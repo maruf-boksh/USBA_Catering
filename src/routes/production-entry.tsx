@@ -2085,7 +2085,7 @@ function FlightOrdersTabContent({ orders }: { orders: FlightOrderRow[] }) {
                                 variant="outline"
                                 className="h-5 px-1.5 text-[10px] tabular-nums border-primary/30 bg-card text-primary"
                               >
-                                {legs.length} legs
+                                {legs.length} flights
                               </Badge>
                             )}
                             <OrderStatusBadges legs={legs} />
@@ -2216,7 +2216,7 @@ function CrewMealsTabContent({ orders }: { orders: FlightOrderRow[] }) {
                                 variant="outline"
                                 className="h-5 px-1.5 text-[10px] tabular-nums border-primary/30 bg-card text-primary"
                               >
-                                {legs.length} legs
+                                {legs.length} flights
                               </Badge>
                             )}
                             <OrderStatusBadges legs={legs} />

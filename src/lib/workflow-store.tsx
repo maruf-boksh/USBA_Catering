@@ -363,10 +363,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       warehouseId: "WH-001",
     },
   ]);
-  const [stockDeltas, setStockDeltas] = useState<StockDelta[]>([]);
-  const [prdStatuses, setPrdStatuses] = useState<Record<string, string>>({});
-  const [prdProgress, setPrdProgress] = useState<Record<string, number>>({});
-  const [productionEntries, setProductionEntries] = useState<WfProductionEntry[]>([
+  const initialProductionEntries: WfProductionEntry[] = [
     { id: "PRO-2026-000031", date: "2026-05-19", bom: "Chicken Biryani",       outputItemName: "Chicken Biryani",      orderQty: 280, producedQty: 140, status: "In Preparation", officeId: "OFF-001", warehouseId: "WH-003" },
     { id: "PRO-2026-000030", date: "2026-05-18", bom: "Continental Breakfast", outputItemName: "Continental Breakfast", orderQty: 150, producedQty: 150, status: "Ready for QC",   officeId: "OFF-001", warehouseId: "WH-003" },
     { id: "PRO-2026-000029", date: "2026-05-17", bom: "Veg Pulao",             outputItemName: "Veg Pulao",            orderQty: 320, producedQty:   0, status: "Approved",        officeId: "OFF-001", warehouseId: "WH-003" },
@@ -375,7 +372,20 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     { id: "PRO-2026-000022", date: "2026-05-08", bom: "Continental Breakfast", outputItemName: "Continental Breakfast", orderQty: 220, producedQty: 220, status: "Completed",      qcCheckedBy: "T. Islam",     qcPassedAt: "2026-05-08 09:40", completedAt: "2026-05-08 09:42", inventoryAdded: true, officeId: "OFF-001", warehouseId: "WH-003" },
     { id: "PRO-2026-000019", date: "2026-05-05", bom: "Grilled Salmon",        outputItemName: "Grilled Salmon",       orderQty: 130, producedQty: 130, status: "Completed",      qcCheckedBy: "Hygiene Lead", qcPassedAt: "2026-05-05 12:30", completedAt: "2026-05-05 12:31", inventoryAdded: true, officeId: "OFF-001", warehouseId: "WH-004" },
     { id: "PRO-2026-000016", date: "2026-05-02", bom: "Hindu Meal Special",    outputItemName: "Hindu Meal Special",   orderQty:  80, producedQty:   0, status: "Pending",         officeId: "OFF-001", warehouseId: "WH-003" },
-  ]);
+  ];
+  // Seed the movements ledger with the IN side already implied by the completed
+  // (inventory-added) production entries, so the Inventory report's In Qty
+  // column reflects finished goods already in stock. The OUT side accrues as
+  // flights are dispatched. Keyed by output item name (same key cooking-temp
+  // and dispatch use), so production-in and dispatch-out net per meal.
+  const [stockDeltas, setStockDeltas] = useState<StockDelta[]>(
+    initialProductionEntries
+      .filter((e) => e.inventoryAdded && e.producedQty > 0)
+      .map((e) => ({ itemId: e.outputItemName ?? e.id, delta: e.producedQty })),
+  );
+  const [prdStatuses, setPrdStatuses] = useState<Record<string, string>>({});
+  const [prdProgress, setPrdProgress] = useState<Record<string, number>>({});
+  const [productionEntries, setProductionEntries] = useState<WfProductionEntry[]>(initialProductionEntries);
 
   // Production-floor entry records. The seeds line up with PRO-2026-000031's
   // 280-order which already shows 140 produced — that 140 came from these

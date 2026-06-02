@@ -139,11 +139,8 @@ export default function OrderManagementPage() {
   const [selectedOrder, setSelectedOrder] = useState<FlightOrder | null>(null);
   const [activeTab, setActiveTab] = useState<"flights" | "crew">("flights");
 
-  // When the user clicks View on any leg, surface ALL legs of that order
-  // in the details dialog by filtering against orderNo.
-  const selectedLegs = selectedOrder
-    ? orders.filter((o) => o.orderNo === selectedOrder.orderNo)
-    : [];
+  // Clicking View on a row surfaces THAT individual flight's details.
+  const selectedLegs = selectedOrder ? [selectedOrder] : [];
 
   const addOrder = (legs: FlightOrder[]) => {
     addFlightOrders(legs);
@@ -177,7 +174,7 @@ export default function OrderManagementPage() {
         moved += 1;
       }
     }
-    if (moved > 0) toast.success(`${orderNo} — advanced ${moved} ${moved === 1 ? "leg" : "legs"}.`);
+    if (moved > 0) toast.success(`${orderNo} — advanced ${moved} ${moved === 1 ? "flight" : "flights"}.`);
     else toast.info(`${orderNo} is already Completed.`);
   };
 
@@ -416,7 +413,7 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                                       variant="outline"
                                       className="h-5 px-1.5 text-[10px] tabular-nums border-primary/30 bg-card text-primary"
                                     >
-                                      {legs.length} legs
+                                      {legs.length} flights
                                     </Badge>
                                   )}
                                   <OrderStatusBadges legs={legs} />
@@ -599,21 +596,47 @@ function OrdersList({
   useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
 
   // Deep-link: when arriving with ?ord=ORD-XXXX (e.g. from the dashboard's
-  // Active Orders panel), find that order in the grouped list, jump to its
-  // page so the row exists in the DOM for arrival-flash to highlight, then
-  // strip the param so a manual refresh doesn't keep re-triggering it.
+  // Active Orders panel or the "Delayed Flights" KPI), find that order in the
+  // grouped list, jump to its page so the row exists in the DOM, scroll it into
+  // view, then strip the param so a manual refresh doesn't keep re-triggering.
   const [searchParams, setSearchParams] = useSearchParams();
   const ordParam = searchParams.get("ord");
+  // Row id to scroll to after a deep-link page jump. Set here, consumed by the
+  // scroll effect below — kept separate so stripping ?ord doesn't tear down the
+  // pending scroll before the target page has rendered.
+  const [pendingScrollId, setPendingScrollId] = useState<string | null>(null);
   useEffect(() => {
     if (!ordParam) return;
     const idx = groupedOrders.findIndex(([no]) => no === ordParam);
     if (idx < 0) return;
     const targetPage = Math.floor(idx / pageSize) + 1;
     if (targetPage !== page) setPage(targetPage);
+    setPendingScrollId(groupedOrders[idx]?.[1]?.[0]?.id ?? null);
     const next = new URLSearchParams(searchParams);
     next.delete("ord");
     setSearchParams(next, { replace: true });
   }, [ordParam, groupedOrders, page, searchParams, setSearchParams]);
+
+  // Scroll the deep-linked order's first row into view once it renders on the
+  // freshly selected page. Retries because the page switch re-renders the table
+  // asynchronously; re-runs when `page` settles on the target.
+  useEffect(() => {
+    if (!pendingScrollId) return;
+    const sel = `[data-arrival-row-id="${CSS.escape(pendingScrollId)}"]`;
+    let done = false;
+    const timers = [0, 120, 300, 600, 1000].map((delay) =>
+      setTimeout(() => {
+        if (done) return;
+        const el = document.querySelector<HTMLElement>(sel);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          done = true;
+          setPendingScrollId(null);
+        }
+      }, delay),
+    );
+    return () => timers.forEach((t) => clearTimeout(t));
+  }, [pendingScrollId, page]);
 
   const pageStart = (page - 1) * pageSize;
   const pageEnd = Math.min(pageStart + pageSize, groupedOrders.length);
@@ -779,7 +802,7 @@ function OrdersList({
                               variant="outline"
                               className="h-5 px-1.5 text-[10px] tabular-nums border-primary/30 bg-card text-primary"
                             >
-                              {legs.length} legs
+                              {legs.length} flights
                             </Badge>
                           )}
                           <OrderStatusBadges legs={legs} />
@@ -1022,33 +1045,9 @@ function OrderCreate({
   const removeLeg = (i: number) =>
     setLegs((prev) => prev.filter((_, idx) => idx !== i));
 
-  // Pre-fill the form with the return-flight version of the last added Outbound:
-  // swap From/To, bump the flight number (e.g. BG-401 → BG-402), clear ETD/PAX.
-  const prefillReturn = () => {
-    const lastOutbound = [...legs].reverse().find((l) => l.direction === "Outbound");
-    if (!lastOutbound) {
-      toast.error("Add an Outbound leg first.");
-      return;
-    }
-    const [origFrom, origTo] = lastOutbound.sector.split(" → ");
-    if (!origFrom || !origTo) return;
-    const flightMatch = lastOutbound.flight.match(/^(.+?)(\d+)$/);
-    const nextFlight = flightMatch
-      ? `${flightMatch[1]}${Number(flightMatch[2]) + 1}`
-      : `${lastOutbound.flight}-R`;
-    setFrom(origTo);
-    setTo(origFrom);
-    setFlight(nextFlight);
-    setEtd("");
-    setPax("");
-    setRoster([]);
-    setDirection("Return");
-    toast.info(`Pre-filled return for ${lastOutbound.flight} — review and click Add Leg.`);
-  };
-
   const handleSave = () => {
     if (legs.length === 0) {
-      toast.error("Add at least one flight leg.");
+      toast.error("Add at least one flight.");
       return;
     }
     const rows: FlightOrder[] = legs.map((l, i) => ({
@@ -1067,7 +1066,7 @@ function OrderCreate({
       specialMealRoster: l.roster.length > 0 ? l.roster : undefined,
     }));
     onSave(rows);
-    toast.success(`${nextOrderNo} created with ${legs.length} ${legs.length === 1 ? "leg" : "legs"}.`);
+    toast.success(`${nextOrderNo} created with ${legs.length} ${legs.length === 1 ? "flight" : "flights"}.`);
   };
 
   return (
@@ -1077,17 +1076,14 @@ function OrderCreate({
           <div>
             <h3 className="text-sm font-semibold tracking-wider uppercase text-foreground">
               Create Flight Order
-              <span className="ml-2 font-mono text-xs text-primary normal-case tracking-normal">
-                {nextOrderNo}
-              </span>
             </h3>
             <p className="text-xs text-muted-foreground mt-0.5">
-              All flights added below share this Order # — each leg becomes its own row in the list.
+              All flights added below share this Order # — each flight becomes its own row in the list.
             </p>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" onClick={addLeg}>
-              <Plus className="h-4 w-4 mr-1.5" /> Add Leg
+              <Plus className="h-4 w-4 mr-1.5" /> Add Flight
             </Button>
             <Button onClick={handleSave}>
               <Save className="h-4 w-4 mr-1.5" /> Save
@@ -1098,7 +1094,7 @@ function OrderCreate({
         <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-4 mb-4">
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Scope</Label>
-            <div className="mt-1 inline-flex rounded-md border border-input bg-background p-0.5 shadow-sm">
+            <div className="mt-1 flex w-fit rounded-md border border-input bg-background p-0.5 shadow-sm">
               {(["Domestic", "International"] as const).map((s) => {
                 const active = scope === s;
                 return (
@@ -1144,7 +1140,7 @@ function OrderCreate({
 
         <div className="border-t border-border pt-4 mb-2">
           <h4 className="text-xs font-semibold uppercase tracking-wider text-foreground">
-            New Leg
+            New Flight
           </h4>
         </div>
 
@@ -1233,7 +1229,7 @@ function OrderCreate({
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">
               Direction
             </Label>
-            <div className="mt-1 inline-flex rounded-md border border-input bg-background p-0.5 shadow-sm">
+            <div className="mt-1 flex w-fit rounded-md border border-input bg-background p-0.5 shadow-sm">
               {(["Outbound", "Return"] as FlightDirection[]).map((d) => {
                 const active = direction === d;
                 const isReturn = d === "Return";
@@ -1255,15 +1251,6 @@ function OrderCreate({
                   </button>
                 );
               })}
-              <button
-                type="button"
-                onClick={prefillReturn}
-                disabled={!legs.some((l) => l.direction === "Outbound")}
-                className="ml-2 px-3 py-1.5 text-xs font-medium rounded-sm border border-dashed border-navy/30 text-navy hover:bg-navy/5 disabled:opacity-40 disabled:cursor-not-allowed"
-                title="Pre-fill return flight from the last outbound"
-              >
-                + Add Return Flight
-              </button>
             </div>
           </div>
         </div>
@@ -1276,7 +1263,7 @@ function OrderCreate({
                 Special Meal Roster
               </h4>
               <p className="text-[11px] text-muted-foreground mt-0.5">
-                Optional — one row per passenger requiring a special meal on this leg.
+                Optional — one row per passenger requiring a special meal on this flight.
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -1342,7 +1329,7 @@ function OrderCreate({
                 {roster.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={6} className="text-center text-xs text-muted-foreground py-6">
-                      No special meals on this leg. Click <strong className="text-foreground">+ Add Passenger</strong> or <strong className="text-foreground">Bulk Paste</strong> to attach a manifest.
+                      No special meals on this flight. Click <strong className="text-foreground">+ Add Passenger</strong> or <strong className="text-foreground">Bulk Paste</strong> to attach a manifest.
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -1410,17 +1397,17 @@ function OrderCreate({
         <div className="mt-6">
           <div className="flex items-center justify-between mb-2">
             <h4 className="text-xs font-semibold uppercase tracking-wider text-foreground">
-              Flight Legs
+              Flights
             </h4>
             <span className="text-xs text-muted-foreground">
-              {legs.length === 0 ? "No legs added yet" : `${legs.length} ${legs.length === 1 ? "leg" : "legs"} on this order`}
+              {legs.length === 0 ? "No flights added yet" : `${legs.length} ${legs.length === 1 ? "flight" : "flights"} on this order`}
             </span>
           </div>
           <div className="border border-border rounded-md overflow-hidden">
             <Table>
               <TableHeader className="bg-muted/40">
                 <TableRow>
-                  <TableHead className="w-14 text-xs uppercase tracking-wider">Leg</TableHead>
+                  <TableHead className="w-14 text-xs uppercase tracking-wider">#</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">ETD</TableHead>
@@ -1433,7 +1420,7 @@ function OrderCreate({
                 {legs.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={7} className="text-center text-sm text-muted-foreground py-8">
-                      Fill the form above and click <strong className="text-foreground">Add Leg</strong> to attach a flight to this order.
+                      Fill the form above and click <strong className="text-foreground">Add Flight</strong> to attach a flight to this order.
                     </TableCell>
                   </TableRow>
                 ) : (
@@ -1457,7 +1444,7 @@ function OrderCreate({
                             variant="ghost"
                             className="h-7 w-7"
                             onClick={() => removeLeg(i)}
-                            aria-label={`Remove leg ${i + 1}`}
+                            aria-label={`Remove flight${i + 1}`}
                           >
                             <X className="h-3.5 w-3.5 text-destructive" />
                           </Button>
@@ -1579,7 +1566,7 @@ function CrewMealCreate({
 
   const handleSave = () => {
     if (legs.length === 0) {
-      toast.error("Add at least one flight leg.");
+      toast.error("Add at least one flight.");
       return;
     }
     // crew count needs to be captured per leg — read from each LegDraft entry.
@@ -1600,7 +1587,7 @@ function CrewMealCreate({
       direction: l.direction,
     }));
     onSave(rows);
-    toast.success(`${nextOrderNo} created with ${legs.length} ${legs.length === 1 ? "leg" : "legs"}.`);
+    toast.success(`${nextOrderNo} created with ${legs.length} ${legs.length === 1 ? "flight" : "flights"}.`);
   };
 
   // Build groups for the in-form preview table (uses the user's current slots)
@@ -1627,7 +1614,7 @@ function CrewMealCreate({
           </div>
           <div className="flex items-center gap-2">
             <Button variant="outline" onClick={addLeg}>
-              <Plus className="h-4 w-4 mr-1.5" /> Add Leg
+              <Plus className="h-4 w-4 mr-1.5" /> Add Flight
             </Button>
             <Button onClick={handleSave}>
               <Save className="h-4 w-4 mr-1.5" /> Save
@@ -1639,7 +1626,7 @@ function CrewMealCreate({
         <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-4 mb-4">
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Scope</Label>
-            <div className="mt-1 inline-flex rounded-md border border-input bg-background p-0.5 shadow-sm">
+            <div className="mt-1 flex w-fit rounded-md border border-input bg-background p-0.5 shadow-sm">
               {(["Domestic", "International"] as const).map((s) => {
                 const active = scope === s;
                 return (
@@ -1673,7 +1660,7 @@ function CrewMealCreate({
         <div className="border-t border-border pt-4 mb-3">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
             <h4 className="text-xs font-semibold uppercase tracking-wider text-foreground">
-              New Leg
+              New Flight
               <Badge
                 variant="outline"
                 className="ml-2 h-5 px-1.5 text-[10px] border-primary/30 bg-primary/5 text-primary"
@@ -1775,7 +1762,7 @@ function CrewMealCreate({
 
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Direction</Label>
-            <div className="mt-1 inline-flex rounded-md border border-input bg-background p-0.5 shadow-sm">
+            <div className="mt-1 flex w-fit rounded-md border border-input bg-background p-0.5 shadow-sm">
               {(["Outbound", "Return"] as FlightDirection[]).map((d) => {
                 const active = direction === d;
                 const isReturn = d === "Return";
@@ -1805,10 +1792,10 @@ function CrewMealCreate({
         <div className="mt-6">
           <div className="flex items-center justify-between mb-2">
             <h4 className="text-xs font-semibold uppercase tracking-wider text-foreground">
-              Flight Legs by Meal Slot
+              Flights by Meal Slot
             </h4>
             <span className="text-xs text-muted-foreground">
-              {legs.length === 0 ? "No legs added yet" : `${legs.length} ${legs.length === 1 ? "leg" : "legs"} on this order`}
+              {legs.length === 0 ? "No flights added yet" : `${legs.length} ${legs.length === 1 ? "flight" : "flights"} on this order`}
             </span>
           </div>
 
@@ -1873,7 +1860,7 @@ function CrewMealCreate({
                                     variant="ghost"
                                     className="h-7 w-7"
                                     onClick={() => removeLeg(originalIndex)}
-                                    aria-label={`Remove leg ${originalIndex + 1}`}
+                                    aria-label={`Remove flight${originalIndex + 1}`}
                                   >
                                     <X className="h-3.5 w-3.5 text-destructive" />
                                   </Button>
@@ -3225,11 +3212,18 @@ function SpecialMealRosterPanel({ legs }: { legs: FlightOrder[] }) {
   const allEntries = legs.flatMap((l) =>
     (l.specialMealRoster ?? []).map((e) => ({ ...e, flight: l.flight, sector: l.sector })),
   );
+  const plannedCount = legs.reduce((s, l) => s + l.specialMeals, 0);
 
   if (allEntries.length === 0) {
     return (
       <div className="rounded-md border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
-        No passenger-level special meal roster attached yet. Once the manifest is imported, individual PNR/Seat/Meal entries will appear here.
+        {plannedCount > 0 ? (
+          <>
+            <span className="font-medium text-foreground">{plannedCount}</span> special meal{plannedCount === 1 ? "" : "s"} planned on this flight — passenger-level manifest (PNR / Seat / Meal) not yet imported.
+          </>
+        ) : (
+          <>No special meals on this flight.</>
+        )}
       </div>
     );
   }
@@ -3323,6 +3317,68 @@ function FlightOrderDetailsDialog({
   const totalPax = legs.reduce((s, l) => s + l.pax, 0);
   const totalSpec = legs.reduce((s, l) => s + l.specialMeals, 0);
 
+  // ── Individual flight detail (clicking View on a single row) ──────────────
+  if (order && !isMulti) {
+    const leg = legs[0] ?? order;
+    const rosterCount = leg.specialMealRoster?.length ?? 0;
+    return (
+      <Dialog open={!!order} onOpenChange={(open) => !open && onClose()}>
+        <DialogContent className={rosterCount > 0 ? "max-w-2xl" : "max-w-lg"}>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 flex-wrap">
+              Flight Details
+              <span className="font-mono text-sm text-muted-foreground">— {leg.flight}</span>
+              <DirectionBadge direction={leg.direction} />
+            </DialogTitle>
+          </DialogHeader>
+          <div className="mt-2 space-y-4">
+            <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+              <DetailRow label="Order #" value={leg.orderNo} mono />
+              <DetailRow label="Flight" value={leg.flight} bold />
+              <DetailRow label="Airline" value={leg.airline} />
+              <DetailRow label="Sector" value={leg.sector} />
+              <DetailRow label="Date" value={leg.date} />
+              <DetailRow label="ETD" value={leg.etd} />
+              <DetailRow label="Passengers" value={leg.pax.toLocaleString()} />
+              <DetailRow label="Crew" value={leg.crew.toString()} />
+              <DetailRow label="Special Meals" value={leg.specialMeals.toString()} />
+            </div>
+
+            <div className="flex items-center gap-2 rounded-md bg-muted/40 px-3 py-2">
+              <span className="text-[11px] uppercase tracking-wider text-muted-foreground">Status</span>
+              <StatusBadge status={leg.status} />
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-[11px] uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+                  Special Meal Roster
+                  <Badge variant="outline" className="h-5 px-1.5 text-[10px] tabular-nums">
+                    {rosterCount > 0 ? `${rosterCount} pax` : `${leg.specialMeals} planned`}
+                  </Badge>
+                </div>
+                {!isDomesticSector(leg.sector) && (
+                  <span className="text-[10px] uppercase tracking-wider text-navy">International</span>
+                )}
+              </div>
+              <SpecialMealRosterPanel legs={[leg]} />
+            </div>
+
+            <div className="rounded-md bg-muted/40 px-3 py-2 flex items-center justify-between">
+              <span className="text-xs text-muted-foreground">Total Meals (PAX + Special)</span>
+              <span className="text-sm font-semibold text-foreground tabular-nums">
+                {(leg.pax + leg.specialMeals).toLocaleString()}
+              </span>
+            </div>
+          </div>
+          <DialogFooter className="mt-4">
+            <Button variant="outline" onClick={onClose}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+
   return (
     <Dialog open={!!order} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className={isMulti || hasRoster ? "max-w-3xl" : "max-w-2xl"}>
@@ -3342,7 +3398,7 @@ function FlightOrderDetailsDialog({
               <DetailRow label="Order #" value={order.orderNo} mono />
               <DetailRow label="Airline" value={order.airline} />
               <DetailRow label="Date" value={order.date} />
-              <DetailRow label="Legs" value={legs.length.toString()} />
+              <DetailRow label="Flights" value={legs.length.toString()} />
               <DetailRow label="Total Passengers" value={totalPax.toLocaleString()} />
               <DetailRow label="Total Special Meals" value={totalSpec.toString()} />
             </div>
@@ -3365,7 +3421,7 @@ function FlightOrderDetailsDialog({
                 <div className="text-[11px] uppercase tracking-wider text-muted-foreground flex items-center gap-2">
                   Flights
                   <Badge variant="outline" className="h-5 px-1.5 text-[10px] tabular-nums">
-                    {legs.length} {legs.length === 1 ? "leg" : "legs"}
+                    {legs.length} {legs.length === 1 ? "flight" : "flights"}
                   </Badge>
                 </div>
                 {legs.some((l) => nextFlightStatus(l.status) !== null) && (
@@ -3375,7 +3431,7 @@ function FlightOrderDetailsDialog({
                     className="h-7 text-xs"
                     onClick={() => onAdvanceOrder(order.orderNo)}
                   >
-                    Advance All Legs →
+                    Advance All Flights →
                   </Button>
                 )}
               </div>
@@ -3383,7 +3439,7 @@ function FlightOrderDetailsDialog({
                 <Table>
                   <TableHeader className="bg-muted/40">
                     <TableRow>
-                      <TableHead className="w-12 text-[10px] uppercase tracking-wider">Leg</TableHead>
+                      <TableHead className="w-12 text-[10px] uppercase tracking-wider">#</TableHead>
                       <TableHead className="text-[10px] uppercase tracking-wider">Flight</TableHead>
                       <TableHead className="text-[10px] uppercase tracking-wider">Sector</TableHead>
                       <TableHead className="text-[10px] uppercase tracking-wider">ETD</TableHead>

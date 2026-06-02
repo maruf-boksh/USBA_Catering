@@ -139,10 +139,13 @@ function useDashboardKpis(period: Period, range?: DateRange) {
 
   const delayedFlights = flights.filter((f) => f.status === "Delayed");
   const delayed = delayedFlights.length;
+  const delayedPax = delayedFlights.reduce((s, f) => s + f.pax, 0);
   const delayedFlightCodes = new Set(delayedFlights.map((f) => f.flight));
-  const delayedRowIds = flightOrders
-    .filter((o) => delayedFlightCodes.has(o.flight))
-    .map((o) => o.id);
+  const delayedOrders = flightOrders.filter((o) => delayedFlightCodes.has(o.flight));
+  const delayedRowIds = delayedOrders.map((o) => o.id);
+  // Deep-link target: the first delayed flight's catering order. Order Management
+  // jumps to that order's page (?ord=) so the arrival-flash can tint the row.
+  const delayedOrderNo = delayedOrders[0]?.orderNo;
 
   const qcFailed = qcChecks.filter((q) => q.result === "Fail");
   const qcOpen = qcFailed.length;
@@ -206,7 +209,7 @@ function useDashboardKpis(period: Period, range?: DateRange) {
     kpis: {
       flights: { value: flightsValue, sub: flightsSub, ids: flightsIds },
       meals:   { value: producedTotal.toLocaleString(), sub: targetTotal > 0 ? `${targetPct}% of target` : "no targets yet", ids: mealsRowIds },
-      delayed: { value: delayed, sub: delayed > 0 ? `${Math.max(1, Math.floor(delayed * 0.66))} catering related` : "none", ids: delayedRowIds },
+      delayed: { value: delayed, sub: delayed > 0 ? `${delayedPax.toLocaleString()} pax affected` : "none on time", ids: delayedRowIds, ord: delayedOrderNo },
       qcIssues:{ value: qcOpen, sub: `${qcOpen} open, ${qcResolved} resolved`, ids: qcRowIds },
       pendingPOs:{ value: pendingPOCount, sub: pendingPOAmount > 0 ? `${formatLakh(pendingPOAmount)} pending` : "no value pending", ids: pendingPORowIds },
       invAlerts:{ value: invAlerts, sub: `${criticalItems.length} critical`, ids: invAlertRowIds },
@@ -447,6 +450,7 @@ export default function Dashboard() {
             />
             <Button
               type="primary"
+              size="small"
               onClick={() => toast.success(`${periodLabel} report exported.`)}
             >
               Export Report
@@ -465,7 +469,7 @@ export default function Dashboard() {
         <KpiLink to="/production-entry" highlight="production-list" ids={data.kpis.meals.ids}>
           <KpiCard label="Meals Prepared"  value={data.kpis.meals.value}     sub={data.kpis.meals.sub}     icon={CoffeeOutlined}            tone="success" />
         </KpiLink>
-        <KpiLink to="/order-management" highlight="active-orders" ids={data.kpis.delayed.ids}>
+        <KpiLink to="/order-management" ord={data.kpis.delayed.ord} highlight="active-orders" ids={data.kpis.delayed.ids}>
           <KpiCard label="Delayed Flights" value={data.kpis.delayed.value}   sub={data.kpis.delayed.sub}   icon={WarningOutlined}           tone="warning" />
         </KpiLink>
         <KpiLink to="/cooking-temp" highlight="qc-issues" ids={data.kpis.qcIssues.ids}>
@@ -754,7 +758,7 @@ function OrderGroupCard({
                 lineHeight: "14px",
               }}
             >
-              {legs.length} legs
+              {legs.length} flights
             </Tag>
           )}
           <span style={{ fontSize: 10, color: "var(--color-muted-foreground)", fontVariantNumeric: "tabular-nums" }}>
@@ -1066,17 +1070,21 @@ function CustomRangePicker({
 }
 
 function KpiLink({
-  to, highlight, ids, children,
+  to, ord, highlight, ids, children,
 }: {
   to: "/order-management" | "/production-entry" | "/cooking-temp"
     | "/procurement" | "/inventory" | "/dispatch";
+  ord?: string;
   highlight?: string;
   ids?: string[];
   children: ReactNode;
 }) {
+  // When an order number is supplied, deep-link via ?ord= so the destination
+  // page scrolls to (and paginates to) the matching row before flashing it.
+  const target = ord ? `${to}?ord=${encodeURIComponent(ord)}` : to;
   return (
     <Link
-      to={to}
+      to={target}
       onClick={() => {
         if (highlight) flagArrival({ target: highlight, ids });
       }}
