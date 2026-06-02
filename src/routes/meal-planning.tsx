@@ -1,4 +1,4 @@
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { useState, useMemo } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -8,7 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, Info, ChevronRight } from "lucide-react";
+import { Plus, Info, ChevronRight, ArrowLeft } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useMealSlots } from "@/lib/meal-slot-settings";
@@ -433,6 +433,8 @@ export default function MealPlanning() {
     const hh = (h: number) => `${String(h % 24).padStart(2, "0")}:00`;
     return s ? { start: hh(s.from), end: hh(s.to) } : { start: "07:00", end: "10:00" };
   };
+  const location = useLocation();
+  const backUrl = (location.state as { backUrl?: string } | null)?.backUrl ?? null;
   const [meals, setMeals] = useState<MealCard[]>(getSampleMeals());
   const [selectedDay, setSelectedDay] = useState(DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]);
   const [createModalOpen, setCreateModalOpen] = useState(false);
@@ -680,6 +682,12 @@ export default function MealPlanning() {
         title="Meal Planning"
         subtitle="Configure daily meal service for passengers and crew"
         actions={
+          <>
+            {backUrl && (
+              <Button variant="outline" onClick={() => navigate(backUrl)}>
+                <ArrowLeft className="h-4 w-4 mr-1" /> Back to Order Summary
+              </Button>
+            )}
           <Dialog open={createModalOpen} onOpenChange={handleCreateOpenChange}>
             <DialogTrigger asChild>
               <Button>
@@ -1383,6 +1391,7 @@ export default function MealPlanning() {
               </DialogFooter>
             </DialogContent>
           </Dialog>
+          </>
         }
       />
 
@@ -1508,8 +1517,8 @@ export default function MealPlanning() {
         </DialogContent>
       </Dialog>
 
-      {/* GM Order Banner - State A: Pending */}
-      {forwardCycle === "pending" && (
+      {/* GM Order Banner - State A: Pending — button moved to Order Management */}
+      {false && forwardCycle === "pending" && (
         <Alert className="bg-blue-50 border-blue-200 mb-6">
           <Info className="h-4 w-4 text-blue-600" />
           <AlertDescription className="text-sm text-blue-900 flex items-center justify-between">

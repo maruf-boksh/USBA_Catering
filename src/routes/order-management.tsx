@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, Fragment } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, useNavigate } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -169,16 +169,38 @@ const SAMPLE_PARSED_INTL: ParsedRow[] = [
 type MealPlan = Record<string, number>;
 type ActivityEntry = { message: string; user: string; role: string; at: string };
 type RecentUploadRow = (typeof recentUploads)[number];
+type MealOrderConfirmation = {
+  timestamp: string;
+  totalFlights: number;
+  totalMeals: number;
+  tomorrowDayName: string;
+  dayAfterDayName: string;
+  dayAfterDateStr: string;
+  validIntl: ParsedRow[];
+  validDom: ParsedRow[];
+  dayAfterMenu: {
+    intl: { depMealName: string; depChmlName: string; retMealName: string; retVgmlName: string };
+    dom: { usbaBreakfastName: string; usbaLunchName: string; aaaBreakfastName: string; aaaLunchName: string; crewSnackName: string; crewLunchName: string; crewDinnerName: string };
+  } | undefined;
+};
 
 export default function OrderManagementPage() {
   useArrivalFlash();
+  const navigate = useNavigate();
   const orders = useFlightOrders();
   // Action buttons are permissioned elements — shown only with "create".
   const canCreate = useElementPermission("/order-management", "action-create").create;
   const canBulk = useElementPermission("/order-management", "action-bulk").create;
-  const [view, setView] = useState<"list" | "create" | "bulk" | "crew-create">("list");
+  const [omParams] = useSearchParams();
+  const [view, setView] = useState<"list" | "create" | "bulk" | "crew-create">(() => {
+    const v = omParams.get("view");
+    return (v === "bulk" || v === "create" || v === "crew-create") ? v : "list";
+  });
   const [selectedOrder, setSelectedOrder] = useState<FlightOrder | null>(null);
   const [activeTab, setActiveTab] = useState<"flights" | "crew">("flights");
+  const [confirmedOrder, setConfirmedOrder] = useState<MealOrderConfirmation | null>(null);
+  const [nextDayDraftSaved, setNextDayDraftSaved] = useState(false);
+  const [showNextDaySummary, setShowNextDaySummary] = useState(false);
 
   // Clicking View on a row surfaces THAT individual flight's details.
   const selectedLegs = selectedOrder ? [selectedOrder] : [];
@@ -219,6 +241,28 @@ export default function OrderManagementPage() {
     else toast.info(`${orderNo} is already Completed.`);
   };
 
+  const dayAfterComputed = useMemo(() => {
+    if (!confirmedOrder) return null;
+    const validIntl = confirmedOrder.validIntl;
+    const validDom = confirmedOrder.validDom;
+    const depMeal = validIntl.reduce((s, r) => s + (r.bcMeal ?? 0) + (r.ecMeal ?? 0), 0);
+    const chml = validIntl.reduce((s, r) => s + (r.chml ?? 0), 0);
+    const vgml = validIntl.reduce((s, r) => s + (r.vgml ?? 0), 0);
+    const usbaRows = validDom.filter((r) => (r.airline ?? "").toLowerCase().includes("bangla"));
+    const aaaRows = validDom.filter((r) => (r.airline ?? "").toLowerCase().includes("astra"));
+    const usbaZenith = usbaRows.reduce((s, r) => s + (r.zenLoad ?? r.pax ?? 0), 0);
+    const usbaPax = usbaRows.reduce((s, r) => s + (r.pax ?? 0), 0);
+    const usbaBreakfast = usbaRows.filter((r) => (r.etd ?? "") <= "10:30").reduce((s, r) => s + (r.pax ?? 0), 0);
+    const usbaLunch = usbaRows.filter((r) => (r.etd ?? "") > "10:30").reduce((s, r) => s + (r.pax ?? 0), 0);
+    const aaaZenith = aaaRows.reduce((s, r) => s + (r.zenLoad ?? r.pax ?? 0), 0);
+    const aaaPax = aaaRows.reduce((s, r) => s + (r.pax ?? 0), 0);
+    return {
+      depMeal, chml, vgml, grandTotal: depMeal + chml + vgml,
+      usbaZenith, usbaPax, usbaBreakfast, usbaLunch,
+      aaaZenith, aaaPax, totalZenith: usbaZenith + aaaZenith,
+    };
+  }, [confirmedOrder]);
+
   return (
     <>
       <PageHeader
@@ -251,34 +295,309 @@ export default function OrderManagementPage() {
       />
 
       {view === "list" && (
-        <Tabs
-          value={activeTab}
-          onValueChange={(v) => setActiveTab(v as "flights" | "crew")}
-          className="space-y-4 mt-4"
-        >
-          <TabsList className="h-auto bg-transparent p-0 border-b border-border w-full justify-start rounded-none">
-            <TabsTrigger
-              value="flights"
-              className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-4 pb-3"
-            >
-              Flight Orders
-            </TabsTrigger>
-            <TabsTrigger
-              value="crew"
-              className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-4 pb-3"
-            >
-              Crew Meals
-            </TabsTrigger>
-          </TabsList>
+        <>
+          {/* Banner 1 — Meal order confirmed */}
+          {confirmedOrder && (
+            <div className="mt-4 rounded-lg border border-success/40 bg-success/5 px-4 py-3 flex items-start gap-3">
+              <CheckCircle2 className="h-5 w-5 text-success flex-shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-foreground">
+                  Meal Order for Next 24 Hours ({confirmedOrder.tomorrowDayName}) has been generated
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  GM/Admin · {confirmedOrder.timestamp} · {confirmedOrder.totalFlights} flight{confirmedOrder.totalFlights !== 1 ? "s" : ""} · {confirmedOrder.totalMeals.toLocaleString()} meals
+                </p>
+              </div>
+            </div>
+          )}
 
-          <TabsContent value="flights" className="mt-0">
-            <OrdersList orders={orders} onView={setSelectedOrder} />
-          </TabsContent>
+          {/* Banner 2 — Day-after-tomorrow queued draft */}
+          {confirmedOrder && (
+            <div
+              className="mt-3 rounded-lg border border-amber-300 p-4"
+              style={{ animation: "amber-banner-blink 2s ease-in-out infinite" }}
+            >
+              <style>{`@keyframes amber-banner-blink { 0%, 100% { background-color: rgb(255 251 235); } 50% { background-color: rgb(254 240 138); } }`}</style>
+              <div className="flex items-start gap-4 flex-wrap mb-4">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span className="relative flex-shrink-0 h-3 w-3 mt-0.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+                    <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500" />
+                  </span>
+                  <div>
+                    <div className="text-sm font-semibold text-amber-900">
+                      Meal Order — Day After Tomorrow ({confirmedOrder.dayAfterDayName}, {confirmedOrder.dayAfterDateStr})
+                    </div>
+                    <div className="text-xs text-amber-700 mt-0.5">
+                      Draft ready · Order Meal will be available after current 24 hours pass
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="rounded-lg border border-navy/20 bg-navy/5 p-4 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-navy">International</h4>
+                    <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => navigate("/meal-planning", { state: { backUrl: "/order-management?view=bulk" } })}>
+                      <Pencil className="h-3 w-3 mr-1" />Edit Menu
+                    </Button>
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Departure</div>
+                    <div className="flex justify-between text-sm">
+                      <div>
+                        <span className="text-muted-foreground">Total Departure Meal</span>
+                        <div className="text-[10px] text-muted-foreground">{confirmedOrder.dayAfterMenu?.intl.depMealName}</div>
+                      </div>
+                      <span className="font-medium tabular-nums">{dayAfterComputed?.depMeal ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <div>
+                        <span className="text-muted-foreground">Departure CHML</span>
+                        <div className="text-[10px] text-muted-foreground">{confirmedOrder.dayAfterMenu?.intl.depChmlName}</div>
+                      </div>
+                      <span className="font-medium tabular-nums">{dayAfterComputed?.chml ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between text-sm font-semibold border-t border-navy/20 pt-1">
+                      <span>Departure Total</span>
+                      <span className="tabular-nums">{(dayAfterComputed?.depMeal ?? 0) + (dayAfterComputed?.chml ?? 0)}</span>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Return</div>
+                    <div className="flex justify-between text-sm">
+                      <div>
+                        <span className="text-muted-foreground">Return VGML</span>
+                        <div className="text-[10px] text-muted-foreground">{confirmedOrder.dayAfterMenu?.intl.retVgmlName}</div>
+                      </div>
+                      <span className="font-medium tabular-nums">{dayAfterComputed?.vgml ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between text-sm font-semibold border-t border-navy/20 pt-1">
+                      <span>Return Total</span>
+                      <span className="tabular-nums">{dayAfterComputed?.vgml ?? 0}</span>
+                    </div>
+                  </div>
+                  <div className="flex justify-between text-sm font-bold border-t-2 border-navy/30 pt-2 mt-1">
+                    <span>Total Meal (Departure+Return)</span>
+                    <span className="tabular-nums">{dayAfterComputed?.grandTotal ?? 0}</span>
+                  </div>
+                </div>
+                <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-xs font-semibold uppercase tracking-wider text-primary">Domestic</h4>
+                    <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => navigate("/meal-planning", { state: { backUrl: "/order-management?view=bulk" } })}>
+                      <Pencil className="h-3 w-3 mr-1" />Edit Menu
+                    </Button>
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">US-Bangla</div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Zenith Load</span>
+                      <span className="font-medium tabular-nums">{dayAfterComputed?.usbaZenith ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Pax Load</span>
+                      <span className="font-medium tabular-nums">{dayAfterComputed?.usbaPax ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <div>
+                        <span className="text-muted-foreground">Breakfast</span>
+                        <div className="text-[10px] text-muted-foreground">{confirmedOrder.dayAfterMenu?.dom.usbaBreakfastName}</div>
+                      </div>
+                      <span className="font-medium tabular-nums">{dayAfterComputed?.usbaBreakfast ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <div>
+                        <span className="text-muted-foreground">Lunch</span>
+                        <div className="text-[10px] text-muted-foreground">{confirmedOrder.dayAfterMenu?.dom.usbaLunchName}</div>
+                      </div>
+                      <span className="font-medium tabular-nums">{dayAfterComputed?.usbaLunch ?? 0}</span>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Air Astra</div>
+                    <div className="flex justify-between text-sm">
+                      <div>
+                        <span className="text-muted-foreground">Zenith Load</span>
+                        <div className="text-[10px] text-muted-foreground">{confirmedOrder.dayAfterMenu?.dom.aaaBreakfastName}</div>
+                      </div>
+                      <span className="font-medium tabular-nums">{dayAfterComputed?.aaaZenith ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <div>
+                        <span className="text-muted-foreground">Pax Load</span>
+                        <div className="text-[10px] text-muted-foreground">{confirmedOrder.dayAfterMenu?.dom.aaaLunchName}</div>
+                      </div>
+                      <span className="font-medium tabular-nums">{dayAfterComputed?.aaaPax ?? 0}</span>
+                    </div>
+                  </div>
+                  <div className="flex justify-between text-sm font-semibold border-t border-primary/20 pt-2">
+                    <span>Total Zenith (USBA + Air Astra)</span>
+                    <span className="tabular-nums">{dayAfterComputed?.totalZenith ?? 0}</span>
+                  </div>
+                </div>
+              </div>
+              <div className="mt-4 text-[11px] text-amber-700 bg-amber-100/60 rounded px-3 py-2">
+                Tag &amp; Forward to Production for {confirmedOrder.dayAfterDayName} will become available once the current 24-hour window closes.
+              </div>
+            </div>
+          )}
 
-          <TabsContent value="crew" className="mt-0">
-            <CrewMealsView orders={orders} />
-          </TabsContent>
-        </Tabs>
+          <Tabs
+            value={activeTab}
+            onValueChange={(v) => setActiveTab(v as "flights" | "crew")}
+            className="space-y-4 mt-4"
+          >
+            <TabsList className="h-auto bg-transparent p-0 border-b border-border w-full justify-start rounded-none">
+              <TabsTrigger
+                value="flights"
+                className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-4 pb-3"
+              >
+                Flight Orders
+              </TabsTrigger>
+              <TabsTrigger
+                value="crew"
+                className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-4 pb-3"
+              >
+                Crew Meals
+              </TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="flights" className="mt-0">
+              <OrdersList orders={orders} onView={setSelectedOrder} />
+            </TabsContent>
+
+            <TabsContent value="crew" className="mt-0">
+              <CrewMealsView orders={orders} />
+            </TabsContent>
+          </Tabs>
+
+          {/* Day-after-tomorrow summary dialog (lives in parent so it persists after BulkUpload unmounts) */}
+          {confirmedOrder && (
+            <Dialog open={showNextDaySummary} onOpenChange={setShowNextDaySummary}>
+              <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+                <DialogHeader>
+                  <DialogTitle>
+                    Meal Order Summary — {confirmedOrder.dayAfterDayName}, {confirmedOrder.dayAfterDateStr}
+                    <span className="ml-2 text-xs font-normal text-muted-foreground normal-case tracking-normal">Day After Tomorrow · Draft</span>
+                  </DialogTitle>
+                </DialogHeader>
+                <div className="space-y-5 py-2">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wider text-navy mb-2">International Flights</div>
+                    <div className="rounded-md border border-border overflow-hidden">
+                      <table className="w-full text-sm">
+                        <thead className="bg-muted/40">
+                          <tr>
+                            <th className="text-left px-3 py-2 text-xs uppercase tracking-wider font-semibold">Flight</th>
+                            <th className="text-left px-3 py-2 text-xs uppercase tracking-wider font-semibold">Sector</th>
+                            <th className="text-left px-3 py-2 text-xs uppercase tracking-wider font-semibold">ETD</th>
+                            <th className="text-right px-3 py-2 text-xs uppercase tracking-wider font-semibold">Pax</th>
+                            <th className="text-left px-3 py-2 text-xs uppercase tracking-wider font-semibold">Menu Item</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border">
+                          {confirmedOrder.validIntl.map((r, i) => (
+                            <tr key={i} className="hover:bg-muted/20">
+                              <td className="px-3 py-2 font-mono text-xs">{r.flight}</td>
+                              <td className="px-3 py-2 text-xs">{r.sector}</td>
+                              <td className="px-3 py-2 text-xs tabular-nums">{r.etd}</td>
+                              <td className="px-3 py-2 text-right tabular-nums text-xs">{r.pax}</td>
+                              <td className="px-3 py-2 text-xs">{confirmedOrder.dayAfterMenu?.intl.depMealName}</td>
+                            </tr>
+                          ))}
+                          {confirmedOrder.validIntl.length === 0 && (
+                            <tr><td colSpan={5} className="px-3 py-4 text-center text-xs text-muted-foreground">No international flights</td></tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="mt-1.5 grid grid-cols-3 gap-2 text-xs">
+                      <div className="rounded border border-border px-2 py-1.5 bg-muted/20">
+                        <span className="text-muted-foreground">Dep Meal: </span><span className="font-medium">{confirmedOrder.dayAfterMenu?.intl.depMealName}</span>
+                      </div>
+                      <div className="rounded border border-border px-2 py-1.5 bg-muted/20">
+                        <span className="text-muted-foreground">CHML: </span><span className="font-medium">{confirmedOrder.dayAfterMenu?.intl.depChmlName}</span>
+                      </div>
+                      <div className="rounded border border-border px-2 py-1.5 bg-muted/20">
+                        <span className="text-muted-foreground">Ret VGML: </span><span className="font-medium">{confirmedOrder.dayAfterMenu?.intl.retVgmlName}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wider text-primary mb-2">Domestic Flights</div>
+                    <div className="rounded-md border border-border overflow-hidden">
+                      <table className="w-full text-sm">
+                        <thead className="bg-muted/40">
+                          <tr>
+                            <th className="text-left px-3 py-2 text-xs uppercase tracking-wider font-semibold">Flight</th>
+                            <th className="text-left px-3 py-2 text-xs uppercase tracking-wider font-semibold">Airline</th>
+                            <th className="text-left px-3 py-2 text-xs uppercase tracking-wider font-semibold">Sector</th>
+                            <th className="text-left px-3 py-2 text-xs uppercase tracking-wider font-semibold">ETD</th>
+                            <th className="text-right px-3 py-2 text-xs uppercase tracking-wider font-semibold">Pax</th>
+                            <th className="text-left px-3 py-2 text-xs uppercase tracking-wider font-semibold">Menu Item</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border">
+                          {confirmedOrder.validDom.map((r, i) => (
+                            <tr key={i} className="hover:bg-muted/20">
+                              <td className="px-3 py-2 font-mono text-xs">{r.flight}</td>
+                              <td className="px-3 py-2 text-xs">{r.airline}</td>
+                              <td className="px-3 py-2 text-xs">{r.sector}</td>
+                              <td className="px-3 py-2 text-xs tabular-nums">{r.etd}</td>
+                              <td className="px-3 py-2 text-right tabular-nums text-xs">{r.pax}</td>
+                              <td className="px-3 py-2 text-xs">
+                                {r.etd <= "10:30" ? confirmedOrder.dayAfterMenu?.dom.usbaBreakfastName : confirmedOrder.dayAfterMenu?.dom.usbaLunchName}
+                              </td>
+                            </tr>
+                          ))}
+                          {confirmedOrder.validDom.length === 0 && (
+                            <tr><td colSpan={6} className="px-3 py-4 text-center text-xs text-muted-foreground">No domestic flights</td></tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="mt-1.5 grid grid-cols-3 gap-2 text-xs">
+                      <div className="rounded border border-border px-2 py-1.5 bg-muted/20">
+                        <span className="text-muted-foreground">Breakfast: </span><span className="font-medium">{confirmedOrder.dayAfterMenu?.dom.usbaBreakfastName}</span>
+                      </div>
+                      <div className="rounded border border-border px-2 py-1.5 bg-muted/20">
+                        <span className="text-muted-foreground">Lunch: </span><span className="font-medium">{confirmedOrder.dayAfterMenu?.dom.usbaLunchName}</span>
+                      </div>
+                      <div className="rounded border border-border px-2 py-1.5 bg-muted/20">
+                        <span className="text-muted-foreground">Crew Snack: </span><span className="font-medium">{confirmedOrder.dayAfterMenu?.dom.crewSnackName}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
+                    "Order Meal" for {confirmedOrder.dayAfterDayName} will be available after the current 24-hour window closes. Save as Draft to confirm the menu now.
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setShowNextDaySummary(false)}>
+                    <ArrowLeft className="h-3.5 w-3.5 mr-1.5" /> Back
+                  </Button>
+                  <Button
+                    variant={nextDayDraftSaved ? "secondary" : "default"}
+                    className={nextDayDraftSaved ? "text-success" : ""}
+                    onClick={() => {
+                      setNextDayDraftSaved(true);
+                      setShowNextDaySummary(false);
+                      toast.success(`Draft saved for ${confirmedOrder.dayAfterDayName} — activates after current 24 hours.`);
+                    }}
+                    disabled={nextDayDraftSaved}
+                  >
+                    {nextDayDraftSaved ? (
+                      <><CheckCircle2 className="h-4 w-4 mr-1.5" /> Draft Saved</>
+                    ) : (
+                      <><Save className="h-4 w-4 mr-1.5" /> Save as Draft</>
+                    )}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          )}
+        </>
       )}
       {view === "create" && (
         <OrderCreate
@@ -300,7 +619,7 @@ export default function OrderManagementPage() {
           nextRowSeq={orders.length + 1}
         />
       )}
-      {view === "bulk" && <BulkUpload onImport={addOrdersBulk} />}
+      {view === "bulk" && <BulkUpload onImport={addOrdersBulk} onOrderConfirmed={(data) => setConfirmedOrder(data)} />}
 
       <FlightOrderDetailsDialog
         order={selectedOrder}
@@ -1969,7 +2288,35 @@ function formatDayLabel(dateStr: string) {
   return d.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 }
 
-function BulkUpload({ onImport }: { onImport: (orders: FlightOrder[]) => void }) {
+// Weekly meal config keyed by day-of-week (0=Sun…6=Sat), sourced from Meal Planning module
+const WEEK_MEAL_CONFIG: Record<number, {
+  intl: { depMealName: string; depChmlName: string; retMealName: string; retVgmlName: string };
+  dom: {
+    usbaBreakfastName: string; usbaLunchName: string;
+    aaaBreakfastName: string; aaaLunchName: string;
+    crewSnackName: string; crewLunchName: string; crewDinnerName: string;
+  };
+}> = {
+  0: { intl: { depMealName: "Chicken Biryani + Salad", depChmlName: "Child Meal Box", retMealName: "Fish Rice + Veg", retVgmlName: "Veg Platter" }, dom: { usbaBreakfastName: "JBR + CKN Buggati", usbaLunchName: "Rice + Hilsa Curry", aaaBreakfastName: "Paratha + Omelette", aaaLunchName: "Rice + Dal", crewSnackName: "Biscuits + Tea", crewLunchName: "Chef's Rice + Fish", crewDinnerName: "Rice + Chicken" } },
+  1: { intl: { depMealName: "Beef Kacchi Biryani", depChmlName: "Junior Snack Box", retMealName: "Chicken Rice + Soup", retVgmlName: "Veg Curry Plate" }, dom: { usbaBreakfastName: "Paratha + Omelette + Juice", usbaLunchName: "Rice + Chicken Roast", aaaBreakfastName: "JBR + CKN Buggati", aaaLunchName: "Rice + Beef Curry", crewSnackName: "Samosa + Tea", crewLunchName: "Rice + Chicken Curry", crewDinnerName: "Rice + Fish Fry" } },
+  2: { intl: { depMealName: "Chicken Tikka Masala + Rice", depChmlName: "Kids' Snack Tray", retMealName: "Lamb Pilaf", retVgmlName: "Paneer Tikka + Rice" }, dom: { usbaBreakfastName: "JBR + Egg Bhurji", usbaLunchName: "Rice + Mutton Curry", aaaBreakfastName: "Paratha + Halwa", aaaLunchName: "Rice + Fish Curry", crewSnackName: "Biscuits + Coffee", crewLunchName: "Rice + Beef Curry", crewDinnerName: "Fried Rice + Chicken" } },
+  3: { intl: { depMealName: "Hilsa Fish Rice + Dal", depChmlName: "Child Snack Box", retMealName: "Chicken Biryani", retVgmlName: "Mixed Veg Platter" }, dom: { usbaBreakfastName: "JBR + CKN Buggati", usbaLunchName: "Rice + Hilsa Curry", aaaBreakfastName: "Paratha + Omelette", aaaLunchName: "Rice + Chicken Curry", crewSnackName: "Biscuits + Tea", crewLunchName: "Chef's Special Rice + Fish", crewDinnerName: "Rice + Beef Bhuna" } },
+  4: { intl: { depMealName: "Mutton Kacchi + Salad", depChmlName: "Junior Meal Box", retMealName: "Fish Curry Rice", retVgmlName: "Veg Biryani" }, dom: { usbaBreakfastName: "Semolina Halwa + Paratha", usbaLunchName: "Rice + Mutton Curry", aaaBreakfastName: "JBR + CKN Buggati", aaaLunchName: "Rice + Fish Fry", crewSnackName: "Cake + Tea", crewLunchName: "Rice + Mutton Curry", crewDinnerName: "Fried Rice + Fish" } },
+  5: { intl: { depMealName: "Chicken Biryani + Raita", depChmlName: "Child Meal Box", retMealName: "Beef Kacchi Rice", retVgmlName: "Veg Pulao" }, dom: { usbaBreakfastName: "JBR + Egg Bhurji", usbaLunchName: "Khichuri + Beef Bhuna", aaaBreakfastName: "Paratha + Chicken Fry", aaaLunchName: "Rice + Hilsa Curry", crewSnackName: "Pitha + Tea", crewLunchName: "Khichuri + Beef", crewDinnerName: "Rice + Chicken Roast" } },
+  6: { intl: { depMealName: "Lamb Curry Rice + Salad", depChmlName: "Child Snack Set", retMealName: "Chicken Tikka Rice", retVgmlName: "Veg Fried Rice" }, dom: { usbaBreakfastName: "Paratha + Halwa + Juice", usbaLunchName: "Rice + Chicken Curry", aaaBreakfastName: "JBR + CKN Buggati", aaaLunchName: "Rice + Beef Curry", crewSnackName: "Biscuits + Coffee", crewLunchName: "Rice + Fish Curry", crewDinnerName: "Rice + Lamb Curry" } },
+};
+
+const BU_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const BU_MEAL_TYPES = ["Breakfast", "Lunch", "Snacks", "Heavy Snacks", "Dinner"];
+const BU_MEAL_TYPE_TIME: Record<string, string> = {
+  Breakfast: "07:00 AM – 10:00 AM", Lunch: "11:00 AM – 02:00 PM",
+  Snacks: "02:00 PM – 04:00 PM", "Heavy Snacks": "04:00 PM – 07:00 PM",
+  Dinner: "07:00 PM – 10:00 PM",
+};
+
+function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightOrder[]) => void; onOrderConfirmed?: (data: MealOrderConfirmation) => void }) {
+  const navigate = useNavigate();
+  const [draftSaved, setDraftSaved] = useState(false);
   const domFileRef = useRef<HTMLInputElement>(null);
   const [domFile, setDomFile] = useState<File | null>(null);
   const [domProgress, setDomProgress] = useState(0);
@@ -2001,6 +2348,20 @@ function BulkUpload({ onImport }: { onImport: (orders: FlightOrder[]) => void })
   const [importedOrders, setImportedOrders] = useState<FlightOrder[]>([]);
   const [orderLoading, setOrderLoading] = useState(false);
   const [orderSent, setOrderSent] = useState(false);
+  const [tagForwardOpen, setTagForwardOpen] = useState(false);
+  const [daySelectionOpen, setDaySelectionOpen] = useState(false);
+  const [pendingDay, setPendingDay] = useState("");
+
+  // Day-of-week meal config (stable for session)
+  const _d0 = new Date();
+  const _d1 = new Date(_d0.getTime()); _d1.setDate(_d0.getDate() + 1);
+  const _d2 = new Date(_d0.getTime()); _d2.setDate(_d0.getDate() + 2);
+  const tomorrowDayName = _d1.toLocaleDateString("en-GB", { weekday: "long" });
+  const tomorrowDateStr = _d1.toISOString().slice(0, 10);
+  const dayAfterDayName = _d2.toLocaleDateString("en-GB", { weekday: "long" });
+  const dayAfterDateStr = _d2.toISOString().slice(0, 10);
+  const tomorrowMenu = WEEK_MEAL_CONFIG[_d1.getDay()];
+  const dayAfterMenu = WEEK_MEAL_CONFIG[_d2.getDay()];
 
   const [activityLog, setActivityLog] = useState<ActivityEntry[]>([
     { message: "Bulk upload ready for validation", user: "ops.user", role: "Flight Ops", at: "2026-05-19 06:12" },
@@ -2113,17 +2474,21 @@ function BulkUpload({ onImport }: { onImport: (orders: FlightOrder[]) => void })
   const totalMeals = importedOrders.reduce((s, o) => s + o.pax + o.specialMeals, 0);
   const importDate = new Date().toISOString().slice(0, 10);
 
-  const handleOrderMeal = () => {
+  const handleOrderMeal = (onComplete?: () => void) => {
     setOrderLoading(true);
     setTimeout(() => {
       setOrderLoading(false);
       setOrderSent(true);
+      const _ts = new Date();
+      const ts = _ts.toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
       const refId = `OMR-${Date.now().toString().slice(-6)}`;
       addLog(
         `Meal order for next 24 hours has been created and forwarded to Meal Planner — Ref: ${refId} · ${totalFlights} flights · ${totalMeals} meals · Confirmed by system`,
       );
+      onOrderConfirmed?.({ timestamp: ts, totalFlights, totalMeals, tomorrowDayName, dayAfterDayName, dayAfterDateStr, validIntl, validDom, dayAfterMenu });
       onImport(importedOrders);
-      toast.success("Meal order forwarded to Meal Planner.");
+      toast.success("Meal plan tagged and forwarded to Production.");
+      onComplete?.();
     }, 1500);
   };
 
@@ -2678,12 +3043,12 @@ function BulkUpload({ onImport }: { onImport: (orders: FlightOrder[]) => void })
         </DialogContent>
       </Dialog>
 
-      {/* View Menu Modal */}
+      {/* Edit Menu Modal */}
       <Dialog open={showViewMenuModal !== null} onOpenChange={(open) => { if (!open) setShowViewMenuModal(null); }}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>
-              {showViewMenuModal === "intl" ? "International" : "Domestic"} Meal Configuration — {formatDayLabel(importDate)}
+              {showViewMenuModal === "intl" ? "International" : "Domestic"} Menu — {tomorrowDayName}, {tomorrowDateStr}
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-5 py-2">
@@ -2702,18 +3067,13 @@ function BulkUpload({ onImport }: { onImport: (orders: FlightOrder[]) => void })
                       </thead>
                       <tbody className="divide-y divide-border">
                         <tr>
-                          <td className="px-3 py-2 text-muted-foreground">B/C Departure</td>
-                          <td className="px-3 py-2">Grilled Chicken + Rice</td>
-                          <td className="px-3 py-2 text-right tabular-nums">{summaryEdit?.intlDepMeal ?? intlDepMeal}</td>
-                        </tr>
-                        <tr>
-                          <td className="px-3 py-2 text-muted-foreground">E/C Departure</td>
-                          <td className="px-3 py-2">Standard Box Meal</td>
+                          <td className="px-3 py-2 text-muted-foreground">Departure Meal</td>
+                          <td className="px-3 py-2">{tomorrowMenu?.intl.depMealName}</td>
                           <td className="px-3 py-2 text-right tabular-nums">{summaryEdit?.intlDepMeal ?? intlDepMeal}</td>
                         </tr>
                         <tr>
                           <td className="px-3 py-2 text-muted-foreground">Departure CHML</td>
-                          <td className="px-3 py-2">Children's Meal</td>
+                          <td className="px-3 py-2">{tomorrowMenu?.intl.depChmlName}</td>
                           <td className="px-3 py-2 text-right tabular-nums">{summaryEdit?.intlDepChml ?? intlDepChml}</td>
                         </tr>
                       </tbody>
@@ -2733,8 +3093,13 @@ function BulkUpload({ onImport }: { onImport: (orders: FlightOrder[]) => void })
                       </thead>
                       <tbody className="divide-y divide-border">
                         <tr>
+                          <td className="px-3 py-2 text-muted-foreground">Return Meal</td>
+                          <td className="px-3 py-2">{tomorrowMenu?.intl.retMealName}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">0</td>
+                        </tr>
+                        <tr>
                           <td className="px-3 py-2 text-muted-foreground">Return VGML</td>
-                          <td className="px-3 py-2">Vegetarian Meal</td>
+                          <td className="px-3 py-2">{tomorrowMenu?.intl.retVgmlName}</td>
                           <td className="px-3 py-2 text-right tabular-nums">{summaryEdit?.intlRetVgml ?? intlRetVgml}</td>
                         </tr>
                       </tbody>
@@ -2758,12 +3123,12 @@ function BulkUpload({ onImport }: { onImport: (orders: FlightOrder[]) => void })
                       <tbody className="divide-y divide-border">
                         <tr>
                           <td className="px-3 py-2 text-muted-foreground">Breakfast</td>
-                          <td className="px-3 py-2">JBR + CKN Buggati</td>
+                          <td className="px-3 py-2">{tomorrowMenu?.dom.usbaBreakfastName}</td>
                           <td className="px-3 py-2 text-right tabular-nums">{summaryEdit?.usbaBreakfast ?? usbaBreakfast}</td>
                         </tr>
                         <tr>
                           <td className="px-3 py-2 text-muted-foreground">Lunch</td>
-                          <td className="px-3 py-2">Rice + Mutton Curry</td>
+                          <td className="px-3 py-2">{tomorrowMenu?.dom.usbaLunchName}</td>
                           <td className="px-3 py-2 text-right tabular-nums">{summaryEdit?.usbaLunch ?? usbaLunch}</td>
                         </tr>
                       </tbody>
@@ -2783,13 +3148,13 @@ function BulkUpload({ onImport }: { onImport: (orders: FlightOrder[]) => void })
                       </thead>
                       <tbody className="divide-y divide-border">
                         <tr>
-                          <td className="px-3 py-2 text-muted-foreground">Zenith Load</td>
-                          <td className="px-3 py-2">Standard Allocation</td>
+                          <td className="px-3 py-2 text-muted-foreground">Breakfast</td>
+                          <td className="px-3 py-2">{tomorrowMenu?.dom.aaaBreakfastName}</td>
                           <td className="px-3 py-2 text-right tabular-nums">{summaryEdit?.aaaZenith ?? aaaZenith}</td>
                         </tr>
                         <tr>
-                          <td className="px-3 py-2 text-muted-foreground">Pax Load</td>
-                          <td className="px-3 py-2">Standard Allocation</td>
+                          <td className="px-3 py-2 text-muted-foreground">Lunch</td>
+                          <td className="px-3 py-2">{tomorrowMenu?.dom.aaaLunchName}</td>
                           <td className="px-3 py-2 text-right tabular-nums">{summaryEdit?.aaaPax ?? aaaPax}</td>
                         </tr>
                       </tbody>
@@ -2811,7 +3176,12 @@ function BulkUpload({ onImport }: { onImport: (orders: FlightOrder[]) => void })
             </Button>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowViewMenuModal(null)}>Close</Button>
+            <Button variant="outline" onClick={() => setShowViewMenuModal(null)}>
+              <ArrowLeft className="h-3.5 w-3.5 mr-1.5" /> Back
+            </Button>
+            <Button variant="secondary" onClick={() => { setShowViewMenuModal(null); navigate("/meal-planning"); }}>
+              Edit in Meal Planning
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -2972,7 +3342,7 @@ function BulkUpload({ onImport }: { onImport: (orders: FlightOrder[]) => void })
           <Card>
             <CardContent className="pt-6">
               <h3 className="text-sm font-semibold tracking-wider uppercase text-foreground mb-4">
-                Meal Order Summary — Next 24 Hours
+                Meal Order Summary — Next 24 Hours ({tomorrowDayName})
                 <span className="ml-2 text-xs font-normal normal-case tracking-normal text-muted-foreground">{importDate} · From Zenith PAX Load</span>
               </h3>
 
@@ -2981,7 +3351,7 @@ function BulkUpload({ onImport }: { onImport: (orders: FlightOrder[]) => void })
                 <div className="rounded-lg border border-navy/20 bg-navy/5 p-4 space-y-4">
                   <div className="flex items-center justify-between">
                     <h4 className="text-xs font-semibold uppercase tracking-wider text-navy">International</h4>
-                    <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setShowViewMenuModal("intl")}>View Menu</Button>
+                    <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => navigate("/meal-planning", { state: { backUrl: "/order-management?view=bulk" } })}><Pencil className="h-3 w-3 mr-1" />Edit Menu</Button>
                   </div>
                   <div className="space-y-1.5">
                     <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Departure</div>
@@ -3065,7 +3435,7 @@ function BulkUpload({ onImport }: { onImport: (orders: FlightOrder[]) => void })
                 <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-4">
                   <div className="flex items-center justify-between">
                     <h4 className="text-xs font-semibold uppercase tracking-wider text-primary">Domestic</h4>
-                    <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setShowViewMenuModal("dom")}>View Menu</Button>
+                    <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => navigate("/meal-planning", { state: { backUrl: "/order-management?view=bulk" } })}><Pencil className="h-3 w-3 mr-1" />Edit Menu</Button>
                   </div>
                   <div className="space-y-1.5">
                     <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">US-Bangla</div>
@@ -3090,7 +3460,7 @@ function BulkUpload({ onImport }: { onImport: (orders: FlightOrder[]) => void })
                       )}
                     </div>
                     <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Breakfast (JBR + CKN Buggati)</span>
+                      <span className="text-muted-foreground">Breakfast</span>
                       {mealEditMode && summaryEdit ? (
                         <input type="number" min={0} value={summaryEdit.usbaBreakfast}
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, usbaBreakfast: Number(e.target.value) })}
@@ -3210,18 +3580,241 @@ function BulkUpload({ onImport }: { onImport: (orders: FlightOrder[]) => void })
                     </Button>
                   )}
                   <Button
-                    onClick={handleOrderMeal}
+                    onClick={orderSent ? undefined : () => setTagForwardOpen(true)}
                     disabled={orderLoading || orderSent}
                     className={cn(orderSent && "bg-success hover:bg-success text-white")}
                   >
                     {orderLoading ? "Sending…" : orderSent ? (
                       <><CheckCircle2 className="h-4 w-4 mr-1.5" />Sent</>
-                    ) : "Order meal"}
+                    ) : "Tag & Forward to Production"}
                   </Button>
                 </div>
               </div>
+
             </CardContent>
           </Card>
+
+          {/* Tag & Forward to Production — confirmation dialog */}
+          <Dialog open={tagForwardOpen} onOpenChange={(open) => { if (!open) { setTagForwardOpen(false); if (mealEditMode) { setMealEditMode(false); setSummaryEdit(null); } } }}>
+            <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+              <DialogHeader>
+                <DialogTitle>
+                  Tag &amp; Forward to Production — {tomorrowDayName}
+                  <span className="ml-2 text-xs font-normal text-muted-foreground normal-case tracking-normal">{tomorrowDateStr} · Next 24 Hours</span>
+                </DialogTitle>
+              </DialogHeader>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 py-2">
+                {/* International */}
+                <div className="rounded-lg border border-navy/20 bg-navy/5 p-4 space-y-4">
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-navy">International</h4>
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Departure</div>
+                    <div className="flex justify-between text-sm items-center">
+                      <span className="text-muted-foreground">Total Departure Meal</span>
+                      {mealEditMode && summaryEdit ? (
+                        <input type="number" min={0} value={summaryEdit.intlDepMeal}
+                          onChange={(e) => setSummaryEdit((p) => p && { ...p, intlDepMeal: Number(e.target.value) })}
+                          className="w-20 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
+                      ) : <span className="font-medium tabular-nums">{intlDepMeal}</span>}
+                    </div>
+                    <div className="flex justify-between text-sm items-center">
+                      <span className="text-muted-foreground">Departure CHML</span>
+                      {mealEditMode && summaryEdit ? (
+                        <input type="number" min={0} value={summaryEdit.intlDepChml}
+                          onChange={(e) => setSummaryEdit((p) => p && { ...p, intlDepChml: Number(e.target.value) })}
+                          className="w-20 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
+                      ) : <span className="font-medium tabular-nums">{intlDepChml}</span>}
+                    </div>
+                    <div className="flex justify-between text-sm font-semibold border-t border-navy/20 pt-1">
+                      <span>Departure Total</span>
+                      <span className="tabular-nums">{mealEditMode && summaryEdit ? summaryEdit.intlDepMeal + summaryEdit.intlDepChml : intlDepTotal}</span>
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Return</div>
+                    <div className="flex justify-between text-sm items-center">
+                      <span className="text-muted-foreground">Total Return Meal</span>
+                      {mealEditMode && summaryEdit ? (
+                        <input type="number" min={0} value={summaryEdit.intlRetMeal}
+                          onChange={(e) => setSummaryEdit((p) => p && { ...p, intlRetMeal: Number(e.target.value) })}
+                          className="w-20 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
+                      ) : <span className="font-medium tabular-nums">0</span>}
+                    </div>
+                    <div className="flex justify-between text-sm items-center">
+                      <span className="text-muted-foreground">Return CHML</span>
+                      {mealEditMode && summaryEdit ? (
+                        <input type="number" min={0} value={summaryEdit.intlRetChml}
+                          onChange={(e) => setSummaryEdit((p) => p && { ...p, intlRetChml: Number(e.target.value) })}
+                          className="w-20 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
+                      ) : <span className="font-medium tabular-nums">0</span>}
+                    </div>
+                    <div className="flex justify-between text-sm items-center">
+                      <span className="text-muted-foreground">Return VGML</span>
+                      {mealEditMode && summaryEdit ? (
+                        <input type="number" min={0} value={summaryEdit.intlRetVgml}
+                          onChange={(e) => setSummaryEdit((p) => p && { ...p, intlRetVgml: Number(e.target.value) })}
+                          className="w-20 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
+                      ) : <span className="font-medium tabular-nums">{intlRetVgml}</span>}
+                    </div>
+                    <div className="flex justify-between text-sm font-semibold border-t border-navy/20 pt-1">
+                      <span>Return Total</span>
+                      <span className="tabular-nums">{mealEditMode && summaryEdit ? summaryEdit.intlRetMeal + summaryEdit.intlRetChml + summaryEdit.intlRetVgml : intlRetTotal}</span>
+                    </div>
+                  </div>
+                  <div className="flex justify-between text-sm font-bold border-t-2 border-navy/30 pt-2 mt-1">
+                    <span>Total Meal (Departure+Return)</span>
+                    <span className="tabular-nums">{mealEditMode && summaryEdit ? summaryEdit.intlDepMeal + summaryEdit.intlDepChml + summaryEdit.intlRetMeal + summaryEdit.intlRetChml + summaryEdit.intlRetVgml : intlGrandTotal}</span>
+                  </div>
+                </div>
+                {/* Domestic */}
+                <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-4">
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-primary">Domestic</h4>
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">US-Bangla</div>
+                    <div className="flex justify-between text-sm items-center">
+                      <span className="text-muted-foreground">Zenith Load</span>
+                      {mealEditMode && summaryEdit ? (
+                        <input type="number" min={0} value={summaryEdit.usbaZenith}
+                          onChange={(e) => setSummaryEdit((p) => p && { ...p, usbaZenith: Number(e.target.value) })}
+                          className="w-20 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
+                      ) : <span className="font-medium tabular-nums">{usbaZenith}</span>}
+                    </div>
+                    <div className="flex justify-between text-sm items-center">
+                      <span className="text-muted-foreground">Pax Load</span>
+                      {mealEditMode && summaryEdit ? (
+                        <input type="number" min={0} value={summaryEdit.usbaPax}
+                          onChange={(e) => setSummaryEdit((p) => p && { ...p, usbaPax: Number(e.target.value) })}
+                          className="w-20 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
+                      ) : <span className="font-medium tabular-nums">{usbaPax}</span>}
+                    </div>
+                    <div className="flex justify-between text-sm items-center">
+                      <span className="text-muted-foreground">Breakfast</span>
+                      {mealEditMode && summaryEdit ? (
+                        <input type="number" min={0} value={summaryEdit.usbaBreakfast}
+                          onChange={(e) => setSummaryEdit((p) => p && { ...p, usbaBreakfast: Number(e.target.value) })}
+                          className="w-20 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
+                      ) : <span className="font-medium tabular-nums">{usbaBreakfast}</span>}
+                    </div>
+                    <div className="flex justify-between text-sm items-center">
+                      <span className="text-muted-foreground">Lunch</span>
+                      {mealEditMode && summaryEdit ? (
+                        <input type="number" min={0} value={summaryEdit.usbaLunch}
+                          onChange={(e) => setSummaryEdit((p) => p && { ...p, usbaLunch: Number(e.target.value) })}
+                          className="w-20 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
+                      ) : <span className="font-medium tabular-nums">{usbaLunch}</span>}
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Air Astra</div>
+                    <div className="flex justify-between text-sm items-center">
+                      <span className="text-muted-foreground">Zenith Load</span>
+                      {mealEditMode && summaryEdit ? (
+                        <input type="number" min={0} value={summaryEdit.aaaZenith}
+                          onChange={(e) => setSummaryEdit((p) => p && { ...p, aaaZenith: Number(e.target.value) })}
+                          className="w-20 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
+                      ) : <span className="font-medium tabular-nums">{aaaZenith}</span>}
+                    </div>
+                    <div className="flex justify-between text-sm items-center">
+                      <span className="text-muted-foreground">Pax Load</span>
+                      {mealEditMode && summaryEdit ? (
+                        <input type="number" min={0} value={summaryEdit.aaaPax}
+                          onChange={(e) => setSummaryEdit((p) => p && { ...p, aaaPax: Number(e.target.value) })}
+                          className="w-20 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
+                      ) : <span className="font-medium tabular-nums">{aaaPax}</span>}
+                    </div>
+                  </div>
+                  <div className="flex justify-between text-sm font-semibold border-t border-primary/20 pt-2">
+                    <span>Total Zenith (USBA + Air Astra)</span>
+                    <span className="tabular-nums">{mealEditMode && summaryEdit ? summaryEdit.usbaZenith + summaryEdit.aaaZenith : totalZenith}</span>
+                  </div>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => { setTagForwardOpen(false); if (mealEditMode) { setMealEditMode(false); setSummaryEdit(null); } }}>Close</Button>
+                <Button
+                  onClick={() => {
+                    setTagForwardOpen(false);
+                    if (mealEditMode) { setMealEditMode(false); setSummaryEdit(null); }
+                    setPendingDay(tomorrowDayName);
+                    setDaySelectionOpen(true);
+                  }}
+                >
+                  Tag Meal
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          {/* Tag Meal — Day Selection Dialog */}
+          <Dialog open={daySelectionOpen} onOpenChange={setDaySelectionOpen}>
+            <DialogContent className="max-w-3xl max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden">
+              <div className="px-6 pt-6 pb-4 border-b bg-white">
+                <DialogTitle className="text-lg font-semibold mb-4">Tag Meal — Select Day & Configure</DialogTitle>
+                <div className="flex gap-1.5">
+                  {BU_DAYS.map((d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                        pendingDay === d
+                          ? "bg-slate-800 text-white"
+                          : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                      }`}
+                      onClick={() => setPendingDay(d)}
+                    >
+                      {d.slice(0, 3)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex-1 overflow-y-auto px-6 py-4 space-y-3 bg-slate-50">
+                {BU_MEAL_TYPES.map((mealType, typeIdx) => {
+                  const tagPalette = [
+                    { border: "border-amber-200",   header: "bg-amber-50",   headerText: "text-amber-800",   body: "bg-white",  cardAccent: "border-l-amber-400"   },
+                    { border: "border-sky-200",     header: "bg-sky-50",     headerText: "text-sky-800",     body: "bg-white",  cardAccent: "border-l-sky-400"     },
+                    { border: "border-violet-200",  header: "bg-violet-50",  headerText: "text-violet-800",  body: "bg-white",  cardAccent: "border-l-violet-400"  },
+                    { border: "border-orange-200",  header: "bg-orange-50",  headerText: "text-orange-800",  body: "bg-white",  cardAccent: "border-l-orange-400"  },
+                    { border: "border-emerald-200", header: "bg-emerald-50", headerText: "text-emerald-800", body: "bg-white",  cardAccent: "border-l-emerald-400" },
+                  ];
+                  const pal = tagPalette[typeIdx % tagPalette.length];
+                  return (
+                    <div key={mealType} className={`rounded-xl border ${pal.border} overflow-hidden shadow-sm`}>
+                      <div className={`${pal.header} px-4 py-2.5 flex items-center gap-3 border-b ${pal.border}`}>
+                        <span className={`font-semibold text-sm w-28 shrink-0 ${pal.headerText}`}>{mealType}</span>
+                        <span className="text-xs text-slate-400">{BU_MEAL_TYPE_TIME[mealType]}</span>
+                      </div>
+                      <div className={`${pal.body} px-4 py-3`}>
+                        <div className="flex items-center gap-4 py-1">
+                          <span className="text-sm text-slate-400 italic">No meals configured for this day</span>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 text-xs"
+                            onClick={() => { setDaySelectionOpen(false); navigate("/meal-planning"); }}
+                          >
+                            + Add New
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="px-6 py-4 border-t bg-white flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setDaySelectionOpen(false)}>Cancel</Button>
+                <Button
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                  disabled={orderLoading}
+                  onClick={() => {
+                    setDaySelectionOpen(false);
+                    handleOrderMeal();
+                  }}
+                >
+                  {orderLoading ? "Sending…" : "Forward to Production"}
+                </Button>
+              </div>
+            </DialogContent>
+          </Dialog>
         </>
       )}
 
