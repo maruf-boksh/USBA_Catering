@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import { Layout, Menu, Button, Tooltip, Popover } from 'antd';
 import type { MenuProps } from 'antd';
+import { LogoTile } from '@/components/AviationLogo';
 import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
@@ -27,74 +28,6 @@ export interface AppSidebarProps {
   onUnpin: (key: string) => void;
 }
 
-function BrandMark() {
-  return (
-    <svg
-      className="sb-brand-svg"
-      width="26"
-      height="26"
-      viewBox="0 0 40 40"
-      fill="none"
-      aria-hidden
-      xmlns="http://www.w3.org/2000/svg"
-    >
-      <defs>
-        <linearGradient id="vzn-stroke" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#ffffff" stopOpacity="1" />
-          <stop offset="100%" stopColor="#ffffff" stopOpacity="0.78" />
-        </linearGradient>
-        <linearGradient id="vzn-shimmer" x1="0" y1="0" x2="40" y2="0" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#ffffff" stopOpacity="0" />
-          <stop offset="50%" stopColor="#ffffff" stopOpacity="0.9" />
-          <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
-        </linearGradient>
-        <radialGradient id="vzn-spark" cx="0.5" cy="0.5" r="0.5">
-          <stop offset="0%" stopColor="#FCD34D" />
-          <stop offset="60%" stopColor="#FBBF24" />
-          <stop offset="100%" stopColor="#F59E0B" />
-        </radialGradient>
-      </defs>
-
-      {/* V monogram — primary stroke */}
-      <path
-        className="sb-brand-v"
-        d="M8 10 L20 30 L32 10"
-        stroke="url(#vzn-stroke)"
-        strokeWidth="3.2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        fill="none"
-      />
-
-      {/* Ascending chart line — growth motif */}
-      <path
-        className="sb-brand-chart"
-        d="M11 22 L17 18 L23 20 L30 12"
-        stroke="#FBBF24"
-        strokeWidth="1.6"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeOpacity="0.85"
-        fill="none"
-      />
-
-      {/* Animated shimmer overlay */}
-      <path
-        className="sb-brand-shimmer"
-        d="M8 10 L20 30 L32 10"
-        stroke="url(#vzn-shimmer)"
-        strokeWidth="3.2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        fill="none"
-      />
-
-      {/* Spark — apex of growth */}
-      <circle className="sb-brand-spark" cx="30" cy="12" r="2.4" fill="url(#vzn-spark)" />
-      <circle className="sb-brand-spark-ring" cx="30" cy="12" r="2.4" fill="none" stroke="#FBBF24" strokeWidth="1" />
-    </svg>
-  );
-}
 
 function getFirstLeafKey(items: NavSubItem[]): string | undefined {
   for (const it of items) {
@@ -324,12 +257,12 @@ export const AppSidebar = memo(function AppSidebar({
           aria-label="Go to home"
         >
           <span className="sb-brand-mark">
-            <BrandMark />
+            <LogoTile size={36} glow={false} />
           </span>
           {!collapsed && (
             <span className="sb-brand-copy">
               <span className="sb-brand-name">
-                <span className="sb-brand-word">HARVEST</span>
+                <span className="sb-brand-word">Harvest</span>
                 <em>Catering</em>
                 <i className="sb-brand-underline" aria-hidden />
               </span>

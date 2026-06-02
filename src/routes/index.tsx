@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { useState, type ReactNode } from "react";
-import { Card, Button, Tag, Input, Popover, Tabs, DatePicker } from "antd";
+import { Button, Input, Popover, DatePicker } from "antd";
 import {
   RocketOutlined,
   CoffeeOutlined,
@@ -26,7 +26,7 @@ import { useWorkflow } from "@/lib/workflow-store";
 import { flagArrival } from "@/lib/arrival-flash";
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Legend,
-  ResponsiveContainer, Tooltip, XAxis, YAxis, Cell, PieChart, Pie,
+  ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { toast } from "sonner";
 
@@ -34,12 +34,12 @@ type Period = "today" | "week" | "custom";
 
 type DateRange = { from: string; to: string };
 
-// Vizyon chart palette — teal/amber/status colors per DESIGN.md §3.
-const CHART_PRIMARY  = "#0F766E"; // teal
-const CHART_AMBER    = "#D97706"; // amber accent
-const CHART_SUCCESS  = "#16A34A"; // green status
-const CHART_INFO     = "#0EA5E9"; // sky info
-const CHART_COLORS = [CHART_PRIMARY, CHART_AMBER, CHART_SUCCESS, CHART_INFO];
+// Harvest Catering chart palette — brand red/amber/status colors.
+const CHART_PRIMARY  = "#E10101"; // brand red
+const CHART_AMBER    = "#d97316"; // warm amber target line
+const CHART_SUCCESS  = "#0f7a40"; // green status
+const CHART_INFO     = "#3c3a40"; // ink info
+const CHART_COLORS   = [CHART_PRIMARY, "#7e0206", CHART_AMBER, CHART_INFO];
 
 // ── Live KPI helpers ────────────────────────────────────────────────────────
 function formatLakh(n: number): string {
@@ -173,7 +173,7 @@ function useDashboardKpis(period: Period, range?: DateRange) {
     trendTitle: isCustom
       ? `Meal Production Trend (${range!.from || "…"} → ${range!.to || "…"})`
       : isWeek ? "Meal Production Trend (Last 7 Days)" : "Meal Production Trend (Today)",
-    sectionMix: computeSectionMix(),
+    sectionMix: computeSectionMix(producedTotal),
     activeFlights: pickActiveFlights(),
     activityFeed: buildActivityFeed({
       wfRequisitions, productionEntryRecords, transferNotes,
@@ -230,10 +230,25 @@ function groupActiveByOrder(rows: ReturnType<typeof pickActiveFlights>, maxOrder
   return Array.from(map.entries()).slice(0, maxOrders);
 }
 
-function computeSectionMix(): { name: string; v: number }[] {
-  const map = new Map<string, number>();
-  for (const p of productionOrders) map.set(p.section, (map.get(p.section) ?? 0) + p.qty);
-  return Array.from(map.entries()).map(([name, v]) => ({ name, v }));
+// Production Mix donut data — splits the day's produced meals across the four
+// kitchen sections so the donut center stays equal to the "Meals Prepared" KPI
+// and the slices match the GM dashboard design:
+//   Hot Kitchen 41% · Cold Kitchen 34% · Veg Section 16% · Special Meal 9%.
+// CHART_COLORS maps by index → red · dark-red · amber · ink.
+function computeSectionMix(total: number): { name: string; v: number }[] {
+  const sections = [
+    { name: "Hot Kitchen",  w: 0.41 },
+    { name: "Cold Kitchen", w: 0.34 },
+    { name: "Veg Section",  w: 0.16 },
+    { name: "Special Meal", w: 0.09 },
+  ];
+  let allocated = 0;
+  return sections.map((s, i) => {
+    // Last slice takes the remainder so the parts always sum to `total` exactly.
+    const v = i === sections.length - 1 ? Math.max(0, total - allocated) : Math.round(total * s.w);
+    allocated += v;
+    return { name: s.name, v };
+  });
 }
 
 function buildActivityFeed({
@@ -326,7 +341,7 @@ function buildActivityFeed({
   return out.slice(0, 6);
 }
 
-// Vizyon card surface — used as the consistent wrapper for every dashboard panel.
+// Harvest card surface — used as the consistent wrapper for every dashboard panel.
 function PanelCard({
   title,
   link,
@@ -341,31 +356,130 @@ function PanelCard({
   children: ReactNode;
 }) {
   return (
-    <Card
-      variant="borderless"
-      style={{
-        borderRadius: 12,
-        border: "1px solid var(--color-border)",
-        boxShadow: "0 1px 2px 0 rgba(15, 23, 42, 0.04)",
-        background: "var(--color-card)",
-        height: "100%",
-      }}
-      styles={{ body: { padding: 16 } }}
-    >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: "var(--color-foreground)" }}>{title}</div>
+    <div style={{
+      background: '#ffffff',
+      border: '1px solid var(--line, #e6e2e0)',
+      borderRadius: 16,
+      boxShadow: '0 1px 2px rgba(26,2,4,.04), 0 12px 30px -22px rgba(26,2,4,.18)',
+      display: 'flex',
+      flexDirection: 'column',
+      height: '100%',
+    }}>
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        gap: 12, padding: '18px 22px',
+        borderBottom: '1px solid #f5f0ec',
+      }}>
+        <h2 style={{
+          fontFamily: "var(--serif, 'Newsreader', Georgia, serif)",
+          fontWeight: 600, fontSize: 19, letterSpacing: '-0.01em',
+          margin: 0, color: 'var(--ink, #1a0204)', whiteSpace: 'nowrap',
+        }}>
+          {title}
+        </h2>
         {link && (
           <Link
             to={link}
             onClick={() => highlight && flagArrival(highlight)}
-            style={{ fontSize: 12, color: "var(--color-primary)", textDecoration: "none" }}
+            style={{ fontSize: 12.5, fontWeight: 600, color: '#E10101', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
           >
-            {linkLabel ?? "Open →"}
+            {linkLabel ?? 'Open →'}
           </Link>
         )}
       </div>
-      {children}
-    </Card>
+      <div style={{ padding: '18px 22px', flex: 1 }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// Production Mix donut — hand-rolled SVG ring with rounded segment caps over a
+// faint track, a serif center total, and a percentage legend, matching the GM
+// dashboard mockup's custom donut (not a recharts pie).
+function ProductionMixDonut({ data }: { data: { name: string; v: number }[] }) {
+  const total = data.reduce((s, d) => s + d.v, 0);
+  const SIZE = 230, C = SIZE / 2, R = 84, SW = 20, GAP = 18;
+
+  // Point on the ring centerline at `ang` degrees, measured clockwise from top.
+  const pt = (ang: number) => {
+    const rad = (ang * Math.PI) / 180;
+    return { x: C + R * Math.sin(rad), y: C - R * Math.cos(rad) };
+  };
+
+  let cursor = 0;
+  const segs = data.map((d, i) => {
+    const frac = total > 0 ? d.v / total : 0;
+    const sweep = frac * 360;
+    // Shrink the gap on tiny slices so no section silently vanishes from the ring.
+    const g = data.length > 1 ? Math.min(GAP / 2, sweep / 3) : 0;
+    const a1 = cursor + g;
+    const a2 = cursor + sweep - g;
+    cursor += sweep;
+    return { name: d.name, v: d.v, frac, a1, a2, color: CHART_COLORS[i % CHART_COLORS.length] };
+  });
+
+  const single = segs.length === 1 && total > 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "14px 0 6px" }}>
+      <div style={{ position: "relative", width: SIZE, height: SIZE }}>
+        <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`}>
+          {/* faint track shows through the gaps between segments */}
+          <circle cx={C} cy={C} r={R} fill="none" stroke="#f0ebe8" strokeWidth={SW} />
+          {single ? (
+            <circle cx={C} cy={C} r={R} fill="none" stroke={segs[0].color} strokeWidth={SW} />
+          ) : (
+            segs.map((s, i) => {
+              if (s.a2 <= s.a1) return null;
+              const p1 = pt(s.a1), p2 = pt(s.a2);
+              const large = s.a2 - s.a1 > 180 ? 1 : 0;
+              return (
+                <path
+                  key={i}
+                  d={`M ${p1.x.toFixed(2)} ${p1.y.toFixed(2)} A ${R} ${R} 0 ${large} 1 ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`}
+                  fill="none"
+                  stroke={s.color}
+                  strokeWidth={SW}
+                  strokeLinecap="round"
+                >
+                  <title>{`${s.name}: ${s.v.toLocaleString()} (${Math.round(s.frac * 100)}%)`}</title>
+                </path>
+              );
+            })
+          )}
+        </svg>
+        <div style={{
+          position: "absolute", inset: 0, display: "flex", flexDirection: "column",
+          alignItems: "center", justifyContent: "center", pointerEvents: "none",
+        }}>
+          <span style={{
+            fontFamily: "var(--serif, 'Newsreader', Georgia, serif)",
+            fontWeight: 600, fontSize: 34, lineHeight: 1, color: "var(--ink, #1a0204)",
+          }}>
+            {total.toLocaleString()}
+          </span>
+          <span style={{
+            fontSize: 10.5, fontWeight: 700, letterSpacing: "0.12em",
+            textTransform: "uppercase", color: "var(--muted, #6b6b72)", marginTop: 4,
+          }}>
+            Meals
+          </span>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "8px 18px", marginTop: 18 }}>
+        {segs.map((s, i) => (
+          <span key={i} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "var(--ink, #1a0204)" }}>
+            <span style={{ width: 10, height: 10, borderRadius: 3, flexShrink: 0, background: s.color }} />
+            {s.name}
+            <span style={{ color: "var(--muted, #6b6b72)", fontVariantNumeric: "tabular-nums" }}>
+              {total > 0 ? Math.round((s.v / total) * 100) : 0}%
+            </span>
+          </span>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -417,8 +531,12 @@ export default function Dashboard() {
         }
       />
 
-      {/* Vizyon decorative tri-band stripe */}
-      <div className="usb-livery-stripe" style={{ height: 4, borderRadius: 4, marginBottom: 20 }} aria-hidden />
+      {/* Harvest decorative brand stripe */}
+      <div style={{
+        height: 3, borderRadius: 99, margin: '18px 0 22px',
+        background: 'linear-gradient(90deg, #E10101 0%, #a60303 46%, #1a0204 100%)',
+        opacity: 0.9,
+      }} aria-hidden />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <KpiLink to="/order-management" highlight="active-orders" ids={data.kpis.flights.ids}>
@@ -437,16 +555,16 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
         <KpiLink to="/procurement" highlight="po-list" ids={data.kpis.pendingPOs.ids}>
-          <KpiCard label="Pending POs"      value={data.kpis.pendingPOs.value} sub={data.kpis.pendingPOs.sub} icon={ShoppingCartOutlined} tone="navy"    />
+          <KpiCard label="Pending POs"      value={data.kpis.pendingPOs.value} sub={data.kpis.pendingPOs.sub} icon={ShoppingCartOutlined} tone="info"    />
         </KpiLink>
         <KpiLink to="/inventory" highlight="inv-alerts" ids={data.kpis.invAlerts.ids}>
-          <KpiCard label="Inventory Alerts" value={data.kpis.invAlerts.value}  sub={data.kpis.invAlerts.sub}  icon={InboxOutlined}        tone="red"     />
+          <KpiCard label="Inventory Alerts" value={data.kpis.invAlerts.value}  sub={data.kpis.invAlerts.sub}  icon={InboxOutlined}        tone="warning" />
         </KpiLink>
         <KpiLink to="/dispatch" highlight="dispatch-list" ids={data.kpis.dispatch.ids}>
           <KpiCard label="Dispatch Active"  value={data.kpis.dispatch.value}   sub={data.kpis.dispatch.sub}   icon={CarOutlined}          tone="success" />
         </KpiLink>
         <KpiLink to="/inventory" highlight="inv-value">
-          <KpiCard label="Daily Cost"       value={data.kpis.dailyCost.value}  sub={data.kpis.dailyCost.sub}  icon={DollarOutlined}       tone="warning" />
+          <KpiCard label="Daily Cost"       value={data.kpis.dailyCost.value}  sub={data.kpis.dailyCost.sub}  icon={DollarOutlined}       tone="ink"     />
         </KpiLink>
       </div>
 
@@ -457,22 +575,7 @@ export default function Dashboard() {
           </PanelCard>
         </div>
         <PanelCard title="Production Mix" link="/production-entry" linkLabel="Open →" highlight="production-list">
-          <ResponsiveContainer width="100%" height={260}>
-            <PieChart>
-              <Pie data={data.sectionMix} dataKey="v" nameKey="name" innerRadius={55} outerRadius={95} paddingAngle={2}>
-                {data.sectionMix.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
-              </Pie>
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: "var(--color-card)",
-                  border: "1px solid var(--color-border)",
-                  borderRadius: 8,
-                  fontSize: 12,
-                }}
-              />
-              <Legend iconType="circle" wrapperStyle={{ fontSize: 12 }} />
-            </PieChart>
-          </ResponsiveContainer>
+          <ProductionMixDonut data={data.sectionMix} />
         </PanelCard>
       </div>
 
@@ -518,11 +621,11 @@ export default function Dashboard() {
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {data.activityFeed.map((a, i) => {
                 const accent = {
-                  navy: "#0F766E",
-                  success: "#16A34A",
-                  destructive: "#DC2626",
-                  leaf: "#16A34A",
-                  warning: "#D97706",
+                  navy:        "#3c3a40",
+                  success:     "#0f7a40",
+                  destructive: "#E10101",
+                  leaf:        "#0f7a40",
+                  warning:     "#b45309",
                 }[a.tone];
                 return (
                   <Link
@@ -596,10 +699,16 @@ export default function Dashboard() {
                   fontSize: 13,
                   textDecoration: "none",
                   color: "inherit",
-                  transition: "background-color 150ms ease",
+                  transition: "background-color 150ms ease, border-color 150ms ease",
                 }}
-                onMouseEnter={(e) => (e.currentTarget.style.background = "var(--accent)")}
-                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "#fff5f5";
+                  e.currentTarget.style.borderColor = "rgba(225,1,1,0.25)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "transparent";
+                  e.currentTarget.style.borderColor = "var(--color-border)";
+                }}
               >
                 <div>
                   <div style={{ fontWeight: 500 }}>{p.id} — {p.vendor}</div>
@@ -617,48 +726,61 @@ export default function Dashboard() {
   );
 }
 
+// Active Orders status pill — brand status family from the dashboard mockup.
+// Production → amber wash (st-prod), Pending → neutral, everything else → green (st-ready).
+function aoStatusPill(status: string): { color: string; bg: string; border: string } {
+  const s = status.toLowerCase();
+  if (s === "production") return { color: "#b45309", bg: "#fbf1e6", border: "#f0d9bf" };
+  if (s === "pending")    return { color: "#6b6b72", bg: "#f4f1ef", border: "#e9e4e1" };
+  return { color: "#0f7a40", bg: "#ecf5ef", border: "#c9e6d4" };
+}
+
 function ActiveOrdersTabs({ rows }: { rows: ReturnType<typeof pickActiveFlights> }) {
   const [tab, setTab] = useState<"flight" | "crew">("flight");
   const groups = groupActiveByOrder(rows, 5);
 
-  if (groups.length === 0) {
-    return (
-      <div style={{ padding: "24px 0", textAlign: "center", fontSize: 12, color: "var(--color-muted-foreground)" }}>
-        No active orders.
-      </div>
-    );
-  }
-
+  // Span the panel body edge-to-edge so the tab rule + scroll list align to the
+  // card like the mockup, then re-apply the design's own paddings inside.
   return (
-    <Tabs
-      activeKey={tab}
-      onChange={(k) => setTab(k as "flight" | "crew")}
-      size="small"
-      items={[
-        {
-          key: "flight",
-          label: "Flight Orders",
-          children: (
-            <div style={{ maxHeight: 320, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, paddingRight: 4 }}>
-              {groups.map(([orderNo, legs]) => (
-                <OrderGroupCard key={`flight-${orderNo}`} orderNo={orderNo} legs={legs} mode="flight" />
-              ))}
-            </div>
-          ),
-        },
-        {
-          key: "crew",
-          label: "Crew Orders",
-          children: (
-            <div style={{ maxHeight: 320, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, paddingRight: 4 }}>
-              {groups.map(([orderNo, legs]) => (
-                <OrderGroupCard key={`crew-${orderNo}`} orderNo={orderNo} legs={legs} mode="crew" />
-              ))}
-            </div>
-          ),
-        },
-      ]}
-    />
+    <div style={{ margin: "-18px -22px" }}>
+      <div style={{ display: "flex", gap: 22, padding: "0 22px", borderBottom: "1px solid #f0ebe8" }}>
+        {([["flight", "Flight Orders"], ["crew", "Crew Orders"]] as const).map(([key, label]) => {
+          const on = tab === key;
+          return (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              style={{
+                position: "relative", padding: "13px 0", fontSize: 13.5, fontWeight: 600,
+                color: on ? "var(--ink, #1a0204)" : "var(--muted, #6b6b72)",
+                cursor: "pointer", background: "none", border: "none",
+                fontFamily: "inherit", whiteSpace: "nowrap",
+              }}
+            >
+              {label}
+              {on && (
+                <span style={{
+                  position: "absolute", left: 0, right: 0, bottom: -1, height: 2.5,
+                  borderRadius: 99, background: "#E10101",
+                }} />
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{ maxHeight: 362, overflowY: "auto", padding: "8px 22px 18px" }}>
+        {groups.length === 0 ? (
+          <div style={{ padding: "24px 0", textAlign: "center", fontSize: 12, color: "var(--muted, #6b6b72)" }}>
+            No active orders.
+          </div>
+        ) : (
+          groups.map(([orderNo, legs]) => (
+            <OrderGroupCard key={`${tab}-${orderNo}`} orderNo={orderNo} legs={legs} mode={tab} />
+          ))
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -673,108 +795,88 @@ function OrderGroupCard({
   const legIds = legs.map((l) => l.id);
   const totalPax = legs.reduce((s, l) => s + l.pax, 0);
   const totalCrew = legs.reduce((s, l) => s + l.crew, 0);
+  const pill = status ? aoStatusPill(status) : null;
 
   return (
-    <div
-      style={{
-        borderRadius: 8,
-        border: "1px solid var(--color-border)",
-        overflow: "hidden",
-        flexShrink: 0,
-      }}
-    >
+    <div style={{
+      border: "1px solid #e9e4e1", borderRadius: 13, marginTop: 12,
+      overflow: "hidden", background: "#fff",
+    }}>
+      {/* group header */}
       <Link
         to="/order-management"
         onClick={() => flagArrival({ target: "active-orders", ids: legIds })}
         style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          background: "var(--accent)",
-          padding: "4px 10px",
-          borderBottom: "1px solid var(--color-border)",
-          textDecoration: "none",
-          color: "inherit",
+          display: "flex", alignItems: "center", gap: 10, padding: "12px 15px",
+          background: "#fbf8f6", borderBottom: "1px solid #f0ebe8",
+          textDecoration: "none", color: "inherit",
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, flexWrap: "wrap" }}>
-          <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, fontWeight: 600, color: "var(--color-primary)" }}>
-            {orderNo}
+        <span style={{ fontWeight: 700, fontSize: 13.5, color: "#E10101", letterSpacing: ".01em" }}>
+          {orderNo}
+        </span>
+        {legs.length > 1 && (
+          <span style={{
+            fontSize: 10.5, fontWeight: 700, letterSpacing: ".04em", color: "#b45309",
+            background: "#fbf1e6", padding: "2px 7px", borderRadius: 6, textTransform: "uppercase",
+          }}>
+            {legs.length} legs
           </span>
-          {legs.length > 1 && (
-            <Tag
-              bordered
-              style={{
-                height: 16,
-                padding: "0 4px",
-                fontSize: 9,
-                fontVariantNumeric: "tabular-nums",
-                background: "var(--color-card)",
-                color: "var(--color-primary)",
-                borderColor: "rgba(15, 118, 110, 0.30)",
-                margin: 0,
-                lineHeight: "14px",
-              }}
-            >
-              {legs.length} legs
-            </Tag>
-          )}
-          <span style={{ fontSize: 10, color: "var(--color-muted-foreground)", fontVariantNumeric: "tabular-nums" }}>
-            · {mode === "flight" ? `${totalPax} pax` : `${totalCrew} crew`}
+        )}
+        <span style={{ fontSize: 12.5, color: "var(--muted, #6b6b72)" }}>
+          ·&nbsp;<span style={{ color: "var(--ink, #1a0204)", fontWeight: 600 }}>
+            {mode === "flight" ? totalPax : totalCrew}
+          </span> {mode === "flight" ? "pax" : "crew"}
+        </span>
+        {status && pill && (
+          <span style={{
+            marginLeft: "auto", fontSize: 11, fontWeight: 600, letterSpacing: ".02em",
+            padding: "4px 11px", borderRadius: 999,
+            color: pill.color, background: pill.bg, border: `1px solid ${pill.border}`,
+          }}>
+            {status}
           </span>
-        </div>
-        {status && <StatusBadge status={status} />}
+        )}
       </Link>
 
-      <div>
-        {legs.map((l, idx) => (
-          <Link
-            key={l.id}
-            to="/order-management"
-            onClick={() => flagArrival({ target: "active-orders", ids: [l.id] })}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              padding: "6px 10px",
-              minHeight: 32,
-              background: "#ffffff",
-              borderTop: idx > 0 ? "1px solid var(--color-border)" : "none",
-              textDecoration: "none",
-              color: "inherit",
-              transition: "background-color 150ms ease",
-            }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = "#F0FDFA")}
-            onMouseLeave={(e) => (e.currentTarget.style.background = "#ffffff")}
-          >
-            <div
-              style={{
-                height: 20,
-                width: 36,
-                borderRadius: 4,
-                background: "#0F766E",
-                color: "white",
-                display: "grid",
-                placeItems: "center",
-                fontSize: 9,
-                fontWeight: 700,
-                flexShrink: 0,
-              }}
-            >
-              {l.flight.slice(-3)}
-            </div>
-            <div style={{ flex: 1, minWidth: 0, fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-              <span style={{ fontWeight: 500 }}>{l.flight}</span>
-              <span style={{ color: "var(--color-muted-foreground)" }}> · {l.sector}</span>
-            </div>
-            <div style={{ fontSize: 10, color: "var(--color-muted-foreground)", fontVariantNumeric: "tabular-nums", flexShrink: 0, display: "flex", alignItems: "center", gap: 2 }}>
-              {l.etd}
-              <span style={{ color: "var(--color-border)", margin: "0 2px" }}>·</span>
-              {mode === "flight" ? `${l.pax}p` : <><TeamOutlined style={{ fontSize: 10 }} />{l.crew}</>}
-            </div>
-          </Link>
-        ))}
-      </div>
+      {/* legs */}
+      {legs.map((l, idx) => (
+        <Link
+          key={l.id}
+          to="/order-management"
+          onClick={() => flagArrival({ target: "active-orders", ids: [l.id] })}
+          style={{
+            display: "flex", alignItems: "center", gap: 12, padding: "11px 15px",
+            borderTop: idx > 0 ? "1px solid #f0ebe8" : "none",
+            textDecoration: "none", color: "inherit", transition: "background-color 150ms ease",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = "#fff5f5")}
+          onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+        >
+          <span style={{
+            fontSize: 12, fontWeight: 700, color: "#fff", background: "#2a2528",
+            borderRadius: 7, padding: "4px 8px", fontVariantNumeric: "tabular-nums", flex: "none",
+          }}>
+            {l.flight.slice(-3)}
+          </span>
+          <span style={{
+            flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 500, color: "var(--ink, #1a0204)",
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+          }}>
+            {l.flight} <span style={{ color: "var(--muted, #6b6b72)", fontWeight: 400 }}>· {l.sector}</span>
+          </span>
+          <span style={{ fontSize: 13, color: "var(--ink, #1a0204)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+            {l.etd}
+          </span>
+          <span style={{
+            fontSize: 12, color: "var(--muted, #6b6b72)", fontVariantNumeric: "tabular-nums",
+            width: 42, textAlign: "right", flex: "none",
+            display: "inline-flex", alignItems: "center", justifyContent: "flex-end", gap: 3,
+          }}>
+            {mode === "flight" ? `${l.pax}p` : <><TeamOutlined style={{ fontSize: 11 }} />{l.crew}</>}
+          </span>
+        </Link>
+      ))}
     </div>
   );
 }
