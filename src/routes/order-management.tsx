@@ -40,9 +40,45 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useArrivalFlash } from "@/lib/arrival-flash";
 
+// Coloured 3px left edge on an order-group band, keyed to its status — green
+// family for done/approved, amber for production, gold for pending. (Design:
+// `.g-done/.g-appr/.g-prod/.g-pend` accents in order-management.css.)
+function orderBarColor(status: FlightOrderStatus): string {
+  switch (status) {
+    case "Production": return "#b45309"; // --warn
+    case "Pending":    return "#b88a12"; // --gold-bright
+    case "Completed":  return "#0f7a40"; // --ok
+    default:           return "#1f9d57"; // --ok-bright (Approved / Dispatched)
+  }
+}
+
+// Status pill on the group band — matches the design's `.om-stat` palette, which
+// deliberately keeps Pending a distinct *gold* so it reads apart from Production's
+// amber (the shared StatusBadge collapses both to amber, so this stays page-local).
+const OM_STAT_CLS: Record<FlightOrderStatus, string> = {
+  Completed:  "text-[#0f7a40] bg-[#ecf5ef] border-[#c4e3cf]",
+  Approved:   "text-[#1f9d57] bg-[#ecf5ef] border-[#c4e3cf]",
+  Dispatched: "text-[#1f9d57] bg-[#ecf5ef] border-[#c4e3cf]",
+  Production: "text-[#b45309] bg-[#fbf1e6] border-[#f0d9bf]",
+  Pending:    "text-[#8a6400] bg-[#fbf4e2] border-[#ecdcae]",
+};
+
+function OmStatusPill({ status }: { status: FlightOrderStatus }) {
+  return (
+    <span
+      className={
+        "inline-flex items-center rounded-full border px-3 py-1 text-[10.5px] font-bold uppercase tracking-[0.04em] " +
+        OM_STAT_CLS[status]
+      }
+    >
+      {status}
+    </span>
+  );
+}
+
 function OrderStatusBadges({ legs }: { legs: { status: FlightOrderStatus }[] }) {
   if (legs.length === 0) return null;
-  return <StatusBadge status={legs[0].status} />;
+  return <OmStatusPill status={legs[0].status} />;
 }
 
 type FlightOrder = {
@@ -186,8 +222,8 @@ export default function OrderManagementPage() {
         actions={
           view === "list" ? (
             <>
-              <Button variant="outline" onClick={() => setView("bulk")}>
-                <Upload className="h-4 w-4 mr-1" /> Bulk Upload
+              <Button variant="outline" className="no-brand" onClick={() => setView("bulk")}>
+                <Upload className="h-4 w-4 mr-1 text-primary" /> Bulk Upload
               </Button>
               <Button
                 onClick={() => {
@@ -314,7 +350,7 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
-              <CalendarRange className="h-3.5 w-3.5 text-muted-foreground" />
+              <CalendarRange className="h-3.5 w-3.5 text-primary" />
               <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">Date</Label>
               <Input
                 type="date"
@@ -527,10 +563,10 @@ function DirectionBadge({ direction }: { direction: FlightDirection }) {
   return (
     <span
       className={
-        "inline-flex items-center gap-1 whitespace-nowrap rounded-full px-1.5 py-0.5 text-[10px] font-medium border " +
+        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold border " +
         (isReturn
-          ? "border-navy/30 bg-navy/5 text-navy"
-          : "border-success/30 bg-success/5 text-success")
+          ? "text-[#2b5f8a] bg-[#eef4f9] border-[#cfe0ec]"
+          : "text-[#0f7a40] bg-[#ecf5ef] border-[#cbe6d5]")
       }
       title={isReturn ? "Return flight" : "Outbound flight"}
     >
@@ -664,13 +700,13 @@ function OrdersList({
     <Card>
       <CardContent className="pt-6">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-          <h3 className="text-sm font-semibold tracking-wider uppercase text-foreground">
+          <h3 className="text-xs font-bold uppercase tracking-[0.14em] text-muted-foreground">
             Flight Orders — {rangeLabel}
-            {scope !== "All" && <span className="text-muted-foreground normal-case font-normal"> · {scope}</span>}
-            {airline !== "All" && <span className="text-muted-foreground normal-case font-normal"> · {airline}</span>}
+            {airline !== "All" && <span className="normal-case font-normal"> · {airline}</span>}
           </h3>
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
+              <CalendarRange className="h-3.5 w-3.5 text-primary" />
               <Plane className="h-3.5 w-3.5 text-muted-foreground" />
               <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">Scope</Label>
               <select
@@ -723,7 +759,7 @@ function OrdersList({
               </Button>
             )}
             <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
-              <Plane className="h-3.5 w-3.5 text-muted-foreground" />
+              <Plane className="h-3.5 w-3.5 text-primary" />
               <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">Airline</Label>
               <select
                 value={airline}
@@ -764,7 +800,7 @@ function OrdersList({
 
         <div data-arrival-id="active-orders" className="border border-border rounded-md overflow-hidden">
           <Table>
-            <TableHeader className="bg-muted/40">
+            <TableHeader style={{ backgroundColor: "#F6F2EF" }}>
               <TableRow>
                 <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
                 <TableHead className="text-xs uppercase tracking-wider">Airline</TableHead>
@@ -786,24 +822,36 @@ function OrdersList({
               ) : (() => {
                 const rows: React.ReactNode[] = [];
                 pageGroups.forEach(([orderNo, legs]) => {
+                  // Decorative status accent stripe on the order group header.
+                  const barStatus = legs[0]?.status;
+                  const barColor =
+                    barStatus === "Completed"  ? "#0f7a40" :
+                    barStatus === "Dispatched" ? "#0f766e" :
+                    barStatus === "Production" ? "#d97316" :
+                    barStatus === "Approved"   ? "#3c3a40" :
+                    "#E10101"; // Pending / default — brand red
                   rows.push(
-                    <TableRow
-                      key={`grp-${orderNo}`}
-                      className="bg-primary/5 hover:bg-primary/10 border-t-2 border-t-primary/40"
-                    >
-                      <TableCell
-                        colSpan={8}
-                        className="font-mono text-sm font-semibold text-foreground py-2"
-                      >
-                        <div className="flex items-center flex-wrap gap-2">
-                          <span className="text-primary">{orderNo}</span>
+                    <TableRow key={`grp-${orderNo}`} className="border-0 hover:bg-transparent">
+                      <TableCell colSpan={8} className="p-0">
+                        <div
+                          className="relative flex items-center flex-wrap gap-[11px] border-t border-b py-3 pl-[18px] pr-4"
+                          style={{
+                            background: "#f6f2ef",
+                            borderTopColor: "#e9e4e1",
+                            borderBottomColor: "#f0ebe8",
+                          }}
+                        >
+                          <span
+                            className="absolute inset-y-0 left-0 w-[3px]"
+                            style={{ background: barColor }}
+                          />
+                          <span className="text-sm font-bold tracking-[0.01em] text-[#E10101]">
+                            {orderNo}
+                          </span>
                           {legs.length > 1 && (
-                            <Badge
-                              variant="outline"
-                              className="h-5 px-1.5 text-[10px] tabular-nums border-primary/30 bg-card text-primary"
-                            >
+                            <span className="rounded-md border border-[#e9e4e1] bg-white px-2 py-[3px] text-[10px] font-bold uppercase tracking-[0.05em] text-[#6b6b72]">
                               {legs.length} flights
-                            </Badge>
+                            </span>
                           )}
                           <OrderStatusBadges legs={legs} />
                         </div>
@@ -815,8 +863,10 @@ function OrdersList({
                     rows.push(
                       <TableRow key={o.id} data-arrival-row-id={o.id} className="hover:bg-muted/30">
                         <TableCell className="font-medium pl-6">
-                          <div className="flex items-center gap-1.5">
-                            {o.flight}
+                          <div className="flex items-center gap-2">
+                            <span className="inline-flex items-center rounded-[7px] bg-[#2a2528] px-[9px] py-1 text-xs font-bold tabular-nums text-white">
+                              {o.flight}
+                            </span>
                             <DirectionBadge direction={o.direction} />
                           </div>
                         </TableCell>
@@ -829,7 +879,7 @@ function OrdersList({
                         <TableCell className="tabular-nums text-xs">{o.date}</TableCell>
                         <TableCell>{o.etd}</TableCell>
                         <TableCell className="text-right tabular-nums">{o.pax}</TableCell>
-                        <TableCell className="text-right tabular-nums">{o.specialMeals}</TableCell>
+                        <TableCell className={"text-right tabular-nums" + (o.specialMeals === 0 ? " text-muted-foreground/60" : "")}>{o.specialMeals}</TableCell>
                         <TableCell>
                           <Button
                             size="sm"
