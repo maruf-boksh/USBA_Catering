@@ -1,4 +1,4 @@
-import { useState, Fragment } from "react";
+import { useState, Fragment, useEffect } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,7 +15,7 @@ import { toast } from "sonner";
 import {
   Plus, Truck, Pencil, Trash2, ThermometerSun, ShieldCheck,
   AlertOctagon, AlertTriangle, PlaneTakeoff, PlaneLanding,
-  Clock, User, CheckCircle2, Eye,
+  Clock, User, CheckCircle2, Eye, Smartphone, ChevronRight, QrCode, X as CloseIcon,
 } from "lucide-react";
 import { flights } from "@/lib/sample-data";
 import { useRole } from "@/lib/roles";
@@ -174,6 +174,37 @@ export default function DispatchMonitoring() {
   const [viewEntryId, setViewEntryId] = useState<string | null>(null);
   const [fsRemarksInput, setFsRemarksInput] = useState("");
   const [hocRemarksInput, setHocRemarksInput] = useState("");
+
+  // ── Mobile App View state ───────────────────────────────────────────────────
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [mobileTab, setMobileTab] = useState<"dispatch" | "receive" | "log">("dispatch");
+  // Mobile dispatch flow
+  const [mScreen, setMScreen] = useState<1 | 2 | 3 | 4>(1);
+  const [mFlightIds, setMFlightIds] = useState<string[]>([]);
+  const [mVehicleNo, setMVehicleNo] = useState("");
+  const [mVehicleClean, setMVehicleClean] = useState<"Clean" | "Not Clean" | "">("");
+  const [mChilledTemp, setMChilledTemp] = useState("");
+  const [mFrozenTemp, setMFrozenTemp] = useState("");
+  const [mVanStart, setMVanStart] = useState("");
+  const [mVanEnd, setMVanEnd] = useState("");
+  const [mResult, setMResult] = useState<"Yes" | "No" | "">("");
+  const [mDispatchedIds, setMDispatchedIds] = useState<string[]>([]);
+  const [mLogEntryId, setMLogEntryId] = useState<string | null>(null);
+  // Mobile receive flow
+  const [rScreen, setRScreen] = useState<1 | 2 | 3>(1);
+  const [rSelectedId, setRSelectedId] = useState("");
+  const [rGateTemp, setRGateTemp] = useState("");
+  const [rUnloadTime, setRUnloadTime] = useState("");
+  const [rCheck1, setRCheck1] = useState(false);
+  const [rCheck2, setRCheck2] = useState(false);
+  const [rCheck3, setRCheck3] = useState(false);
+  const [rRemarks, setRRemarks] = useState("");
+  const [rAcceptedAt, setRAcceptedAt] = useState("");
+
+  useEffect(() => {
+    document.body.style.overflow = mobileOpen ? "hidden" : "";
+    return () => { document.body.style.overflow = ""; };
+  }, [mobileOpen]);
 
   const sf = <K extends keyof FormState>(k: K, v: FormState[K]) =>
     setForm((prev) => ({ ...prev, [k]: v }));
@@ -410,6 +441,41 @@ export default function DispatchMonitoring() {
     toast.success(msgs[approvalCurrentStage]);
   };
 
+  const mobileConfirmDispatch = () => {
+    const at = nowTimeStr();
+    const newEntries = mFlightIds.map((flightId, i) => {
+      const f = flights.find(x => x.id === flightId);
+      const id = `DSP-${Date.now() + i}`;
+      return {
+        id, flightId, packagingDate: todayStr,
+        mealLines: f ? [{ type: "Regular", qty: f.pax.toString() }] : [],
+        vehicleNo: mVehicleNo,
+        vehicleClean: (mVehicleClean === "Clean" ? "Yes" : "No") as "Yes" | "No",
+        chilledTemp: mChilledTemp, frozenTemp: mFrozenTemp,
+        loadStartTime: "", loadEndTime: "",
+        vehicleTempBegin: mVanStart, vehicleTempEnd: mVanEnd,
+        resultSatisfy: mResult as "Yes" | "No",
+        gateTempGate08: "", unloadingTime: "", checkedByApt: "", monitoredByRemarks: "",
+        monitoredAt: at, approvalStage: 0 as const,
+        receivedBy: "", receivedDesignation: "", receivedAt: "", receivedRemarks: "",
+      };
+    });
+    setEntries(prev => [...newEntries, ...prev]);
+    setMDispatchedIds(newEntries.map(e => e.id));
+    setMScreen(4);
+    toast.success(`${newEntries.length} dispatch${newEntries.length > 1 ? "es" : ""} confirmed via Mobile App`);
+  };
+
+  const mobileAcceptReceipt = () => {
+    const at = nowTimeStr();
+    setRAcceptedAt(at);
+    setEntries(prev => prev.map(e => e.id === rSelectedId
+      ? { ...e, gateTempGate08: rGateTemp, unloadingTime: rUnloadTime, receivedAt: at, receivedRemarks: rRemarks }
+      : e));
+    setRScreen(3);
+    toast.success("Receipt accepted via Mobile App");
+  };
+
   const deleteTarget = entries.find((e) => e.id === deleteId);
   const satisfiedCount = entries.filter((e) => e.resultSatisfy === "Yes").length;
   const unsatisfiedCount = entries.filter((e) => e.resultSatisfy === "No").length;
@@ -417,10 +483,20 @@ export default function DispatchMonitoring() {
 
   return (
     <>
-      <PageHeader
-        title="Daily Product Dispatch Monitoring"
-        subtitle="Cold chain integrity & vehicle hygiene verification per flight dispatch · USBA-FSH-PDM-01"
-      />
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex-1">
+          <PageHeader
+            title="Daily Product Dispatch Monitoring"
+            subtitle="Cold chain integrity & vehicle hygiene verification per flight dispatch · USBA-FSH-PDM-01"
+          />
+        </div>
+        <Button
+          className="shrink-0 mt-2"
+          onClick={() => setMobileOpen(true)}
+        >
+          <Smartphone className="h-4 w-4 mr-1.5" /> Mobile App View
+        </Button>
+      </div>
       <p className="text-xs text-muted-foreground mb-5 -mt-1">Baunia Catering → Airport Catering</p>
 
       {/* KPIs */}
@@ -1277,6 +1353,636 @@ export default function DispatchMonitoring() {
           </Dialog>
         );
       })()}
+
+      {/* ── Mobile App View Overlay ────────────────────────────────────────── */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(15,23,42,0.65)", backdropFilter: "blur(6px)" }}
+        >
+          <button
+            onClick={() => setMobileOpen(false)}
+            className="absolute top-5 right-5 text-white/70 hover:text-white transition-colors"
+            aria-label="Close"
+          >
+            <CloseIcon className="h-7 w-7" />
+          </button>
+
+          {/* Phone frame */}
+          <div
+            className="relative flex flex-col overflow-hidden shadow-2xl"
+            style={{
+              width: 375,
+              height: Math.min(720, window.innerHeight - 60),
+              borderRadius: 36,
+              border: "8px solid #1E293B",
+              background: "#F1F5F9",
+            }}
+          >
+            <div className="absolute top-2 left-1/2 -translate-x-1/2 w-24 h-1.5 rounded-full bg-slate-700 z-10" />
+
+            {/* Status bar */}
+            <div className="bg-slate-900 text-white flex justify-between items-center px-5 pt-5 pb-1.5 shrink-0 text-[10px]">
+              <span className="font-semibold">9:41</span>
+              <span className="opacity-60">●●● WiFi 84%</span>
+            </div>
+
+            {/* Tab switcher */}
+            {mobileTab !== "log" && (
+              <div className="bg-white border-b border-slate-200 flex shrink-0">
+                <button
+                  onClick={() => setMobileTab("dispatch")}
+                  className={`flex-1 py-2.5 text-[11px] font-bold flex items-center justify-center gap-1.5 border-b-2 transition-colors ${mobileTab === "dispatch" ? "border-blue-500 text-blue-600" : "border-transparent text-slate-400 hover:text-slate-600"}`}
+                >
+                  <Truck className="h-3.5 w-3.5" /> Kitchen Dispatch
+                </button>
+                <button
+                  onClick={() => setMobileTab("receive")}
+                  className={`flex-1 py-2.5 text-[11px] font-bold flex items-center justify-center gap-1.5 border-b-2 transition-colors ${mobileTab === "receive" ? "border-emerald-500 text-emerald-600" : "border-transparent text-slate-400 hover:text-slate-600"}`}
+                >
+                  <PlaneLanding className="h-3.5 w-3.5" /> Airport Receiving
+                </button>
+              </div>
+            )}
+
+            {/* Scrollable content */}
+            <div className="flex-1 overflow-y-auto">
+
+              {/* ═══ DISPATCH TAB ═══ */}
+              {mobileTab === "dispatch" && (
+                <>
+                  {/* Screen 1 — Flight Selection */}
+                  {mScreen === 1 && (
+                    <div className="p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-[10px] text-slate-400">Baunia Central Kitchen · USBA-FSH-PDM-01</p>
+                          <p className="font-bold text-slate-800 text-sm">Dispatch Entry</p>
+                        </div>
+                        <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-semibold">1 of 4</span>
+                      </div>
+                      <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-[11px] text-amber-700 font-medium">
+                        <ThermometerSun className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                        Max. Temp. Limit: +8°C — Cold chain integrity must be maintained
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-[10px] font-bold uppercase tracking-widest text-blue-600">Today's Assigned Flights</span>
+                          <span className="text-[10px] bg-blue-600 text-white px-2 py-0.5 rounded-full">Auto-loaded</span>
+                        </div>
+                        <div className="space-y-2">
+                          {flights.slice(0, 5).map(f => {
+                            const isSelected = mFlightIds.includes(f.id);
+                            return (
+                              <Fragment key={f.id}>
+                                <button onClick={() => setMFlightIds(prev => prev.includes(f.id) ? prev.filter(x => x !== f.id) : [...prev, f.id])}
+                                  className={`w-full text-left px-3 py-2.5 rounded-xl border transition-all ${isSelected ? "border-blue-400 bg-blue-50 shadow-sm" : "border-slate-200 bg-white hover:border-blue-200"}`}>
+                                  <div className="flex items-center justify-between">
+                                    <span className="font-bold text-sm text-slate-800">{f.flight}</span>
+                                    {isSelected && <span className="text-[10px] bg-blue-500 text-white px-2 py-0.5 rounded-full">Selected ✓</span>}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 mt-0.5">Dep. {f.dep} · {f.pax} pax · Gate 08</div>
+                                </button>
+                                {isSelected && (
+                                  <div className="bg-blue-50/50 border border-blue-200 rounded-xl p-3 ml-3">
+                                    <div className="flex items-center gap-1.5 mb-2">
+                                      <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Meal Types & Pax</span>
+                                      <span className="text-[10px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded font-medium">From manifest</span>
+                                    </div>
+                                    <div className="space-y-1 text-xs text-slate-700">
+                                      <div className="flex justify-between"><span>Regular</span><span className="font-semibold">{Math.floor(f.pax * 0.84)} pax</span></div>
+                                      <div className="flex justify-between"><span>Vegetarian</span><span className="font-semibold">{Math.floor(f.pax * 0.12)} pax</span></div>
+                                      <div className="flex justify-between"><span>Diabetic</span><span className="font-semibold">{f.pax - Math.floor(f.pax * 0.84) - Math.floor(f.pax * 0.12)} pax</span></div>
+                                      <div className="flex justify-between font-bold border-t border-slate-100 pt-1 mt-0.5"><span>Total</span><span>{f.pax} pax</span></div>
+                                    </div>
+                                    <p className="text-[10px] text-slate-400 italic mt-2">Tap flight again to deselect.</p>
+                                  </div>
+                                )}
+                              </Fragment>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => { if (mFlightIds.length > 0) setMScreen(2); else toast.error("Please select at least one flight"); }}
+                        className={`w-full py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors ${mFlightIds.length > 0 ? "bg-blue-600 text-white hover:bg-blue-700 shadow-md" : "bg-slate-200 text-slate-400 cursor-not-allowed"}`}
+                      >
+                        Next — vehicle details {mFlightIds.length > 0 ? `(${mFlightIds.length} selected)` : ""} <ChevronRight className="h-4 w-4" />
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Screen 2 — Vehicle & Temperature */}
+                  {mScreen === 2 && (
+                    <div className="p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-[10px] text-slate-400">{mFlightIds.length === 1 ? `${flights.find(x => x.id === mFlightIds[0])?.flight} · ${flights.find(x => x.id === mFlightIds[0])?.pax} pax` : `${mFlightIds.length} flights selected`}</p>
+                          <p className="font-bold text-slate-800 text-sm">Vehicle & Temperature</p>
+                        </div>
+                        <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-semibold">2 of 4</span>
+                      </div>
+                      <div className="bg-white rounded-xl border border-slate-200 p-3 space-y-2">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">VAN NUMBER *</p>
+                        <input value={mVehicleNo} onChange={e => setMVehicleNo(e.target.value)} placeholder="e.g. HiLoader-02"
+                          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400 bg-slate-50" />
+                        <p className="text-[10px] text-slate-400 italic">Typed by executive after physical inspection</p>
+                      </div>
+                      <div className="bg-white rounded-xl border border-slate-200 p-3 space-y-2">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">VAN CLEANLINESS *</p>
+                        <div className="flex gap-2">
+                          <button onClick={() => setMVehicleClean("Clean")}
+                            className={`flex-1 py-2 rounded-lg border font-semibold text-sm transition-colors ${mVehicleClean === "Clean" ? "bg-emerald-500 border-emerald-500 text-white" : "border-slate-200 bg-slate-50 text-slate-600 hover:border-emerald-300"}`}>
+                            ✓ Clean
+                          </button>
+                          <button onClick={() => setMVehicleClean("Not Clean")}
+                            className={`flex-1 py-2 rounded-lg border font-semibold text-sm transition-colors ${mVehicleClean === "Not Clean" ? "bg-red-500 border-red-500 text-white" : "border-slate-200 bg-slate-50 text-slate-600 hover:border-red-300"}`}>
+                            Not clean
+                          </button>
+                        </div>
+                        <p className="text-[10px] text-slate-400 italic">Visually examined by executive on-site</p>
+                      </div>
+                      <div className="bg-white rounded-xl border border-slate-200 p-3 space-y-2">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">PRODUCT CORE TEMPERATURE *</p>
+                        <p className="text-[10px] text-slate-400 italic">Read from physical probe — enter manually</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <p className="text-[11px] text-slate-600 mb-1 font-medium">CHILLED (°C)</p>
+                            <input type="number" step="0.1" value={mChilledTemp} onChange={e => setMChilledTemp(e.target.value)} placeholder="e.g. 3.2"
+                              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400 bg-slate-50" />
+                            <p className="text-[10px] text-slate-400 mt-0.5">Standard: 1–4°C</p>
+                          </div>
+                          <div>
+                            <p className="text-[11px] text-slate-600 mb-1 font-medium">FROZEN (°C)</p>
+                            <input type="number" step="0.1" value={mFrozenTemp} onChange={e => setMFrozenTemp(e.target.value)} placeholder="e.g. -13.5"
+                              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400 bg-slate-50" />
+                            <p className="text-[10px] text-slate-400 mt-0.5">Standard: -12 to -8°C</p>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="bg-white rounded-xl border border-slate-200 p-3 space-y-2">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">VAN TEMPERATURE DURING LOADING</p>
+                        <p className="text-[10px] text-slate-400 italic">Check van thermometer — enter start and end</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <p className="text-[11px] text-slate-600 mb-1 font-medium">START (°C)</p>
+                            <input type="number" step="0.1" value={mVanStart} onChange={e => setMVanStart(e.target.value)} placeholder="e.g. 4.1"
+                              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400 bg-slate-50" />
+                          </div>
+                          <div>
+                            <p className="text-[11px] text-slate-600 mb-1 font-medium">END (°C)</p>
+                            <input type="number" step="0.1" value={mVanEnd} onChange={e => setMVanEnd(e.target.value)} placeholder="e.g. 4.8"
+                              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-blue-400 bg-slate-50" />
+                          </div>
+                        </div>
+                        <p className="text-[10px] text-slate-400">Stays within ±8°C limit</p>
+                      </div>
+                      <div className="flex gap-2 pt-1">
+                        <button onClick={() => setMScreen(1)} className="flex-1 py-2.5 rounded-xl border border-slate-200 bg-white text-slate-600 font-semibold text-sm hover:bg-slate-50">← Back</button>
+                        <button onClick={() => { if (!mVehicleNo || !mVehicleClean) { toast.error("Fill vehicle details"); return; } setMScreen(3); }}
+                          className="flex-[2] py-2.5 rounded-xl bg-blue-600 text-white font-bold text-sm flex items-center justify-center gap-1 hover:bg-blue-700 shadow-md">
+                          Next <ChevronRight className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Screen 3 — Result Check */}
+                  {mScreen === 3 && (
+                    <div className="p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-[10px] text-slate-400">{mFlightIds.length === 1 ? flights.find(x => x.id === mFlightIds[0])?.flight : `${mFlightIds.length} flights`} · {mVehicleNo}</p>
+                          <p className="font-bold text-slate-800 text-sm">Result Check</p>
+                        </div>
+                        <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-semibold">3 of 4</span>
+                      </div>
+                      {mResult === "Yes" && (
+                        <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-xl px-3 py-2.5 text-xs text-emerald-700 font-semibold">
+                          <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" /> All checks passed
+                        </div>
+                      )}
+                      <div className="bg-white rounded-xl border border-slate-200 p-3 space-y-2">
+                        {[
+                          ["Van clean", mVehicleClean === "Clean" ? "Yes ✓" : mVehicleClean === "Not Clean" ? "No" : "—"],
+                          ["Chilled temp", mChilledTemp ? `${mChilledTemp}°C` : "—"],
+                          ["Frozen temp", mFrozenTemp ? `${mFrozenTemp}°C` : "—"],
+                          ["Van temp (start)", mVanStart ? `${mVanStart}°C` : "—"],
+                          ["Van temp (end)", mVanEnd ? `${mVanEnd}°C` : "—"],
+                        ].map(([label, value]) => (
+                          <div key={label} className="flex items-center justify-between text-xs">
+                            <span className="text-slate-500">{label}</span>
+                            <span className={`font-semibold ${value === "No" ? "text-red-600" : "text-slate-800"}`}>{value}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="bg-white rounded-xl border border-slate-200 p-3 space-y-2">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">RESULT SATISFY</p>
+                        <div className="flex gap-2">
+                          <button onClick={() => setMResult("Yes")}
+                            className={`flex-1 py-2.5 rounded-xl border font-bold text-sm transition-colors ${mResult === "Yes" ? "bg-emerald-500 border-emerald-500 text-white shadow-md" : "border-slate-200 bg-slate-50 text-slate-600 hover:border-emerald-300"}`}>
+                            ✓ Yes
+                          </button>
+                          <button onClick={() => setMResult("No")}
+                            className={`flex-1 py-2.5 rounded-xl border font-bold text-sm transition-colors ${mResult === "No" ? "bg-red-500 border-red-500 text-white shadow-md" : "border-slate-200 bg-slate-50 text-slate-600 hover:border-red-300"}`}>
+                            No
+                          </button>
+                        </div>
+                      </div>
+                      {mResult === "Yes" && (
+                        <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 flex items-center gap-3">
+                          <div className="w-11 h-11 bg-slate-800 rounded-lg flex items-center justify-center shrink-0">
+                            <QrCode className="h-6 w-6 text-white" />
+                          </div>
+                          <div>
+                            <p className="text-xs font-bold text-sky-800">Dispatch QR ready</p>
+                            <p className="text-[10px] text-sky-600">Contains all flight, meal, van & temp data. Airport exec scans this.</p>
+                          </div>
+                        </div>
+                      )}
+                      <div className="flex gap-2 pt-1">
+                        <button onClick={() => setMScreen(2)} className="flex-1 py-2.5 rounded-xl border border-slate-200 bg-white text-slate-600 font-semibold text-sm hover:bg-slate-50">← Back</button>
+                        <button onClick={() => { if (!mResult) { toast.error("Select result satisfy"); return; } mobileConfirmDispatch(); }}
+                          className={`flex-[2] py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-1.5 transition-colors ${mResult ? "bg-blue-600 text-white hover:bg-blue-700 shadow-md" : "bg-slate-200 text-slate-400 cursor-not-allowed"}`}>
+                          <PlaneTakeoff className="h-4 w-4" /> Confirm & dispatch
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Screen 4 — Dispatched */}
+                  {mScreen === 4 && (
+                    <div className="p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <p className="text-[10px] text-slate-400">USBA-FSH-PDM-01</p>
+                        <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-semibold">Done</span>
+                      </div>
+                      <div className="flex flex-col items-center py-6">
+                        <div className="w-20 h-20 rounded-full bg-emerald-100 border-4 border-emerald-400 flex items-center justify-center mb-3">
+                          <CheckCircle2 className="h-10 w-10 text-emerald-500" />
+                        </div>
+                        <p className="text-2xl font-bold text-slate-800">Dispatched</p>
+                        {mDispatchedIds.length === 1 ? (() => {
+                          const entry = entries.find(x => x.id === mDispatchedIds[0]);
+                          const f = entry ? flights.find(x => x.id === entry.flightId) : null;
+                          return f ? (
+                            <>
+                              <p className="text-sm text-slate-600 mt-1">{f.flight} · {f.pax} pax</p>
+                              <p className="text-xs text-slate-400">{mVehicleNo} · {todayStr}</p>
+                            </>
+                          ) : null;
+                        })() : (
+                          <>
+                            <p className="text-sm text-slate-600 mt-1">{mDispatchedIds.length} flights dispatched</p>
+                            <p className="text-xs text-slate-400">{mVehicleNo} · {todayStr}</p>
+                          </>
+                        )}
+                      </div>
+                      <div className="bg-sky-50 border border-sky-200 rounded-xl px-3 py-2.5 flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-1.5 text-sky-700 font-medium">
+                          <PlaneLanding className="h-3.5 w-3.5 shrink-0" /> En route to Gate 08
+                        </div>
+                        <span className="text-sky-500 font-semibold">Awaiting APT scan</span>
+                      </div>
+                      <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-2 text-xs">
+                        <div className="flex justify-between items-center">
+                          <span className="text-slate-400">Dispatch ID</span>
+                          <span className="font-mono font-bold text-slate-700 text-[10px] break-all">{mDispatchedIds[0] ?? ""}{mDispatchedIds.length > 1 ? ` +${mDispatchedIds.length - 1} more` : ""}</span>
+                        </div>
+                        <div className="flex justify-between items-center">
+                          <span className="text-slate-400">Status</span>
+                          <span className="bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-semibold text-[10px]">Awaiting APT verify</span>
+                        </div>
+                      </div>
+                      <p className="text-[10px] text-slate-400 text-center italic">This status updates automatically once the airport executive scans and accepts.</p>
+                      <button
+                        onClick={() => { setMScreen(1); setMFlightIds([]); setMVehicleNo(""); setMVehicleClean(""); setMChilledTemp(""); setMFrozenTemp(""); setMVanStart(""); setMVanEnd(""); setMResult(""); setMDispatchedIds([]); }}
+                        className="w-full py-2.5 rounded-xl border border-blue-300 bg-blue-50 text-blue-600 font-semibold text-sm hover:bg-blue-100">
+                        + New Dispatch
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* ═══ RECEIVE TAB ═══ */}
+              {mobileTab === "receive" && (
+                <>
+                  {/* Screen 1 — Select dispatch */}
+                  {rScreen === 1 && (
+                    <div className="p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-[10px] text-slate-400">Airport Catering Unit — Gate No. 08</p>
+                          <p className="font-bold text-slate-800 text-sm">Airport Receiving</p>
+                        </div>
+                        <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-semibold">1 of 3</span>
+                      </div>
+                      <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-[11px] text-amber-700 font-medium">
+                        <ThermometerSun className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                        Max +8°C — Verify vehicle temp before unloading begins
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-600 mb-2">Pending Dispatches</p>
+                        {entries.filter(e => !e.receivedAt).length === 0 ? (
+                          <div className="text-[11px] text-slate-400 italic text-center py-6 bg-white border border-slate-200 rounded-xl">
+                            No pending dispatches yet.<br />Complete a Kitchen Dispatch first.
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            {entries.filter(e => !e.receivedAt).map(e => {
+                              const f = flights.find(x => x.id === e.flightId);
+                              return (
+                                <button key={e.id} onClick={() => setRSelectedId(e.id)}
+                                  className={`w-full text-left px-3 py-2.5 rounded-xl border transition-all ${rSelectedId === e.id ? "border-emerald-400 bg-emerald-50 shadow-sm" : "border-slate-200 bg-white hover:border-emerald-200"}`}>
+                                  <div className="flex items-center justify-between">
+                                    <span className="font-bold text-sm text-slate-800">{f?.flight ?? e.flightId}</span>
+                                    <span className="text-[10px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">Awaiting</span>
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 mt-0.5">{e.id} · {totalQty(e.mealLines)} pax · {e.vehicleNo}</div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                      {rSelectedId && (() => {
+                        const e = entries.find(x => x.id === rSelectedId);
+                        if (!e) return null;
+                        return (
+                          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 space-y-1.5">
+                            <div className="flex items-center gap-1.5 text-xs text-emerald-700 font-bold mb-1">
+                              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" /> QR scanned — data loaded
+                            </div>
+                            {[
+                              ["Dispatch ID", e.id],
+                              ["Flight", flightLabel(e.flightId)],
+                              ["Total pax", totalQty(e.mealLines).toString()],
+                              ["Vehicle", e.vehicleNo],
+                              ["Van clean", e.vehicleClean],
+                              ["Chilled temp (kitchen)", e.chilledTemp ? `${e.chilledTemp}°C` : "—"],
+                              ["Frozen temp (kitchen)", e.frozenTemp ? `${e.frozenTemp}°C` : "—"],
+                            ].map(([l, v]) => (
+                              <div key={l} className="flex justify-between text-[11px]">
+                                <span className="text-slate-400">{l}</span>
+                                <span className="font-medium text-slate-700">{v}</span>
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })()}
+                      <button onClick={() => { if (!rSelectedId) { toast.error("Select a dispatch entry"); return; } setRScreen(2); }}
+                        className={`w-full py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-colors ${rSelectedId ? "bg-emerald-600 text-white hover:bg-emerald-700 shadow-md" : "bg-slate-200 text-slate-400 cursor-not-allowed"}`}>
+                        Proceed to gate check <ChevronRight className="h-4 w-4" />
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Screen 2 — Gate Verification */}
+                  {rScreen === 2 && (
+                    <div className="p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-[10px] text-slate-400">Gate 08 · {flightLabel(entries.find(e => e.id === rSelectedId)?.flightId ?? "")}</p>
+                          <p className="font-bold text-slate-800 text-sm">Gate Verification</p>
+                        </div>
+                        <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-semibold">2 of 3</span>
+                      </div>
+                      <div className="bg-white rounded-xl border border-slate-200 p-3 space-y-2">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">GATE 08 TEMPERATURE (°C) *</p>
+                        <input type="number" step="0.1" value={rGateTemp} onChange={e => setRGateTemp(e.target.value)} placeholder="e.g. 5.8"
+                          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-emerald-400 bg-slate-50" />
+                        <p className="text-[10px] text-slate-400 italic">Read from gate thermometer — typed in by executive</p>
+                        {rGateTemp && parseFloat(rGateTemp) <= 8 && <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-semibold inline-block">≤ +8°C ✓</span>}
+                        {rGateTemp && parseFloat(rGateTemp) > 8 && <span className="text-[10px] bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-semibold inline-block">⚠ Exceeds +8°C</span>}
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-1">TIME OF UNLOADING</p>
+                        <input type="time" value={rUnloadTime} onChange={e => setRUnloadTime(e.target.value)}
+                          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-emerald-400 bg-white" />
+                      </div>
+                      <div className="bg-white rounded-xl border border-slate-200 p-3 space-y-3">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">PHYSICAL CHECKS BY EXECUTIVE</p>
+                        {([
+                          ["Vehicle temp verified at gate before unloading", rCheck1, setRCheck1],
+                          ["Seal integrity & packaging condition checked", rCheck2, setRCheck2],
+                          ["Unloading time recorded", rCheck3, setRCheck3],
+                        ] as [string, boolean, (v: boolean) => void][]).map(([label, checked, setter]) => (
+                          <label key={label} className="flex items-start gap-2.5 cursor-pointer">
+                            <input type="checkbox" checked={checked} onChange={e => setter(e.target.checked)} className="mt-0.5 accent-emerald-500 w-4 h-4 shrink-0" />
+                            <span className="text-xs text-slate-700">{label}</span>
+                          </label>
+                        ))}
+                        <label className="flex items-start gap-2.5 opacity-40">
+                          <input type="checkbox" disabled className="mt-0.5 w-4 h-4 shrink-0" />
+                          <span className="text-xs text-slate-500">APT countersign pending</span>
+                        </label>
+                        <p className="text-[10px] text-slate-400 italic">All boxes must be checked before accepting.</p>
+                      </div>
+                      <div className="bg-white rounded-xl border border-slate-200 p-3 space-y-2">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">REMARKS (OPTIONAL)</p>
+                        <textarea value={rRemarks} onChange={e => setRRemarks(e.target.value)} placeholder="e.g. Seals intact. No breach observed."
+                          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-xs resize-none h-14 focus:outline-none focus:border-emerald-400 bg-slate-50" />
+                      </div>
+                      <div className="bg-white rounded-xl border border-dashed border-slate-300 p-3">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-2">APT OFFICER SIGNATURE *</p>
+                        <button className="w-full py-2 border border-dashed border-slate-300 rounded-lg text-xs text-slate-500 flex items-center justify-center gap-1.5 hover:bg-slate-50">
+                          <User className="h-3.5 w-3.5" /> Sign with finger
+                        </button>
+                      </div>
+                      <div className="flex gap-2 pt-1">
+                        <button onClick={() => setRScreen(1)} className="flex-1 py-2.5 rounded-xl border border-slate-200 bg-white text-slate-600 font-semibold text-sm hover:bg-slate-50">← Back</button>
+                        <button onClick={() => {
+                          if (!rGateTemp) { toast.error("Enter gate temperature"); return; }
+                          if (!rCheck1 || !rCheck2 || !rCheck3) { toast.error("Complete all physical checks"); return; }
+                          mobileAcceptReceipt();
+                        }} className="flex-[2] py-2.5 rounded-xl bg-emerald-600 text-white font-bold text-sm flex items-center justify-center gap-1.5 hover:bg-emerald-700 shadow-md">
+                          <CheckCircle2 className="h-4 w-4" /> Save & accept
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Screen 3 — Accepted */}
+                  {rScreen === 3 && (
+                    <div className="p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-[10px] text-slate-400">Gate 08 — APT Verified</p>
+                          <p className="font-bold text-slate-800 text-sm">Airport Receiving</p>
+                        </div>
+                        <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-semibold">Done</span>
+                      </div>
+                      <div className="flex flex-col items-center py-5">
+                        <div className="w-20 h-20 rounded-full bg-sky-100 border-4 border-sky-400 flex items-center justify-center mb-3">
+                          <CheckCircle2 className="h-10 w-10 text-sky-500" />
+                        </div>
+                        <p className="text-2xl font-bold text-slate-800">Receipt accepted</p>
+                        {(() => {
+                          const e = entries.find(x => x.id === rSelectedId);
+                          const f = flights.find(x => x.id === e?.flightId);
+                          return e && f ? (
+                            <>
+                              <p className="text-xs text-slate-600 mt-1">{f.flight} · {totalQty(e.mealLines)} pax · Gate 08</p>
+                              <p className="text-[10px] text-slate-400">{rAcceptedAt}</p>
+                            </>
+                          ) : null;
+                        })()}
+                      </div>
+                      <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-2 text-xs">
+                        {(() => {
+                          const e = entries.find(x => x.id === rSelectedId);
+                          return e ? [
+                            ["Kitchen temp (chilled)", e.chilledTemp ? `${e.chilledTemp}°C` : "—"],
+                            ["Gate 08 temp", rGateTemp ? `${rGateTemp}°C` : "—"],
+                            ["Max limit", "+8°C"],
+                            ["Cold chain", "✓ No breach"],
+                          ].map(([label, value]) => (
+                            <div key={label} className="flex justify-between">
+                              <span className="text-slate-400">{label}</span>
+                              <span className={`font-semibold ${String(value).includes("No breach") ? "text-emerald-600" : "text-slate-800"}`}>{value}</span>
+                            </div>
+                          )) : null;
+                        })()}
+                      </div>
+                      <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 space-y-1">
+                        <div className="flex items-center gap-1.5 text-xs text-sky-700 font-bold">
+                          <CheckCircle2 className="h-3.5 w-3.5 text-sky-500" /> Synced to web dashboard
+                        </div>
+                        <p className="text-[10px] text-sky-600">Kitchen + airport records updated — Date & time auto-recorded</p>
+                        <p className="text-[10px] text-sky-500 italic">Kitchen dispatch screen now shows 'APT Verified' status.</p>
+                      </div>
+                      <button onClick={() => { setRScreen(1); setRSelectedId(""); setRGateTemp(""); setRUnloadTime(""); setRCheck1(false); setRCheck2(false); setRCheck3(false); setRRemarks(""); setRAcceptedAt(""); }}
+                        className="w-full py-2.5 rounded-xl border border-emerald-300 bg-emerald-50 text-emerald-600 font-semibold text-sm hover:bg-emerald-100">
+                        + Receive Another
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* ═══ LOG TAB ═══ */}
+              {mobileTab === "log" && (
+                <div className="p-4 space-y-3">
+                  {mLogEntryId ? (() => {
+                    const entry = entries.find(e => e.id === mLogEntryId);
+                    if (!entry) return null;
+                    const f = flights.find(x => x.id === entry.flightId);
+                    return (
+                      <>
+                        <div className="flex items-center gap-2">
+                          <button onClick={() => setMLogEntryId(null)}
+                            className="text-slate-500 hover:text-slate-700 p-1 rounded-lg hover:bg-slate-100 transition-colors">
+                            <ChevronRight className="h-4 w-4 rotate-180" />
+                          </button>
+                          <p className="font-bold text-slate-800 text-sm">Dispatch Details</p>
+                        </div>
+                        <div className="bg-white border border-slate-200 rounded-xl p-3 space-y-2">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="font-bold text-sm text-blue-700">{f?.flight ?? entry.flightId}</span>
+                            <YesNoBadge value={entry.resultSatisfy} />
+                          </div>
+                          {([
+                            ["Dispatch ID", entry.id],
+                            ["Date", entry.packagingDate],
+                            ["Vehicle", entry.vehicleNo || "—"],
+                            ["Vehicle Clean", entry.vehicleClean],
+                            ["Total Pax", totalQty(entry.mealLines).toString()],
+                            ["Chilled Temp", entry.chilledTemp ? `${entry.chilledTemp}°C` : "—"],
+                            ["Frozen Temp", entry.frozenTemp ? `${entry.frozenTemp}°C` : "—"],
+                            ["Veh. Temp Begin", entry.vehicleTempBegin ? `${entry.vehicleTempBegin}°C` : "—"],
+                            ["Veh. Temp End", entry.vehicleTempEnd ? `${entry.vehicleTempEnd}°C` : "—"],
+                            ["Gate 08 Temp", entry.gateTempGate08 ? `${entry.gateTempGate08}°C` : "—"],
+                            ["Monitored At", entry.monitoredAt],
+                            ["Received At", entry.receivedAt || "Awaiting receipt"],
+                          ] as [string, string][]).map(([label, value]) => (
+                            <div key={label} className="flex justify-between text-xs">
+                              <span className="text-slate-400">{label}</span>
+                              <span className="font-medium text-slate-700 text-right max-w-[55%] break-all">{value}</span>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="space-y-2">
+                          <div className={`rounded-xl border p-2.5 ${entry.verifiedBy ? "border-emerald-200 bg-emerald-50" : "border-slate-200 bg-slate-50 opacity-50"}`}>
+                            <p className="text-[10px] font-bold text-emerald-700 mb-0.5">② Verified By (Food Safety)</p>
+                            <p className="text-[11px] text-slate-600">{entry.verifiedBy ? `${entry.verifiedBy.date}, ${entry.verifiedBy.time}` : "Pending"}</p>
+                            {entry.verifiedBy?.remarks && <p className="text-[10px] text-slate-400 italic mt-0.5">"{entry.verifiedBy.remarks}"</p>}
+                          </div>
+                          <div className={`rounded-xl border p-2.5 ${entry.approvedBy ? "border-violet-200 bg-violet-50" : "border-slate-200 bg-slate-50 opacity-50"}`}>
+                            <p className="text-[10px] font-bold text-violet-700 mb-0.5">③ Approved By (HoC)</p>
+                            <p className="text-[11px] text-slate-600">{entry.approvedBy ? `${entry.approvedBy.date}, ${entry.approvedBy.time}` : "Pending"}</p>
+                            {entry.approvedBy?.remarks && <p className="text-[10px] text-slate-400 italic mt-0.5">"{entry.approvedBy.remarks}"</p>}
+                          </div>
+                          <div className={`rounded-xl border p-2.5 ${entry.receivedAt ? "border-sky-200 bg-sky-50" : "border-slate-200 bg-slate-50 opacity-50"}`}>
+                            <p className="text-[10px] font-bold text-sky-700 mb-0.5">④ Airport Receipt</p>
+                            <p className="text-[11px] text-slate-600">{entry.receivedAt || "Awaiting airport receipt"}</p>
+                            {entry.receivedRemarks && <p className="text-[10px] text-slate-400 italic mt-0.5">"{entry.receivedRemarks}"</p>}
+                          </div>
+                        </div>
+                      </>
+                    );
+                  })() : (
+                    <>
+                      <div className="flex items-center justify-between">
+                        <p className="font-bold text-slate-800 text-sm">Dispatch Log</p>
+                        <span className="text-[10px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded-full font-semibold">{entries.length} total</span>
+                      </div>
+                      {entries.length === 0 ? (
+                        <div className="text-[11px] text-slate-400 italic text-center py-10 bg-white border border-slate-200 rounded-xl">
+                          No dispatches recorded yet.<br />Complete a Kitchen Dispatch first.
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {entries.map(entry => {
+                            const f = flights.find(x => x.id === entry.flightId);
+                            return (
+                              <button key={entry.id} onClick={() => setMLogEntryId(entry.id)}
+                                className="w-full text-left px-3 py-2.5 rounded-xl border border-slate-200 bg-white hover:border-blue-200 hover:bg-blue-50/30 transition-all">
+                                <div className="flex items-center justify-between mb-0.5">
+                                  <span className="font-bold text-sm text-slate-800">{f?.flight ?? entry.flightId}</span>
+                                  <YesNoBadge value={entry.resultSatisfy} />
+                                </div>
+                                <div className="flex items-center justify-between text-[11px] text-slate-500">
+                                  <span className="font-mono">{entry.id.slice(0, 16)}…</span>
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${entry.receivedAt ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                                    {entry.receivedAt ? "Received" : "Awaiting"}
+                                  </span>
+                                </div>
+                                <div className="text-[10px] text-slate-400 mt-0.5">{entry.monitoredAt} · {entry.vehicleNo || "—"}</div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Bottom nav */}
+            <div className="bg-white border-t border-slate-200 flex shrink-0">
+              <button onClick={() => setMobileTab("dispatch")}
+                className={`flex-1 py-2.5 flex flex-col items-center gap-0.5 text-[10px] font-semibold transition-colors ${mobileTab === "dispatch" ? "text-blue-600" : "text-slate-400"}`}>
+                <Truck className="h-4 w-4" /> Dispatch
+              </button>
+              <button onClick={() => setMobileTab("log")}
+                className={`flex-1 py-2.5 flex flex-col items-center gap-0.5 text-[10px] font-semibold transition-colors ${mobileTab === "log" ? "text-blue-600" : "text-slate-400"}`}>
+                <Clock className="h-4 w-4" /> Log
+              </button>
+              <button className="flex-1 py-2.5 flex flex-col items-center gap-0.5 text-[10px] font-semibold text-slate-400">
+                <User className="h-4 w-4" /> Profile
+              </button>
+            </div>
+
+            {/* Home indicator */}
+            <div className="bg-slate-900 flex justify-center pb-2 pt-1 shrink-0">
+              <div className="w-20 h-1 rounded-full bg-white/30" />
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
+

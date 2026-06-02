@@ -1,4 +1,5 @@
-import { useRef, useState, Fragment } from "react";
+import { useEffect, useMemo, useRef, useState, Fragment } from "react";
+import { useSearchParams } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -25,13 +26,17 @@ import {
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
-  recentUploads, seedFlightOrders,
+  recentUploads,
   FLIGHT_ORDER_STATUS_FLOW, nextFlightStatus,
-  MEAL_SLOTS, getMealSlot, isDomesticSector,
+  isDomesticSector,
   SPECIAL_MEAL_CODES, SPECIAL_MEAL_BY_CODE,
   type FlightDirection, type FlightOrderStatus, type MealSlot,
   type SpecialMealEntry, type SpecialMealCategory,
 } from "@/lib/sample-data";
+import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-settings";
+import {
+  useFlightOrders, addFlightOrders, updateFlightOrderStatus,
+} from "@/lib/flight-orders-store";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useArrivalFlash } from "@/lib/arrival-flash";
 
@@ -110,8 +115,6 @@ const AIRPORTS: { code: string; name: string }[] = [
   { code: "KTM", name: "Kathmandu" },
 ];
 
-const seedOrders: FlightOrder[] = seedFlightOrders;
-
 type ParsedRow = {
   row: number;
   id: string;
@@ -167,7 +170,7 @@ type RecentUploadRow = (typeof recentUploads)[number];
 
 export default function OrderManagementPage() {
   useArrivalFlash();
-  const [orders, setOrders] = useState<FlightOrder[]>(seedOrders);
+  const orders = useFlightOrders();
   const [view, setView] = useState<"list" | "create" | "bulk" | "crew-create">("list");
   const [selectedOrder, setSelectedOrder] = useState<FlightOrder | null>(null);
   const [activeTab, setActiveTab] = useState<"flights" | "crew">("flights");
@@ -179,44 +182,39 @@ export default function OrderManagementPage() {
     : [];
 
   const addOrder = (legs: FlightOrder[]) => {
-    setOrders((prev) => [...legs, ...prev]);
+    addFlightOrders(legs);
     setView("list");
   };
 
   const addOrdersBulk = (newOrders: FlightOrder[]) => {
-    setOrders((prev) => [...newOrders, ...prev]);
+    addFlightOrders(newOrders);
     setView("list");
   };
 
   const advanceStatus = (rowId: string) => {
-    setOrders((prev) =>
-      prev.map((o) => {
-        if (o.id !== rowId) return o;
-        const next = nextFlightStatus(o.status);
-        if (!next) {
-          toast.info(`${o.flight} is already Completed.`);
-          return o;
-        }
-        toast.success(`${o.flight} moved to ${next}.`);
-        return { ...o, status: next };
-      }),
-    );
+    const target = orders.find((o) => o.id === rowId);
+    if (!target) return;
+    const next = nextFlightStatus(target.status);
+    if (!next) {
+      toast.info(`${target.flight} is already Completed.`);
+      return;
+    }
+    updateFlightOrderStatus(rowId, next);
+    toast.success(`${target.flight} moved to ${next}.`);
   };
 
   const advanceOrderStatus = (orderNo: string) => {
-    setOrders((prev) => {
-      let moved = 0;
-      const updated = prev.map((o) => {
-        if (o.orderNo !== orderNo) return o;
-        const next = nextFlightStatus(o.status);
-        if (!next) return o;
+    const legs = orders.filter((o) => o.orderNo === orderNo);
+    let moved = 0;
+    for (const leg of legs) {
+      const next = nextFlightStatus(leg.status);
+      if (next) {
+        updateFlightOrderStatus(leg.id, next);
         moved += 1;
-        return { ...o, status: next };
-      });
-      if (moved > 0) toast.success(`${orderNo} — advanced ${moved} ${moved === 1 ? "leg" : "legs"}.`);
-      else toast.info(`${orderNo} is already Completed.`);
-      return updated;
-    });
+      }
+    }
+    if (moved > 0) toast.success(`${orderNo} — advanced ${moved} ${moved === 1 ? "leg" : "legs"}.`);
+    else toast.info(`${orderNo} is already Completed.`);
   };
 
   return (
@@ -250,7 +248,7 @@ export default function OrderManagementPage() {
         <Tabs
           value={activeTab}
           onValueChange={(v) => setActiveTab(v as "flights" | "crew")}
-          className="space-y-4"
+          className="space-y-4 mt-4"
         >
           <TabsList className="h-auto bg-transparent p-0 border-b border-border w-full justify-start rounded-none">
             <TabsTrigger
@@ -313,22 +311,27 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
   const today = new Date().toISOString().slice(0, 10);
   const [date, setDate] = useState<string>(today);
   const [scope, setScope] = useState<"Domestic" | "International" | "All">("Domestic");
+  const [airline, setAirline] = useState<string>("All");
+  const slots = useMealSlots();
+
+  const airlineOptions = Array.from(new Set(orders.map((o) => o.airline))).sort();
 
   const filtered = orders.filter((o) => {
     if (date && o.date !== date) return false;
     if (scope === "Domestic" && !isDomesticSector(o.sector)) return false;
     if (scope === "International" && isDomesticSector(o.sector)) return false;
+    if (airline !== "All" && o.airline !== airline) return false;
     return true;
   });
 
-  // Group by meal slot
+  // Group by meal slot (using the user's current slot configuration)
   const groups = new Map<MealSlot, FlightOrder[]>();
-  MEAL_SLOTS.forEach((s) => groups.set(s.name, []));
+  slots.forEach((s) => groups.set(s.name, []));
   filtered.forEach((o) => {
-    const slot = getMealSlot(o.etd);
-    groups.get(slot)!.push(o);
+    const slotName = resolveMealSlot(o.etd, slots).name;
+    groups.get(slotName)!.push(o);
   });
-  MEAL_SLOTS.forEach((s) => {
+  slots.forEach((s) => {
     groups.get(s.name)!.sort((a, b) => a.etd.localeCompare(b.etd));
   });
 
@@ -342,12 +345,13 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
           <div>
             <h3 className="text-sm font-semibold tracking-wider uppercase text-foreground">
               Meal for {scope === "All" ? "All" : scope} Flights
+              {airline !== "All" && <span className="text-muted-foreground normal-case font-normal"> · {airline}</span>}
             </h3>
             <p className="text-xs text-muted-foreground mt-0.5">
               Cabin-crew meal orders grouped by meal slot — derived from each flight's ETD.
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
               <CalendarRange className="h-3.5 w-3.5 text-primary" />
               <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">Date</Label>
@@ -357,6 +361,19 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                 onChange={(e) => setDate(e.target.value)}
                 className="h-7 w-[140px] border-0 shadow-none px-1 focus-visible:ring-0"
               />
+            </div>
+            <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
+              <Plane className="h-3.5 w-3.5 text-muted-foreground" />
+              <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">Airline</Label>
+              <select
+                value={airline}
+                onChange={(e) => setAirline(e.target.value)}
+                className="h-7 bg-transparent border-0 text-sm focus:outline-none focus:ring-0 pr-1"
+                aria-label="Filter Crew Meals by airline"
+              >
+                <option value="All">All</option>
+                {airlineOptions.map((a) => <option key={a} value={a}>{a}</option>)}
+              </select>
             </div>
             <div className="inline-flex rounded-md border border-input bg-background p-0.5 shadow-sm">
               {(["Domestic", "International", "All"] as const).map((s) => {
@@ -391,7 +408,7 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
               <Table>
                 <TableHeader className="bg-muted/40">
                   <TableRow>
-                    <TableHead className="text-xs uppercase tracking-wider w-32">Flight No</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider w-44">Flight No</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider w-20">ETD</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider text-right w-24">PAX</TableHead>
@@ -399,7 +416,7 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {MEAL_SLOTS.map((slot) => {
+                  {slots.map((slot) => {
                     const slotRows = groups.get(slot.name)!;
                     if (slotRows.length === 0) return null;
                     const slotCrew = slotRows.reduce((s, o) => s + o.crew, 0);
@@ -420,7 +437,7 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                               {slot.name}
                             </span>
                             <span className="ml-2 text-[10px] text-muted-foreground tabular-nums">
-                              {slot.range}
+                              {formatSlotRange(slot)}
                             </span>
                           </TableCell>
                         </TableRow>
@@ -444,9 +461,9 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                             </TableRow>
                             {legs.map((o) => (
                               <TableRow key={o.id} data-arrival-row-id={o.id} className="hover:bg-muted/30">
-                                <TableCell className="font-mono text-xs pl-8">
+                                <TableCell className="font-mono text-xs pl-8 whitespace-nowrap">
                                   <span className="inline-flex items-center gap-1.5">
-                                    {o.flight}
+                                    <span className="whitespace-nowrap">{o.flight}</span>
                                     <DirectionBadge direction={o.direction} />
                                   </span>
                                 </TableCell>
@@ -556,7 +573,8 @@ function DirectionBadge({ direction }: { direction: FlightDirection }) {
       }
       title={isReturn ? "Return flight" : "Outbound flight"}
     >
-      {isReturn ? "↺" : "↗"} {direction}
+      <span aria-hidden>{isReturn ? "↺" : "↗"}</span>
+      <span>{direction}</span>
     </span>
   );
 }
@@ -571,19 +589,75 @@ function OrdersList({
   const [from, setFrom] = useState<string>("");
   const [to, setTo] = useState<string>("");
   const [airline, setAirline] = useState<string>("All");
+  const [scope, setScope] = useState<"All" | "Domestic" | "International">("All");
 
   const airlineOptions = Array.from(new Set(orders.map((o) => o.airline))).sort();
 
-  const filteredOrders = orders.filter((o) => {
-    if (from && o.date < from) return false;
-    if (to && o.date > to) return false;
-    if (airline !== "All" && o.airline !== airline) return false;
-    return true;
-  });
+  const filteredOrders = useMemo(
+    () =>
+      orders
+        .filter((o) => {
+          if (from && o.date < from) return false;
+          if (to && o.date > to) return false;
+          if (airline !== "All" && o.airline !== airline) return false;
+          if (scope === "Domestic" && !isDomesticSector(o.sector)) return false;
+          if (scope === "International" && isDomesticSector(o.sector)) return false;
+          return true;
+        })
+        .sort((a, b) => b.date.localeCompare(a.date) || b.etd.localeCompare(a.etd)),
+    [orders, from, to, airline, scope],
+  );
+
+  // Group filtered rows by Order # — memoised so we don't redo this work each
+  // render (with 3k+ rows the grouping cost was visible during page switches).
+  const groupedOrders = useMemo(() => {
+    const map = new Map<string, FlightOrder[]>();
+    for (const o of filteredOrders) {
+      const list = map.get(o.orderNo);
+      if (list) list.push(o);
+      else map.set(o.orderNo, [o]);
+    }
+    return Array.from(map.entries());
+  }, [filteredOrders]);
+
+  // Pagination — paginate by order group, not by flight row, so an order's
+  // legs stay together on one page. Capped at 3 orders per page on user
+  // request (each order can fan out to 30-40 legs, so 3 already produces a
+  // ~100-row table).
+  const [page, setPage] = useState(1);
+  const pageSize = 3;
+  const totalPages = Math.max(1, Math.ceil(groupedOrders.length / pageSize));
+
+  // Whenever the filter/sort inputs change the result set, jump back to page 1.
+  useEffect(() => { setPage(1); }, [from, to, airline, scope]);
+  // Defensive: if `page` is now past the last page (e.g. after a filter
+  // narrowed the list), clamp it.
+  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
+
+  // Deep-link: when arriving with ?ord=ORD-XXXX (e.g. from the dashboard's
+  // Active Orders panel), find that order in the grouped list, jump to its
+  // page so the row exists in the DOM for arrival-flash to highlight, then
+  // strip the param so a manual refresh doesn't keep re-triggering it.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const ordParam = searchParams.get("ord");
+  useEffect(() => {
+    if (!ordParam) return;
+    const idx = groupedOrders.findIndex(([no]) => no === ordParam);
+    if (idx < 0) return;
+    const targetPage = Math.floor(idx / pageSize) + 1;
+    if (targetPage !== page) setPage(targetPage);
+    const next = new URLSearchParams(searchParams);
+    next.delete("ord");
+    setSearchParams(next, { replace: true });
+  }, [ordParam, groupedOrders, page, searchParams, setSearchParams]);
+
+  const pageStart = (page - 1) * pageSize;
+  const pageEnd = Math.min(pageStart + pageSize, groupedOrders.length);
+  const pageGroups = groupedOrders.slice(pageStart, pageEnd);
 
   const pendingCount = filteredOrders.filter((o) => o.status === "Pending").length;
   const rangeActive = from !== "" || to !== "";
-  const filtersActive = rangeActive || airline !== "All";
+  const filtersActive = rangeActive || airline !== "All" || scope !== "All";
   const rangeLabel =
     from && to
       ? from === to
@@ -597,7 +671,7 @@ function OrdersList({
 
   const clearRange = () => { setFrom(""); setTo(""); };
   const setToday = () => { setFrom(today); setTo(today); };
-  const clearAll = () => { setFrom(""); setTo(""); setAirline("All"); };
+  const clearAll = () => { setFrom(""); setTo(""); setAirline("All"); setScope("All"); };
 
   return (
     <Card>
@@ -610,6 +684,21 @@ function OrdersList({
           <div className="flex flex-wrap items-center gap-2">
             <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
               <CalendarRange className="h-3.5 w-3.5 text-primary" />
+              <Plane className="h-3.5 w-3.5 text-muted-foreground" />
+              <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">Scope</Label>
+              <select
+                value={scope}
+                onChange={(e) => setScope(e.target.value as "All" | "Domestic" | "International")}
+                className="h-7 bg-transparent border-0 text-sm focus:outline-none focus:ring-0 pr-1"
+                aria-label="Filter by domestic or international"
+              >
+                <option value="All">All</option>
+                <option value="Domestic">Domestic</option>
+                <option value="International">International</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
+              <CalendarRange className="h-3.5 w-3.5 text-muted-foreground" />
               <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">From</Label>
               <Input
                 type="date"
@@ -679,7 +768,11 @@ function OrdersList({
         </div>
 
         <div className="text-xs text-muted-foreground mb-2">
-          Showing <strong className="text-foreground tabular-nums">{filteredOrders.length}</strong> of {orders.length} order{orders.length === 1 ? "" : "s"}
+          Showing <strong className="text-foreground tabular-nums">{filteredOrders.length}</strong> of {orders.length} order{orders.length === 1 ? "" : "s"} ·{" "}
+          <strong className="text-foreground tabular-nums">{groupedOrders.length}</strong> Order #{groupedOrders.length === 1 ? "" : "s"}{" "}
+          {groupedOrders.length > 0 && (
+            <>· Page <strong className="text-foreground tabular-nums">{page}</strong> of <strong className="text-foreground tabular-nums">{totalPages}</strong></>
+          )}
         </div>
 
         <div data-arrival-id="active-orders" className="border border-border rounded-md overflow-hidden">
@@ -704,17 +797,8 @@ function OrdersList({
                   </TableCell>
                 </TableRow>
               ) : (() => {
-                // Group rows by Order # (preserving the order they first appear in)
-                const grouped = new Map<string, FlightOrder[]>();
-                filteredOrders.forEach((o) => {
-                  const list = grouped.get(o.orderNo);
-                  if (list) list.push(o);
-                  else grouped.set(o.orderNo, [o]);
-                });
-
                 const rows: React.ReactNode[] = [];
-                grouped.forEach((legs, orderNo) => {
-                  const barColor = orderBarColor(legs[0]?.status ?? "Pending");
+                pageGroups.forEach(([orderNo, legs]) => {
                   rows.push(
                     <TableRow key={`grp-${orderNo}`} className="border-0 hover:bg-transparent">
                       <TableCell colSpan={8} className="p-0">
@@ -784,6 +868,66 @@ function OrdersList({
             </TableBody>
           </Table>
         </div>
+
+        {groupedOrders.length > 0 && (
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="text-xs text-muted-foreground">
+              Showing orders{" "}
+              <strong className="text-foreground tabular-nums">{pageStart + 1}</strong>–
+              <strong className="text-foreground tabular-nums">{pageEnd}</strong>{" "}
+              of <strong className="text-foreground tabular-nums">{groupedOrders.length}</strong>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 px-2"
+                onClick={() => setPage(1)}
+                disabled={page === 1}
+                aria-label="First page"
+                title="First page"
+              >
+                «
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 px-2"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page === 1}
+                aria-label="Previous page"
+                title="Previous page"
+              >
+                ‹
+              </Button>
+              <span className="text-xs text-muted-foreground tabular-nums min-w-[80px] text-center">
+                Page {page} / {totalPages}
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 px-2"
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={page === totalPages}
+                aria-label="Next page"
+                title="Next page"
+              >
+                ›
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 px-2"
+                onClick={() => setPage(totalPages)}
+                disabled={page === totalPages}
+                aria-label="Last page"
+                title="Last page"
+              >
+                »
+              </Button>
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -1393,11 +1537,12 @@ function CrewMealCreate({
   nextRowSeq: number;
 }) {
   const today = new Date().toISOString().slice(0, 10);
+  const slots = useMealSlots();
   const [scope, setScope] = useState<"Domestic" | "International">("Domestic");
   const [airline, setAirline] = useState(AIRLINES[0]);
   const [date, setDate] = useState(today);
 
-  const [mealSlot, setMealSlot] = useState<MealSlot>("Breakfast");
+  const [mealSlot, setMealSlot] = useState<MealSlot>(slots[0]?.name ?? "Breakfast");
   const [flight, setFlight] = useState("");
   const [from, setFrom] = useState("DAC");
   const [to, setTo] = useState("CGP");
@@ -1416,12 +1561,12 @@ function CrewMealCreate({
 
   // Slot derived from ETD wins for display once the user has typed a time;
   // before that the explicit Meal Slot picker drives the badge.
-  const derivedSlot = etd ? getMealSlot(etd) : null;
+  const derivedSlot = etd ? resolveMealSlot(etd, slots).name : null;
   const slotForBadge = derivedSlot ?? mealSlot;
   const slotMismatch = derivedSlot && derivedSlot !== mealSlot;
 
   const slotStartTime = (slot: MealSlot): string => {
-    const def = MEAL_SLOTS.find((s) => s.name === slot);
+    const def = slots.find((s) => s.name === slot);
     if (!def) return "";
     return `${String(def.from).padStart(2, "0")}:00`;
   };
@@ -1500,11 +1645,11 @@ function CrewMealCreate({
     toast.success(`${nextOrderNo} created with ${legs.length} ${legs.length === 1 ? "leg" : "legs"}.`);
   };
 
-  // Build groups for the in-form preview table (Breakfast / Lunch / etc)
+  // Build groups for the in-form preview table (uses the user's current slots)
   const groups = new Map<MealSlot, LegDraft[]>();
-  MEAL_SLOTS.forEach((s) => groups.set(s.name, []));
+  slots.forEach((s) => groups.set(s.name, []));
   legs.forEach((l) => {
-    groups.get(getMealSlot(l.etd))!.push(l);
+    groups.get(resolveMealSlot(l.etd, slots).name)!.push(l);
   });
 
   return (
@@ -1584,7 +1729,7 @@ function CrewMealCreate({
           </div>
 
           <div className="inline-flex flex-wrap rounded-md border border-input bg-background p-0.5 shadow-sm">
-            {MEAL_SLOTS.map((s) => {
+            {slots.map((s) => {
               const active = mealSlot === s.name;
               return (
                 <button
@@ -1732,7 +1877,7 @@ function CrewMealCreate({
                   </TableRow>
                 ) : (
                   <>
-                    {MEAL_SLOTS.map((slot) => {
+                    {slots.map((slot) => {
                       const rows = groups.get(slot.name)!;
                       if (rows.length === 0) return null;
                       const slotCrew = rows.reduce((s, l) => s + (Number(crew) || 0), 0);
@@ -1744,7 +1889,7 @@ function CrewMealCreate({
                                 {slot.name}
                               </span>
                               <span className="ml-2 text-[10px] text-muted-foreground tabular-nums">
-                                {slot.range}
+                                {formatSlotRange(slot)}
                               </span>
                             </TableCell>
                           </TableRow>

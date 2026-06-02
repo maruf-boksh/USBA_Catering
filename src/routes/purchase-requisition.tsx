@@ -16,12 +16,12 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  FileText, ClipboardList, CheckCircle, Plus, Save, Send, Trash2,
+  FileText, ClipboardList, CheckCircle, Plus, Save, Send, Trash2, Pencil,
 } from "lucide-react";
 import { toast } from "sonner";
 import { activeItems } from "@/lib/sample-data";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
-import { useWorkflow, type WfRequisition } from "@/lib/workflow-store";
+import { useWorkflow, type WfRequisition, type WfDemandItem } from "@/lib/workflow-store";
 import { useArrivalFlash } from "@/lib/arrival-flash";
 
 type PRLineItem = {
@@ -178,13 +178,49 @@ type PRPrefill = {
 
 export default function PurchaseRequisitionPage() {
   useArrivalFlash();
-  const { wfRequisitions } = useWorkflow();
+  const { wfRequisitions, updateRequisition } = useWorkflow();
   const [requisitions, setRequisitions] = useState<PurchaseRequisition[]>(seedRequisitions);
   const [view, setView] = useState<"list" | "create">("list");
   const [selected, setSelected] = useState<PurchaseRequisition | null>(null);
+  const [editing, setEditing] = useState<PurchaseRequisition | null>(null);
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
   const [prefill, setPrefill] = useState<PRPrefill | null>(null);
+
+  // Status values where a requisition is still mutable. Once approved /
+  // rejected / closed the form is read-only.
+  const isEditable = (r: PurchaseRequisition) =>
+    r.status === "Pending Approval" || r.status === "Draft";
+
+  /**
+   * Persist an edited requisition. If it lives in our local seed array we
+   * update there; if it was bridged in from the workflow store (MRP, demand
+   * auto-flow) we push the edit back via `updateRequisition` so other modules
+   * see the same line-item changes.
+   */
+  const saveEditedRequisition = (next: PurchaseRequisition) => {
+    const isLocal = requisitions.some((r) => r.id === next.id);
+    if (isLocal) {
+      setRequisitions((prev) => prev.map((r) => (r.id === next.id ? next : r)));
+    } else {
+      // Bridged from workflow-store. Translate the local lines back into the
+      // WfDemandItem shape and patch the workflow record.
+      const demandItems: WfDemandItem[] = next.lines.map((l) => ({
+        id: l.id,
+        name: l.itemName,
+        qty: l.qty,
+        uom: l.uom,
+        type: l.description || "Material",
+      }));
+      updateRequisition(next.id, {
+        items: next.lines.length,
+        demandItems,
+        note: next.justification,
+      });
+    }
+    toast.success(`${next.id} updated.`);
+    setEditing(null);
+  };
 
   // Auto-open Create view when navigated to from Stock Overview (or any other
   // page that stashes a "pr-prefill-from-inventory" payload in sessionStorage).
@@ -303,14 +339,27 @@ export default function PurchaseRequisitionPage() {
               searchKeys={["id", "requestedBy", "status"]}
               selectable={false}
               actions={(r) => (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7 px-2.5 text-xs"
-                  onClick={() => setSelected(r)}
-                >
-                  View
-                </Button>
+                <div className="flex items-center gap-1.5">
+                  {isEditable(r) && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2.5 text-xs border-primary/40 text-primary hover:bg-primary/5"
+                      onClick={() => setEditing(r)}
+                      title={`Edit ${r.id}`}
+                    >
+                      <Pencil className="h-3 w-3 mr-1" /> Edit
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 px-2.5 text-xs"
+                    onClick={() => setSelected(r)}
+                  >
+                    View
+                  </Button>
+                </div>
               )}
             />
           </div>
@@ -326,6 +375,12 @@ export default function PurchaseRequisitionPage() {
       <RequisitionDetailsDialog
         requisition={selected}
         onClose={() => setSelected(null)}
+      />
+
+      <RequisitionEditDialog
+        requisition={editing}
+        onClose={() => setEditing(null)}
+        onSave={saveEditedRequisition}
       />
     </>
   );
@@ -791,5 +846,254 @@ function Field({ label, value, bold }: { label: string; value: string; bold?: bo
         {value}
       </div>
     </div>
+  );
+}
+
+/**
+ * Edit dialog for in-flight requisitions (Draft / Pending Approval). Users
+ * can adjust the priority + justification and add / remove / mutate line
+ * items. Save persists either to local state or back to the workflow store
+ * via the parent's onSave handler.
+ */
+function RequisitionEditDialog({
+  requisition, onClose, onSave,
+}: {
+  requisition: PurchaseRequisition | null;
+  onClose: () => void;
+  onSave: (r: PurchaseRequisition) => void;
+}) {
+  const [priority, setPriority] = useState<Priority>("Normal");
+  const [justification, setJustification] = useState("");
+  const [lines, setLines] = useState<PRLineItem[]>([]);
+
+  // Draft-line state (the "add new" row at the bottom of the table)
+  const [itemName, setItemName] = useState("");
+  const [description, setDescription] = useState("");
+  const [qty, setQty] = useState("");
+  const [uom, setUom] = useState(UOMS[0]);
+  const [rate, setRate] = useState("");
+
+  // Reseed local state every time the dialog opens with a new requisition.
+  useEffect(() => {
+    if (!requisition) return;
+    setPriority(requisition.priority);
+    setJustification(requisition.justification);
+    setLines(requisition.lines.map((l) => ({ ...l })));
+    setItemName(""); setDescription(""); setQty(""); setRate("");
+    setUom(UOMS[0]);
+  }, [requisition]);
+
+  if (!requisition) return null;
+
+  const totalAmount = lines.reduce((s, l) => s + l.qty * l.rate, 0);
+
+  const addLine = () => {
+    if (!itemName.trim()) { toast.error("Pick an item to add."); return; }
+    const qtyN = Number(qty);
+    if (!qtyN || qtyN <= 0) { toast.error("Quantity must be greater than zero."); return; }
+    const rateN = Number(rate);
+    if (rateN < 0) { toast.error("Rate cannot be negative."); return; }
+    if (lines.some((l) => l.itemName.toLowerCase() === itemName.trim().toLowerCase())) {
+      toast.error(`${itemName} is already in this requisition.`); return;
+    }
+    setLines((prev) => [
+      ...prev,
+      {
+        id: `LN-${Date.now()}`,
+        itemName: itemName.trim(),
+        description: description.trim(),
+        qty: qtyN,
+        uom,
+        rate: rateN,
+      },
+    ]);
+    setItemName(""); setDescription(""); setQty(""); setRate("");
+  };
+
+  const updateLine = (id: string, patch: Partial<PRLineItem>) =>
+    setLines((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+
+  const removeLine = (id: string) =>
+    setLines((prev) => prev.filter((l) => l.id !== id));
+
+  const handleSave = () => {
+    if (lines.length === 0) { toast.error("At least one line item is required."); return; }
+    onSave({ ...requisition, priority, justification, lines, totalAmount });
+  };
+
+  return (
+    <Dialog open={!!requisition} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-4xl max-h-[92vh] overflow-hidden flex flex-col p-0 gap-0">
+        <DialogHeader className="px-6 pt-6 pb-4 border-b border-border">
+          <DialogTitle className="flex items-center gap-2">
+            <Pencil className="h-4 w-4 text-primary" />
+            Edit Requisition
+            <span className="font-mono text-sm text-muted-foreground ml-1">— {requisition.id}</span>
+            <StatusBadge status={requisition.status} />
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+          {/* Header fields */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+            <div>
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Priority</Label>
+              <select
+                value={priority}
+                onChange={(e) => setPriority(e.target.value as Priority)}
+                className={selectCls}
+              >
+                {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </div>
+            <div>
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Requested By</Label>
+              <Input value={requisition.requestedBy} disabled className="mt-1" />
+            </div>
+            <div className="md:col-span-2">
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Justification / Remarks</Label>
+              <Textarea
+                value={justification}
+                onChange={(e) => setJustification(e.target.value)}
+                placeholder="Why is this requisition needed?"
+                className="mt-1 min-h-[60px]"
+              />
+            </div>
+          </div>
+
+          {/* Add line row */}
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-2">
+              Add Item
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
+              <div className="md:col-span-4">
+                <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Item</Label>
+                <select
+                  value={itemName}
+                  onChange={(e) => {
+                    const name = e.target.value;
+                    setItemName(name);
+                    const m = ITEM_MASTER.find((i) => i.name === name);
+                    if (m) {
+                      setUom(m.uom);
+                      if (!description.trim()) setDescription(m.description);
+                    }
+                  }}
+                  className={selectCls}
+                >
+                  <option value="">Select item…</option>
+                  {ITEM_MASTER.map((i) => <option key={i.name} value={i.name}>{i.name}</option>)}
+                </select>
+              </div>
+              <div className="md:col-span-3">
+                <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Description</Label>
+                <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Spec / brand" className="mt-1" />
+              </div>
+              <div className="md:col-span-2">
+                <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Qty</Label>
+                <Input type="number" min={0} value={qty} onChange={(e) => setQty(e.target.value)} className="mt-1" />
+              </div>
+              <div className="md:col-span-1">
+                <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">UoM</Label>
+                <select value={uom} onChange={(e) => setUom(e.target.value)} className={selectCls}>
+                  {UOMS.map((u) => <option key={u} value={u}>{u}</option>)}
+                </select>
+              </div>
+              <div className="md:col-span-1">
+                <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Rate</Label>
+                <Input type="number" min={0} value={rate} onChange={(e) => setRate(e.target.value)} className="mt-1" />
+              </div>
+              <div className="md:col-span-1">
+                <Button variant="outline" onClick={addLine} className="w-full h-9">
+                  <Plus className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Existing lines — qty/rate inline editable */}
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground mb-2 flex items-center justify-between">
+              <span>Line Items ({lines.length})</span>
+              <span className="text-foreground">
+                Total: <span className="font-bold tabular-nums">৳ {totalAmount.toLocaleString()}</span>
+              </span>
+            </div>
+            <div className="border border-border rounded-md overflow-hidden">
+              <Table>
+                <TableHeader className="bg-muted/40">
+                  <TableRow>
+                    <TableHead className="w-12 text-xs uppercase tracking-wider">SL</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Description</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider w-24">Qty</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider w-20">UoM</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider w-28">Rate</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider w-28">Amount</TableHead>
+                    <TableHead className="w-12" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {lines.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-6">
+                        No line items yet — add one above.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    lines.map((l, i) => (
+                      <TableRow key={l.id}>
+                        <TableCell>{i + 1}</TableCell>
+                        <TableCell className="font-medium">{l.itemName}</TableCell>
+                        <TableCell className="text-muted-foreground text-xs">{l.description || "—"}</TableCell>
+                        <TableCell>
+                          <Input
+                            type="number" min={0}
+                            value={l.qty}
+                            onChange={(e) => updateLine(l.id, { qty: Number(e.target.value) || 0 })}
+                            className="h-8 tabular-nums"
+                          />
+                        </TableCell>
+                        <TableCell>{l.uom}</TableCell>
+                        <TableCell>
+                          <Input
+                            type="number" min={0}
+                            value={l.rate}
+                            onChange={(e) => updateLine(l.id, { rate: Number(e.target.value) || 0 })}
+                            className="h-8 tabular-nums"
+                          />
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {(l.qty * l.rate).toLocaleString()}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 w-7 p-0"
+                            onClick={() => removeLine(l.id)}
+                            aria-label={`Remove ${l.itemName}`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+        </div>
+
+        <DialogFooter className="px-6 py-4 border-t border-border">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleSave}>
+            <Save className="h-4 w-4 mr-1.5" /> Save Changes
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

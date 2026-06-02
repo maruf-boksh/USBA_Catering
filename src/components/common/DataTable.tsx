@@ -50,12 +50,21 @@ export function DataTable<T extends { id: string }>({
   }, [data, q, searchKeys]);
 
   // Translate our Column<T> shape to Ant's TableColumnType<T>.
+  // We deliberately strip `text-right` from column-level classNames so number
+  // columns (qty, count, amount) stay left-aligned for the same visual rhythm
+  // as the rest of the row. Individual cell renders can still right-align
+  // their own content via inline classes if they really need to.
+  const stripColumnAlignment = (cls?: string) => {
+    if (!cls) return undefined;
+    const next = cls.split(/\s+/).filter((c) => c !== "text-right" && c !== "text-center").join(" ");
+    return next || undefined;
+  };
   const antColumns: TableColumnType<T>[] = useMemo(() => {
     const cols: TableColumnType<T>[] = columns.map((c) => ({
       title: c.header,
       dataIndex: String(c.key),
       key: String(c.key),
-      className: c.className,
+      className: stripColumnAlignment(c.className),
       sorter:
         c.sortable === false
           ? undefined

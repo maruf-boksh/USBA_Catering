@@ -1,2 +1,6 @@
 node_modules/
 dist/
+
+# Build & deploy artifacts
+.tanstack/
+.vercel/

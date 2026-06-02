@@ -61,6 +61,117 @@ interface GMOrder {
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const MEAL_TYPES = ["Breakfast", "Lunch", "Snacks", "Heavy Snacks", "Dinner"];
 
+const FOOD_ITEMS: Record<string, Array<{ name: string; weight: number; calories: number }>> = {
+  Breakfast: [
+    { name: "Portuguese Omelet", weight: 80, calories: 150 },
+    { name: "Potato Hasbrown", weight: 80, calories: 120 },
+    { name: "Chicken Croquette", weight: 80, calories: 160 },
+    { name: "Croissant", weight: 40, calories: 180 },
+    { name: "Soft Roll", weight: 40, calories: 100 },
+    { name: "Chicken Khichuri", weight: 250, calories: 280 },
+    { name: "Fried Egg", weight: 50, calories: 85 },
+    { name: "Scrambled Egg", weight: 100, calories: 145 },
+    { name: "Boiled Egg", weight: 50, calories: 78 },
+    { name: "Paratha", weight: 60, calories: 180 },
+    { name: "Laccha Paratha", weight: 60, calories: 190 },
+    { name: "Chana Dal", weight: 80, calories: 120 },
+    { name: "Mug Dal", weight: 40, calories: 65 },
+    { name: "Jam", weight: 10, calories: 30 },
+    { name: "Butter", weight: 10, calories: 72 },
+    { name: "Mixed Veg", weight: 30, calories: 45 },
+    { name: "Semolina Halwa", weight: 80, calories: 170 },
+    { name: "Chicken Omelet", weight: 80, calories: 160 },
+  ],
+  Lunch: [
+    { name: "Boiled Rice", weight: 180, calories: 210 },
+    { name: "Plain Polao", weight: 180, calories: 240 },
+    { name: "Jeera Polao", weight: 180, calories: 245 },
+    { name: "Beef Biriyani", weight: 250, calories: 380 },
+    { name: "Chicken Biriyani", weight: 250, calories: 360 },
+    { name: "Chicken Shaslik", weight: 100, calories: 160 },
+    { name: "Prawn with Veg Curry", weight: 100, calories: 140 },
+    { name: "Akbari Vendi", weight: 50, calories: 70 },
+    { name: "Chicken Masala", weight: 100, calories: 155 },
+    { name: "Buttered Veg", weight: 100, calories: 90 },
+    { name: "Kulcha", weight: 60, calories: 180 },
+    { name: "Mixed Veg Curry", weight: 50, calories: 75 },
+    { name: "Dal Butter Fry", weight: 50, calories: 120 },
+    { name: "Mug Dal Vuna", weight: 50, calories: 80 },
+    { name: "Naan", weight: 60, calories: 170 },
+    { name: "Mughlai Chicken", weight: 100, calories: 160 },
+  ],
+  Dinner: [
+    { name: "Plain Polao", weight: 180, calories: 240 },
+    { name: "Boiled Rice", weight: 180, calories: 210 },
+    { name: "Chicken Rezala", weight: 100, calories: 145 },
+    { name: "Chicken Vuna", weight: 100, calories: 150 },
+    { name: "Chicken Dopiaza", weight: 100, calories: 140 },
+    { name: "Mug Dal", weight: 100, calories: 130 },
+    { name: "Mixed Veg. Vajee", weight: 50, calories: 65 },
+    { name: "Laccha Paratha", weight: 60, calories: 190 },
+    { name: "Sauteed Veg", weight: 100, calories: 110 },
+    { name: "Dal Butter Fry", weight: 50, calories: 120 },
+    { name: "Tandoori Chicken", weight: 100, calories: 160 },
+    { name: "Kulcha", weight: 60, calories: 180 },
+    { name: "Beef Rezala", weight: 100, calories: 150 },
+    { name: "Chicken Kabab", weight: 50, calories: 120 },
+    { name: "Mixed Veg Curry", weight: 50, calories: 75 },
+  ],
+  Snacks: [
+    { name: "Chicken Roll", weight: 60, calories: 180 },
+    { name: "Plain Cake", weight: 40, calories: 120 },
+    { name: "Salted Biscuit", weight: 50, calories: 140 },
+    { name: "Lemon Danish", weight: 40, calories: 160 },
+    { name: "Sandwich", weight: 100, calories: 200 },
+    { name: "Fruit Salad", weight: 80, calories: 70 },
+    { name: "Cookies", weight: 30, calories: 130 },
+    { name: "Banana Cake", weight: 50, calories: 150 },
+    { name: "Cheese Cracker", weight: 30, calories: 110 },
+  ],
+  "Heavy Snacks": [
+    { name: "Chicken Buggati", weight: 90, calories: 200 },
+    { name: "Potato Wedges", weight: 50, calories: 120 },
+    { name: "Chicken & Veg Frankie", weight: 100, calories: 240 },
+    { name: "Fried Potato", weight: 50, calories: 115 },
+    { name: "Korean Fried Chicken", weight: 100, calories: 280 },
+    { name: "Roll Sandwich with Chicken & Cheese", weight: 150, calories: 320 },
+    { name: "Veg Frankie", weight: 80, calories: 200 },
+    { name: "Veg Buggati", weight: 90, calories: 170 },
+    { name: "Veg Cutlet", weight: 60, calories: 140 },
+    { name: "Spring Roll", weight: 80, calories: 160 },
+    { name: "Samosa", weight: 60, calories: 140 },
+  ],
+};
+
+const DESSERT_ITEMS = [
+  { name: "Yoghurt", weight: 80, calories: 70 },
+  { name: "Firni", weight: 80, calories: 160 },
+  { name: "Semolina", weight: 50, calories: 130 },
+  { name: "Vanilla Pastry", weight: 60, calories: 180 },
+  { name: "Chocolate Brownie", weight: 50, calories: 210 },
+  { name: "Fruit Custard", weight: 80, calories: 140 },
+  { name: "Lemon Danish", weight: 40, calories: 160 },
+  { name: "Kitkat Chocolate", weight: 30, calories: 155 },
+  { name: "Gulab Jamun", weight: 60, calories: 200 },
+  { name: "Panna Cotta", weight: 80, calories: 180 },
+  { name: "Ice Cream", weight: 60, calories: 130 },
+];
+
+const SPECIAL_MEAL_INFO: Record<string, { code: string; label: string; allowed: string[]; notAllowed: string[]; note: string }> = {
+  AVML: { code: "AVML", label: "Asian Vegetarian Meal", allowed: ["Vegetables", "Dairy products", "Eggs", "Legumes", "Rice", "Lentils", "Spices"], notAllowed: ["Meat", "Poultry", "Seafood", "Fish", "Beef", "Pork"], note: "Lacto-vegetarian, spiced. Suitable for South Asian vegetarians." },
+  KSML: { code: "KSML", label: "Kosher Meal", allowed: ["Certified Kosher meat/poultry", "Kosher fish (fins & scales)", "Fruits", "Vegetables"], notAllowed: ["Pork", "Shellfish", "Mixing meat and dairy", "Non-certified Kosher items"], note: "Must be certified Kosher. Meat and dairy cannot be served together." },
+  MOML: { code: "MOML", label: "Muslim / Halal Meal", allowed: ["Halal-certified meat", "Poultry", "Fish", "Vegetables", "Rice", "Bread"], notAllowed: ["Pork", "Pork by-products", "Alcohol", "Non-Halal slaughtered meat"], note: "All meat must be Halal-certified." },
+  DBML: { code: "DBML", label: "Diabetic Meal", allowed: ["Lean protein", "Non-starchy vegetables", "Whole grains (small portion)", "Low-GI foods"], notAllowed: ["Refined sugar", "White bread", "Fried foods", "High-GI desserts"], note: "Low sugar, low fat. No concentrated sweets." },
+  GFML: { code: "GFML", label: "Gluten-Free Meal", allowed: ["Rice", "Potatoes", "Corn", "Meat", "Fish", "Vegetables", "GF-certified grains"], notAllowed: ["Wheat", "Barley", "Rye", "Regular bread/pasta/cakes", "Standard soy sauce"], note: "No gluten-containing ingredients. Avoid cross-contamination." },
+  LCML: { code: "LCML", label: "Low-Calorie Meal", allowed: ["Lean protein", "Steamed vegetables", "Salads", "Low-fat dairy", "Grilled items"], notAllowed: ["Fried foods", "High-fat sauces", "Full-fat dairy", "Pastries"], note: "Generally under 400 kcal. Low fat and sugar." },
+  BLML: { code: "BLML", label: "Bland Meal", allowed: ["Plain rice", "Boiled chicken", "Steamed vegetables", "White bread", "Low-acid fruits"], notAllowed: ["Spicy foods", "Fried foods", "Acidic foods", "Onion", "Garlic"], note: "For sensitive stomachs. No spices or strong flavors." },
+  HNML: { code: "HNML", label: "Hindu Meal", allowed: ["Vegetables", "Chicken (sometimes)", "Fish (sometimes)", "Dairy", "Eggs", "Rice", "Bread"], notAllowed: ["Beef", "Veal", "Pork"], note: "No beef. May include poultry/fish depending on preference." },
+  VLML: { code: "VLML", label: "Lacto-Ovo Vegetarian Meal", allowed: ["Vegetables", "Dairy products", "Eggs", "Legumes", "Grains", "Fruits"], notAllowed: ["Meat", "Poultry", "Fish", "Seafood"], note: "Vegetarian including dairy and eggs." },
+  CHML: { code: "CHML", label: "Child Meal", allowed: ["Mild foods", "Small portions", "Kid-friendly items", "Plain rice/pasta", "Mild chicken"], notAllowed: ["Spicy foods", "Whole nuts", "Alcohol-based sauces"], note: "Suitable for children aged 2–12. Mild, easy to eat." },
+  VGML: { code: "VGML", label: "Vegan Meal", allowed: ["Vegetables", "Fruits", "Legumes", "Grains", "Nuts", "Seeds", "Plant-based items"], notAllowed: ["Meat", "Poultry", "Fish", "Dairy", "Eggs", "Honey", "Any animal-derived ingredient"], note: "Strictly plant-based. No animal products whatsoever." },
+  JML:  { code: "JML",  label: "Jain Meal", allowed: ["Above-ground vegetables only", "Grains", "Legumes", "Fruits"], notAllowed: ["Root vegetables (onion, garlic, potato, carrot, beet)", "Meat", "Fish", "Eggs"], note: "No root vegetables. Strictly vegetarian." },
+};
+
 const gmOrderData: GMOrder = {
   flightNumber: "BS-315",
   route: "DAC → KUL",
@@ -342,34 +453,20 @@ export default function MealPlanning() {
     forType: "",
     mealTypes: [] as string[],
     choices: [
-      {
-        label: "CHOICE 1",
-        percentage: 60,
-        items: [{ name: "", weight: 0, calories: 0 }],
-      },
-      {
-        label: "CHOICE 2",
-        percentage: 40,
-        items: [{ name: "", weight: 0, calories: 0 }],
-      },
+      { label: "CHOICE 1", percentage: 60, items: [] as MealItem[] },
+      { label: "CHOICE 2", percentage: 40, items: [] as MealItem[] },
     ] as MealChoice[],
-    specialMeals: [
-      { type: "VGML", portions: 0, items: [{ name: "", weight: 0, calories: 0 }], enabled: false },
-      { type: "CHML", portions: "", items: [{ name: "", weight: 0, calories: 0 }], enabled: false },
-      { type: "MOML", portions: 0, items: [{ name: "", weight: 0, calories: 0 }], enabled: false },
-      { type: "HFML", portions: 0, items: [{ name: "", weight: 0, calories: 0 }], enabled: false },
-      { type: "HNML", portions: 0, items: [{ name: "", weight: 0, calories: 0 }], enabled: false },
-      { type: "DBML", portions: 0, items: [{ name: "", weight: 0, calories: 0 }], enabled: false },
-    ] as SpecialMeal[],
-    menuItems: MEAL_TYPES.reduce((acc, t) => {
-      acc[t] = [{ name: "", weight: 0, calories: 0 }];
-      return acc;
-    }, {} as Record<string, MealItem[]>),
-    dessert: { name: "", weight: 0, calories: 0 },
+    specialMealsByType: {} as Record<string, Array<{ code: string; portions: number | string; items: MealItem[] }>>,
+    choiceItems: [
+      MEAL_TYPES.reduce((acc, t) => { acc[t] = [] as MealItem[]; return acc; }, {} as Record<string, MealItem[]>),
+      MEAL_TYPES.reduce((acc, t) => { acc[t] = [] as MealItem[]; return acc; }, {} as Record<string, MealItem[]>),
+    ] as [Record<string, MealItem[]>, Record<string, MealItem[]>],
+    dessertByType: {} as Record<string, MealItem[]>,
+    dessertAllocationByType: {} as Record<string, number[]>,
+    choicePercentagesByType: {} as Record<string, { c1: number; c2: number }>,
     servingTimes: {} as Record<string, { start: string; end: string }>,
   });
 
-  const [createStep, setCreateStep] = useState(1);
   const [createData, setCreateData] = useState(getInitialCreateData(selectedDay));
   const [createErrors, setCreateErrors] = useState<string[]>([]);
   const [daySelectionOpen, setDaySelectionOpen] = useState(false);
@@ -387,13 +484,35 @@ export default function MealPlanning() {
     },
   });
 
+  const [pendingSpecialMeal, setPendingSpecialMeal] = useState<{ code: string; portions: number | string; items: MealItem[] } | null>(null);
+  const [pendingSpecialMealForType, setPendingSpecialMealForType] = useState<string | null>(null);
+  const [activeChoiceForItems, setActiveChoiceForItems] = useState<0 | 1>(0);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [activeChoicePercentType, setActiveChoicePercentType] = useState<string>("");
+  const [activeItemsTab, setActiveItemsTab] = useState<string>("");
+  const [createStep, setCreateStep] = useState(1);
+  const [activeMealTab, setActiveMealTab] = useState<string>("Breakfast");
+
   const currentDayMeals = useMemo(() => meals.filter((m) => m.day === selectedDay), [meals, selectedDay]);
-  const selectedMealType = createData.mealTypes[0] ?? "";
-  const totalChoicePercent = createData.choices.reduce((sum, choice) => sum + choice.percentage, 0);
-  const stepValid = {
+  const effectiveItemsTab = (activeItemsTab && (createData.mealTypes.includes(activeItemsTab) || activeItemsTab === "special-meals" || activeItemsTab === "dessert"))
+    ? activeItemsTab
+    : (createData.mealTypes[0] ?? "");
+  const effectiveChoicePercentType = (activeChoicePercentType && createData.mealTypes.includes(activeChoicePercentType))
+    ? activeChoicePercentType
+    : (createData.mealTypes[0] ?? "");
+  const totalChoicePercent = effectiveChoicePercentType
+    ? ((createData.choicePercentagesByType[effectiveChoicePercentType]?.c1 ?? 60) + (createData.choicePercentagesByType[effectiveChoicePercentType]?.c2 ?? 40))
+    : 100;
+  const stepValid: Record<number, boolean> = {
     1: createData.flightType.length > 0 && createData.forType !== "",
-    2: createData.mealTypes.length > 0 && createData.mealTypes.every((t) => (createData.menuItems[t] || []).some((it) => it.name.trim() !== "")),
-    3: createData.choices.length > 0 && totalChoicePercent === 100,
+    2: createData.mealTypes.length > 0 && createData.mealTypes.every((t) =>
+      (createData.choiceItems[0][t] || []).some((it) => it.name.trim() !== "") &&
+      (createData.choiceItems[1][t] || []).some((it) => it.name.trim() !== "")
+    ),
+    3: createData.mealTypes.length > 0 && createData.mealTypes.every((t) => {
+      const p = createData.choicePercentagesByType[t];
+      return p && (p.c1 + p.c2) === 100;
+    }),
     4: createData.mealTypes.every((t) => Boolean(createData.servingTimes[t]?.start) && Boolean(createData.servingTimes[t]?.end)),
     5: true,
   };
@@ -402,8 +521,14 @@ export default function MealPlanning() {
   const handleCreateOpenChange = (open: boolean) => {
     setCreateModalOpen(open);
     if (open) {
-      setCreateStep(1);
       resetCreateData(selectedDay);
+      setActiveChoiceForItems(0);
+      setPendingSpecialMeal(null);
+      setPendingSpecialMealForType(null);
+      setActiveChoicePercentType("");
+      setActiveItemsTab("");
+      setActiveMealTab("Breakfast");
+      setCreateErrors([]);
     }
   };
 
@@ -412,29 +537,37 @@ export default function MealPlanning() {
     if (createData.flightType.length === 0) errors.push("Flight Type is required.");
     if (!createData.forType) errors.push("'For' (Passengers/Crew) is required.");
     if (createData.mealTypes.length === 0) errors.push("At least one Meal Type must be selected.");
-    if (totalChoicePercent !== 100) errors.push("Choices must total 100%.");
     createData.mealTypes.forEach((t) => {
-      const items = (createData.menuItems[t] || []).filter((it) => it.name.trim() !== "");
-      if (items.length === 0) errors.push(`At least one menu item required for ${t}.`);
+      const percs = createData.choicePercentagesByType[t];
+      if (!percs || (percs.c1 + percs.c2) !== 100) errors.push(`${t}: Choice percentages must total 100%.`);
+      const items1 = (createData.choiceItems[0][t] || []).filter((it) => it.name.trim() !== "");
+      const items2 = (createData.choiceItems[1][t] || []).filter((it) => it.name.trim() !== "");
+      if (items1.length === 0) errors.push(`CHOICE 1: At least one item required for ${t}.`);
+      if (items2.length === 0) errors.push(`CHOICE 2: At least one item required for ${t}.`);
       if (!createData.servingTimes[t]?.start || !createData.servingTimes[t]?.end) errors.push(`Serving time required for ${t}.`);
     });
 
     if (errors.length > 0) {
       setCreateErrors(errors);
-      setCreateStep(5);
       return;
     }
 
     const newMeals: MealCard[] = createData.mealTypes.map((mealType) => {
       const servingTime = createData.servingTimes[mealType] ?? { start: "11:00", end: "14:00" };
-      const itemsForMeal = (createData.menuItems[mealType] || []).filter((it) => it.name.trim() !== "");
-      const choices = createData.choices.map((choice) => ({
+      const typePercs = createData.choicePercentagesByType[mealType];
+      const choices = createData.choices.map((choice, choiceIdx) => ({
         ...choice,
-        items: itemsForMeal,
+        percentage: choiceIdx === 0 ? (typePercs?.c1 ?? 60) : (typePercs?.c2 ?? 40),
+        items: (createData.choiceItems[choiceIdx as 0 | 1]?.[mealType] || []).filter((it) => it.name.trim() !== ""),
       }));
-      const specialMeals = createData.specialMeals
-        .filter((s) => s.enabled)
-        .map((meal) => ({ ...meal, items: meal.items.filter((it) => it.name.trim() !== "") }));
+      const specialMeals: SpecialMeal[] = (createData.specialMealsByType[mealType] || []).map((sel) => ({
+        type: sel.code,
+        portions: sel.portions,
+        items: sel.items || [],
+        enabled: true,
+      }));
+      const dessertItems = (createData.dessertByType[mealType] || []).filter((it) => it.name.trim() !== "");
+      const firstDessert = dessertItems[0] ?? { name: "", weight: 0, calories: 0 };
 
       const totalKcal = choices.reduce((sum, c) => sum + c.items.reduce((inner, it) => inner + (it.calories || 0), 0), 0) || 500;
 
@@ -446,7 +579,7 @@ export default function MealPlanning() {
         forType: createData.forType || "Passengers",
         choices,
         specialMeals,
-        dessert: createData.dessert,
+        dessert: firstDessert,
         servingTime,
         totalKcal,
         createdDate: new Date().toISOString().split('T')[0],
@@ -456,7 +589,6 @@ export default function MealPlanning() {
     setMeals((prev) => [...prev, ...newMeals]);
     toast.success("Meal configured successfully");
     setCreateModalOpen(false);
-    setCreateStep(1);
     setCreateErrors([]);
     resetCreateData(selectedDay);
   };
@@ -481,8 +613,14 @@ export default function MealPlanning() {
       forType: meal.forType,
       mealTypes: [meal.mealType],
       choices: meal.choices,
-      specialMeals: meal.specialMeals,
-      dessert: meal.dessert,
+      specialMealsByType: { [meal.mealType]: meal.specialMeals.filter((sm) => sm.enabled).map((sm) => ({ code: sm.type, portions: sm.portions, items: sm.items || [] })) },
+      choiceItems: [
+        { ...MEAL_TYPES.reduce((acc, t) => { acc[t] = [] as MealItem[]; return acc; }, {} as Record<string, MealItem[]>), [meal.mealType]: meal.choices[0]?.items ?? [] },
+        { ...MEAL_TYPES.reduce((acc, t) => { acc[t] = [] as MealItem[]; return acc; }, {} as Record<string, MealItem[]>), [meal.mealType]: meal.choices[1]?.items ?? [] },
+      ],
+      dessertByType: { [meal.mealType]: meal.dessert.name ? [meal.dessert] : [] },
+      dessertAllocationByType: { [meal.mealType]: meal.dessert.name ? [100] : [] },
+      choicePercentagesByType: { [meal.mealType]: { c1: meal.choices[0]?.percentage ?? 60, c2: meal.choices[1]?.percentage ?? 40 } },
       servingTimes: { [meal.mealType]: meal.servingTime },
     });
     setEditModalOpen(true);
@@ -537,177 +675,227 @@ export default function MealPlanning() {
                 <Plus className="h-4 w-4 mr-1" /> New Meal
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+            <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
               <DialogHeader>
                 <DialogTitle>Create New Meal Configuration</DialogTitle>
-                <div className="flex gap-2 mt-4">
-                  {[1, 2, 3, 4, 5].map((step) => (
-                    <div key={step} className="flex items-center">
-                      <div
-                        className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold ${
-                          createStep >= step
-                            ? "bg-primary text-primary-foreground"
-                            : "bg-muted text-muted-foreground"
-                        }`}
-                      >
-                        {step}
-                      </div>
-                      {step < 5 && <ChevronRight className="h-4 w-4 mx-1 text-muted-foreground" />}
-                    </div>
-                  ))}
-                </div>
               </DialogHeader>
 
-              <div className="space-y-4">
-                {createStep === 1 && (
-                  <div className="space-y-4">
-                    <div>
-                      <Label>Day</Label>
-                      <select
-                        value={createData.day}
-                        onChange={(e) => setCreateData({ ...createData, day: e.target.value })}
-                        className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                      >
-                        {DAYS.map((day) => (
-                          <option key={day} value={day}>
-                            {day}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <Label>Flight Type</Label>
-                      <div className="flex gap-3 mt-2">
-                        {["Domestic", "International", "Both"].map((type) => (
-                          <label key={type} className="flex items-center gap-2 cursor-pointer">
-                            <input
-                              type="radio"
-                              name="flightType"
-                              value={type}
-                              checked={createData.flightType.join(",") === (type === "Both" ? "Domestic,International" : type)}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                setCreateData({
-                                  ...createData,
-                                  flightType: val === "Both" ? ["Domestic", "International"] : [val],
-                                });
-                              }}
-                              className="h-4 w-4"
-                            />
-                            <span className="text-sm">{type}</span>
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div>
-                      <Label>For</Label>
-                      <div className="flex gap-3 mt-2">
-                        {["Passengers", "Crew", "Both"].map((type) => (
-                          <label key={type} className="flex items-center gap-2 cursor-pointer">
-                            <input
-                              type="radio"
-                              name="forType"
-                              value={type}
-                              checked={createData.forType === type}
-                              onChange={(e) => setCreateData({ ...createData, forType: e.target.value })}
-                              className="h-4 w-4"
-                            />
-                            <span className="text-sm">{type}</span>
-                          </label>
-                        ))}
-                      </div>
+              <div className="space-y-5">
+                {/* ── Basic Info ── */}
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <Label>Day</Label>
+                    <select
+                      value={createData.day}
+                      onChange={(e) => setCreateData({ ...createData, day: e.target.value })}
+                      className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                    >
+                      {DAYS.map((day) => (
+                        <option key={day} value={day}>{day}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <Label>Flight Type</Label>
+                    <div className="flex flex-col gap-1 mt-2">
+                      {["Domestic", "International", "Both"].map((type) => (
+                        <label key={type} className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="flightType"
+                            value={type}
+                            checked={createData.flightType.join(",") === (type === "Both" ? "Domestic,International" : type)}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setCreateData({ ...createData, flightType: val === "Both" ? ["Domestic", "International"] : [val] });
+                            }}
+                            className="h-4 w-4"
+                          />
+                          <span className="text-sm">{type}</span>
+                        </label>
+                      ))}
                     </div>
                   </div>
-                )}
+                  <div>
+                    <Label>For</Label>
+                    <div className="flex flex-col gap-1 mt-2">
+                      {["Passengers", "Crew", "Both"].map((type) => (
+                        <label key={type} className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="forType"
+                            value={type}
+                            checked={createData.forType === type}
+                            onChange={(e) => setCreateData({ ...createData, forType: e.target.value })}
+                            className="h-4 w-4"
+                          />
+                          <span className="text-sm">{type}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </div>
 
-                {createStep === 2 && (
-                  <div className="space-y-4">
-                    <div>
-                      <Label>Meal Type</Label>
-                      <div className="flex gap-2 mt-2">
-                        {MEAL_TYPES.map((type) => {
-                          const active = createData.mealTypes.includes(type);
-                          return (
-                            <button
-                              key={type}
-                              type="button"
-                              className={`rounded-full px-3 py-1 text-sm font-medium ${
-                                active ? "bg-primary text-primary-foreground" : "bg-muted/10"
-                              }`}
-                              onClick={() => {
-                                const exists = createData.mealTypes.includes(type);
-                                const newMealTypes = exists
-                                  ? createData.mealTypes.filter((t) => t !== type)
-                                  : [...createData.mealTypes, type];
-                                setCreateData({
-                                  ...createData,
-                                  mealTypes: newMealTypes,
-                                  servingTimes: {
-                                    ...createData.servingTimes,
-                                    [type]: createData.servingTimes[type] ?? (type === "Breakfast" ? { start: "07:00", end: "10:00" } : type === "Lunch" ? { start: "11:00", end: "14:00" } : type === "Snacks" ? { start: "14:00", end: "16:00" } : type === "Heavy Snacks" ? { start: "16:00", end: "19:00" } : { start: "19:00", end: "22:00" }),
-                                  },
-                                });
+                <div className="border-t" />
+
+                {/* ── Meal Configuration ── */}
+                <div>
+                  <div className="text-sm font-semibold mb-3">Meal Configuration</div>
+                  {/* ── Meal type toggle buttons ── */}
+                  <div className="flex flex-wrap gap-2 mb-4">
+                    {(["Breakfast", "Lunch", "Dinner", "Snacks", "Heavy Snacks"] as const).map((t) => {
+                      const isSelected = createData.mealTypes.includes(t);
+                      const isActive = activeMealTab === t;
+                      return (
+                        <button
+                          key={t}
+                          type="button"
+                          onClick={() => {
+                            if (!isSelected) {
+                              const copy = { ...createData };
+                              const seedRow = [{ name: "", weight: 0, calories: 0 }];
+                              copy.choiceItems = [
+                                { ...copy.choiceItems[0], [t]: copy.choiceItems[0][t]?.length ? copy.choiceItems[0][t] : seedRow },
+                                { ...copy.choiceItems[1], [t]: copy.choiceItems[1][t]?.length ? copy.choiceItems[1][t] : seedRow },
+                              ];
+                              copy.dessertByType = { ...copy.dessertByType, [t]: copy.dessertByType[t] ?? [] };
+                              copy.dessertAllocationByType = { ...copy.dessertAllocationByType, [t]: copy.dessertAllocationByType[t] ?? [] };
+                              copy.choicePercentagesByType = { ...copy.choicePercentagesByType, [t]: copy.choicePercentagesByType[t] ?? { c1: 60, c2: 40 } };
+                              copy.specialMealsByType = { ...copy.specialMealsByType, [t]: copy.specialMealsByType[t] ?? [] };
+                              copy.servingTimes = { ...copy.servingTimes, [t]: copy.servingTimes[t] ?? (t === "Breakfast" ? { start: "07:00", end: "10:00" } : t === "Lunch" ? { start: "11:00", end: "14:00" } : t === "Snacks" ? { start: "14:00", end: "16:00" } : t === "Heavy Snacks" ? { start: "16:00", end: "19:00" } : { start: "19:00", end: "22:00" }) };
+                              copy.mealTypes = [...copy.mealTypes, t];
+                              setCreateData(copy);
+                              setActiveMealTab(t);
+                            } else {
+                              setActiveMealTab(t);
+                            }
+                          }}
+                          className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${
+                            isSelected && isActive
+                              ? "bg-primary text-primary-foreground border-primary"
+                              : isSelected
+                              ? "bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
+                              : isActive
+                              ? "bg-muted border-border text-foreground"
+                              : "bg-background text-muted-foreground border-border hover:bg-muted"
+                          }`}
+                        >
+                          {t}
+                          {isSelected && (
+                            <span
+                              className="ml-0.5 text-base leading-none opacity-60 hover:opacity-100"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const newMealTypes = createData.mealTypes.filter((mt) => mt !== t);
+                                setCreateData({ ...createData, mealTypes: newMealTypes });
+                                setActiveMealTab(isActive ? (newMealTypes[0] ?? "Breakfast") : activeMealTab);
                               }}
                             >
-                              {type}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
+                              ×
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                    <div className="w-px bg-border mx-1 self-stretch" />
+                    {(["special-meals", "dessert"] as const).map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => setActiveMealTab(t)}
+                        className={`px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${
+                          activeMealTab === t
+                            ? "bg-primary text-primary-foreground border-primary"
+                            : "bg-background text-muted-foreground border-border hover:bg-muted"
+                        }`}
+                      >
+                        {t === "special-meals" ? "Special Meals" : "Dessert"}
+                      </button>
+                    ))}
+                  </div>
 
-                    {createData.mealTypes.map((type) => (
-                      <div key={type} className="rounded-lg border p-3">
-                        <div className="font-semibold">{type}</div>
-                        <div className="space-y-2 mt-2">
-                          <div className="flex gap-2 items-center text-xs font-semibold text-muted-foreground border-b pb-1">
-                            <div className="w-2/5">Name</div>
-                            <div className="w-1/5">Weight (g)</div>
-                            <div className="w-1/5">Kcal</div>
-                          </div>
-                          {(createData.menuItems[type] || []).map((item, idx) => (
-                            <div key={idx} className="flex gap-2 items-center">
+                  {/* ── Content panel for regular meal types ── */}
+                  {(["Breakfast", "Lunch", "Dinner", "Snacks", "Heavy Snacks"] as const).map((type) => {
+                    if (activeMealTab !== type) return null;
+                    const isIncluded = createData.mealTypes.includes(type);
+                    if (!isIncluded) {
+                      return (
+                        <div key={type} className="text-center py-12 border rounded-lg bg-muted/20 text-sm text-muted-foreground">
+                          Click <strong className="text-foreground">{type}</strong> above to include it in this meal plan
+                        </div>
+                      );
+                    }
+                    const activeItems = createData.choiceItems[activeChoiceForItems][type] || [];
+                    const percs = createData.choicePercentagesByType[type] ?? { c1: 60, c2: 40 };
+                    const totalPct = percs.c1 + percs.c2;
+                    return (
+                      <div key={type} className="space-y-4">
+                        {/* CHOICE 01 / 02 Radio */}
+                        <div className="flex gap-6">
+                          {([0, 1] as const).map((cIdx) => (
+                            <label key={cIdx} className="flex items-center gap-2 cursor-pointer">
                               <input
-                                type="text"
-                                placeholder="Item name"
+                                type="radio"
+                                name={`activeChoice-${type}`}
+                                checked={activeChoiceForItems === cIdx}
+                                onChange={() => setActiveChoiceForItems(cIdx)}
+                                className="h-4 w-4"
+                              />
+                              <span className="text-sm font-semibold">CHOICE {cIdx === 0 ? "01" : "02"}</span>
+                            </label>
+                          ))}
+                        </div>
+
+                        {/* Items for active choice */}
+                        <div className="rounded-lg border p-3">
+                          <div className="font-semibold text-sm mb-2">
+                            {type} — CHOICE {activeChoiceForItems === 0 ? "01" : "02"}
+                          </div>
+                          <div className="flex gap-2 items-center text-xs font-semibold text-muted-foreground border-b pb-1 mb-2">
+                            <div className="flex-1">Item</div>
+                            <div className="w-20 text-center">Weight (g)</div>
+                            <div className="w-16 text-center">Kcal</div>
+                            <div className="w-16" />
+                          </div>
+                          {activeItems.map((item, itemIdx) => (
+                            <div key={itemIdx} className="flex gap-2 items-center mb-2">
+                              <select
                                 value={item.name}
                                 onChange={(e) => {
+                                  const found = (FOOD_ITEMS[type] || []).find((fi) => fi.name === e.target.value);
                                   const copy = { ...createData };
-                                  copy.menuItems[type][idx].name = e.target.value;
+                                  const updated = copy.choiceItems[activeChoiceForItems][type].map((it, i) =>
+                                    i === itemIdx ? (found ? { name: found.name, weight: found.weight, calories: found.calories } : { name: "", weight: 0, calories: 0 }) : it
+                                  );
+                                  copy.choiceItems = [
+                                    activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
+                                    activeChoiceForItems === 1 ? { ...copy.choiceItems[1], [type]: updated } : copy.choiceItems[1],
+                                  ];
                                   setCreateData(copy);
                                 }}
-                                className="w-2/5 rounded border px-2 py-1"
-                              />
-                              <input
-                                type="number"
-                                placeholder="e.g. 180"
-                                value={item.weight}
-                                onChange={(e) => {
-                                  const copy = { ...createData };
-                                  copy.menuItems[type][idx].weight = Number(e.target.value);
-                                  setCreateData(copy);
-                                }}
-                                className="w-1/5 rounded border px-2 py-1"
-                              />
-                              <input
-                                type="number"
-                                placeholder="e.g. 350"
-                                value={item.calories}
-                                onChange={(e) => {
-                                  const copy = { ...createData };
-                                  copy.menuItems[type][idx].calories = Number(e.target.value);
-                                  setCreateData(copy);
-                                }}
-                                className="w-1/5 rounded border px-2 py-1"
-                              />
+                                className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
+                              >
+                                <option value="">Select item…</option>
+                                {(FOOD_ITEMS[type] || []).map((fi) => (
+                                  <option key={fi.name} value={fi.name}>{fi.name}</option>
+                                ))}
+                              </select>
+                              <div className="w-20 rounded border border-border bg-muted/30 px-2 py-1.5 text-sm text-center tabular-nums text-muted-foreground">
+                                {item.weight > 0 ? `${item.weight}g` : "—"}
+                              </div>
+                              <div className="w-16 rounded border border-border bg-muted/30 px-2 py-1.5 text-sm text-center tabular-nums text-muted-foreground">
+                                {item.calories > 0 ? item.calories : "—"}
+                              </div>
                               <button
                                 type="button"
-                                className="text-red-600 text-sm"
+                                className="w-16 text-right text-red-600 text-sm shrink-0"
                                 onClick={() => {
                                   const copy = { ...createData };
-                                  copy.menuItems[type] = copy.menuItems[type].filter((_, i) => i !== idx);
+                                  const updated = copy.choiceItems[activeChoiceForItems][type].filter((_, i) => i !== itemIdx);
+                                  copy.choiceItems = [
+                                    activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
+                                    activeChoiceForItems === 1 ? { ...copy.choiceItems[1], [type]: updated } : copy.choiceItems[1],
+                                  ];
                                   setCreateData(copy);
                                 }}
                               >
@@ -717,161 +905,194 @@ export default function MealPlanning() {
                           ))}
                           <button
                             type="button"
-                            className="text-blue-600 text-sm"
+                            className="text-blue-600 text-sm mt-1"
                             onClick={() => {
                               const copy = { ...createData };
-                              copy.menuItems[type] = [...(copy.menuItems[type] || []), { name: "", weight: 0, calories: 0 }];
+                              const existing = copy.choiceItems[activeChoiceForItems][type] || [];
+                              const updated = [...existing, { name: "", weight: 0, calories: 0 }];
+                              copy.choiceItems = [
+                                activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
+                                activeChoiceForItems === 1 ? { ...copy.choiceItems[1], [type]: updated } : copy.choiceItems[1],
+                              ];
                               setCreateData(copy);
                             }}
                           >
                             + Add Item
                           </button>
                         </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
 
-                {createStep === 3 && (
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <Label>Meal Choices</Label>
-                      <span className="text-xs text-muted-foreground">Total allocation: {totalChoicePercent}%</span>
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <Label>Choice 1 %</Label>
-                        <Input
-                          type="number"
-                          min={0}
-                          max={100}
-                          value={createData.choices[0].percentage}
-                          onChange={(e) => {
-                            const value = Number(e.target.value) || 0;
-                            setCreateData({
-                              ...createData,
-                              choices: [
-                                { ...createData.choices[0], percentage: value },
-                                { ...createData.choices[1], percentage: Math.max(0, 100 - value) },
-                              ],
-                            });
-                          }}
-                        />
-                      </div>
-                      <div>
-                        <Label>Choice 2 %</Label>
-                        <Input type="number" value={createData.choices[1].percentage} readOnly />
-                      </div>
-                    </div>
-                    {totalChoicePercent !== 100 && (
-                      <div className="text-sm text-destructive">Total choice percent must equal 100% before continuing.</div>
-                    )}
+                        {/* Both choices summary */}
+                        <div className="grid grid-cols-2 gap-3">
+                          {([0, 1] as const).map((cIdx) => {
+                            const summaryItems = (createData.choiceItems[cIdx][type] || []).filter((it) => it.name.trim());
+                            return (
+                              <div key={cIdx} className={`rounded-md border p-2.5 text-xs ${cIdx === 0 ? "border-blue-200 bg-blue-50/40" : "border-teal-200 bg-teal-50/40"}`}>
+                                <div className={`font-semibold mb-1.5 ${cIdx === 0 ? "text-blue-700" : "text-teal-700"}`}>
+                                  CHOICE {cIdx === 0 ? "01" : "02"}
+                                </div>
+                                {summaryItems.length === 0 ? (
+                                  <div className="text-muted-foreground italic">No items yet</div>
+                                ) : summaryItems.map((it, i) => (
+                                  <div key={i} className="py-0.5">
+                                    <span className="font-medium">{it.name}</span>
+                                    <span className="text-muted-foreground"> — {it.weight}g · {it.calories} kcal</span>
+                                  </div>
+                                ))}
+                              </div>
+                            );
+                          })}
+                        </div>
 
-                    <div className="space-y-3">
-                      <Label>Special Meals</Label>
-                      <div className="grid grid-cols-2 gap-2">
-                        {createData.specialMeals.map((meal, index) => (
-                          <div key={meal.type} className="rounded-lg border p-3">
-                            <label className="flex items-center gap-2">
-                              <input
-                                type="checkbox"
-                                checked={meal.enabled}
-                                onChange={(e) =>
-                                  setCreateData({
-                                    ...createData,
-                                    specialMeals: createData.specialMeals.map((item, i) =>
-                                      i === index ? { ...item, enabled: e.target.checked } : item,
-                                    ),
-                                  })
-                                }
-                                className="h-4 w-4"
+                        {/* Meal Percentage */}
+                        <div className="rounded-lg border p-3 space-y-2">
+                          <div className="font-semibold text-sm">Meal Percentage</div>
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <Label className="text-xs">Choice 01 %</Label>
+                              <Input
+                                type="number" min={0} max={100}
+                                value={percs.c1}
+                                onChange={(e) => {
+                                  const v = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                                  setCreateData({ ...createData, choicePercentagesByType: { ...createData.choicePercentagesByType, [type]: { c1: v, c2: 100 - v } } });
+                                }}
+                                className="mt-1 h-8"
                               />
-                              <span className="font-semibold">{meal.type}</span>
-                            </label>
-                            {meal.enabled && (
-                              <div className="mt-2 space-y-2">
-                                <div className="flex gap-2">
-                                  <div className="flex-1">
-                                    <Label>Portions</Label>
-                                    <Input
-                                      type="number"
-                                      value={meal.portions as number}
-                                      onChange={(e) =>
-                                        setCreateData({
-                                          ...createData,
-                                          specialMeals: createData.specialMeals.map((item, i) =>
-                                            i === index ? { ...item, portions: Number(e.target.value) } : item,
-                                          ),
-                                        })
-                                      }
-                                    />
-                                  </div>
-                                  <div className="flex-1">
-                                    <Label>As per demand</Label>
-                                    <input
-                                      type="checkbox"
-                                      checked={meal.portions === "As per demand" || false}
-                                      onChange={(e) =>
-                                        setCreateData({
-                                          ...createData,
-                                          specialMeals: createData.specialMeals.map((item, i) =>
-                                            i === index
-                                              ? { ...item, portions: e.target.checked ? "As per demand" : 0 }
-                                              : item,
-                                          ),
-                                        })
-                                      }
-                                      className="h-4 w-4 mt-3"
-                                    />
-                                  </div>
-                                </div>
+                            </div>
+                            <div>
+                              <Label className="text-xs">Choice 02 % (auto)</Label>
+                              <Input type="number" value={percs.c2} readOnly className="mt-1 h-8 bg-muted/40" />
+                            </div>
+                          </div>
+                          {totalPct !== 100 && (
+                            <div className="text-xs text-destructive">Must total 100%. Currently: {totalPct}%</div>
+                          )}
+                        </div>
 
-                                <div className="flex gap-2 items-center text-xs font-semibold text-muted-foreground border-b pb-1 mt-1">
-                                  <div className="w-2/5">Name</div>
-                                  <div className="w-1/5">Weight (g)</div>
-                                  <div className="w-1/5">Kcal</div>
+                        {/* Serving Time */}
+                        <div className="rounded-lg border p-3 space-y-2">
+                          <div className="font-semibold text-sm">Serving Time</div>
+                          <div className="flex gap-3 items-center">
+                            <Label className="text-xs shrink-0">Start</Label>
+                            <Input
+                              type="time"
+                              value={createData.servingTimes[type]?.start ?? (type === "Breakfast" ? "07:00" : type === "Lunch" ? "11:00" : type === "Snacks" ? "14:00" : type === "Heavy Snacks" ? "16:00" : "19:00")}
+                              onChange={(e) => setCreateData({ ...createData, servingTimes: { ...createData.servingTimes, [type]: { ...(createData.servingTimes[type] || {}), start: e.target.value } } })}
+                              className="h-8 w-32"
+                            />
+                            <Label className="text-xs shrink-0">End</Label>
+                            <Input
+                              type="time"
+                              value={createData.servingTimes[type]?.end ?? (type === "Breakfast" ? "10:00" : type === "Lunch" ? "14:00" : type === "Snacks" ? "16:00" : type === "Heavy Snacks" ? "19:00" : "22:00")}
+                              onChange={(e) => setCreateData({ ...createData, servingTimes: { ...createData.servingTimes, [type]: { ...(createData.servingTimes[type] || {}), end: e.target.value } } })}
+                              className="h-8 w-32"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* ── Special Meals Panel ── */}
+                  {activeMealTab === "special-meals" && (
+                    <div className="space-y-3">
+                      {createData.mealTypes.length === 0 ? (
+                        <div className="text-sm text-muted-foreground text-center py-8 border rounded-lg bg-muted/20">
+                          Enable meal types first to configure special meals
+                        </div>
+                      ) : (
+                        createData.mealTypes.map((type) => (
+                          <div key={type} className="rounded-lg border p-3 space-y-2">
+                            <div className="font-semibold text-sm border-b pb-2">{type}</div>
+
+                            {(createData.specialMealsByType[type] || []).map((sel, smIdx) => (
+                              <div key={sel.code} className="rounded-lg border border-purple-200 p-3 space-y-2 bg-purple-50/40">
+                                <div className="flex items-start justify-between">
+                                  <div className="space-y-1">
+                                    <div>
+                                      <span className="text-sm font-semibold text-purple-800">{sel.code}</span>
+                                      <span className="text-xs text-muted-foreground ml-2">— {SPECIAL_MEAL_INFO[sel.code]?.label}</span>
+                                    </div>
+                                    <div className="flex items-center gap-2 text-xs">
+                                      <span className="text-muted-foreground">Portions:</span>
+                                      {sel.portions === "As per demand" ? (
+                                        <span className="font-medium">As Per Demand</span>
+                                      ) : (
+                                        <Input
+                                          type="number"
+                                          min={1}
+                                          value={sel.portions as number}
+                                          onChange={(e) => {
+                                            const updatedSMs = (createData.specialMealsByType[type] || []).map((sm, si) =>
+                                              si === smIdx ? { ...sm, portions: Number(e.target.value) } : sm
+                                            );
+                                            setCreateData({ ...createData, specialMealsByType: { ...createData.specialMealsByType, [type]: updatedSMs } });
+                                          }}
+                                          className="h-6 w-16 text-xs"
+                                        />
+                                      )}
+                                      <label className="flex items-center gap-1 cursor-pointer">
+                                        <input
+                                          type="checkbox"
+                                          checked={sel.portions === "As per demand"}
+                                          onChange={(e) => {
+                                            const updatedSMs = (createData.specialMealsByType[type] || []).map((sm, si) =>
+                                              si === smIdx ? { ...sm, portions: e.target.checked ? "As per demand" : 1 } : sm
+                                            );
+                                            setCreateData({ ...createData, specialMealsByType: { ...createData.specialMealsByType, [type]: updatedSMs } });
+                                          }}
+                                          className="h-3 w-3"
+                                        />
+                                        <span>As Per Demand</span>
+                                      </label>
+                                    </div>
+                                  </div>
+                                  <button type="button" className="text-red-500 text-xs hover:text-red-700"
+                                    onClick={() => setCreateData({ ...createData, specialMealsByType: { ...createData.specialMealsByType, [type]: (createData.specialMealsByType[type] || []).filter((_, i) => i !== smIdx) } })}>
+                                    × Remove
+                                  </button>
                                 </div>
-                                {(meal.items || []).map((it, idx) => (
-                                  <div key={idx} className="flex gap-2 items-center">
-                                    <input
-                                      type="text"
-                                      placeholder="Item name"
-                                      value={it.name}
+                                <div className="flex gap-2 items-center text-xs font-semibold text-muted-foreground border-b pb-1">
+                                  <div className="flex-1">Item</div>
+                                  <div className="w-20 text-center">Weight (g)</div>
+                                  <div className="w-16 text-center">Kcal</div>
+                                  <div className="w-16" />
+                                </div>
+                                {(sel.items || []).map((item, itemIdx) => (
+                                  <div key={itemIdx} className="flex gap-2 items-center">
+                                    <select
+                                      value={item.name}
                                       onChange={(e) => {
+                                        const found = (FOOD_ITEMS[type] || []).find((fi) => fi.name === e.target.value);
                                         const copy = { ...createData };
-                                        copy.specialMeals[index].items[idx].name = e.target.value;
+                                        const updatedSMs = (copy.specialMealsByType[type] || []).map((sm, si) =>
+                                          si === smIdx ? { ...sm, items: (sm.items || []).map((it, ii) => ii === itemIdx ? (found ? { name: found.name, weight: found.weight, calories: found.calories } : { name: "", weight: 0, calories: 0 }) : it) } : sm
+                                        );
+                                        copy.specialMealsByType = { ...copy.specialMealsByType, [type]: updatedSMs };
                                         setCreateData(copy);
                                       }}
-                                      className="w-2/5 rounded border px-2 py-1"
-                                    />
-                                    <input
-                                      type="number"
-                                      placeholder="e.g. 180"
-                                      value={it.weight}
-                                      onChange={(e) => {
-                                        const copy = { ...createData };
-                                        copy.specialMeals[index].items[idx].weight = Number(e.target.value);
-                                        setCreateData(copy);
-                                      }}
-                                      className="w-1/5 rounded border px-2 py-1"
-                                    />
-                                    <input
-                                      type="number"
-                                      placeholder="e.g. 350"
-                                      value={it.calories}
-                                      onChange={(e) => {
-                                        const copy = { ...createData };
-                                        copy.specialMeals[index].items[idx].calories = Number(e.target.value);
-                                        setCreateData(copy);
-                                      }}
-                                      className="w-1/5 rounded border px-2 py-1"
-                                    />
+                                      className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
+                                    >
+                                      <option value="">Select item…</option>
+                                      {(FOOD_ITEMS[type] || []).map((fi) => (
+                                        <option key={fi.name} value={fi.name}>{fi.name}</option>
+                                      ))}
+                                    </select>
+                                    <div className="w-20 rounded border border-border bg-muted/30 px-2 py-1.5 text-sm text-center tabular-nums text-muted-foreground">
+                                      {item.weight > 0 ? `${item.weight}g` : "—"}
+                                    </div>
+                                    <div className="w-16 rounded border border-border bg-muted/30 px-2 py-1.5 text-sm text-center tabular-nums text-muted-foreground">
+                                      {item.calories > 0 ? item.calories : "—"}
+                                    </div>
                                     <button
                                       type="button"
-                                      className="text-red-600 text-sm"
+                                      className="w-16 text-right text-red-600 text-sm shrink-0"
                                       onClick={() => {
                                         const copy = { ...createData };
-                                        copy.specialMeals[index].items = copy.specialMeals[index].items.filter((_, i) => i !== idx);
+                                        const updatedSMs = (copy.specialMealsByType[type] || []).map((sm, si) =>
+                                          si === smIdx ? { ...sm, items: (sm.items || []).filter((_, ii) => ii !== itemIdx) } : sm
+                                        );
+                                        copy.specialMealsByType = { ...copy.specialMealsByType, [type]: updatedSMs };
                                         setCreateData(copy);
                                       }}
                                     >
@@ -884,142 +1105,392 @@ export default function MealPlanning() {
                                   className="text-blue-600 text-sm"
                                   onClick={() => {
                                     const copy = { ...createData };
-                                    copy.specialMeals[index].items = [...(copy.specialMeals[index].items || []), { name: "", weight: 0, calories: 0 }];
+                                    const updatedSMs = (copy.specialMealsByType[type] || []).map((sm, si) =>
+                                      si === smIdx ? { ...sm, items: [...(sm.items || []), { name: "", weight: 0, calories: 0 }] } : sm
+                                    );
+                                    copy.specialMealsByType = { ...copy.specialMealsByType, [type]: updatedSMs };
                                     setCreateData(copy);
                                   }}
                                 >
                                   + Add Item
                                 </button>
                               </div>
+                            ))}
+
+                            {pendingSpecialMeal !== null && pendingSpecialMealForType === type ? (
+                              <div className="border rounded-lg p-3 space-y-3 bg-muted/20">
+                                <div>
+                                  <Label className="text-xs">Select Special Meal</Label>
+                                  <select
+                                    value={pendingSpecialMeal.code}
+                                    onChange={(e) => setPendingSpecialMeal({ ...pendingSpecialMeal, code: e.target.value })}
+                                    className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 text-sm"
+                                  >
+                                    <option value="">Choose special meal type…</option>
+                                    {Object.values(SPECIAL_MEAL_INFO)
+                                      .filter((info) => !(createData.specialMealsByType[type] || []).some((s) => s.code === info.code))
+                                      .map((info) => (
+                                        <option key={info.code} value={info.code}>{info.code} — {info.label}</option>
+                                      ))}
+                                  </select>
+                                </div>
+                                {pendingSpecialMeal.code && SPECIAL_MEAL_INFO[pendingSpecialMeal.code] && (
+                                  <>
+                                    <div className="text-xs italic px-2 py-1.5 bg-blue-50 rounded border border-blue-100 text-blue-800">
+                                      {SPECIAL_MEAL_INFO[pendingSpecialMeal.code].note}
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-3 text-xs">
+                                      <div>
+                                        <div className="font-semibold text-green-700 mb-1">✓ Allowed</div>
+                                        <ul className="space-y-0.5">
+                                          {SPECIAL_MEAL_INFO[pendingSpecialMeal.code].allowed.map((itm) => (
+                                            <li key={itm} className="text-green-700">• {itm}</li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                      <div>
+                                        <div className="font-semibold text-red-700 mb-1">✗ Not Allowed</div>
+                                        <ul className="space-y-0.5">
+                                          {SPECIAL_MEAL_INFO[pendingSpecialMeal.code].notAllowed.map((itm) => (
+                                            <li key={itm} className="text-red-600">• {itm}</li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    </div>
+                                    <div>
+                                      <Label className="text-xs">Number of Portions</Label>
+                                      <div className="flex items-center gap-3 mt-1">
+                                        <Input
+                                          type="number"
+                                          min={1}
+                                          value={pendingSpecialMeal.portions === "As per demand" ? "" : pendingSpecialMeal.portions as number}
+                                          onChange={(e) => setPendingSpecialMeal({ ...pendingSpecialMeal, portions: Number(e.target.value) })}
+                                          className="h-8 text-sm w-28"
+                                          disabled={pendingSpecialMeal.portions === "As per demand"}
+                                          placeholder="Qty"
+                                        />
+                                        <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+                                          <input
+                                            type="checkbox"
+                                            checked={pendingSpecialMeal.portions === "As per demand"}
+                                            onChange={(e) => setPendingSpecialMeal({ ...pendingSpecialMeal, portions: e.target.checked ? "As per demand" : 1 })}
+                                            className="h-3.5 w-3.5"
+                                          />
+                                          As Per Demand
+                                        </label>
+                                      </div>
+                                    </div>
+                                    <div>
+                                      <Label className="text-xs mb-2 block">Items</Label>
+                                      <div className="flex gap-2 items-center text-xs font-semibold text-muted-foreground border-b pb-1 mb-2">
+                                        <div className="flex-1">Item</div>
+                                        <div className="w-20 text-center">Weight (g)</div>
+                                        <div className="w-16 text-center">Kcal</div>
+                                        <div className="w-16" />
+                                      </div>
+                                      {(pendingSpecialMeal.items || []).map((item, itemIdx) => (
+                                        <div key={itemIdx} className="flex gap-2 items-center mb-2">
+                                          <select
+                                            value={item.name}
+                                            onChange={(e) => {
+                                              const found = (FOOD_ITEMS[type] || []).find((fi) => fi.name === e.target.value);
+                                              setPendingSpecialMeal({
+                                                ...pendingSpecialMeal,
+                                                items: (pendingSpecialMeal.items || []).map((it, ii) =>
+                                                  ii === itemIdx ? (found ? { name: found.name, weight: found.weight, calories: found.calories } : { name: "", weight: 0, calories: 0 }) : it
+                                                ),
+                                              });
+                                            }}
+                                            className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
+                                          >
+                                            <option value="">Select item…</option>
+                                            {(FOOD_ITEMS[type] || []).map((fi) => (
+                                              <option key={fi.name} value={fi.name}>{fi.name}</option>
+                                            ))}
+                                          </select>
+                                          <div className="w-20 rounded border border-border bg-muted/30 px-2 py-1.5 text-sm text-center tabular-nums text-muted-foreground">
+                                            {item.weight > 0 ? `${item.weight}g` : "—"}
+                                          </div>
+                                          <div className="w-16 rounded border border-border bg-muted/30 px-2 py-1.5 text-sm text-center tabular-nums text-muted-foreground">
+                                            {item.calories > 0 ? item.calories : "—"}
+                                          </div>
+                                          <button
+                                            type="button"
+                                            className="w-16 text-right text-red-600 text-sm shrink-0"
+                                            onClick={() => setPendingSpecialMeal({ ...pendingSpecialMeal, items: (pendingSpecialMeal.items || []).filter((_, ii) => ii !== itemIdx) })}
+                                          >
+                                            × Remove
+                                          </button>
+                                        </div>
+                                      ))}
+                                      <button
+                                        type="button"
+                                        className="text-blue-600 text-sm"
+                                        onClick={() => setPendingSpecialMeal({ ...pendingSpecialMeal, items: [...(pendingSpecialMeal.items || []), { name: "", weight: 0, calories: 0 }] })}
+                                      >
+                                        + Add Item
+                                      </button>
+                                    </div>
+                                    <div className="flex gap-2 justify-end pt-2">
+                                      <Button type="button" size="sm" className="h-8"
+                                        onClick={() => {
+                                          if (!pendingSpecialMeal.code) return;
+                                          setCreateData({ ...createData, specialMealsByType: { ...createData.specialMealsByType, [type]: [...(createData.specialMealsByType[type] || []), { code: pendingSpecialMeal.code, portions: pendingSpecialMeal.portions, items: pendingSpecialMeal.items || [] }] } });
+                                          setPendingSpecialMeal(null);
+                                          setPendingSpecialMealForType(null);
+                                        }}>
+                                        Done
+                                      </Button>
+                                      <Button type="button" variant="outline" size="sm" className="h-8"
+                                        onClick={() => { setPendingSpecialMeal(null); setPendingSpecialMealForType(null); }}>
+                                        Cancel
+                                      </Button>
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            ) : (
+                              (pendingSpecialMeal === null || pendingSpecialMealForType !== type) && (
+                                <button type="button" className="text-blue-600 text-sm"
+                                  onClick={() => { setPendingSpecialMeal({ code: "", portions: 1, items: [] }); setPendingSpecialMealForType(type); }}>
+                                  + Add Special Meal
+                                </button>
+                              )
                             )}
                           </div>
-                        ))}
-                      </div>
+                        ))
+                      )}
                     </div>
+                  )}
 
-                    <div className="grid grid-cols-3 gap-4">
-                      <div>
-                        <Label>Dessert Name</Label>
-                        <Input
-                          value={createData.dessert.name}
-                          onChange={(e) => setCreateData({ ...createData, dessert: { ...createData.dessert, name: e.target.value } })}
-                        />
-                      </div>
-                      <div>
-                        <Label>Weight g</Label>
-                        <Input
-                          type="number"
-                          value={createData.dessert.weight}
-                          onChange={(e) => setCreateData({ ...createData, dessert: { ...createData.dessert, weight: Number(e.target.value) } })}
-                        />
-                      </div>
-                      <div>
-                        <Label>kcal</Label>
-                        <Input
-                          type="number"
-                          value={createData.dessert.calories}
-                          onChange={(e) => setCreateData({ ...createData, dessert: { ...createData.dessert, calories: Number(e.target.value) } })}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {createStep === 4 && (
-                  <div className="space-y-4">
-                    <Label>Serving Time</Label>
+                  {/* ── Dessert Panel ── */}
+                  {activeMealTab === "dessert" && (
                     <div className="space-y-3">
-                      {createData.mealTypes.map((type) => (
-                        <div key={type} className="grid grid-cols-3 gap-3 items-center">
-                          <div className="font-medium">{type} serving window</div>
-                          <div>
-                            <Input
-                              type="time"
-                              value={createData.servingTimes[type]?.start ?? (type === "Breakfast" ? "07:00" : type === "Lunch" ? "11:00" : type === "Snacks" ? "14:00" : type === "Heavy Snacks" ? "16:00" : "19:00")}
-                              onChange={(e) =>
-                                setCreateData({
-                                  ...createData,
-                                  servingTimes: {
-                                    ...createData.servingTimes,
-                                    [type]: { ...(createData.servingTimes[type] || {}), start: e.target.value },
-                                  },
-                                })
-                              }
-                            />
-                          </div>
-                          <div>
-                            <Input
-                              type="time"
-                              value={createData.servingTimes[type]?.end ?? (type === "Breakfast" ? "10:00" : type === "Lunch" ? "14:00" : type === "Snacks" ? "16:00" : type === "Heavy Snacks" ? "19:00" : "22:00")}
-                              onChange={(e) =>
-                                setCreateData({
-                                  ...createData,
-                                  servingTimes: {
-                                    ...createData.servingTimes,
-                                    [type]: { ...(createData.servingTimes[type] || {}), end: e.target.value },
-                                  },
-                                })
-                              }
-                            />
-                          </div>
+                      {createData.mealTypes.length === 0 ? (
+                        <div className="text-sm text-muted-foreground text-center py-4 border rounded-lg bg-muted/20">
+                          Enable meal types to configure dessert
                         </div>
-                      ))}
+                      ) : (
+                        createData.mealTypes.map((type) => {
+                          const dessertItems = createData.dessertByType[type] || [];
+                          return (
+                            <div key={type} className="rounded-lg border p-3 space-y-2">
+                              <div className="font-semibold text-sm">{type}</div>
+                              {dessertItems.map((dItem, idx) => (
+                                <div key={idx} className="flex gap-2 items-center">
+                                  <select
+                                    value={dItem.name}
+                                    onChange={(e) => {
+                                      const found = DESSERT_ITEMS.find((d) => d.name === e.target.value);
+                                      const copy = { ...createData };
+                                      copy.dessertByType = {
+                                        ...copy.dessertByType,
+                                        [type]: copy.dessertByType[type].map((it, i) =>
+                                          i === idx ? (found ? { name: found.name, weight: found.weight, calories: found.calories } : { name: "", weight: 0, calories: 0 }) : it
+                                        ),
+                                      };
+                                      setCreateData(copy);
+                                    }}
+                                    className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
+                                  >
+                                    <option value="">Select dessert…</option>
+                                    {DESSERT_ITEMS.map((d) => (
+                                      <option key={d.name} value={d.name}>{d.name}</option>
+                                    ))}
+                                  </select>
+                                  {dItem.name && (
+                                    <div className="text-xs text-muted-foreground whitespace-nowrap">
+                                      {dItem.weight}g · {dItem.calories} kcal
+                                    </div>
+                                  )}
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <Input
+                                      type="number"
+                                      min={1}
+                                      max={100}
+                                      value={(createData.dessertAllocationByType[type] || [])[idx] ?? 100}
+                                      onChange={(e) => {
+                                        const copy = { ...createData };
+                                        const arr = [...(copy.dessertAllocationByType[type] || [])];
+                                        arr[idx] = Number(e.target.value);
+                                        copy.dessertAllocationByType = { ...copy.dessertAllocationByType, [type]: arr };
+                                        setCreateData(copy);
+                                      }}
+                                      className="w-16 h-7 text-xs"
+                                    />
+                                    <span className="text-xs text-muted-foreground">%</span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="text-red-500 text-sm shrink-0"
+                                    onClick={() => {
+                                      const copy = { ...createData };
+                                      copy.dessertByType = { ...copy.dessertByType, [type]: copy.dessertByType[type].filter((_, i) => i !== idx) };
+                                      copy.dessertAllocationByType = { ...copy.dessertAllocationByType, [type]: (copy.dessertAllocationByType[type] || []).filter((_, i) => i !== idx) };
+                                      setCreateData(copy);
+                                    }}
+                                  >
+                                    × Remove
+                                  </button>
+                                </div>
+                              ))}
+                              <button
+                                type="button"
+                                className="text-blue-600 text-sm"
+                                onClick={() => {
+                                  const copy = { ...createData };
+                                  copy.dessertByType = { ...copy.dessertByType, [type]: [...(copy.dessertByType[type] || []), { name: "", weight: 0, calories: 0 }] };
+                                  copy.dessertAllocationByType = { ...copy.dessertAllocationByType, [type]: [...(copy.dessertAllocationByType[type] || []), 100] };
+                                  setCreateData(copy);
+                                }}
+                              >
+                                + Add Item
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
                     </div>
-                  </div>
-                )}
-
-                {createStep === 5 && (
-                  <div className="space-y-3 p-4 bg-muted/50 rounded-lg border border-border">
-                    <h4 className="font-semibold">Review & Save</h4>
-                    {createErrors.length > 0 && (
-                      <div className="text-sm text-destructive">
-                        {createErrors.map((e, i) => (
-                          <div key={i}>• {e}</div>
-                        ))}
-                      </div>
-                    )}
-                    <div className="text-sm space-y-1">
-                      <div>
-                        <span className="font-medium">Day:</span> {createData.day}
-                      </div>
-                      <div>
-                        <span className="font-medium">Flight Type:</span> {createData.flightType.join(", ")}
-                      </div>
-                      <div>
-                        <span className="font-medium">For:</span> {createData.forType}
-                      </div>
-                      <div>
-                        <span className="font-medium">Meal Types:</span> {createData.mealTypes.join(", ")}
-                      </div>
-                      <div>
-                        <span className="font-medium">Meal Choices:</span> {createData.choices.map((c) => `${c.label} ${c.percentage}%`).join(", ")}
-                      </div>
-                    </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
 
+              {createErrors.length > 0 && (
+                <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive space-y-0.5 mt-2">
+                  {createErrors.map((e, i) => <div key={i}>• {e}</div>)}
+                </div>
+              )}
+
               <DialogFooter>
-                {createStep > 1 && (
-                  <Button variant="outline" onClick={() => setCreateStep(createStep - 1)}>
-                    Back
-                  </Button>
-                )}
-                {createStep < 5 && (
-                  <Button onClick={() => setCreateStep(createStep + 1)} disabled={!stepValid[createStep]}>
-                    Next
-                  </Button>
-                )}
-                {createStep === 5 && (
-                  <Button onClick={handleCreateSave}>
-                    Save Meal Configuration
-                  </Button>
-                )}
+                <Button variant="outline" onClick={() => setPreviewOpen(true)}>Preview</Button>
+                <Button onClick={handleCreateSave}>Save Meal Configuration</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
         }
       />
+
+      {/* Preview Modal */}
+      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+        <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Meal Configuration Preview</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-6">
+            {createData.mealTypes.length === 0 ? (
+              <div className="text-center text-muted-foreground py-8">No meal types selected yet.</div>
+            ) : (
+              createData.mealTypes.map((mealType) => (
+                <div key={mealType} className="space-y-3">
+                  <div className="text-base font-semibold border-b pb-2">{mealType}</div>
+                  <div className="flex gap-3 flex-wrap">
+                    {/* CHOICE 1 */}
+                    {(() => {
+                      const items1 = (createData.choiceItems[0][mealType] || []).filter((it) => it.name.trim());
+                      const c1pct = createData.choicePercentagesByType[mealType]?.c1 ?? 60;
+                      return (
+                        <div className="rounded-lg border border-blue-200 w-52 shrink-0">
+                          <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-blue-100 text-blue-800">
+                            CHOICE 1 — {c1pct}%
+                          </div>
+                          <div className="p-3 space-y-1">
+                            {items1.length === 0 ? (
+                              <div className="text-xs text-muted-foreground italic">No items configured</div>
+                            ) : items1.map((it, i) => (
+                              <div key={i} className="text-xs">
+                                <span className="font-medium">{it.name}</span>
+                                {it.weight > 0 && <span className="text-muted-foreground"> – {it.weight}g</span>}
+                                {it.calories > 0 && <span className="text-muted-foreground"> · {it.calories} kcal</span>}
+                              </div>
+                            ))}
+                            {items1.length > 0 && (
+                              <div className="text-xs font-semibold border-t pt-1 mt-1">
+                                Total: {items1.reduce((s, it) => s + (it.calories || 0), 0)} kcal
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* CHOICE 2 */}
+                    {(() => {
+                      const items2 = (createData.choiceItems[1][mealType] || []).filter((it) => it.name.trim());
+                      const c2pct = createData.choicePercentagesByType[mealType]?.c2 ?? 40;
+                      return (
+                        <div className="rounded-lg border border-teal-200 w-52 shrink-0">
+                          <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-teal-100 text-teal-800">
+                            CHOICE 2 — {c2pct}%
+                          </div>
+                          <div className="p-3 space-y-1">
+                            {items2.length === 0 ? (
+                              <div className="text-xs text-muted-foreground italic">No items configured</div>
+                            ) : items2.map((it, i) => (
+                              <div key={i} className="text-xs">
+                                <span className="font-medium">{it.name}</span>
+                                {it.weight > 0 && <span className="text-muted-foreground"> – {it.weight}g</span>}
+                                {it.calories > 0 && <span className="text-muted-foreground"> · {it.calories} kcal</span>}
+                              </div>
+                            ))}
+                            {items2.length > 0 && (
+                              <div className="text-xs font-semibold border-t pt-1 mt-1">
+                                Total: {items2.reduce((s, it) => s + (it.calories || 0), 0)} kcal
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Special meal cards */}
+                    {(createData.specialMealsByType[mealType] || []).map((sel) => (
+                      <div key={sel.code} className="rounded-lg border border-purple-200 w-52 shrink-0">
+                        <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-purple-100 text-purple-800">
+                          {sel.code} — {sel.portions} portion{sel.portions !== 1 ? "s" : ""}
+                        </div>
+                        <div className="p-3 space-y-1">
+                          <div className="text-xs font-medium">{SPECIAL_MEAL_INFO[sel.code]?.label}</div>
+                          <div className="text-xs text-muted-foreground italic">{SPECIAL_MEAL_INFO[sel.code]?.note}</div>
+                        </div>
+                      </div>
+                    ))}
+
+                    {/* Dessert card */}
+                    {(() => {
+                      const allDItems = createData.dessertByType[mealType] || [];
+                      const dItems = allDItems.map((it, i) => ({ ...it, allocation: (createData.dessertAllocationByType[mealType] || [])[i] ?? 100 })).filter((it) => it.name.trim());
+                      if (dItems.length === 0) return null;
+                      return (
+                        <div className="rounded-lg border border-pink-200 w-52 shrink-0">
+                          <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-pink-100 text-pink-800">
+                            Dessert
+                          </div>
+                          <div className="p-3 space-y-1">
+                            {dItems.map((it, i) => (
+                              <div key={i} className="text-xs">
+                                <span className="font-medium">{it.name}</span>
+                                {it.weight > 0 && <span className="text-muted-foreground"> – {it.weight}g</span>}
+                                {it.calories > 0 && <span className="text-muted-foreground"> · {it.calories} kcal</span>}
+                                <span className="text-muted-foreground"> [{it.allocation}%]</span>
+                              </div>
+                            ))}
+                            <div className="text-xs font-semibold border-t pt-1 mt-1">
+                              Total: {dItems.reduce((s, it) => s + (it.calories || 0), 0)} kcal
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setPreviewOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* GM Order Banner - State A: Pending */}
       {forwardCycle === "pending" && (
@@ -1498,7 +1969,7 @@ export default function MealPlanning() {
                             size="sm"
                             variant="outline"
                             className="h-7 text-xs"
-                            onClick={() => { setSelectedDay(pendingDay); setDaySelectionOpen(false); setCreateModalOpen(true); setCreateStep(1); }}
+                            onClick={() => { setSelectedDay(pendingDay); setDaySelectionOpen(false); setCreateModalOpen(true); }}
                           >
                             + Add New
                           </Button>
@@ -1523,7 +1994,7 @@ export default function MealPlanning() {
                             size="sm"
                             variant="outline"
                             className="h-8 text-xs self-center"
-                            onClick={() => { setSelectedDay(pendingDay); setDaySelectionOpen(false); setCreateModalOpen(true); setCreateStep(1); }}
+                            onClick={() => { setSelectedDay(pendingDay); setDaySelectionOpen(false); setCreateModalOpen(true); }}
                           >
                             + Add New
                           </Button>

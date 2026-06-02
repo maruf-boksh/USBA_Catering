@@ -347,7 +347,12 @@ export const AppSidebar = memo(function AppSidebar({
         )}
 
         <div className={`sb-foot${collapsed ? ' is-collapsed' : ''}`}>
-          {!collapsed && <span className="sb-foot-copy">Harvest Catering · 2026</span>}
+          {!collapsed && (
+            <span className="sb-foot-copy">
+              Harvest Catering · 2026
+              <span className="sb-foot-sub">powered by US-Bangla Airlines</span>
+            </span>
+          )}
           <Tooltip title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'} placement="right">
             <Button
               type="text"

@@ -16,13 +16,14 @@ import {
 } from "@/components/ui/dialog";
 import {
   BadgeCheck, Check, X as XIcon, Clock, ShieldCheck, Search,
-  FileText, ShoppingCart, Truck, ArrowLeftRight, Layers, UserCog,
+  FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, Layers, UserCog,
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
 type Category =
+  | "Demand Request"
   | "Purchase Requisition"
   | "Purchase Order"
   | "Goods Receipt"
@@ -33,6 +34,7 @@ type Category =
   | "User Account";
 
 const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
+  { key: "Demand Request",       label: "Demand Req.",        icon: FileSearch      },
   { key: "Purchase Requisition", label: "Purchase Req.",      icon: FileText        },
   { key: "Purchase Order",       label: "Purchase Orders",    icon: ShoppingCart    },
   { key: "Goods Receipt",        label: "Goods Receipts",     icon: Truck           },
@@ -82,7 +84,7 @@ const SEED: ApprovalItem[] = [
   { id: "AP-1401", category: "Stock Adjustment",     refId: "SA-2026-019", title: "Spice Mix variance",                      requestedBy: "F. Begum",   requestedAt: "2026-05-19 07:55", summary: "Physical count -2.4 Kg vs system — wastage write-off",    status: "Pending" },
 
   // Production Order
-  { id: "AP-1501", category: "Production Order",     refId: "PO-2026-000031", title: "Chicken Biryani batch",                 requestedBy: "N. Hossen",  requestedAt: "2026-05-19 13:15", summary: "280 portions — ready for QC sign-off",                    itemsCount: 1, status: "Pending" },
+  { id: "AP-1501", category: "Production Order",     refId: "PRO-2026-000031", title: "Chicken Biryani batch",                 requestedBy: "N. Hossen",  requestedAt: "2026-05-19 13:15", summary: "280 portions — ready for QC sign-off",                    itemsCount: 1, status: "Pending" },
 
   // Bill of Materials
   { id: "AP-1601", category: "Bill of Materials",    refId: "BOM-007",     title: "New BOM — Vegetable Cutlet",              requestedBy: "S. Ahmed",   requestedAt: "2026-05-18 16:40", summary: "Draft v1.0 with 8 materials, ready to publish",          itemsCount: 8, status: "Pending" },
@@ -110,11 +112,41 @@ export default function ApprovalManagementPage() {
   const today = new Date().toISOString().slice(0, 10);
   const stamp = () => new Date().toISOString().slice(0, 16).replace("T", " ");
 
+  // Project workflow-store demands into ApprovalItem shape so the same list,
+  // counts, filtering, and dialogs work uniformly across categories. The id
+  // is prefixed with `DR-AP-` to avoid collisions with the local SEED ids;
+  // refId stays as the original DR-#### so handlers can look the demand back
+  // up via `demands.find(d => d.id === it.refId)`.
+  const demandItems: ApprovalItem[] = useMemo(() => {
+    const toStatus = (s: WfDemandStatus): ApprovalStatus =>
+      s === "Pending Approval" ? "Pending"
+      : s === "Rejected"        ? "Rejected"
+      : "Approved";
+    return demands.map((d) => ({
+      id: `DR-AP-${d.id}`,
+      category: "Demand Request" as Category,
+      refId: d.id,
+      title: d.autoFulfill
+        ? "Auto-fulfill demand from Meal Plan"
+        : `Material demand from ${d.role}`,
+      requestedBy: d.requestedBy,
+      requestedAt: d.date,
+      summary: `${d.items.length} item${d.items.length === 1 ? "" : "s"} · From ${d.role}${d.note ? " — " + d.note : ""}`,
+      itemsCount: d.items.length,
+      status: toStatus(d.status),
+      processedBy: d.approvedBy ?? d.rejectedBy,
+      processedAt: d.approvedAt ?? d.rejectedAt,
+      rejectionReason: d.rejectionReason,
+    }));
+  }, [demands]);
+
+  const allItems = useMemo(() => [...demandItems, ...items], [demandItems, items]);
+
   const counts = useMemo(() => {
     const pendingByCat = new Map<Category, number>();
     for (const c of CATEGORIES) pendingByCat.set(c.key, 0);
     let pending = 0, approvedToday = 0, rejectedToday = 0, valuePending = 0;
-    for (const it of items) {
+    for (const it of allItems) {
       if (it.status === "Pending") {
         pending++;
         pendingByCat.set(it.category, (pendingByCat.get(it.category) ?? 0) + 1);
@@ -125,16 +157,16 @@ export default function ApprovalManagementPage() {
       }
     }
     return { pending, approvedToday, rejectedToday, valuePending, pendingByCat };
-  }, [items, today]);
+  }, [allItems, today]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return items.filter((it) => {
+    return allItems.filter((it) => {
       if (activeTab !== "all" && it.category !== activeTab) return false;
       if (q && ![it.refId, it.title, it.requestedBy, it.summary].some((f) => f.toLowerCase().includes(q))) return false;
       return true;
     });
-  }, [items, activeTab, search]);
+  }, [allItems, activeTab, search]);
 
   const pendingItems = filtered.filter((it) => it.status === "Pending");
   const recentItems  = filtered
@@ -142,7 +174,113 @@ export default function ApprovalManagementPage() {
     .sort((a, b) => (b.processedAt ?? "").localeCompare(a.processedAt ?? ""))
     .slice(0, 8);
 
+  // Auto-fulfill side-effects for bulk-meal-plan demands: split items by
+  // on-hand stock, raise one Transfer Note (in-stock portion) and one Purchase
+  // Requisition (shortfalls), and pick the right next demand status. Mirrors
+  // the prior behaviour from demand-orders.tsx which has been retired in
+  // favour of this centralised approval queue.
+  const approveDemand = (dr: WfDemandRequest) => {
+    const at = new Date().toLocaleString();
+
+    if (!dr.autoFulfill) {
+      updateDemandStatus(dr.id, "Pending Store Review", { approvedBy: role, approvedAt: at });
+      toast.success(`${dr.id} approved — ready for Store Review.`);
+      return;
+    }
+
+    const onHandFor = (name: string) =>
+      inventory.find((i) => i.name.toLowerCase() === name.toLowerCase())?.stock ?? 0;
+    const tagged = dr.items.map((it) => {
+      const onHand = onHandFor(it.name);
+      const toIssue = Math.min(onHand, it.qty);
+      return { ...it, onHand, toIssue, shortfall: Math.max(0, it.qty - onHand) };
+    });
+    const hasInStock = tagged.some((t) => t.toIssue > 0);
+    const hasShortfall = tagged.some((t) => t.shortfall > 0);
+    const created: string[] = [];
+    const createdTnIds: string[] = [];
+    const createdReqIds: string[] = [];
+
+    if (hasInStock) {
+      const tnId = `TN-${String(Date.now()).slice(-5)}`;
+      const fromName = warehouses.find((w) => w.id === "WH-001")?.name ?? "Central Warehouse";
+      const toName = warehouses.find((w) => w.id === dr.warehouseId)?.name ?? "Hot Kitchen";
+      addTransferNote({
+        id: tnId,
+        demandRef: dr.id,
+        grnRef: `Auto-allocated on approval of ${dr.id}`,
+        items: tagged.filter((t) => t.toIssue > 0).map((t) => ({
+          id: t.id, name: t.name, qty: Math.round(t.toIssue * 1000) / 1000, uom: t.uom,
+        })),
+        from: fromName,
+        to: toName,
+        issuedBy: role,
+        date: at,
+        status: "Pending",
+        officeId: dr.officeId,
+        warehouseId: dr.warehouseId,
+      });
+      created.push(`Issue ${tnId}`);
+      createdTnIds.push(tnId);
+    }
+
+    if (hasShortfall) {
+      const reqId = `REQ-${String(Date.now() + 1).slice(-5)}`;
+      const shortItems = tagged.filter((t) => t.shortfall > 0).map((t) => ({
+        id: t.id, name: t.name, qty: Math.ceil(t.shortfall), uom: t.uom, type: t.type,
+      }));
+      addRequisition({
+        id: reqId,
+        reference: dr.id,
+        requestedBy: role,
+        source: dr.source,
+        date: at,
+        status: "Pending Accounts",
+        items: shortItems.length,
+        note: `Auto-generated on approval of ${dr.id}. Covers shortfall on ${shortItems.length} material${shortItems.length === 1 ? "" : "s"}.`,
+        demandRef: dr.id,
+        demandItems: shortItems,
+        officeId: dr.officeId,
+        warehouseId: dr.warehouseId,
+      });
+      created.push(`PR ${reqId}`);
+      createdReqIds.push(reqId);
+    }
+
+    // Patch the linked MRP run so its detail dialog stops saying "awaiting
+    // approval" and starts listing the freshly created PR/TN ids.
+    const linkedRun = mrpRuns.find((r) => r.demandRef === dr.id);
+    if (linkedRun && (createdTnIds.length || createdReqIds.length)) {
+      updateMrpRun(linkedRun.id, {
+        requisitionIds: [...linkedRun.requisitionIds, ...createdReqIds],
+        transferIds: [...linkedRun.transferIds, ...createdTnIds],
+      });
+    }
+
+    const nextStatus: WfDemandStatus =
+      !hasShortfall ? "Pending Store Review"
+      : !hasInStock ? "Escalated to Supply Chain"
+      : "Partially Available";
+    updateDemandStatus(dr.id, nextStatus, { approvedBy: role, approvedAt: at });
+
+    toast.success(
+      created.length > 0
+        ? `${dr.id} approved · ${created.join(" + ")} created.`
+        : `${dr.id} approved.`,
+      { duration: 6000 },
+    );
+  };
+
   const approve = (it: ApprovalItem) => {
+    if (it.category === "Demand Request") {
+      const dr = demands.find((d) => d.id === it.refId);
+      if (!dr) {
+        toast.error(`Demand ${it.refId} not found.`);
+        return;
+      }
+      approveDemand(dr);
+      return;
+    }
     setItems((p) =>
       p.map((x) =>
         x.id === it.id
@@ -165,6 +303,20 @@ export default function ApprovalManagementPage() {
       toast.error("Provide a reason for rejection.");
       return;
     }
+    const reason = rejectReason.trim();
+
+    if (rejectTarget.category === "Demand Request") {
+      updateDemandStatus(rejectTarget.refId, "Rejected", {
+        rejectedBy: role,
+        rejectedAt: new Date().toLocaleString(),
+        rejectionReason: reason,
+      });
+      toast.success(`${rejectTarget.refId} rejected.`);
+      setRejectOpen(false);
+      setRejectTarget(null);
+      return;
+    }
+
     setItems((p) =>
       p.map((x) =>
         x.id === rejectTarget.id
@@ -173,7 +325,7 @@ export default function ApprovalManagementPage() {
               status: "Rejected",
               processedBy: "R. Hossain (GM/Admin)",
               processedAt: stamp(),
-              rejectionReason: rejectReason.trim(),
+              rejectionReason: reason,
             }
           : x,
       ),

@@ -16,7 +16,6 @@ import {
   Factory,
   Layers,
   ClipboardCheck,
-  Calculator,
   BarChart3,
   Boxes,
   FileText,
@@ -40,6 +39,7 @@ import {
   ThermometerSun,
   PackageCheck,
   Coffee,
+  Clock,
   Plane,
   ScanBarcode,
   Wrench,
@@ -90,8 +90,9 @@ export const NAV_MODULES: NavModule[] = [
     label: 'Operations',
     icon: I(UtensilsCrossed),
     children: [
-      { key: '/order-management', label: 'Order Management', icon: I(Upload) },
-      { key: '/meal-planning',    label: 'Meal Planning',    icon: I(UtensilsCrossed) },
+      { key: '/operations-overview', label: 'Operations Dashboard', icon: I(LayoutDashboard) },
+      { key: '/order-management',    label: 'Order Management',     icon: I(Upload) },
+      { key: '/meal-planning',       label: 'Meal Planning',    icon: I(UtensilsCrossed) },
     ],
   },
 
@@ -101,10 +102,10 @@ export const NAV_MODULES: NavModule[] = [
     label: 'Production',
     icon: I(Factory),
     children: [
+      { key: '/production-overview',   label: 'Production Dashboard',        icon: I(LayoutDashboard) },
       { key: '/bom',                   label: 'Bill of Materials',           icon: I(Layers) },
       { key: '/production-entry',      label: 'Production Order',            icon: I(ClipboardCheck) },
       { key: '/production-entry-new',  label: 'Production Entry',            icon: I(ClipboardCheck) },
-      { key: '/mrp',                   label: 'Material Requirement Planning', icon: I(Calculator) },
       { key: '/production-reports',    label: 'Production Reports',          icon: I(BarChart3) },
     ],
   },
@@ -115,6 +116,7 @@ export const NAV_MODULES: NavModule[] = [
     label: 'Inventory & Store',
     icon: I(Boxes),
     children: [
+      { key: '/inventory-overview', label: 'Inventory Dashboard', icon: I(LayoutDashboard) },
       { key: '/demand-orders',     label: 'Demand Requests',  icon: I(FileText) },
       { key: '/item-issue',        label: 'Item Issue',       icon: I(Send) },
       { key: '/transfer-request',  label: 'Transfer Request', icon: I(ArrowLeftRight) },
@@ -130,6 +132,7 @@ export const NAV_MODULES: NavModule[] = [
     label: 'Supply Chain',
     icon: I(ShoppingCart),
     children: [
+      { key: '/supply-chain-overview',  label: 'Supply Chain Dashboard', icon: I(LayoutDashboard) },
       { key: '/purchase-requisition',   label: 'Purchase Requisition',   icon: I(FileText) },
       { key: '/request-for-quotation',  label: 'Request for Quotation',  icon: I(MailQuestion) },
       { key: '/quotation-entry',        label: 'Quotation Entry',        icon: I(ClipboardList) },
@@ -147,10 +150,11 @@ export const NAV_MODULES: NavModule[] = [
     label: 'Accounts',
     icon: I(Wallet),
     children: [
+      { key: '/accounts-overview',  label: 'Accounts Dashboard',    icon: I(LayoutDashboard) },
       { key: '/accounts-invoices',  label: 'Invoices & Payments',   icon: I(Receipt) },
       { key: '/accounts-approvals', label: 'Payment Approvals',     icon: I(BadgeCheck) },
       { key: '/accounts-expenses',  label: 'Expense Overview',      icon: I(PieChart) },
-      { key: '/accounts',           label: 'Accounts Dashboard',    icon: I(Wallet) },
+      { key: '/accounts',           label: 'Accounts Summary',      icon: I(Wallet) },
     ],
   },
 
@@ -160,6 +164,7 @@ export const NAV_MODULES: NavModule[] = [
     label: 'Food Safety & QC',
     icon: I(ShieldCheck),
     children: [
+      { key: '/food-safety-overview', label: 'Food Safety Dashboard',     icon: I(LayoutDashboard) },
       { key: '/hygiene-monitoring',   label: 'Daily Hygiene Monitoring',  icon: I(ClipboardCheck) },
       { key: '/cooking-temp',         label: 'Cooking Temp & Sensory',    icon: I(ThermometerSun) },
       { key: '/dispatch-monitoring',  label: 'Dispatch Monitoring',       icon: I(Truck) },
@@ -172,7 +177,8 @@ export const NAV_MODULES: NavModule[] = [
     label: 'Packaging & Dispatch',
     icon: I(PackageCheck),
     children: [
-      { key: '/dispatch', label: 'Dispatch', icon: I(PackageCheck) },
+      { key: '/packaging-dispatch-overview', label: 'Dispatch Dashboard', icon: I(LayoutDashboard) },
+      { key: '/dispatch',                    label: 'Dispatch', icon: I(PackageCheck) },
     ],
   },
 
@@ -182,6 +188,7 @@ export const NAV_MODULES: NavModule[] = [
     label: 'Airline Consumables',
     icon: I(Coffee),
     children: [
+      { key: '/airline-consumables-overview', label: 'Consumables Dashboard', icon: I(LayoutDashboard) },
       { key: '/airline-consumables',   label: 'Inventory',         icon: I(Boxes) },
       { key: '/consumable-usage',      label: 'Usage Tracking',    icon: I(Send) },
       { key: '/consumable-allocation', label: 'Flight Allocation', icon: I(Plane) },
@@ -194,6 +201,7 @@ export const NAV_MODULES: NavModule[] = [
     label: 'Airline Equipments',
     icon: I(ScanBarcode),
     children: [
+      { key: '/airline-equipments-overview', label: 'Equipments Dashboard', icon: I(LayoutDashboard) },
       { key: '/airline-equipments',     label: 'Assets',         icon: I(Boxes) },
       { key: '/equipment-maintenance',  label: 'Maintenance',    icon: I(Wrench) },
       { key: '/equipment-returns',      label: 'Returns',        icon: I(Undo2) },
@@ -201,29 +209,18 @@ export const NAV_MODULES: NavModule[] = [
     ],
   },
 
-  // ── 10. Bakery & Kitchen ───────────────────────────────────────────────────
-  {
-    key: 'kitchen-bakery',
-    label: 'Kitchen & Bakery',
-    icon: I(UtensilsCrossed),
-    children: [
-      { key: '/kitchen',    label: 'Kitchen',    icon: I(UtensilsCrossed) },
-      { key: '/bakery',     label: 'Bakery',     icon: I(UtensilsCrossed) },
-      { key: '/amenities',  label: 'Amenities',  icon: I(Boxes) },
-    ],
-  },
-
-  // ── 11. Maintenance ────────────────────────────────────────────────────────
+  // ── 10. Maintenance ────────────────────────────────────────────────────────
   {
     key: 'maintenance',
     label: 'Maintenance & Assets',
     icon: I(Wrench),
     children: [
-      { key: '/maintenance', label: 'Maintenance', icon: I(Wrench) },
+      { key: '/maintenance-overview', label: 'Maintenance Dashboard', icon: I(LayoutDashboard) },
+      { key: '/maintenance',          label: 'Maintenance', icon: I(Wrench) },
     ],
   },
 
-  // ── 12. Reports ────────────────────────────────────────────────────────────
+  // ── 11. Reports ────────────────────────────────────────────────────────────
   {
     key: 'reports',
     label: 'Reports',
@@ -233,7 +230,7 @@ export const NAV_MODULES: NavModule[] = [
     ],
   },
 
-  // ── 13. Admin ──────────────────────────────────────────────────────────────
+  // ── 12. Admin ──────────────────────────────────────────────────────────────
   {
     key: 'admin',
     label: 'Administration',
@@ -245,7 +242,7 @@ export const NAV_MODULES: NavModule[] = [
     ],
   },
 
-  // ── 14. Configuration ──────────────────────────────────────────────────────
+  // ── 13. Configuration ──────────────────────────────────────────────────────
   {
     key: 'config',
     label: 'Configuration',
@@ -259,6 +256,7 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/config-warehouse',  label: 'Warehouse',        icon: I(Warehouse) },
       { key: '/config-price',      label: 'Price Setup',      icon: I(BadgeDollarSign) },
       { key: '/config-approval',   label: 'Approval Setup',   icon: I(GitBranch) },
+      { key: '/config-meal-slots', label: 'Meal Slots',       icon: I(Clock) },
     ],
   },
 ];

@@ -6,10 +6,11 @@ import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-  Plus, FileText, Clock, Send, ShoppingCart, AlertTriangle,
-  CheckCircle2, ArrowUpRight, PackageCheck, Trash2, Eye,
+  Plus, FileText, Clock, Send, AlertTriangle,
+  CheckCircle2, XCircle, ArrowUpRight, PackageCheck, Trash2,
+  ShieldCheck, Eye,
 } from "lucide-react";
-import { inventory, vendors } from "@/lib/sample-data";
+import { inventory } from "@/lib/sample-data";
 import { KpiCard } from "@/components/common/KpiCard";
 import { toast } from "sonner";
 import {
@@ -18,7 +19,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { useWorkflow, type WfDemandRequest, type WfDemandItem, type WfTransferNote } from "@/lib/workflow-store";
+import {
+  useWorkflow,
+  type WfDemandRequest, type WfDemandItem,
+} from "@/lib/workflow-store";
 import { useRole } from "@/lib/roles";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 
@@ -42,14 +46,12 @@ export default function DemandOrders() {
   const { role } = useRole();
   const wf = useWorkflow();
   const {
-    demands, addDemands, updateDemandStatus,
-    addRequisition, transferNotes,
+    demands, addDemands,
   } = wf;
   const navigate = useNavigate();
 
   const [selectedRequest, setSelectedRequest] = useState<WfDemandRequest | null>(null);
   const [needsPurchase, setNeedsPurchase] = useState<Record<string, boolean>>({});
-  const [viewTn, setViewTn] = useState<WfTransferNote | null>(null);
   const [newOpen, setNewOpen] = useState(false);
   const [newBy, setNewBy] = useState("");
   const [newNote, setNewNote] = useState("");
@@ -61,6 +63,14 @@ export default function DemandOrders() {
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
 
+  // Always show the freshest copy of the selected request — workflow-store
+  // updates (status / TN linkages / approval audit) reach the dialog via this
+  // lookup rather than the snapshot held in `selectedRequest`.
+  const activeDemand = useMemo(
+    () => (selectedRequest ? demands.find((d) => d.id === selectedRequest.id) ?? selectedRequest : null),
+    [demands, selectedRequest],
+  );
+
   const filteredDemands = demands.filter((d) => {
     if (filterOffice && d.officeId !== filterOffice) return false;
     if (filterWarehouse && d.warehouseId !== filterWarehouse) return false;
@@ -68,6 +78,7 @@ export default function DemandOrders() {
   });
 
   // Derived counts
+  const pendingApproval = useMemo(() => demands.filter(r => r.status === "Pending Approval").length, [demands]);
   const pending = useMemo(() => demands.filter(r => r.status === "Pending Store Review").length, [demands]);
   const escalated = useMemo(() => demands.filter(r => r.status === "Escalated to Supply Chain").length, [demands]);
   const fulfilled = useMemo(() => demands.filter(r => r.status === "Fulfilled").length, [demands]);
@@ -81,39 +92,32 @@ export default function DemandOrders() {
     },
     { key: "role", header: "From" },
     { key: "date", header: "Date" },
-    { key: "status", header: "Status", render: (r) => <StatusBadge status={r.status} /> },
+    {
+      key: "status", header: "Status",
+      render: (r) => {
+        // Collapse the full lifecycle into the three approval-state labels.
+        // Granular post-approval states (Pending Store Review, Partially
+        // Available, Escalated to Supply Chain, etc.) all show as "Approved"
+        // here; the dialog still surfaces the full status for follow-up.
+        const label =
+          r.status === "Pending Approval" ? "Pending Approval"
+          : r.status === "Rejected"      ? "Rejected"
+          : "Approved";
+        return <StatusBadge status={label} />;
+      },
+    },
     { key: "items", header: "Items", render: (r) => r.items.length },
   ];
+
+  // Approval (and rejection) of Pending-Approval demands is centralised on
+  // /approval-management. This page is read-only for the approval step — once
+  // a demand has been approved there, the store-review actions below kick in.
 
   // ── Step 2a: Fulfill from Store → route to Item Issue with this demand ─────
   const fulfillFromStore = () => {
     if (!selectedRequest) return;
     navigate("/item-issue");
   };
-
-  // ── Step 2b: Escalate to Supply Chain → auto-create Requisition ─────────────
-  const escalateToSupplyChain = () => {
-    if (!selectedRequest) return;
-    const flaggedItems = selectedRequest.items.filter(item => needsPurchase[item.id]);
-    if (flaggedItems.length === 0) return;
-    const reqId = `REQ-${Date.now().toString().slice(-5)}`;
-    addRequisition({
-      id: reqId,
-      reference: selectedRequest.id,
-      requestedBy: role,
-      source: "Store",
-      date: new Date().toLocaleString(),
-      status: "Pending Accounts",
-      items: flaggedItems.length,
-      note: `Escalated from kitchen demand ${selectedRequest.id} — store stock insufficient. Items flagged for purchase.`,
-      demandRef: selectedRequest.id,
-      demandItems: flaggedItems,
-    });
-    updateDemandStatus(selectedRequest.id, "Escalated to Supply Chain");
-    setSelectedRequest(prev => prev ? { ...prev, status: "Escalated to Supply Chain" } : prev);
-    toast.success(`Demand ${selectedRequest.id} escalated → Requisition ${reqId} created in Supply Chain.`);
-  };
-
 
   // ── New Demand dialog ────────────────────────────────────────────────────────
   const addItemLine = () => {
@@ -151,7 +155,7 @@ export default function DemandOrders() {
       requestedBy: newBy.trim(),
       role: "Store Executive",
       date: new Date().toLocaleString(),
-      status: "Pending Store Review",
+      status: "Pending Approval",
       items: newItems,
       note: newNote.trim() || "Internal item requisition raised from store.",
       source: "Store",
@@ -176,8 +180,9 @@ export default function DemandOrders() {
         }
       />
 
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-5 gap-4 mb-6">
         <KpiCard label="Total Requests" value={demands.length} icon={FileText} tone="navy" />
+        <KpiCard label="Pending Approval" value={pendingApproval} icon={ShieldCheck} tone="warning" />
         <KpiCard label="Pending Review" value={pending} icon={Clock} tone="warning" />
         <KpiCard label="Escalated to Supply Chain" value={escalated} icon={ArrowUpRight} tone="red" />
         <KpiCard label="Fulfilled" value={fulfilled} icon={PackageCheck} tone="success" />
@@ -193,86 +198,140 @@ export default function DemandOrders() {
               onChange={(n) => { setFilterOffice(n.officeId); setFilterWarehouse(n.warehouseId); }}
             />
           </div>
-          <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-6">
-            {/* Table */}
-            <div>
-              <DataTable
-                title="demand-requests"
-                data={filteredDemands}
-                columns={requestCols}
-                searchKeys={["id", "reference", "requestedBy", "role", "status"]}
-                actions={(row) => (
-                  <Button
-                    size="sm"
-                    onClick={() => { setSelectedRequest(row); setNeedsPurchase({}); }}
-                    disabled={
-                      row.status === "Escalated to Supply Chain" ||
-                      row.status === "Fulfilled"
-                    }
-                  >
-                    Review
-                  </Button>
-                )}
-              />
-            </div>
+          <DataTable
+            title="demand-requests"
+            data={filteredDemands}
+            columns={requestCols}
+            searchKeys={["id", "reference", "requestedBy", "role", "status"]}
+            selectable={false}
+            actions={(row) => (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 px-2"
+                onClick={() => { setSelectedRequest(row); setNeedsPurchase({}); }}
+                disabled={row.status === "Fulfilled" || row.status === "Rejected"}
+                aria-label={`${row.status === "Pending Approval" ? "View" : "Review"} ${row.id}`}
+                title={row.status === "Pending Approval" ? "View" : "Review"}
+              >
+                <Eye className="h-4 w-4" />
+              </Button>
+            )}
+          />
 
-            {/* Review Panel */}
-            <div className="space-y-4">
-              {selectedRequest ? (
-                <Card className="border border-border">
-                  {/* Header */}
-                  <div className="px-4 pt-4 pb-3 border-b border-border">
-                    <div className="flex items-center justify-between mb-1">
-                      <h3 className="text-base font-semibold">Request — {selectedRequest.id}</h3>
-                      <StatusBadge status={selectedRequest.status} />
+          {/* Review Dialog — opens when a demand is selected */}
+          <Dialog
+            open={!!activeDemand}
+            onOpenChange={(open) => {
+              if (!open) { setSelectedRequest(null); setNeedsPurchase({}); }
+            }}
+          >
+            <DialogContent className="max-w-3xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
+              <DialogHeader className="px-5 py-4 border-b border-border">
+                <DialogTitle className="flex items-center justify-between gap-3">
+                  <span>Demand Request — {activeDemand?.id}</span>
+                  {activeDemand && <StatusBadge status={activeDemand.status} />}
+                </DialogTitle>
+              </DialogHeader>
+
+              <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+              {activeDemand && (
+                <>
+                  {/* Metadata */}
+                  <div className="rounded-md border border-border bg-muted/40 px-3 py-2.5 text-xs space-y-1">
+                    <div className="text-muted-foreground">
+                      Ref: <strong className="text-foreground">{activeDemand.reference}</strong>
+                      {" · "}By <strong className="text-foreground">{activeDemand.requestedBy}</strong> ({activeDemand.role})
+                      {" · "}{activeDemand.date}
                     </div>
-                    <div className="text-xs text-muted-foreground">
-                      Ref: <strong>{selectedRequest.reference}</strong> · By <strong>{selectedRequest.requestedBy}</strong> ({selectedRequest.role}) · {selectedRequest.date}
-                    </div>
-                    {selectedRequest.note && (
-                      <div className="mt-2 text-xs text-muted-foreground bg-muted/60 rounded px-2 py-1.5">
-                        {selectedRequest.note}
+                    {activeDemand.autoFulfill && (
+                      <div className="flex items-center gap-1.5 text-primary font-medium">
+                        <ShieldCheck className="h-3 w-3" />
+                        Auto-fulfill on approval — Issue (in-stock) + PR (shortfalls) will be created automatically.
+                      </div>
+                    )}
+                    {activeDemand.approvedBy && (
+                      <div className="flex items-center gap-1.5 text-success">
+                        <CheckCircle2 className="h-3 w-3" />
+                        Approved by <strong>{activeDemand.approvedBy}</strong> · {activeDemand.approvedAt}
+                      </div>
+                    )}
+                    {activeDemand.rejectedBy && (
+                      <div className="flex items-center gap-1.5 text-destructive">
+                        <XCircle className="h-3 w-3" />
+                        Rejected by <strong>{activeDemand.rejectedBy}</strong> · {activeDemand.rejectedAt}
+                        {activeDemand.rejectionReason && <span> — {activeDemand.rejectionReason}</span>}
+                      </div>
+                    )}
+                    {activeDemand.note && (
+                      <div className="text-muted-foreground italic pt-1 border-t border-border/60 mt-1.5">
+                        {activeDemand.note}
                       </div>
                     )}
                   </div>
 
                   {/* Item analysis */}
-                  <div className="px-4 pt-3 pb-1">
-                    <div className="grid grid-cols-[1fr_80px_80px_80px_32px] gap-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">
-                      <span>Item</span>
-                      <span className="text-center">In Stock</span>
-                      <span className="text-center">Required</span>
-                      <span className="text-center">Shortfall</span>
-                      <div className="flex justify-center items-center">
-                        <input
-                          type="checkbox"
-                          title="Select all for escalation"
-                          checked={selectedRequest.items.length > 0 && selectedRequest.items.every(i => needsPurchase[i.id])}
-                          onChange={() => {
-                            const allFlagged = selectedRequest.items.every(i => needsPurchase[i.id]);
-                            if (allFlagged) {
-                              setNeedsPurchase({});
-                            } else {
-                              setNeedsPurchase(Object.fromEntries(selectedRequest.items.map(i => [i.id, true])));
-                            }
-                          }}
-                          className="h-4 w-4 accent-amber-500 cursor-pointer"
-                        />
-                      </div>
-                    </div>
+                  <div>
+                    {(() => {
+                      // Only items with stock available are issuable. Shortfall items
+                      // can't be checked — they automatically flow to a Purchase
+                      // Requisition; the user only ticks what they want to issue from
+                      // the store.
+                      const issuableItems = activeDemand.items.filter((i) => {
+                        const inv = inventory.find((x) => x.id === i.id || x.name.toLowerCase() === i.name.toLowerCase());
+                        return (inv?.stock ?? 0) >= i.qty;
+                      });
+                      const canSelect =
+                        activeDemand.status === "Pending Store Review" ||
+                        activeDemand.status === "Partially Available" ||
+                        activeDemand.status === "Partially Fulfilled";
+                      const allIssuableSelected =
+                        canSelect &&
+                        issuableItems.length > 0 &&
+                        issuableItems.every((i) => needsPurchase[i.id]);
+                      return (
+                        <div className="grid grid-cols-[1fr_80px_80px_80px_32px] gap-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-2">
+                          <span>Item</span>
+                          <span className="text-center">In Stock</span>
+                          <span className="text-center">Required</span>
+                          <span className="text-center">Shortfall</span>
+                          <div className="flex justify-center items-center">
+                            {canSelect && issuableItems.length > 0 ? (
+                              <input
+                                type="checkbox"
+                                title="Select all in-stock items for issue"
+                                checked={allIssuableSelected}
+                                onChange={() => {
+                                  if (allIssuableSelected) {
+                                    setNeedsPurchase({});
+                                  } else {
+                                    setNeedsPurchase(Object.fromEntries(issuableItems.map((i) => [i.id, true])));
+                                  }
+                                }}
+                                className="h-4 w-4 accent-green-600 cursor-pointer"
+                              />
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })()}
 
-                    {selectedRequest.items.length > 0 ? (
-                      <div className="space-y-2 pb-3">
-                        {selectedRequest.items.map(item => {
-                          const inv = inventory.find(i => i.id === item.id);
+                    {activeDemand.items.length > 0 ? (
+                      <div className="space-y-2">
+                        {activeDemand.items.map(item => {
+                          const inv = inventory.find(i => i.id === item.id || i.name.toLowerCase() === item.name.toLowerCase());
                           const currentStock = inv?.stock ?? 0;
                           const shortfall = item.qty - currentStock;
                           const insufficient = shortfall > 0;
                           const flagged = needsPurchase[item.id] ?? false;
+                          const canSelect = (activeDemand.status === "Pending Store Review" ||
+                                             activeDemand.status === "Partially Available" ||
+                                             activeDemand.status === "Partially Fulfilled") &&
+                                            !insufficient;
                           return (
                             <div
                               key={item.id}
-                              className={`rounded-lg border p-3 ${flagged ? "border-amber-400 bg-amber-50" : insufficient ? "border-red-200 bg-red-50/50" : "border-border bg-muted/40"}`}
+                              className={`rounded-lg border p-3 ${flagged ? "border-green-400 bg-green-50" : insufficient ? "border-red-200 bg-red-50/50" : "border-border bg-muted/40"}`}
                             >
                               <div className="grid grid-cols-[1fr_80px_80px_80px_32px] gap-2 items-center">
                                 <div>
@@ -301,13 +360,15 @@ export default function DemandOrders() {
                                   )}
                                 </div>
                                 <div className="flex justify-center">
-                                  <input
-                                    type="checkbox"
-                                    title="Mark as purchase required"
-                                    checked={flagged}
-                                    onChange={(e) => setNeedsPurchase(prev => ({ ...prev, [item.id]: e.target.checked }))}
-                                    className="h-4 w-4 accent-amber-500 cursor-pointer"
-                                  />
+                                  {canSelect && (
+                                    <input
+                                      type="checkbox"
+                                      title="Mark for issue from store"
+                                      checked={flagged}
+                                      onChange={(e) => setNeedsPurchase(prev => ({ ...prev, [item.id]: e.target.checked }))}
+                                      className="h-4 w-4 accent-green-600 cursor-pointer"
+                                    />
+                                  )}
                                 </div>
                               </div>
                               {insufficient && (
@@ -317,9 +378,9 @@ export default function DemandOrders() {
                                 </div>
                               )}
                               {flagged && (
-                                <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-amber-700 font-medium">
-                                  <ShoppingCart className="h-3 w-3 shrink-0" />
-                                  Flagged for purchase — will be escalated to Supply Chain
+                                <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-green-700 font-medium">
+                                  <CheckCircle2 className="h-3 w-3 shrink-0" />
+                                  Selected for issue from store
                                 </div>
                               )}
                             </div>
@@ -329,224 +390,103 @@ export default function DemandOrders() {
                     ) : (
                       <p className="text-sm text-muted-foreground py-3">No items attached to this request.</p>
                     )}
-
-                    {/* Legend */}
-                    <div className="flex items-center gap-3 text-[10px] text-muted-foreground pb-1">
-                      <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm bg-amber-400" /> Purchase flagged</span>
-                      <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm bg-red-200" /> Insufficient</span>
-                      <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm bg-muted border border-border" /> Sufficient</span>
-                    </div>
                   </div>
 
-                  {/* Action footer */}
-                  <div className="px-4 pb-4 pt-2 border-t border-border space-y-2">
-                    {selectedRequest.status === "Pending Store Review" || selectedRequest.status === "Partially Available" ? (
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <Button
-                          className="bg-green-600 hover:bg-green-700 text-white"
-                          onClick={fulfillFromStore}
-                        >
-                          <CheckCircle2 className="h-4 w-4 mr-1.5" />
-                          Fulfill from Store
-                        </Button>
-                        {Object.values(needsPurchase).some(Boolean) && (
-                          <>
-                            <Button
-                              className="bg-amber-500 hover:bg-amber-600 text-white"
-                              onClick={escalateToSupplyChain}
-                            >
-                              <ArrowUpRight className="h-4 w-4 mr-1.5" />
-                              Escalate to Supply Chain
-                            </Button>
-                            <span className="text-xs text-muted-foreground">
-                              {Object.values(needsPurchase).filter(Boolean).length} item(s) flagged
-                            </span>
-                          </>
-                        )}
-                      </div>
-                    ) : selectedRequest.status === "Partially Issued" ? (
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <div className="flex items-center gap-2 text-xs text-amber-700 font-medium">
-                          <PackageCheck className="h-3.5 w-3.5" />
-                          Partially issued — some items still pending
-                        </div>
-                        <Button
-                          className="bg-green-600 hover:bg-green-700 text-white"
-                          onClick={fulfillFromStore}
-                        >
-                          <CheckCircle2 className="h-4 w-4 mr-1.5" />
-                          Continue Issuing
-                        </Button>
-                      </div>
-                    ) : selectedRequest.status === "Partially Fulfilled" ? (
-                      <div className="space-y-2">
-                        <div className="flex items-center gap-2 text-xs text-blue-700 font-medium">
-                          <PackageCheck className="h-3.5 w-3.5" />
-                          Partially fulfilled — items issued from store; remaining escalated to supply chain.
-                        </div>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <Button
-                            className="bg-green-600 hover:bg-green-700 text-white"
-                            onClick={fulfillFromStore}
-                          >
-                            <CheckCircle2 className="h-4 w-4 mr-1.5" />
-                            Fulfill from Store
-                          </Button>
-                          {Object.values(needsPurchase).some(Boolean) && (
-                            <>
-                              <Button
-                                className="bg-amber-500 hover:bg-amber-600 text-white"
-                                onClick={escalateToSupplyChain}
-                              >
-                                <ArrowUpRight className="h-4 w-4 mr-1.5" />
-                                Escalate to Supply Chain
-                              </Button>
-                              <span className="text-xs text-muted-foreground">
-                                {Object.values(needsPurchase).filter(Boolean).length} item(s) flagged
-                              </span>
-                            </>
-                          )}
-                        </div>
-                      </div>
-                    ) : selectedRequest.status === "Escalated to Supply Chain" ? (
-                      <div className="space-y-2">
-                        <div className="flex items-center gap-2 text-xs text-amber-700 font-medium">
-                          <Send className="h-3.5 w-3.5" />
-                          Escalated — Requisition created in Supply Chain. Awaiting PO and GRN.
-                        </div>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <Button
-                            className="bg-green-600 hover:bg-green-700 text-white"
-                            onClick={fulfillFromStore}
-                          >
-                            <CheckCircle2 className="h-4 w-4 mr-1.5" />
-                            Fulfill from Store
-                          </Button>
-                        </div>
-                      </div>
-                    ) : selectedRequest.status === "Fulfilled" ? (
-                      <div className="flex items-center gap-2 text-xs text-green-700 font-medium">
-                        <CheckCircle2 className="h-3.5 w-3.5" /> Fulfilled — all items issued
-                      </div>
-                    ) : null}
-                  </div>
-                </Card>
-              ) : (
-                <div className="rounded-xl border border-border p-6 bg-muted/80 text-sm text-muted-foreground">
-                  Select a demand request to review item details and take action.
-                </div>
+                </>
               )}
-
-              {/* Transfer Notes history for selected request */}
-              {selectedRequest && transferNotes.filter(t => t.demandRef === selectedRequest.id).length > 0 && (
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm">Transfer Notes</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-2">
-                    {transferNotes.filter(t => t.demandRef === selectedRequest.id).map(tn => (
-                      <div key={tn.id} className="rounded-lg border border-border p-3 bg-muted/40">
-                        <div className="flex items-center justify-between">
-                          <span className="font-medium text-sm">{tn.id}</span>
-                          <div className="flex items-center gap-2">
-                            <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => setViewTn(tn)}>
-                              <Eye className="h-3.5 w-3.5 mr-1" /> View
-                            </Button>
-                            <StatusBadge status={tn.status} />
-                          </div>
-                        </div>
-                        <div className="text-xs text-muted-foreground mt-1">
-                          Store → {tn.to} · Issued by {tn.issuedBy} · {tn.date}
-                        </div>
-                      </div>
-                    ))}
-                  </CardContent>
-                </Card>
-              )}
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* View Transfer Note Dialog */}
-      {viewTn && (() => {
-        const demand = demands.find(d => d.id === viewTn.demandRef);
-        const tnItemIds = new Set(viewTn.items.map(i => i.id));
-        const escalatedItems = demand?.items.filter(i => !tnItemIds.has(i.id)) ?? [];
-        return (
-          <Dialog open onOpenChange={(open) => { if (!open) setViewTn(null); }}>
-            <DialogContent className="max-w-lg">
-              <DialogHeader>
-                <DialogTitle>Transfer Note — {viewTn.id}</DialogTitle>
-              </DialogHeader>
-              <div className="space-y-4 py-1">
-                {/* Summary note */}
-                <div className="rounded-md bg-muted/60 border border-border px-3 py-2 text-[11px] text-muted-foreground">
-                  <span className="font-semibold text-green-700">{viewTn.items.length} item{viewTn.items.length !== 1 ? "s" : ""}</span> fulfilled from store
-                  {escalatedItems.length > 0 && (
-                    <> · <span className="font-semibold text-amber-700">{escalatedItems.length} item{escalatedItems.length !== 1 ? "s" : ""}</span> forwarded to supply chain</>
-                  )}
-                  {" "}· Issued by <span className="font-medium">{viewTn.issuedBy}</span> on {viewTn.date}
-                </div>
-
-                <div>
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-2">
-                    Items Issued from Store (In Stock)
-                  </div>
-                  <div className="space-y-1.5">
-                    {viewTn.items.map(item => {
-                      const inv = inventory.find(i => i.id === item.id);
-                      return (
-                        <div key={item.id} className="flex items-center justify-between rounded-md border border-green-200 bg-green-50 px-3 py-2">
-                          <div>
-                            <div className="text-sm font-medium">{item.name}</div>
-                            <div className="text-[11px] text-muted-foreground">Current stock: {inv?.stock ?? "—"} {item.uom}</div>
-                            <div className="text-[10px] text-green-700 mt-0.5">Fulfilled from store · {viewTn.id}</div>
-                          </div>
-                          <div className="text-right">
-                            <div className="text-sm font-semibold text-green-700">{item.qty} {item.uom}</div>
-                            <div className="text-[10px] text-green-600">issued</div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-                {escalatedItems.length > 0 && (
-                  <div>
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-2">
-                      Forwarded to Supply Chain
-                    </div>
-                    <div className="space-y-1.5">
-                      {escalatedItems.map(item => {
-                        const inv = inventory.find(i => i.id === item.id);
-                        const currentStock = inv?.stock ?? 0;
-                        const shortfall = item.qty - currentStock;
-                        return (
-                          <div key={item.id} className="flex items-center justify-between rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
-                            <div>
-                              <div className="text-sm font-medium">{item.name}</div>
-                              <div className="text-[11px] text-muted-foreground">Current stock: {currentStock} {item.uom}</div>
-                              <div className="text-[10px] text-amber-700 mt-0.5">Purchase requisition raised · Awaiting supply chain</div>
-                            </div>
-                            <div className="text-right">
-                              <div className="text-sm font-semibold text-amber-700">−{shortfall} {item.uom}</div>
-                              <div className="text-[10px] text-amber-600">short · escalated</div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
               </div>
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setViewTn(null)}>Close</Button>
-              </DialogFooter>
+
+              {/* Action footer */}
+              {activeDemand && (
+                <DialogFooter className="px-5 py-3 border-t border-border bg-muted/20 flex-wrap gap-2">
+                  {activeDemand.status === "Pending Approval" ? (
+                    <>
+                      <div className="flex items-center gap-2 text-xs text-amber-700 font-medium mr-auto">
+                        <ShieldCheck className="h-3.5 w-3.5" />
+                        Awaiting approval — handled on Approval Management
+                      </div>
+                      <Button asChild size="sm">
+                        <Link to="/approval-management">
+                          Go to Approval Management <ArrowUpRight className="h-3.5 w-3.5 ml-1.5" />
+                        </Link>
+                      </Button>
+                    </>
+                  ) : activeDemand.status === "Pending Store Review" || activeDemand.status === "Partially Available" ? (
+                    <>
+                      {Object.values(needsPurchase).some(Boolean) && (
+                        <div className="flex items-center gap-2 text-xs text-green-700 font-medium mr-auto">
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          {Object.values(needsPurchase).filter(Boolean).length} item{Object.values(needsPurchase).filter(Boolean).length === 1 ? "" : "s"} selected for issue
+                        </div>
+                      )}
+                      <Button
+                        className="bg-green-600 hover:bg-green-700 text-white"
+                        onClick={fulfillFromStore}
+                      >
+                        <CheckCircle2 className="h-4 w-4 mr-1.5" /> Fulfill from Store
+                      </Button>
+                    </>
+                  ) : activeDemand.status === "Partially Issued" ? (
+                    <>
+                      <div className="flex items-center gap-2 text-xs text-amber-700 font-medium mr-auto">
+                        <PackageCheck className="h-3.5 w-3.5" />
+                        Partially issued — some items still pending
+                      </div>
+                      <Button
+                        className="bg-green-600 hover:bg-green-700 text-white"
+                        onClick={fulfillFromStore}
+                      >
+                        <CheckCircle2 className="h-4 w-4 mr-1.5" /> Continue Issuing
+                      </Button>
+                    </>
+                  ) : activeDemand.status === "Partially Fulfilled" ? (
+                    <>
+                      <div className="flex items-center gap-2 text-xs text-blue-700 font-medium mr-auto">
+                        <PackageCheck className="h-3.5 w-3.5" />
+                        Items issued; remaining escalated to supply chain
+                      </div>
+                      {Object.values(needsPurchase).some(Boolean) && (
+                        <div className="flex items-center gap-2 text-xs text-green-700 font-medium">
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          {Object.values(needsPurchase).filter(Boolean).length} selected for issue
+                        </div>
+                      )}
+                      <Button
+                        className="bg-green-600 hover:bg-green-700 text-white"
+                        onClick={fulfillFromStore}
+                      >
+                        <CheckCircle2 className="h-4 w-4 mr-1.5" /> Fulfill from Store
+                      </Button>
+                    </>
+                  ) : activeDemand.status === "Escalated to Supply Chain" ? (
+                    <>
+                      <div className="flex items-center gap-2 text-xs text-amber-700 font-medium mr-auto">
+                        <Send className="h-3.5 w-3.5" />
+                        Escalated — Requisition awaiting PO and GRN
+                      </div>
+                      <Button
+                        className="bg-green-600 hover:bg-green-700 text-white"
+                        onClick={fulfillFromStore}
+                      >
+                        <CheckCircle2 className="h-4 w-4 mr-1.5" /> Fulfill from Store
+                      </Button>
+                    </>
+                  ) : activeDemand.status === "Fulfilled" ? (
+                    <div className="flex items-center gap-2 text-xs text-green-700 font-medium">
+                      <CheckCircle2 className="h-3.5 w-3.5" /> Fulfilled — all items issued
+                    </div>
+                  ) : activeDemand.status === "Rejected" ? (
+                    <div className="flex items-center gap-2 text-xs text-destructive font-medium">
+                      <XCircle className="h-3.5 w-3.5" /> Rejected — no further action
+                    </div>
+                  ) : null}
+                </DialogFooter>
+              )}
             </DialogContent>
           </Dialog>
-        );
-      })()}
+
+        </CardContent>
+      </Card>
 
       {/* New Demand Dialog */}
       <Dialog
