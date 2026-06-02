@@ -30,7 +30,15 @@ import {
 } from "recharts";
 import { toast } from "sonner";
 
-type Period = "today" | "week" | "custom";
+type Period = "today" | "week" | "month" | "quarter" | "year" | "custom";
+
+// Days back from "today" each rolling window covers. seedFlightOrders' date
+// column is ISO yyyy-mm-dd, so a string threshold compares without parsing.
+const PERIOD_WINDOW_DAYS: Record<"month" | "quarter" | "year", number> = {
+  month: 30,
+  quarter: 90,
+  year: 365,
+};
 
 type DateRange = { from: string; to: string };
 
@@ -83,6 +91,27 @@ function useDashboardKpis(period: Period, range?: DateRange) {
   const flightsCustomIds = customOrders.map((o) => o.id);
   const customDayCount = range
     ? new Set(customOrders.map((o) => o.date)).size
+    : 0;
+
+  // Rolling windows for This Month / Quarter / Year (relative to seed "today").
+  const windowDays =
+    period === "month" || period === "quarter" || period === "year"
+      ? PERIOD_WINDOW_DAYS[period]
+      : null;
+  const windowStart = (() => {
+    if (windowDays == null || !today) return null;
+    const t = new Date(today);
+    if (Number.isNaN(t.getTime())) return null;
+    t.setDate(t.getDate() - (windowDays - 1));
+    return t.toISOString().slice(0, 10);
+  })();
+  const windowOrders = windowStart
+    ? seedFlightOrders.filter((o) => o.date >= windowStart && o.date <= today)
+    : [];
+  const flightsWindow = windowOrders.length;
+  const flightsWindowIds = windowOrders.map((o) => o.id);
+  const windowDayCount = windowStart
+    ? new Set(windowOrders.map((o) => o.date)).size
     : 0;
 
   const producedTotal = productionEntryRecords.reduce((s, r) => s + r.producedQty, 0);
@@ -152,14 +181,17 @@ function useDashboardKpis(period: Period, range?: DateRange) {
 
   const isWeek = period === "week";
   const isCustom = period === "custom" && !!range;
+  const isWindow = period === "month" || period === "quarter" || period === "year";
 
-  const flightsValue = isCustom ? flightsCustom : isWeek ? flightsWeek : flightsToday;
+  const flightsValue = isCustom ? flightsCustom : isWindow ? flightsWindow : isWeek ? flightsWeek : flightsToday;
   const flightsSub = isCustom
     ? `${customDayCount} day${customDayCount === 1 ? "" : "s"} in range`
-    : isWeek
-      ? `${allDates.length} days covered`
-      : `${flightsDelta >= 0 ? "+" : ""}${flightsDelta} vs yesterday`;
-  const flightsIds = isCustom ? flightsCustomIds : isWeek ? flightsAllIds : flightsTodayIds;
+    : isWindow
+      ? `${windowDayCount} day${windowDayCount === 1 ? "" : "s"} covered`
+      : isWeek
+        ? `${allDates.length} days covered`
+        : `${flightsDelta >= 0 ? "+" : ""}${flightsDelta} vs yesterday`;
+  const flightsIds = isCustom ? flightsCustomIds : isWindow ? flightsWindowIds : isWeek ? flightsAllIds : flightsTodayIds;
 
   return {
     kpis: {
@@ -172,10 +204,10 @@ function useDashboardKpis(period: Period, range?: DateRange) {
       dispatch: { value: dispatchActive, sub: `${dispatchEnRoute} en route`, ids: dispatchRowIds },
       dailyCost:{ value: formatLakh(stockValue), sub: "FEFO stock value", ids: [] as string[] },
     },
-    trend: isCustom ? buildCustomTrend(range!, producedTotal, targetTotal) : isWeek ? trendWeek : trendToday,
+    trend: isCustom ? buildCustomTrend(range!, producedTotal, targetTotal) : (isWeek || isWindow) ? trendWeek : trendToday,
     trendTitle: isCustom
       ? `Meal Production Trend (${range!.from || "…"} → ${range!.to || "…"})`
-      : isWeek ? "Meal Production Trend (Last 7 Days)" : "Meal Production Trend (Today)",
+      : (isWeek || isWindow) ? "Meal Production Trend (Last 7 Days)" : "Meal Production Trend (Today)",
     sectionMix: computeSectionMix(producedTotal),
     activeFlights: pickActiveFlights(),
     activityFeed: buildActivityFeed({
@@ -495,6 +527,9 @@ export default function Dashboard() {
   const periodLabel =
     period === "today" ? "Today's"
     : period === "week" ? "Weekly"
+    : period === "month" ? "Monthly"
+    : period === "quarter" ? "Quarterly"
+    : period === "year" ? "Yearly"
     : range ? `${range.from} → ${range.to}` : "Custom";
 
   return (
@@ -516,6 +551,24 @@ export default function Dashboard() {
                 onClick={() => { setPeriod("week"); setRange(null); }}
               >
                 This Week
+              </Button>
+              <Button
+                type={period === "month" ? "primary" : "default"}
+                onClick={() => { setPeriod("month"); setRange(null); }}
+              >
+                This Month
+              </Button>
+              <Button
+                type={period === "quarter" ? "primary" : "default"}
+                onClick={() => { setPeriod("quarter"); setRange(null); }}
+              >
+                This Quarter
+              </Button>
+              <Button
+                type={period === "year" ? "primary" : "default"}
+                onClick={() => { setPeriod("year"); setRange(null); }}
+              >
+                This Year
               </Button>
               <CustomRangePicker
                 active={period === "custom"}
