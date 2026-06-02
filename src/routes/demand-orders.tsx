@@ -270,126 +270,96 @@ export default function DemandOrders() {
                     )}
                   </div>
 
-                  {/* Item analysis */}
+                  {/* Item analysis — read-only split view */}
                   <div>
-                    {(() => {
-                      // Only items with stock available are issuable. Shortfall items
-                      // can't be checked — they automatically flow to a Purchase
-                      // Requisition; the user only ticks what they want to issue from
-                      // the store.
-                      const issuableItems = activeDemand.items.filter((i) => {
-                        const inv = inventory.find((x) => x.id === i.id || x.name.toLowerCase() === i.name.toLowerCase());
-                        return (inv?.stock ?? 0) >= i.qty;
+                    {activeDemand.items.length === 0 ? (
+                      <p className="text-sm text-muted-foreground py-3">No items attached to this request.</p>
+                    ) : (() => {
+                      const taggedItems = activeDemand.items.map((item) => {
+                        const inv = inventory.find((x) => x.id === item.id || x.name.toLowerCase() === item.name.toLowerCase());
+                        const currentStock = inv?.stock ?? 0;
+                        const shortfall = item.qty - currentStock;
+                        return { ...item, currentStock, shortfall, insufficient: shortfall > 0 };
                       });
-                      const canSelect =
-                        activeDemand.status === "Pending Store Review" ||
-                        activeDemand.status === "Partially Available" ||
-                        activeDemand.status === "Partially Fulfilled";
-                      const allIssuableSelected =
-                        canSelect &&
-                        issuableItems.length > 0 &&
-                        issuableItems.every((i) => needsPurchase[i.id]);
+                      const sufficientItems = taggedItems.filter((it) => !it.insufficient);
+                      const shortfallItems  = taggedItems.filter((it) => it.insufficient);
                       return (
-                        <div className="grid grid-cols-[1fr_80px_80px_80px_32px] gap-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-2">
-                          <span>Item</span>
-                          <span className="text-center">In Stock</span>
-                          <span className="text-center">Required</span>
-                          <span className="text-center">Shortfall</span>
-                          <div className="flex justify-center items-center">
-                            {canSelect && issuableItems.length > 0 ? (
-                              <input
-                                type="checkbox"
-                                title="Select all in-stock items for issue"
-                                checked={allIssuableSelected}
-                                onChange={() => {
-                                  if (allIssuableSelected) {
-                                    setNeedsPurchase({});
-                                  } else {
-                                    setNeedsPurchase(Object.fromEntries(issuableItems.map((i) => [i.id, true])));
-                                  }
-                                }}
-                                className="h-4 w-4 accent-green-600 cursor-pointer"
-                              />
-                            ) : null}
-                          </div>
-                        </div>
+                        <>
+                          {sufficientItems.length > 0 && (
+                            <div className="mb-4">
+                              <div className="flex items-center gap-1.5 mb-2">
+                                <CheckCircle2 className="h-3 w-3 text-green-600" />
+                                <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                                  Sufficient Items ({sufficientItems.length})
+                                </span>
+                              </div>
+                              <div className="space-y-2">
+                                {sufficientItems.map((item) => (
+                                  <div key={item.id} className="rounded-lg border border-green-200 bg-green-50/50 p-3">
+                                    <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 items-center">
+                                      <div>
+                                        <div className="font-semibold text-sm">{item.name}</div>
+                                        <div className="text-[11px] text-muted-foreground">{item.type}</div>
+                                      </div>
+                                      <div className="text-center">
+                                        <span className="text-sm font-semibold text-green-700">{item.currentStock}</span>
+                                        <div className="text-[10px] text-muted-foreground">{item.uom}</div>
+                                      </div>
+                                      <div className="text-center">
+                                        <span className="text-sm font-semibold">{item.qty}</span>
+                                        <div className="text-[10px] text-muted-foreground">{item.uom}</div>
+                                      </div>
+                                      <div className="text-center">
+                                        <span className="text-sm font-bold text-green-600">OK</span>
+                                        <div className="text-[10px] text-green-600">sufficient</div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {shortfallItems.length > 0 && (
+                            <div>
+                              <div className="flex items-center gap-1.5 mb-2">
+                                <AlertTriangle className="h-3 w-3 text-destructive" />
+                                <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                                  Shortfall Items ({shortfallItems.length})
+                                </span>
+                              </div>
+                              <div className="space-y-2">
+                                {shortfallItems.map((item) => (
+                                  <div key={item.id} className="rounded-lg border border-red-200 bg-red-50/50 p-3">
+                                    <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 items-center">
+                                      <div>
+                                        <div className="font-semibold text-sm">{item.name}</div>
+                                        <div className="text-[11px] text-muted-foreground">{item.type}</div>
+                                      </div>
+                                      <div className="text-center">
+                                        <span className="text-sm font-semibold text-red-600">{item.currentStock}</span>
+                                        <div className="text-[10px] text-muted-foreground">{item.uom}</div>
+                                      </div>
+                                      <div className="text-center">
+                                        <span className="text-sm font-semibold">{item.qty}</span>
+                                        <div className="text-[10px] text-muted-foreground">{item.uom}</div>
+                                      </div>
+                                      <div className="text-center">
+                                        <span className="text-sm font-bold text-red-600">−{item.shortfall}</span>
+                                        <div className="text-[10px] text-red-500">{item.uom} short</div>
+                                      </div>
+                                    </div>
+                                    <div className="mt-2 flex items-center gap-1.5 text-[11px] text-red-600">
+                                      <AlertTriangle className="h-3 w-3 shrink-0" />
+                                      Stock insufficient — {item.shortfall} {item.uom} must be procured
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
                       );
                     })()}
-
-                    {activeDemand.items.length > 0 ? (
-                      <div className="space-y-2">
-                        {activeDemand.items.map(item => {
-                          const inv = inventory.find(i => i.id === item.id || i.name.toLowerCase() === item.name.toLowerCase());
-                          const currentStock = inv?.stock ?? 0;
-                          const shortfall = item.qty - currentStock;
-                          const insufficient = shortfall > 0;
-                          const flagged = needsPurchase[item.id] ?? false;
-                          const canSelect = (activeDemand.status === "Pending Store Review" ||
-                                             activeDemand.status === "Partially Available" ||
-                                             activeDemand.status === "Partially Fulfilled") &&
-                                            !insufficient;
-                          return (
-                            <div
-                              key={item.id}
-                              className={`rounded-lg border p-3 ${flagged ? "border-green-400 bg-green-50" : insufficient ? "border-red-200 bg-red-50/50" : "border-border bg-muted/40"}`}
-                            >
-                              <div className="grid grid-cols-[1fr_80px_80px_80px_32px] gap-2 items-center">
-                                <div>
-                                  <div className="font-semibold text-sm">{item.name}</div>
-                                  <div className="text-[11px] text-muted-foreground">{item.type}</div>
-                                </div>
-                                <div className="text-center">
-                                  <span className={`text-sm font-semibold ${insufficient ? "text-red-600" : "text-green-700"}`}>{currentStock}</span>
-                                  <div className="text-[10px] text-muted-foreground">{item.uom}</div>
-                                </div>
-                                <div className="text-center">
-                                  <span className="text-sm font-semibold">{item.qty}</span>
-                                  <div className="text-[10px] text-muted-foreground">{item.uom}</div>
-                                </div>
-                                <div className="text-center">
-                                  {insufficient ? (
-                                    <>
-                                      <span className="text-sm font-bold text-red-600">−{shortfall}</span>
-                                      <div className="text-[10px] text-red-500">{item.uom} short</div>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <span className="text-sm font-bold text-green-600">OK</span>
-                                      <div className="text-[10px] text-green-600">sufficient</div>
-                                    </>
-                                  )}
-                                </div>
-                                <div className="flex justify-center">
-                                  {canSelect && (
-                                    <input
-                                      type="checkbox"
-                                      title="Mark for issue from store"
-                                      checked={flagged}
-                                      onChange={(e) => setNeedsPurchase(prev => ({ ...prev, [item.id]: e.target.checked }))}
-                                      className="h-4 w-4 accent-green-600 cursor-pointer"
-                                    />
-                                  )}
-                                </div>
-                              </div>
-                              {insufficient && (
-                                <div className="mt-2 flex items-center gap-1.5 text-[11px] text-red-600">
-                                  <AlertTriangle className="h-3 w-3 shrink-0" />
-                                  Stock insufficient — {shortfall} {item.uom} must be procured
-                                </div>
-                              )}
-                              {flagged && (
-                                <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-green-700 font-medium">
-                                  <CheckCircle2 className="h-3 w-3 shrink-0" />
-                                  Selected for issue from store
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <p className="text-sm text-muted-foreground py-3">No items attached to this request.</p>
-                    )}
                   </div>
 
                 </>
@@ -405,72 +375,30 @@ export default function DemandOrders() {
                         <ShieldCheck className="h-3.5 w-3.5" />
                         Awaiting approval — handled on Approval Management
                       </div>
-                      <Button asChild size="sm">
-                        <Link to="/approval-management">
-                          Go to Approval Management <ArrowUpRight className="h-3.5 w-3.5 ml-1.5" />
-                        </Link>
+                      <Button size="sm" onClick={() => navigate("/approval-management")}>
+                        Go to Approval Management <ArrowUpRight className="h-3.5 w-3.5 ml-1.5" />
                       </Button>
                     </>
                   ) : activeDemand.status === "Pending Store Review" || activeDemand.status === "Partially Available" ? (
-                    <>
-                      {Object.values(needsPurchase).some(Boolean) && (
-                        <div className="flex items-center gap-2 text-xs text-green-700 font-medium mr-auto">
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                          {Object.values(needsPurchase).filter(Boolean).length} item{Object.values(needsPurchase).filter(Boolean).length === 1 ? "" : "s"} selected for issue
-                        </div>
-                      )}
-                      <Button
-                        className="bg-green-600 hover:bg-green-700 text-white"
-                        onClick={fulfillFromStore}
-                      >
-                        <CheckCircle2 className="h-4 w-4 mr-1.5" /> Fulfill from Store
-                      </Button>
-                    </>
+                    <div className="flex items-center gap-2 text-xs text-amber-700 font-medium">
+                      <ShieldCheck className="h-3.5 w-3.5" />
+                      Approved — fulfillment in progress
+                    </div>
                   ) : activeDemand.status === "Partially Issued" ? (
-                    <>
-                      <div className="flex items-center gap-2 text-xs text-amber-700 font-medium mr-auto">
-                        <PackageCheck className="h-3.5 w-3.5" />
-                        Partially issued — some items still pending
-                      </div>
-                      <Button
-                        className="bg-green-600 hover:bg-green-700 text-white"
-                        onClick={fulfillFromStore}
-                      >
-                        <CheckCircle2 className="h-4 w-4 mr-1.5" /> Continue Issuing
-                      </Button>
-                    </>
+                    <div className="flex items-center gap-2 text-xs text-amber-700 font-medium">
+                      <PackageCheck className="h-3.5 w-3.5" />
+                      Partially issued — some items still pending
+                    </div>
                   ) : activeDemand.status === "Partially Fulfilled" ? (
-                    <>
-                      <div className="flex items-center gap-2 text-xs text-blue-700 font-medium mr-auto">
-                        <PackageCheck className="h-3.5 w-3.5" />
-                        Items issued; remaining escalated to supply chain
-                      </div>
-                      {Object.values(needsPurchase).some(Boolean) && (
-                        <div className="flex items-center gap-2 text-xs text-green-700 font-medium">
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                          {Object.values(needsPurchase).filter(Boolean).length} selected for issue
-                        </div>
-                      )}
-                      <Button
-                        className="bg-green-600 hover:bg-green-700 text-white"
-                        onClick={fulfillFromStore}
-                      >
-                        <CheckCircle2 className="h-4 w-4 mr-1.5" /> Fulfill from Store
-                      </Button>
-                    </>
+                    <div className="flex items-center gap-2 text-xs text-blue-700 font-medium">
+                      <PackageCheck className="h-3.5 w-3.5" />
+                      Items issued; remaining escalated to supply chain
+                    </div>
                   ) : activeDemand.status === "Escalated to Supply Chain" ? (
-                    <>
-                      <div className="flex items-center gap-2 text-xs text-amber-700 font-medium mr-auto">
-                        <Send className="h-3.5 w-3.5" />
-                        Escalated — Requisition awaiting PO and GRN
-                      </div>
-                      <Button
-                        className="bg-green-600 hover:bg-green-700 text-white"
-                        onClick={fulfillFromStore}
-                      >
-                        <CheckCircle2 className="h-4 w-4 mr-1.5" /> Fulfill from Store
-                      </Button>
-                    </>
+                    <div className="flex items-center gap-2 text-xs text-amber-700 font-medium">
+                      <Send className="h-3.5 w-3.5" />
+                      Escalated — Requisition awaiting PO and GRN
+                    </div>
                   ) : activeDemand.status === "Fulfilled" ? (
                     <div className="flex items-center gap-2 text-xs text-green-700 font-medium">
                       <CheckCircle2 className="h-3.5 w-3.5" /> Fulfilled — all items issued

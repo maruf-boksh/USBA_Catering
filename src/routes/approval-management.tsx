@@ -18,9 +18,16 @@ import {
   BadgeCheck, Check, X as XIcon, Clock, ShieldCheck, Search,
   FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, Layers, UserCog,
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
+  PackageCheck, AlertTriangle, CheckCircle2, Share2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import {
+  useWorkflow,
+  type WfDemandRequest, type WfDemandStatus,
+} from "@/lib/workflow-store";
+import { inventory, warehouses } from "@/lib/sample-data";
+import { useRole } from "@/lib/roles";
 
 type Category =
   | "Demand Request"
@@ -100,6 +107,13 @@ function categoryIcon(cat: Category) {
 }
 
 export default function ApprovalManagementPage() {
+  const { role } = useRole();
+  const {
+    demands, updateDemandStatus,
+    addTransferNote, addRequisition,
+    mrpRuns, updateMrpRun,
+  } = useWorkflow();
+
   const [items, setItems] = useState<ApprovalItem[]>(SEED);
   const [activeTab, setActiveTab] = useState<Category | "all">("all");
   const [search, setSearch] = useState("");
@@ -108,6 +122,11 @@ export default function ApprovalManagementPage() {
   const [rejectReason, setRejectReason] = useState("");
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailItem, setDetailItem] = useState<ApprovalItem | null>(null);
+  const [fulfillStoreDone, setFulfillStoreDone] = useState(false);
+  const [escalateDone, setEscalateDone] = useState(false);
+  const [shortfallQtys, setShortfallQtys] = useState<Record<string, string>>({});
+  const [detailRejectOpen, setDetailRejectOpen] = useState(false);
+  const [detailRejectReason, setDetailRejectReason] = useState("");
 
   const today = new Date().toISOString().slice(0, 10);
   const stamp = () => new Date().toISOString().slice(0, 16).replace("T", " ");
@@ -338,6 +357,101 @@ export default function ApprovalManagementPage() {
   const openDetail = (it: ApprovalItem) => {
     setDetailItem(it);
     setDetailOpen(true);
+    setFulfillStoreDone(false);
+    setEscalateDone(false);
+    setShortfallQtys({});
+    setDetailRejectOpen(false);
+    setDetailRejectReason("");
+  };
+
+  const handleFulfillFromStore = (dr: WfDemandRequest) => {
+    const at = new Date().toLocaleString();
+    const tagged = dr.items
+      .map((it) => {
+        const inv = inventory.find((i) => i.name.toLowerCase() === it.name.toLowerCase());
+        const onHand = inv?.stock ?? 0;
+        const toIssue = Math.min(onHand, it.qty);
+        return { ...it, toIssue };
+      })
+      .filter((it) => it.toIssue > 0);
+    if (tagged.length === 0) { toast.error("No items available in store."); return; }
+    const tnId = `TN-${String(Date.now()).slice(-5)}`;
+    const fromName = warehouses.find((w) => w.id === "WH-001")?.name ?? "Central Warehouse";
+    const toName = warehouses.find((w) => w.id === dr.warehouseId)?.name ?? "Hot Kitchen";
+    addTransferNote({
+      id: tnId,
+      demandRef: dr.id,
+      grnRef: `Fulfilled from store — ${dr.id}`,
+      items: tagged.map((t) => ({ id: t.id, name: t.name, qty: Math.round(t.toIssue * 1000) / 1000, uom: t.uom })),
+      from: fromName,
+      to: toName,
+      issuedBy: role,
+      date: at,
+      status: "Pending",
+      officeId: dr.officeId,
+      warehouseId: dr.warehouseId,
+    });
+    setFulfillStoreDone(true);
+    toast.success(`Transfer Note ${tnId} created — ${tagged.length} item${tagged.length === 1 ? "" : "s"} queued for issue from store.`);
+  };
+
+  const handleEscalateToSupplyChain = (dr: WfDemandRequest) => {
+    const at = new Date().toLocaleString();
+    const shortItems = dr.items
+      .map((it) => {
+        const inv = inventory.find((i) => i.name.toLowerCase() === it.name.toLowerCase());
+        const onHand = inv?.stock ?? 0;
+        const shortfall = Math.max(0, it.qty - onHand);
+        const raw = shortfallQtys[it.id];
+        const parsed = raw !== undefined ? parseFloat(raw) : NaN;
+        const finalQty = !isNaN(parsed) && parsed > 0 ? parsed : shortfall;
+        return { ...it, shortfall, finalQty };
+      })
+      .filter((it) => it.shortfall > 0);
+    if (shortItems.length === 0) { toast.error("No shortfall items to escalate."); return; }
+    const reqId = `REQ-${String(Date.now() + 1).slice(-5)}`;
+    addRequisition({
+      id: reqId,
+      reference: dr.id,
+      requestedBy: role,
+      source: dr.source,
+      date: at,
+      status: "Pending Accounts",
+      items: shortItems.length,
+      note: `Escalated to Supply Chain from Approval Management. Demand: ${dr.id}. ${shortItems.length} material${shortItems.length === 1 ? "" : "s"} short.`,
+      demandRef: dr.id,
+      demandItems: shortItems.map((t) => ({ id: t.id, name: t.name, qty: Math.ceil(t.finalQty), uom: t.uom, type: t.type })),
+      officeId: dr.officeId,
+      warehouseId: dr.warehouseId,
+    });
+    setEscalateDone(true);
+    toast.success(`PR ${reqId} raised — ${shortItems.length} shortfall item${shortItems.length === 1 ? "" : "s"} escalated to Supply Chain.`);
+  };
+
+  const confirmDetailReject = () => {
+    if (!detailItem) return;
+    if (!detailRejectReason.trim()) { toast.error("Provide a reason for rejection."); return; }
+    const reason = detailRejectReason.trim();
+    if (detailItem.category === "Demand Request") {
+      updateDemandStatus(detailItem.refId, "Rejected", {
+        rejectedBy: role,
+        rejectedAt: new Date().toLocaleString(),
+        rejectionReason: reason,
+      });
+    } else {
+      setItems((p) =>
+        p.map((x) =>
+          x.id === detailItem.id
+            ? { ...x, status: "Rejected", processedBy: "R. Hossain (GM/Admin)", processedAt: stamp(), rejectionReason: reason }
+            : x,
+        ),
+      );
+    }
+    toast.success(`${detailItem.refId} rejected.`);
+    setDetailOpen(false);
+    setDetailRejectOpen(false);
+    setDetailRejectReason("");
+    setDetailItem(null);
   };
 
   return (
@@ -613,8 +727,8 @@ export default function ApprovalManagementPage() {
 
       {/* Detail dialog */}
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
+          <DialogHeader className="px-5 py-4 border-b border-border">
             <DialogTitle className="flex items-center gap-2">
               {detailItem && (() => {
                 const Icon = categoryIcon(detailItem.category);
@@ -627,7 +741,7 @@ export default function ApprovalManagementPage() {
           </DialogHeader>
 
           {detailItem && (
-            <div className="space-y-4">
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
               {/* Status strip */}
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-muted/20 px-3 py-2">
                 <Badge
@@ -693,6 +807,172 @@ export default function ApprovalManagementPage() {
                 <div className="text-sm leading-relaxed">{detailItem.summary}</div>
               </div>
 
+              {/* Item list — Demand Requests only, split by sufficient / shortfall */}
+              {detailItem.category === "Demand Request" && (() => {
+                const dr = demands.find((d) => d.id === detailItem.refId);
+                if (!dr || dr.items.length === 0) return null;
+                const taggedItems = dr.items.map((item) => {
+                  const inv = inventory.find((i) => i.id === item.id || i.name.toLowerCase() === item.name.toLowerCase());
+                  const inStock = inv?.stock ?? 0;
+                  const shortfall = item.qty - inStock;
+                  return { ...item, inStock, shortfall, insufficient: shortfall > 0 };
+                });
+                const sufficientItems = taggedItems.filter((it) => !it.insufficient);
+                const shortfallItems  = taggedItems.filter((it) => it.insufficient);
+                return (
+                  <>
+                    {/* Sufficient Items */}
+                    {sufficientItems.length > 0 && (
+                      <div>
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <CheckCircle2 className="h-3 w-3 text-success" />
+                          <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                            Sufficient Items ({sufficientItems.length})
+                          </span>
+                        </div>
+                        <div className="rounded-md border border-success/30 overflow-hidden">
+                          <table className="w-full text-sm">
+                            <thead className="bg-success/5">
+                              <tr>
+                                <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Item</th>
+                                <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-24">In Stock</th>
+                                <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-24">Required</th>
+                                <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-20">Status</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {sufficientItems.map((item, idx) => (
+                                <tr key={item.id} className={`border-t border-border ${idx % 2 === 0 ? "" : "bg-muted/20"}`}>
+                                  <td className="px-3 py-2">
+                                    <div className="font-medium text-foreground">{item.name}</div>
+                                    <div className="text-[11px] text-muted-foreground">{item.type}</div>
+                                  </td>
+                                  <td className="px-3 py-2 text-center">
+                                    <span className="font-semibold tabular-nums text-success">{item.inStock}</span>
+                                    <div className="text-[10px] text-muted-foreground">{item.uom}</div>
+                                  </td>
+                                  <td className="px-3 py-2 text-center">
+                                    <span className="font-semibold tabular-nums">{item.qty}</span>
+                                    <div className="text-[10px] text-muted-foreground">{item.uom}</div>
+                                  </td>
+                                  <td className="px-3 py-2 text-center">
+                                    <span className="font-bold text-success text-xs">OK</span>
+                                    <div className="text-[10px] text-success">sufficient</div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        {detailItem.status === "Pending" && (
+                          <div className="flex justify-end mt-2">
+                            {fulfillStoreDone ? (
+                              <Button size="sm" variant="outline" disabled className="h-7 px-3 text-[11px] border-success/40 text-success">
+                                <CheckCircle2 className="h-3 w-3 mr-1.5" /> Fulfilled from Store ✓
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                className="h-7 px-3 text-[11px] bg-success text-success-foreground hover:bg-success/90"
+                                onClick={() => handleFulfillFromStore(dr)}
+                              >
+                                <PackageCheck className="h-3 w-3 mr-1.5" /> Fulfill From Store
+                              </Button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Shortfall Items */}
+                    {shortfallItems.length > 0 && (
+                      <div>
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <AlertTriangle className="h-3 w-3 text-destructive" />
+                          <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                            Shortfall Items ({shortfallItems.length})
+                          </span>
+                        </div>
+                        <div className="rounded-md border border-destructive/30 overflow-hidden">
+                          <table className="w-full text-sm">
+                            <thead className="bg-destructive/5">
+                              <tr>
+                                <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Item</th>
+                                <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-20">In Stock</th>
+                                <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-20">Required</th>
+                                <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-20">Shortfall</th>
+                                <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-28">Escalate Qty</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {shortfallItems.map((item, idx) => (
+                                <tr key={item.id} className={`border-t border-border ${idx % 2 === 0 ? "" : "bg-muted/20"}`}>
+                                  <td className="px-3 py-2">
+                                    <div className="font-medium text-foreground">{item.name}</div>
+                                    <div className="text-[11px] text-muted-foreground">{item.type}</div>
+                                  </td>
+                                  <td className="px-3 py-2 text-center">
+                                    <span className="font-semibold tabular-nums text-destructive">{item.inStock}</span>
+                                    <div className="text-[10px] text-muted-foreground">{item.uom}</div>
+                                  </td>
+                                  <td className="px-3 py-2 text-center">
+                                    <span className="font-semibold tabular-nums">{item.qty}</span>
+                                    <div className="text-[10px] text-muted-foreground">{item.uom}</div>
+                                  </td>
+                                  <td className="px-3 py-2 text-center">
+                                    <span className="font-bold tabular-nums text-destructive">−{item.shortfall}</span>
+                                    <div className="text-[10px] text-destructive">{item.uom} short</div>
+                                  </td>
+                                  <td className="px-3 py-2 text-center">
+                                    {detailItem.status === "Pending" && !escalateDone ? (
+                                      <Input
+                                        type="number"
+                                        min="0"
+                                        step="0.001"
+                                        className="h-7 w-24 text-center text-xs mx-auto"
+                                        placeholder={String(Math.ceil(item.shortfall))}
+                                        value={shortfallQtys[item.id] ?? ""}
+                                        onChange={(e) =>
+                                          setShortfallQtys((p) => ({ ...p, [item.id]: e.target.value }))
+                                        }
+                                      />
+                                    ) : (
+                                      <span className="text-xs tabular-nums text-muted-foreground">
+                                        {shortfallQtys[item.id] !== undefined && shortfallQtys[item.id] !== ""
+                                          ? shortfallQtys[item.id]
+                                          : Math.ceil(item.shortfall)}
+                                      </span>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        {detailItem.status === "Pending" && (
+                          <div className="flex justify-end mt-2">
+                            {escalateDone ? (
+                              <Button size="sm" variant="outline" disabled className="h-7 px-3 text-[11px] border-warning/40 text-warning-foreground">
+                                <CheckCircle2 className="h-3 w-3 mr-1.5" /> Escalated to Supply Chain ✓
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 px-3 text-[11px] border-warning/40 text-warning-foreground hover:bg-warning/10"
+                                onClick={() => handleEscalateToSupplyChain(dr)}
+                              >
+                                <Share2 className="h-3 w-3 mr-1.5" /> Escalate To Supply Chain
+                              </Button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
+
               {/* Processing history */}
               {(detailItem.processedBy || detailItem.processedAt) && (
                 <div
@@ -722,29 +1002,58 @@ export default function ApprovalManagementPage() {
             </div>
           )}
 
-          <DialogFooter>
-            {detailItem?.status === "Pending" && (
+          <DialogFooter className={cn("px-5 border-t border-border bg-muted/20", detailItem?.status === "Pending" && detailRejectOpen ? "py-4" : "py-3")}>
+            {detailItem?.status === "Pending" && detailRejectOpen ? (
+              <div className="w-full flex flex-col gap-2">
+                <div>
+                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+                    Rejection Reason <span className="text-destructive">*</span>
+                  </Label>
+                  <Textarea
+                    value={detailRejectReason}
+                    onChange={(e) => setDetailRejectReason(e.target.value)}
+                    placeholder="Explain why this is being rejected..."
+                    className="mt-1 min-h-20"
+                    autoFocus
+                  />
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => { setDetailRejectOpen(false); setDetailRejectReason(""); }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button variant="destructive" size="sm" onClick={confirmDetailReject}>
+                    <XIcon className="h-3.5 w-3.5 mr-1" /> Confirm Reject
+                  </Button>
+                </div>
+              </div>
+            ) : (
               <>
-                <Button
-                  variant="outline"
-                  className="border-destructive/40 text-destructive hover:bg-destructive/10"
-                  onClick={() => {
-                    if (detailItem) { setDetailOpen(false); openReject(detailItem); }
-                  }}
-                >
-                  <XIcon className="h-4 w-4 mr-1.5" /> Reject
-                </Button>
-                <Button
-                  className="bg-success text-success-foreground hover:bg-success/90"
-                  onClick={() => {
-                    if (detailItem) { approve(detailItem); setDetailOpen(false); }
-                  }}
-                >
-                  <Check className="h-4 w-4 mr-1.5" /> Approve
-                </Button>
+                {detailItem?.status === "Pending" && (
+                  <>
+                    <Button
+                      variant="outline"
+                      className="border-destructive/40 text-destructive hover:bg-destructive/10"
+                      onClick={() => setDetailRejectOpen(true)}
+                    >
+                      <XIcon className="h-4 w-4 mr-1.5" /> Reject
+                    </Button>
+                    <Button
+                      className="bg-success text-success-foreground hover:bg-success/90"
+                      onClick={() => {
+                        if (detailItem) { approve(detailItem); setDetailOpen(false); }
+                      }}
+                    >
+                      <Check className="h-4 w-4 mr-1.5" /> Approve
+                    </Button>
+                  </>
+                )}
+                <Button variant="outline" onClick={() => setDetailOpen(false)}>Close</Button>
               </>
             )}
-            <Button variant="outline" onClick={() => setDetailOpen(false)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
