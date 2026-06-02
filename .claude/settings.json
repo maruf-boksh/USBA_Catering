@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:api.anthropic.com)",
+      "PowerShell(Get-ChildItem \"C:\\\\Users\\\\TechnoNext\\\\.claude\\\\projects\\\\d--USBA-Catering-USBA-Catering\\\\cf4cd5fd-e930-4e6a-b536-bc50b0bb85d\\\\tool-results\\\\extracted\" -Recurse -File | ForEach-Object { \"$\\($_.Length\\)`t$\\($_.Name\\)\" })",
+      "Bash(npx eslint *)",
+      "Bash(tar -xf design -C design_x)",
+      "Read(//d/d/tmp/design_x/catering-login/project/**)",
+      "Read(//d/d/tmp/design_x/catering-login/**)",
+      "Bash(cd /d/USBA_Catering/USBA_Catering && grep -nE \"orderAccent|DirectionBadge|function OrdersList|om-count|Showing|Flight Orders|All Dates|StatusBadge|grp-|flt-num|#1a0204|#2a2528|route-blue|2b5f8a|FlightOrderStatus =|Bulk Upload|btn-view|<TableHead\" src/routes/order-management.tsx | head -60)",
+      "Read(//d/d/USBA_Catering/USBA_Catering/src/routes/**)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\TechnoNext\\.claude\\projects\\d--USBA-Catering-USBA-Catering"
+    ]
+  }
+}

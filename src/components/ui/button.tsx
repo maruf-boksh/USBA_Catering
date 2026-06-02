@@ -37,10 +37,23 @@ export interface ButtonProps
 }
 
 const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, ...props }, ref) => {
+  ({ className, variant = "default", size = "default", asChild = false, ...props }, ref) => {
     const Comp = asChild ? Slot : "button";
+    // Brand red-gradient CTA (.hc-cta) on every standard labeled button so both
+    // button systems match the "Export Report" pattern. Icon-only buttons and the
+    // borderless ghost / link / destructive variants keep their utility + danger
+    // styling. Pass `className="no-brand"` to opt a button out (e.g. a white
+    // secondary action sitting next to a red primary).
+    const brand =
+      (variant === "default" || variant === "secondary" || variant === "outline") &&
+      size !== "icon" &&
+      !className?.includes("no-brand");
     return (
-      <Comp className={cn(buttonVariants({ variant, size, className }))} ref={ref} {...props} />
+      <Comp
+        className={cn(buttonVariants({ variant, size }), brand && "hc-cta", className)}
+        ref={ref}
+        {...props}
+      />
     );
   },
 );
