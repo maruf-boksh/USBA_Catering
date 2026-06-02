@@ -539,44 +539,34 @@ export default function Dashboard() {
         subtitle="Live operational overview — US-Bangla Airlines Flight Catering"
         actions={
           <>
-            <Button.Group>
-              <Button
-                type={period === "today" ? "primary" : "default"}
-                onClick={() => { setPeriod("today"); setRange(null); }}
-              >
-                Today
-              </Button>
-              <Button
-                type={period === "week" ? "primary" : "default"}
-                onClick={() => { setPeriod("week"); setRange(null); }}
-              >
-                This Week
-              </Button>
-              <Button
-                type={period === "month" ? "primary" : "default"}
-                onClick={() => { setPeriod("month"); setRange(null); }}
-              >
-                This Month
-              </Button>
-              <Button
-                type={period === "quarter" ? "primary" : "default"}
-                onClick={() => { setPeriod("quarter"); setRange(null); }}
-              >
-                This Quarter
-              </Button>
-              <Button
-                type={period === "year" ? "primary" : "default"}
-                onClick={() => { setPeriod("year"); setRange(null); }}
-              >
-                This Year
-              </Button>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+              {([
+                { value: "today",   label: "Today"        },
+                { value: "week",    label: "This Week"    },
+                { value: "month",   label: "This Month"   },
+                { value: "quarter", label: "This Quarter" },
+                { value: "year",    label: "This Year"    },
+              ] as { value: Period; label: string }[]).map((opt) => {
+                const selected = period === opt.value;
+                return (
+                  <Button
+                    key={opt.value}
+                    size="small"
+                    type={selected ? "primary" : "default"}
+                    className={selected ? undefined : "period-toggle-idle"}
+                    onClick={() => { setPeriod(opt.value); setRange(null); }}
+                  >
+                    {opt.label}
+                  </Button>
+                );
+              })}
               <CustomRangePicker
                 active={period === "custom"}
                 range={range}
                 onApply={(r) => { setRange(r); setPeriod("custom"); }}
                 onClear={() => { setRange(null); setPeriod("today"); }}
               />
-            </Button.Group>
+            </div>
             <Button
               type="primary"
               size="small"
@@ -1046,6 +1036,8 @@ function CustomRangePicker({
     >
       <Button
         type={active ? "primary" : "default"}
+        size="small"
+        className={active ? undefined : "period-toggle-idle"}
         icon={<CalendarOutlined />}
         style={{ fontVariantNumeric: "tabular-nums" }}
       >
