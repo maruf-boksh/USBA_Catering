@@ -182,6 +182,8 @@ type ProductionEntry = WfProductionEntry;
 //   Ready for QC     → cumulative Production Entries reach orderQty (auto)
 //   Completed        → QC sign-off in Cooking Temp & Sensory
 function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
+  const [viewOpen, setViewOpen] = useState(false);
+
   const stageHint =
     entry.status === "Pending"      ? "Approval handled in Approval Management"
     : entry.status === "Approved"   ? "Will move to In Preparation once any Production Entry is logged"
@@ -189,37 +191,173 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
     : entry.status === "Ready for QC"   ? "QC sign-off in Cooking Temp & Sensory"
     : null;
 
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="h-8 w-8">
-          <MoreHorizontal className="h-4 w-4" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-64">
-        <DropdownMenuItem onClick={() => toast.info(`Viewing ${entry.id}`)}>
-          <Eye className="h-4 w-4 mr-2" /> View
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => toast.info(`Editing ${entry.id}`)}>
-          <Pencil className="h-4 w-4 mr-2" /> Edit
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => window.print()}>
-          <Printer className="h-4 w-4 mr-2" /> Print
-        </DropdownMenuItem>
+  const recipe = PRODUCTION_ITEMS.find(
+    (p) => p.name === entry.outputItemName || p.name === entry.bom || p.code === entry.outputItemCode,
+  );
+  const orderQty = entry.orderQty ?? entry.producedQty;
+  const remaining = Math.max(0, orderQty - entry.producedQty);
+  const materials = recipe && orderQty > 0
+    ? aggregateMaterials([{ id: entry.id, itemCode: recipe.code, itemName: recipe.name, qty: orderQty }])
+    : null;
 
-        {stageHint && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
-              Workflow
-            </DropdownMenuLabel>
-            <DropdownMenuItem disabled className="text-[11px]">
-              <span className="text-muted-foreground">{stageHint}</span>
-            </DropdownMenuItem>
-          </>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon" className="h-8 w-8">
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-64">
+          <DropdownMenuItem onClick={() => setViewOpen(true)}>
+            <Eye className="h-4 w-4 mr-2" /> View
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => toast.info(`Editing ${entry.id}`)}>
+            <Pencil className="h-4 w-4 mr-2" /> Edit
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => window.print()}>
+            <Printer className="h-4 w-4 mr-2" /> Print
+          </DropdownMenuItem>
+
+          {stageHint && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                Workflow
+              </DropdownMenuLabel>
+              <DropdownMenuItem disabled className="text-[11px]">
+                <span className="text-muted-foreground">{stageHint}</span>
+              </DropdownMenuItem>
+            </>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <Dialog open={viewOpen} onOpenChange={setViewOpen}>
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden flex flex-col p-0 gap-0">
+          <DialogHeader className="px-6 pt-5 pb-4 border-b border-border">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <DialogTitle className="font-mono text-base">{entry.id}</DialogTitle>
+              <StatusBadge status={entry.status} />
+            </div>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
+            {/* Production Information */}
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+                Production Information
+              </div>
+              <div className="grid grid-cols-2 gap-x-6 gap-y-4">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Date</div>
+                  <div className="mt-0.5 text-sm text-foreground">{entry.date}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Office / Warehouse</div>
+                  <div className="mt-0.5 text-sm">
+                    <LocationCell officeId={entry.officeId} warehouseId={entry.warehouseId} />
+                  </div>
+                </div>
+                <div className="col-span-2">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">BOM</div>
+                  <div className="mt-0.5 text-sm text-foreground">{entry.bom || "—"}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Production Output */}
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+                Production Output
+              </div>
+              <div className="rounded-md border border-border bg-muted/20 px-4 py-3">
+                <div className="flex items-start justify-between gap-4 flex-wrap">
+                  <div>
+                    {entry.outputItemCode && (
+                      <div className="font-mono text-xs text-muted-foreground">{entry.outputItemCode}</div>
+                    )}
+                    <div className="text-base font-semibold text-foreground mt-0.5">
+                      {entry.outputItemName || "—"}
+                    </div>
+                  </div>
+                  <div className="flex gap-6 shrink-0">
+                    <div className="text-center">
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Order Qty</div>
+                      <div className="mt-0.5 font-semibold tabular-nums">{orderQty.toLocaleString()}</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Produced</div>
+                      <div className="mt-0.5 font-semibold tabular-nums">{entry.producedQty.toLocaleString()}</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Remaining</div>
+                      <div className={cn("mt-0.5 font-semibold tabular-nums", remaining > 0 ? "text-warning" : "text-success")}>
+                        {remaining.toLocaleString()}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Material Requirements */}
+            {materials ? (
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+                  Material Requirements
+                </div>
+                {(
+                  [
+                    { label: "Raw Materials",      rows: materials.raw   },
+                    { label: "Packaging Materials", rows: materials.pkg   },
+                    { label: "Other Consumption",   rows: materials.other },
+                  ] as const
+                ).map(({ label, rows }) =>
+                  rows.length === 0 ? null : (
+                    <div key={label} className="mb-4">
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">
+                        {label}
+                      </div>
+                      <div className="border border-border rounded-md overflow-hidden">
+                        <Table>
+                          <TableHeader className="bg-muted/40">
+                            <TableRow>
+                              <TableHead className="text-xs uppercase tracking-wider">Item Code</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Item Name</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">UoM</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider text-right">Req. Qty</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {rows.map((m) => (
+                              <TableRow key={m.itemCode}>
+                                <TableCell className="font-mono text-xs">{m.itemCode}</TableCell>
+                                <TableCell className="font-medium">{m.itemName}</TableCell>
+                                <TableCell>{m.uom}</TableCell>
+                                <TableCell className="text-right tabular-nums">{m.reqQty.toFixed(3)}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                  ),
+                )}
+              </div>
+            ) : (
+              <div className="text-sm text-muted-foreground py-2">
+                No material recipe found for this production item.
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="px-6 py-3 border-t border-border bg-muted/20">
+            <Button variant="outline" onClick={() => setViewOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 

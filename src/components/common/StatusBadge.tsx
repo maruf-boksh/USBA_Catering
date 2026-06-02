@@ -70,7 +70,7 @@ const MAP: Record<string, string> = {
 export function StatusBadge({ status }: { status: string }) {
   const cls = MAP[status.toLowerCase()] ?? "bg-[#F8FAFC] text-[#64748b] border border-[#E2E8F0]";
   return (
-    <Badge className={cn("font-medium rounded-full px-2.5 py-0.5 text-[11px]", cls)}>
+    <Badge className={cn("font-medium rounded-full px-2.5 py-0.5 text-[11px] pointer-events-none", cls)}>
       {status}
     </Badge>
   );
