@@ -1,98 +1,114 @@
-import { cn } from "@/lib/utils";
-import type { LucideIcon } from "lucide-react";
+import React from 'react';
 
-const TONE = {
-  /* Brand teal — primary metrics, flights, dispatch */
-  navy: {
-    bg: "bg-[#f0fdfa]",
-    border: "border-[#99f6e4]",
-    accent: "bg-[#0f766e]",
-    labelText: "text-[#0f766e]",
-    valueText: "text-[#115e59]",
-    iconBg: "bg-[#0f766e]",
-    iconRing: "ring-white/30",
-    iconText: "text-white",
-    blob: "bg-[#0f766e]/10",
-  },
-  /* Destructive red — QC issues, inventory alerts, failures */
-  red: {
-    bg: "bg-[#FEF2F2]",
-    border: "border-[#FECACA]",
-    accent: "bg-[#EF4444]",
-    labelText: "text-[#DC2626]",
-    valueText: "text-[#7f1d1d]",
-    iconBg: "bg-[#EF4444]",
-    iconRing: "ring-white/30",
-    iconText: "text-white",
-    blob: "bg-[#EF4444]/10",
-  },
-  /* Green — meals prepared, dispatch active, approved */
-  success: {
-    bg: "bg-[#ECFDF5]",
-    border: "border-[#A7F3D0]",
-    accent: "bg-[#059669]",
-    labelText: "text-[#059669]",
-    valueText: "text-[#14532d]",
-    iconBg: "bg-[#059669]",
-    iconRing: "ring-white/30",
-    iconText: "text-white",
-    blob: "bg-[#059669]/10",
-  },
-  /* Amber — delayed, pending, warnings (accent only, never primary CTA) */
-  warning: {
-    bg: "bg-[#FFFBEB]",
-    border: "border-[#FDE68A]",
-    accent: "bg-[#D97706]",
-    labelText: "text-[#B45309]",
-    valueText: "text-[#78350f]",
-    iconBg: "bg-[#D97706]",
-    iconRing: "ring-white/30",
-    iconText: "text-white",
-    blob: "bg-[#D97706]/10",
-  },
-} as const;
+// Harvest Catering KPI accents — brand red leads, with status + ink variants.
+// Tinted tones fade a soft status wash into white, matching the dashboard mockup.
+const TONE: Record<string, { accent: string; bg: string }> = {
+  navy:    { accent: '#E10101', bg: '#ffffff' },                              // brand red
+  red:     { accent: '#E10101', bg: 'linear-gradient(180deg,#fdecea,#fff 70%)' },
+  success: { accent: '#0f7a40', bg: '#ffffff' },
+  warning: { accent: '#b45309', bg: 'linear-gradient(180deg,#fbf1e6,#fff 70%)' },
+  info:    { accent: '#3c3a40', bg: '#ffffff' },
+  ink:     { accent: '#1a0204', bg: '#ffffff' },
+};
+
+// A leading delta token in the sub-line (e.g. "+1", "−14", "9%") gets colored:
+// negative → bad/red, otherwise → ok/green. Plain counts ("1 catering related")
+// stay muted so we don't paint every footer.
+function splitDelta(sub: string): { delta?: string; dir?: 'up' | 'down'; rest: string } {
+  const [first, ...others] = sub.split(' ');
+  const rest = others.join(' ');
+  const isSigned = /^[+\-−]/.test(first);
+  const isPct = /^\d+(\.\d+)?%$/.test(first);
+  if (isSigned || isPct) {
+    const dir: 'up' | 'down' = /^[-−]/.test(first) ? 'down' : 'up';
+    return { delta: first, dir, rest };
+  }
+  return { rest: sub };
+}
 
 export function KpiCard({
-  label, value, sub, icon: Icon, tone = "navy",
+  label, value, sub, icon, tone = 'navy',
 }: {
-  label: string; value: string | number; sub?: string;
-  icon: LucideIcon; tone?: keyof typeof TONE;
+  label: string;
+  value: string | number;
+  sub?: string;
+  icon: React.ElementType;
+  tone?: keyof typeof TONE;
 }) {
-  const t = TONE[tone];
+  const t = TONE[tone] ?? TONE.navy;
+
+  // Render a leading currency glyph (৳) smaller, like the mockup's `.cur` span.
+  const valueStr = String(value);
+  const curMatch = valueStr.match(/^(৳\s*)(.*)$/);
+
+  const footer = sub ? splitDelta(sub) : null;
+
   return (
-    <div
-      className={cn(
-        "relative overflow-hidden rounded-xl border p-4 shadow-sm transition-all duration-150 ease-out hover:shadow-md hover:-translate-y-px",
-        t.bg,
-        t.border,
-      )}
-    >
-      <span className={cn("absolute inset-y-0 left-0 w-1.5", t.accent)} />
-      <span
-        className={cn(
-          "pointer-events-none absolute -right-8 -top-8 h-24 w-24 rounded-full blur-2xl opacity-70",
-          t.blob,
-        )}
-        aria-hidden
-      />
-      <div className="relative flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className={cn("text-[11px] font-semibold uppercase tracking-wider", t.labelText)}>{label}</div>
-          <div className={cn("mt-1.5 text-2xl font-bold tabular-nums", t.valueText)}>{value}</div>
-          {sub && <div className="mt-1 text-xs text-[#6b7280]">{sub}</div>}
-        </div>
-        <div
-          className={cn(
-            "flex h-10 w-10 shrink-0 items-center justify-center rounded-md ring-1 ring-inset text-[20px] leading-none",
-            "[&_svg]:h-5 [&_svg]:w-5",
-            t.iconBg,
-            t.iconRing,
-            t.iconText,
-          )}
-        >
-          <Icon className={cn("h-5 w-5", t.iconText)} />
+    <div style={{
+      position: 'relative', overflow: 'hidden',
+      background: t.bg,
+      border: '1px solid var(--line, #e6e2e0)',
+      borderRadius: 16,
+      padding: '18px 18px 16px',
+      boxShadow: '0 1px 2px rgba(26,2,4,.04), 0 12px 30px -22px rgba(26,2,4,.18)',
+      transition: 'box-shadow 150ms, transform 150ms',
+      height: '100%',
+    }}>
+      {/* left accent bar */}
+      <span style={{
+        position: 'absolute', left: 0, top: 0, bottom: 0, width: 3,
+        background: t.accent, borderRadius: 0, opacity: 0.85,
+      }} />
+
+      {/* top row: label + icon */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+        <span style={{
+          fontSize: 10.5, fontWeight: 700, letterSpacing: '0.13em',
+          textTransform: 'uppercase', color: 'var(--muted, #6b6b72)',
+        }}>
+          {label}
+        </span>
+        <div style={{
+          width: 38, height: 38, borderRadius: 11,
+          display: 'grid', placeItems: 'center', flexShrink: 0,
+          color: '#fff', background: t.accent,
+          boxShadow: `0 8px 18px -9px ${t.accent}`,
+        }}>
+          {React.createElement(icon, { style: { width: 18, height: 18 } })}
         </div>
       </div>
+
+      {/* number */}
+      <div style={{
+        fontFamily: "var(--serif, 'Newsreader', Georgia, serif)",
+        fontWeight: 600, fontSize: 42, lineHeight: 1,
+        letterSpacing: '-0.015em', marginTop: 14,
+        color: 'var(--ink, #1a0204)',
+      }}>
+        {curMatch ? (
+          <>
+            <span style={{ fontSize: 24, fontWeight: 500, color: 'var(--muted, #6b6b72)', marginRight: 1 }}>
+              {curMatch[1].trim()}
+            </span>
+            {curMatch[2]}
+          </>
+        ) : valueStr}
+      </div>
+
+      {/* sub / delta footer */}
+      {footer && (
+        <div style={{ fontSize: 12, color: 'var(--muted, #6b6b72)', marginTop: 9, display: 'flex', alignItems: 'center', gap: 6 }}>
+          {footer.delta && (
+            <span style={{
+              fontWeight: 600,
+              color: footer.dir === 'down' ? '#E10101' : '#0f7a40',
+            }}>
+              {footer.delta}
+            </span>
+          )}
+          {footer.delta ? footer.rest : footer.rest}
+        </div>
+      )}
     </div>
   );
 }

@@ -10,12 +10,19 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import {
-  Plus, ArrowLeft, Save, ClipboardCheck, CheckCircle2, AlertCircle, Factory, Users,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from "@/components/ui/dialog";
+import {
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+} from "@/components/ui/table";
+import {
+  Plus, ArrowLeft, Save, ClipboardCheck, CheckCircle2, AlertCircle, Factory, Users, Eye, Package, PackageOpen, Wrench,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { useWorkflow, type WfProductionEntryRecord } from "@/lib/workflow-store";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
+import { PRODUCTION_ITEMS, type RecipeItem } from "@/routes/production-entry";
 
 const SHIFTS = ["Morning", "Evening", "Night"] as const;
 const PRODUCERS = ["F. Begum", "T. Islam", "M. Karim", "N. Hossen", "S. Ahmed", "R. Karim"];
@@ -28,6 +35,7 @@ export default function ProductionEntryPage() {
   const [view, setView] = useState<"list" | "create">("list");
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
+  const [viewEntry, setViewEntry] = useState<WfProductionEntryRecord | null>(null);
 
   // Orders that can accept new entries: anything Approved or In Preparation
   // (Pending = not approved yet, Ready for QC / Completed = order target met).
@@ -78,6 +86,20 @@ export default function ProductionEntryPage() {
       render: (r) => r.shift ? <Badge variant="outline" className="text-[10px]">{r.shift}</Badge> : <span className="text-muted-foreground">—</span>,
     },
     { key: "producedBy", header: "Produced By" },
+    {
+      key: "actions", header: "Actions", className: "text-right",
+      render: (r) => (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 px-2"
+          onClick={(e) => { e.stopPropagation(); setViewEntry(r); }}
+          aria-label={`View ${r.id}`}
+        >
+          <Eye className="h-4 w-4" />
+        </Button>
+      ),
+    },
   ];
 
   return (
@@ -146,6 +168,11 @@ export default function ProductionEntryPage() {
           nextSeq={productionEntryRecords.length + 47}
         />
       )}
+
+      <ProductionEntryDetailDialog
+        entry={viewEntry}
+        onOpenChange={(open) => { if (!open) setViewEntry(null); }}
+      />
     </>
   );
 }
@@ -404,6 +431,230 @@ function SummaryStat({
           !tone && "text-foreground",
         )}
       >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// View dialog — shows entry metadata + costing computed from BOM recipe.
+// Reuses PRODUCTION_ITEMS (the recipe catalog defined for production orders).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const BDT = (n: number) =>
+  `৳ ${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+type CostedLine = RecipeItem & { reqQty: number; lineCost: number };
+
+function lookupRecipe(entry: WfProductionEntryRecord) {
+  const code = entry.outputItemCode;
+  const name = entry.outputItemName ?? entry.bom;
+  return (
+    PRODUCTION_ITEMS.find((p) => (code ? p.code === code : p.name === name)) ??
+    null
+  );
+}
+
+function costLines(items: RecipeItem[], producedQty: number): CostedLine[] {
+  return items.map((it) => {
+    const reqQty = it.qtyPerUnit * producedQty;
+    return { ...it, reqQty, lineCost: reqQty * it.rate };
+  });
+}
+
+function ProductionEntryDetailDialog({
+  entry, onOpenChange,
+}: {
+  entry: WfProductionEntryRecord | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const order = useWorkflow().productionEntries.find(
+    (o) => o.id === entry?.productionOrderId,
+  );
+
+  const breakdown = useMemo(() => {
+    if (!entry) return null;
+    const recipe = lookupRecipe(entry);
+    if (!recipe) return null;
+    const raw = costLines(recipe.rawMaterials, entry.producedQty);
+    const pkg = costLines(recipe.packagingMaterials, entry.producedQty);
+    const other = costLines(recipe.otherConsumption, entry.producedQty);
+    const sum = (arr: CostedLine[]) => arr.reduce((s, l) => s + l.lineCost, 0);
+    const rawCost = sum(raw);
+    const pkgCost = sum(pkg);
+    const otherCost = sum(other);
+    const totalCost = rawCost + pkgCost + otherCost;
+    return {
+      recipe, raw, pkg, other,
+      rawCost, pkgCost, otherCost, totalCost,
+      unitCost: entry.producedQty > 0 ? totalCost / entry.producedQty : 0,
+    };
+  }, [entry]);
+
+  return (
+    <Dialog open={!!entry} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Factory className="h-5 w-5 text-primary" />
+            Production Entry Details
+          </DialogTitle>
+        </DialogHeader>
+
+        {entry && (
+          <div className="space-y-5">
+            {/* ── Header summary grid ──────────────────────────────────── */}
+            <div className="rounded-md border border-border bg-muted/20 px-4 py-3">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-sm">
+                <DetailRow label="Entry No"          value={<span className="font-mono">{entry.id}</span>} />
+                <DetailRow label="Entry Date"        value={<span className="tabular-nums">{entry.date}</span>} />
+                <DetailRow label="Production Order"  value={<span className="font-mono text-primary">{entry.productionOrderId}</span>} />
+                <DetailRow label="Order Date"        value={<span className="tabular-nums">{order?.date ?? "—"}</span>} />
+                <DetailRow label="BOM"               value={entry.bom} />
+                <DetailRow label="Output Item"       value={entry.outputItemName ?? "—"} />
+                <DetailRow label="Office / Warehouse" value={<LocationCell officeId={entry.officeId} warehouseId={entry.warehouseId} />} />
+                <DetailRow label="Batch No"          value={entry.batchNo ?? "—"} />
+                <DetailRow label="Shift"             value={entry.shift ?? "—"} />
+                <DetailRow label="Produced By"       value={entry.producedBy} />
+                {entry.remarks && (
+                  <div className="md:col-span-2">
+                    <DetailRow label="Remarks" value={<span className="text-foreground">{entry.remarks}</span>} />
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* ── Output item costing ──────────────────────────────────── */}
+            <SectionTitle icon={Factory} label="Output Item" />
+            <div className="overflow-x-auto rounded-md border border-border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Code</TableHead>
+                    <TableHead>Item Name</TableHead>
+                    <TableHead>UoM</TableHead>
+                    <TableHead className="text-right">Produced Qty</TableHead>
+                    <TableHead className="text-right">Unit Cost</TableHead>
+                    <TableHead className="text-right">Total Cost</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  <TableRow>
+                    <TableCell className="font-mono text-xs">{breakdown?.recipe.code ?? entry.outputItemCode ?? "—"}</TableCell>
+                    <TableCell>{entry.outputItemName ?? entry.bom}</TableCell>
+                    <TableCell>Pcs</TableCell>
+                    <TableCell className="text-right tabular-nums font-semibold">{entry.producedQty.toLocaleString()}</TableCell>
+                    <TableCell className="text-right tabular-nums">{breakdown ? BDT(breakdown.unitCost) : "—"}</TableCell>
+                    <TableCell className="text-right tabular-nums font-semibold">{breakdown ? BDT(breakdown.totalCost) : "—"}</TableCell>
+                  </TableRow>
+                </TableBody>
+              </Table>
+            </div>
+
+            {/* ── Materials breakdown ──────────────────────────────────── */}
+            {breakdown ? (
+              <>
+                <SectionTitle icon={Package} label="Materials Consumed" />
+                <div className="overflow-x-auto rounded-md border border-border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-[80px]">Bucket</TableHead>
+                        <TableHead>Code</TableHead>
+                        <TableHead>Item Name</TableHead>
+                        <TableHead>UoM</TableHead>
+                        <TableHead className="text-right">Required Qty</TableHead>
+                        <TableHead className="text-right">Rate</TableHead>
+                        <TableHead className="text-right">Total Cost</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      <MaterialRows label="Raw"        rows={breakdown.raw} />
+                      <MaterialRows label="Packaging"  rows={breakdown.pkg} />
+                      <MaterialRows label="Other"      rows={breakdown.other} />
+                    </TableBody>
+                  </Table>
+                </div>
+
+                {/* ── Cost summary ─────────────────────────────────────── */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 pt-1">
+                  <CostTile label="Raw Materials"    value={BDT(breakdown.rawCost)}   icon={Package} />
+                  <CostTile label="Packaging"        value={BDT(breakdown.pkgCost)}   icon={PackageOpen} />
+                  <CostTile label="Other Consumption" value={BDT(breakdown.otherCost)} icon={Wrench} />
+                  <CostTile label="Total Cost"       value={BDT(breakdown.totalCost)} icon={Factory} accent />
+                </div>
+              </>
+            ) : (
+              <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-foreground">
+                <AlertCircle className="h-4 w-4 inline-block mr-1.5" />
+                No BOM recipe registered for this output item — costing breakdown unavailable.
+              </div>
+            )}
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function DetailRow({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex items-start gap-2">
+      <span className="text-xs uppercase tracking-wider text-muted-foreground min-w-[140px]">{label}</span>
+      <span className="text-sm text-foreground flex-1">{value}</span>
+    </div>
+  );
+}
+
+function SectionTitle({ icon: Icon, label }: { icon: React.ElementType; label: string }) {
+  return (
+    <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-foreground">
+      <Icon className="h-4 w-4 text-primary" />
+      {label}
+    </div>
+  );
+}
+
+function MaterialRows({ label, rows }: { label: string; rows: CostedLine[] }) {
+  if (rows.length === 0) return null;
+  return (
+    <>
+      {rows.map((r, i) => (
+        <TableRow key={`${label}-${r.itemCode}-${i}`}>
+          <TableCell><Badge variant="outline" className="text-[10px]">{label}</Badge></TableCell>
+          <TableCell className="font-mono text-xs">{r.itemCode}</TableCell>
+          <TableCell>{r.itemName}</TableCell>
+          <TableCell>{r.uom}</TableCell>
+          <TableCell className="text-right tabular-nums">{r.reqQty.toFixed(3)}</TableCell>
+          <TableCell className="text-right tabular-nums">{BDT(r.rate)}</TableCell>
+          <TableCell className="text-right tabular-nums font-medium">{BDT(r.lineCost)}</TableCell>
+        </TableRow>
+      ))}
+    </>
+  );
+}
+
+function CostTile({
+  label, value, icon: Icon, accent,
+}: { label: string; value: string; icon: React.ElementType; accent?: boolean }) {
+  return (
+    <div className={cn(
+      "rounded-md border px-3 py-2.5",
+      accent ? "border-primary/40 bg-primary/5" : "border-border bg-muted/30",
+    )}>
+      <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+        <Icon className="h-3.5 w-3.5" />
+        {label}
+      </div>
+      <div className={cn(
+        "mt-1 text-sm font-semibold tabular-nums",
+        accent ? "text-primary" : "text-foreground",
+      )}>
         {value}
       </div>
     </div>

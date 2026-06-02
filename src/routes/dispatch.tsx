@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import {
@@ -84,6 +85,11 @@ type PackagingRow = {
   section: string;
   packagingStatus: PackagingStatus;
   dspRef?: string;
+  /** Upstream flight-order code (ORD-NNNN) from Order Management. */
+  orderNo?: string;
+  /** Upstream Production Order code (PRO-2026-NNNNNN). Set when the order
+   *  flowed in from the Production Entry page. */
+  productionOrderId?: string;
 };
 
 type FlightQCData = { qcState: QCState; qcCheckedAt?: string };
@@ -176,13 +182,13 @@ function getMaterials(qty: number) {
 const TODAY = "2026-05-18";
 
 const INITIAL_PACKAGING_ROWS: PackagingRow[] = [
-  { id: "PRD-9006", date: TODAY, depTime: "7:00 AM", flight: "BS-225", mealType: "Snack",     mealName: "Heavy Snack Box",        qty: 174, section: "Cold Kitchen",   packagingStatus: "Packaging In Progress", dspRef: "DSP-7704" },
-  { id: "PRD-9001", date: TODAY, depTime: "7:00 AM", flight: "BS-225", mealType: "Lunch",     mealName: "Chicken Biryani",         qty: 168, section: "Hot Kitchen",    packagingStatus: "Ready for Packaging",   dspRef: "DSP-7704" },
-  { id: "PRD-9002", date: TODAY, depTime: "7:00 AM", flight: "BS-225", mealType: "Snack",     mealName: "Veg Pulao",               qty: 24,  section: "Veg Section",    packagingStatus: "Packaging In Progress", dspRef: "DSP-7704" },
-  { id: "PRD-9002B",date: TODAY, depTime: "7:00 AM", flight: "BS-203", mealType: "Snack",     mealName: "Veg Pulao",               qty: 24,  section: "Veg Section",    packagingStatus: "Packaging In Progress", dspRef: "DSP-7702" },
-  { id: "PRD-9003", date: TODAY, depTime: "8:30 AM", flight: "BS-307", mealType: "Dinner",    mealName: "Grilled Salmon",          qty: 282, section: "Hot Kitchen",    packagingStatus: "Packaging In Progress" },
-  { id: "PRD-9004", date: TODAY, depTime: "8:30 AM", flight: "BS-307", mealType: "Breakfast", mealName: "Continental Breakfast",   qty: 282, section: "Cold Kitchen",   packagingStatus: "Packaging Done" },
-  { id: "PRD-9005", date: TODAY, depTime: "9:00 AM", flight: "BS-101", mealType: "Special",   mealName: "Hindu Meal Special",      qty: 8,   section: "Special Meal",   packagingStatus: "Packaging Done",        dspRef: "DSP-7701" },
+  { id: "PRD-9006", date: TODAY, depTime: "7:00 AM", flight: "BS-225", mealType: "Snack",     mealName: "Heavy Snack Box",        qty: 174, section: "Cold Kitchen",   packagingStatus: "Packaging In Progress", dspRef: "DSP-7704", orderNo: "ORD-3420", productionOrderId: "PRO-2026-100601" },
+  { id: "PRD-9001", date: TODAY, depTime: "7:00 AM", flight: "BS-225", mealType: "Lunch",     mealName: "Chicken Biryani",         qty: 168, section: "Hot Kitchen",    packagingStatus: "Ready for Packaging",   dspRef: "DSP-7704", orderNo: "ORD-3420", productionOrderId: "PRO-2026-100602" },
+  { id: "PRD-9002", date: TODAY, depTime: "7:00 AM", flight: "BS-225", mealType: "Snack",     mealName: "Veg Pulao",               qty: 24,  section: "Veg Section",    packagingStatus: "Packaging In Progress", dspRef: "DSP-7704", orderNo: "ORD-3420", productionOrderId: "PRO-2026-100603" },
+  { id: "PRD-9002B",date: TODAY, depTime: "7:00 AM", flight: "BS-203", mealType: "Snack",     mealName: "Veg Pulao",               qty: 24,  section: "Veg Section",    packagingStatus: "Packaging In Progress", dspRef: "DSP-7702", orderNo: "ORD-3414", productionOrderId: "PRO-2026-100603" },
+  { id: "PRD-9003", date: TODAY, depTime: "8:30 AM", flight: "BS-307", mealType: "Dinner",    mealName: "Grilled Salmon",          qty: 282, section: "Hot Kitchen",    packagingStatus: "Packaging In Progress",                     orderNo: "ORD-3415", productionOrderId: "PRO-2026-100604" },
+  { id: "PRD-9004", date: TODAY, depTime: "8:30 AM", flight: "BS-307", mealType: "Breakfast", mealName: "Continental Breakfast",   qty: 282, section: "Cold Kitchen",   packagingStatus: "Packaging Done",                            orderNo: "ORD-3415", productionOrderId: "PRO-2026-100605" },
+  { id: "PRD-9005", date: TODAY, depTime: "9:00 AM", flight: "BS-101", mealType: "Special",   mealName: "Hindu Meal Special",      qty: 8,   section: "Special Meal",   packagingStatus: "Packaging Done",        dspRef: "DSP-7701", orderNo: "ORD-3422", productionOrderId: "PRO-2026-100606" },
 ];
 
 // ─── Dispatch Seed Data ───────────────────────────────────────────────────────
@@ -284,6 +290,7 @@ const INITIAL_RECORDS: DispatchRecord[] = [
 
 export default function Dispatch() {
   useArrivalFlash();
+  const navigate = useNavigate();
   // ── Dispatch records state ──────────────────────────────────────────────────
   const [records, setRecords] = useState<DispatchRecord[]>(INITIAL_RECORDS);
   const [configuredFlights, setConfiguredFlights] = useState<Set<string>>(
@@ -731,14 +738,12 @@ export default function Dispatch() {
               <tr>
                 <th className="p-3 text-left font-semibold">Dep Time</th>
                 <th className="p-3 text-left font-semibold">Flight</th>
-                <th className="p-3 w-10 text-center">
-                  <input type="checkbox" className="h-4 w-4 rounded" />
-                </th>
-                <th className="p-3 text-left font-semibold">Order #</th>
+                <th className="p-3 text-left font-semibold">Order</th>
+                <th className="p-3 text-left font-semibold">Production</th>
                 <th className="p-3 text-left font-semibold">Meal Type</th>
                 <th className="p-3 text-left font-semibold">Meal Name</th>
                 <th className="p-3 text-right font-semibold">Qty</th>
-                <th className="p-3 text-left font-semibold">Section</th>
+                <th className="p-3 text-left font-semibold">Warehouse</th>
                 <th className="p-3 text-left font-semibold">Status</th>
                 <th className="p-3 text-left font-semibold">Food Safety & QC</th>
                 <th className="p-3 text-left font-semibold">Actions</th>
@@ -789,10 +794,34 @@ export default function Dispatch() {
                                 {flightGroup.flight}
                               </td>
                             )}
-                            <td className="p-3 text-center align-middle">
-                              <input type="checkbox" className="h-4 w-4 rounded" />
+                            <td className="p-3 align-middle">
+                              {row.orderNo ? (
+                                <button
+                                  type="button"
+                                  className="text-xs font-mono font-semibold text-primary hover:underline whitespace-nowrap"
+                                  title="Open Order Management"
+                                  onClick={() => navigate(`/order-management?ord=${row.orderNo}`)}
+                                >
+                                  {row.orderNo}
+                                </button>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">—</span>
+                              )}
                             </td>
-                            <td className="p-3 font-bold text-slate-800 align-middle">{row.id}</td>
+                            <td className="p-3 align-middle">
+                              {row.productionOrderId ? (
+                                <button
+                                  type="button"
+                                  className="text-xs font-mono font-medium text-primary hover:underline whitespace-nowrap"
+                                  title="Open Production Order"
+                                  onClick={() => navigate(`/production-entry?pro=${row.productionOrderId}`)}
+                                >
+                                  {row.productionOrderId}
+                                </button>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">—</span>
+                              )}
+                            </td>
                             <td className="p-3">
                               <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${MEAL_TYPE_BADGE[row.mealType] ?? "bg-muted text-foreground"}`}>
                                 {row.mealType}
@@ -977,7 +1006,7 @@ export default function Dispatch() {
                 <div><span className="text-muted-foreground">Meal:</span><span className="font-semibold ml-1">{viewPackagingRow.mealName}</span></div>
                 <div><span className="text-muted-foreground">Type:</span><span className={`ml-1 px-2 py-0.5 rounded-full text-xs font-semibold ${MEAL_TYPE_BADGE[viewPackagingRow.mealType]}`}>{viewPackagingRow.mealType}</span></div>
                 <div><span className="text-muted-foreground">Qty:</span><span className="font-semibold ml-1">{viewPackagingRow.qty} units</span></div>
-                <div><span className="text-muted-foreground">Section:</span><span className="font-semibold ml-1">{viewPackagingRow.section}</span></div>
+                <div><span className="text-muted-foreground">Warehouse:</span><span className="font-semibold ml-1">{viewPackagingRow.section}</span></div>
                 <div><span className="text-muted-foreground">Dep Time:</span><span className="font-semibold ml-1">{viewPackagingRow.depTime}</span></div>
                 <div><span className="text-muted-foreground">Date:</span><span className="font-semibold ml-1">{viewPackagingRow.date}</span></div>
                 <div className="col-span-2"><span className="text-muted-foreground">Flight:</span><span className="font-semibold ml-1">{viewPackagingRow.flight}</span></div>

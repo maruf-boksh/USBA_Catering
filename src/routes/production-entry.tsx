@@ -24,10 +24,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { toast } from "sonner";
 import {
-  billOfMaterials, seedFlightOrders, inventory, warehouses as ALL_WAREHOUSES,
-  MEAL_SLOTS, getMealSlot, isDomesticSector, itemsByType, allocateFefo,
+  billOfMaterials, inventory, warehouses as ALL_WAREHOUSES,
+  isDomesticSector, itemsByType, allocateFefo,
   type FlightOrderRow, type MealSlot, type ItemMaster,
 } from "@/lib/sample-data";
+import { useFlightOrders, updateFlightOrdersWhere } from "@/lib/flight-orders-store";
+import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-settings";
 import { Fragment } from "react";
 import { useArrivalFlash } from "@/lib/arrival-flash";
 import {
@@ -47,21 +49,21 @@ import {
   type MealCard,
 } from "@/lib/meal-planning-data";
 
-const TOTAL_MEALS_FROM_ORDERS = seedFlightOrders.reduce(
-  (sum, o) => sum + o.pax + o.crew + o.specialMeals,
-  0,
-);
-
-// One forwarded entry per distinct order date, sorted ascending.
-const FORWARDED_ORDERS: { date: string; totalMeals: number }[] = (() => {
+// Aggregates derived from the live flight-orders store — computed inside the
+// page via `useForwardedOrders()` so that approving/advancing an order on the
+// Order Management page (or anywhere else) flows through here in real time.
+function buildForwardedOrders(orders: FlightOrderRow[]): { date: string; totalMeals: number }[] {
   const byDate = new Map<string, number>();
-  for (const o of seedFlightOrders) {
+  for (const o of orders) {
+    // Only count orders that haven't been pushed past Production yet — once an
+    // order is Dispatched or Completed it has left the production pipeline.
+    if (o.status === "Dispatched" || o.status === "Completed") continue;
     byDate.set(o.date, (byDate.get(o.date) ?? 0) + o.pax + o.crew + o.specialMeals);
   }
   return Array.from(byDate.entries())
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, totalMeals]) => ({ date, totalMeals }));
-})();
+}
 
 const DOMESTIC_AIRPORTS = new Set(["DAC", "CXB", "CGP", "ZYL", "JSR"]);
 
@@ -227,27 +229,33 @@ export default function ProductionEntryPage() {
     productionEntries, addProductionEntry, mrpRuns,
     demands, addDemands, addMrpRun,
   } = useWorkflow();
+  const flightOrders = useFlightOrders();
+  const forwardedOrders = useMemo(() => buildForwardedOrders(flightOrders), [flightOrders]);
+  const totalMealsFromOrders = useMemo(
+    () => flightOrders.reduce(
+      (sum, o) => (o.status === "Dispatched" || o.status === "Completed")
+        ? sum
+        : sum + o.pax + o.crew + o.specialMeals,
+      0,
+    ),
+    [flightOrders],
+  );
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [selectedForwardedDate, setSelectedForwardedDate] = useState(
-    FORWARDED_ORDERS[0]?.date ?? "",
+    forwardedOrders[0]?.date ?? "",
   );
+  // Keep the selected date valid as orders advance — if the previously selected
+  // date no longer has any production-pending demand, pick the earliest one.
+  useEffect(() => {
+    if (!forwardedOrders.some((f) => f.date === selectedForwardedDate)) {
+      setSelectedForwardedDate(forwardedOrders[0]?.date ?? "");
+    }
+  }, [forwardedOrders, selectedForwardedDate]);
   const [view, setView] = useState<"list" | "create">("list");
   const [pendingItem, setPendingItem] = useState<OutputLine | undefined>(undefined);
   const [createKey, setCreateKey] = useState(0);
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
-  const [mrpOpen, setMrpOpen] = useState(false);
-  const lastMrpRun = mrpRuns[0];  // newest first in store
-
-  // Allow other modules to open MRP directly by navigating with `#mrp`.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (window.location.hash === "#mrp") {
-      setMrpOpen(true);
-      history.replaceState(null, "", window.location.pathname + window.location.search);
-    }
-  }, []);
-
   const entries = productionEntries.filter((e) => {
     if (filterOffice && e.officeId !== filterOffice) return false;
     if (filterWarehouse && e.warehouseId !== filterWarehouse) return false;
@@ -256,6 +264,16 @@ export default function ProductionEntryPage() {
 
   const addEntry = (entry: ProductionEntry) => {
     addProductionEntry(entry);
+    // Connection: posting a production order auto-advances every flight order
+    // for that same date from the production pipeline (Approved / Production)
+    // into Dispatched, so they appear on the Dispatch page automatically.
+    const advanced = updateFlightOrdersWhere(
+      (o) => o.date === entry.date && (o.status === "Approved" || o.status === "Production"),
+      { status: "Dispatched" },
+    );
+    if (advanced > 0) {
+      toast.success(`${advanced} flight order leg${advanced === 1 ? "" : "s"} for ${entry.date} forwarded to Dispatch.`);
+    }
     setView("list");
     setPendingItem(undefined);
   };
@@ -414,7 +432,7 @@ export default function ProductionEntryPage() {
       const seq = String(baseStamp + i).slice(-6);
       const bomMatch = billOfMaterials.find((b) => b.name === item.name);
       const entry: ProductionEntry = {
-        id: `PO-2026-${seq}`,
+        id: `PRO-2026-${seq}`,
         date: today,
         bom: bomMatch?.name ?? item.name,
         outputItemName: item.name,
@@ -528,28 +546,17 @@ export default function ProductionEntryPage() {
         title="Production Order"
         subtitle="Record and manage production orders"
         actions={
-          <div className="flex items-center gap-2">
-            {view === "list" && (
-              <Button
-                variant="outline"
-                onClick={() => setMrpOpen(true)}
-                className="border-primary/40 text-primary hover:bg-primary/5"
-              >
-                <Calculator className="h-4 w-4 mr-1" /> Run MRP
-              </Button>
+          <Button onClick={() => setView(view === "create" ? "list" : "create")}>
+            {view === "create" ? (
+              <>
+                <ArrowLeft className="h-4 w-4 mr-1" /> Back
+              </>
+            ) : (
+              <>
+                <Plus className="h-4 w-4 mr-1" /> Create Order
+              </>
             )}
-            <Button onClick={() => setView(view === "create" ? "list" : "create")}>
-              {view === "create" ? (
-                <>
-                  <ArrowLeft className="h-4 w-4 mr-1" /> Back
-                </>
-              ) : (
-                <>
-                  <Plus className="h-4 w-4 mr-1" /> Create Order
-                </>
-              )}
-            </Button>
-          </div>
+          </Button>
         }
       />
 
@@ -562,10 +569,10 @@ export default function ProductionEntryPage() {
                   Forwarded from Order Management
                 </div>
                 <div className="mt-1 text-sm text-foreground">
-                  <span className="font-bold">{FORWARDED_ORDERS.length}</span>{" "}
-                  date{FORWARDED_ORDERS.length === 1 ? "" : "s"} pending ·{" "}
+                  <span className="font-bold">{forwardedOrders.length}</span>{" "}
+                  date{forwardedOrders.length === 1 ? "" : "s"} pending ·{" "}
                   <span className="font-bold text-success">
-                    {TOTAL_MEALS_FROM_ORDERS.toLocaleString()}
+                    {totalMealsFromOrders.toLocaleString()}
                   </span>{" "}
                   meals
                 </div>
@@ -576,7 +583,7 @@ export default function ProductionEntryPage() {
                   onChange={(e) => setSelectedForwardedDate(e.target.value)}
                   className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
-                  {FORWARDED_ORDERS.map((f) => (
+                  {forwardedOrders.map((f) => (
                     <option key={f.date} value={f.date}>
                       {f.date} — {f.totalMeals.toLocaleString()} meals
                     </option>
@@ -591,48 +598,6 @@ export default function ProductionEntryPage() {
               </div>
             </div>
           </div>
-
-          {lastMrpRun && (
-            <div className="mb-4 rounded-md border border-primary/30 bg-primary/5 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-2 text-xs">
-                <Calculator className="h-4 w-4 text-primary" />
-                <span className="font-semibold text-primary uppercase tracking-wider">Last MRP Run</span>
-                <span className="font-mono text-foreground">{lastMrpRun.id}</span>
-                <span className="text-muted-foreground tabular-nums">· {lastMrpRun.date}</span>
-                <span className="text-muted-foreground">·</span>
-                <span className="text-foreground">{lastMrpRun.orderIds.length} order{lastMrpRun.orderIds.length === 1 ? "" : "s"}</span>
-                <span className="text-muted-foreground">·</span>
-                <span className="text-foreground">{lastMrpRun.materials.length} materials</span>
-                {lastMrpRun.requisitionIds.length > 0 && (
-                  <>
-                    <span className="text-muted-foreground">·</span>
-                    <span className="text-success font-medium">{lastMrpRun.requisitionIds.length} PR{lastMrpRun.requisitionIds.length === 1 ? "" : "s"}</span>
-                  </>
-                )}
-                {lastMrpRun.transferIds.length > 0 && (
-                  <>
-                    <span className="text-muted-foreground">·</span>
-                    <span className="text-navy font-medium">{lastMrpRun.transferIds.length} transfer{lastMrpRun.transferIds.length === 1 ? "" : "s"}</span>
-                  </>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-7 text-xs"
-                  onClick={() => downloadMrpCsv(lastMrpRun)}
-                >
-                  <FileText className="h-3.5 w-3.5 mr-1" /> CSV
-                </Button>
-                {mrpRuns.length > 1 && (
-                  <Badge variant="outline" className="text-[10px]">
-                    +{mrpRuns.length - 1} earlier
-                  </Badge>
-                )}
-              </div>
-            </div>
-          )}
 
           <div className="mb-4">
             <LocationFilter
@@ -663,17 +628,11 @@ export default function ProductionEntryPage() {
         onBulkCreate={bulkCreateFromMealPlan}
         date={selectedForwardedDate}
       />
-
-      <MaterialRequirementPlanningDialog
-        open={mrpOpen}
-        onOpenChange={setMrpOpen}
-        orders={productionEntries}
-      />
     </>
   );
 }
 
-type RecipeItem = {
+export type RecipeItem = {
   itemCode: string;
   itemName: string;
   uom: string;
@@ -681,7 +640,7 @@ type RecipeItem = {
   rate: number;
 };
 
-type ProductionItem = {
+export type ProductionItem = {
   code: string;
   name: string;
   rawMaterials: RecipeItem[];
@@ -689,7 +648,7 @@ type ProductionItem = {
   otherConsumption: RecipeItem[];
 };
 
-const PRODUCTION_ITEMS: ProductionItem[] = [
+export const PRODUCTION_ITEMS: ProductionItem[] = [
   {
     code: "FG-001",
     name: "Chicken Biryani",
@@ -1388,7 +1347,7 @@ function ProductionEntryCreate({
 
     const nextSeq = String(Date.now()).slice(-6);
     const newEntry: ProductionEntry = {
-      id: `PO-2026-${nextSeq}`,
+      id: `PRO-2026-${nextSeq}`,
       date: orderDate,
       bom: bomName,
       outputItemName: outputItem.itemName,
@@ -1818,9 +1777,10 @@ function MealPlanningDetailsDialog({
   date: string;
 }) {
   const navigate = useNavigate();
+  const flightOrders = useFlightOrders();
   const ordersForDate = useMemo(
-    () => (date ? seedFlightOrders.filter((o) => o.date === date) : seedFlightOrders),
-    [date],
+    () => (date ? flightOrders.filter((o) => o.date === date) : flightOrders),
+    [date, flightOrders],
   );
   const requirements = useMemo(() => computeOrderRequirements(ordersForDate), [ordersForDate]);
   const orderDays = useMemo(() => new Set(requirements.map((r) => r.day)), [requirements]);
@@ -2182,11 +2142,12 @@ function FlightOrdersTabContent({ orders }: { orders: FlightOrderRow[] }) {
 // Crew Meals tab — same flight orders, grouped by meal slot (derived from ETD)
 // ─────────────────────────────────────────────────────────────────────────────
 function CrewMealsTabContent({ orders }: { orders: FlightOrderRow[] }) {
+  const slots = useMealSlots();
   // Group orders by meal slot, then by Order # within each slot
   const bySlot = new Map<MealSlot, FlightOrderRow[]>();
-  MEAL_SLOTS.forEach((s) => bySlot.set(s.name, []));
-  orders.forEach((o) => bySlot.get(getMealSlot(o.etd))!.push(o));
-  MEAL_SLOTS.forEach((s) =>
+  slots.forEach((s) => bySlot.set(s.name, []));
+  orders.forEach((o) => bySlot.get(resolveMealSlot(o.etd, slots).name)!.push(o));
+  slots.forEach((s) =>
     bySlot.get(s.name)!.sort((a, b) => a.etd.localeCompare(b.etd)),
   );
 
@@ -2214,7 +2175,7 @@ function CrewMealsTabContent({ orders }: { orders: FlightOrderRow[] }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {MEAL_SLOTS.map((slot) => {
+            {slots.map((slot) => {
               const slotRows = bySlot.get(slot.name)!;
               if (slotRows.length === 0) return null;
               const slotCrew = slotRows.reduce((s, o) => s + o.crew, 0);
@@ -2235,7 +2196,7 @@ function CrewMealsTabContent({ orders }: { orders: FlightOrderRow[] }) {
                         {slot.name}
                       </span>
                       <span className="ml-2 text-[10px] text-muted-foreground tabular-nums">
-                        {slot.range}
+                        {formatSlotRange(slot)}
                       </span>
                       <span className="ml-3 text-[11px] text-muted-foreground tabular-nums">
                         {byOrder.size} order{byOrder.size === 1 ? "" : "s"} ·

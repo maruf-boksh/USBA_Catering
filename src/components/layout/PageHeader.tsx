@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { AppstoreOutlined } from "@ant-design/icons";
+import { LogoTile } from "@/components/AviationLogo";
 
 /**
  * DESIGN.md §8 — Module header bar:
@@ -10,9 +10,8 @@ import { AppstoreOutlined } from "@ant-design/icons";
  * left column grows + shrinks while the right column stays at natural width,
  * never wrapping the actions below the title on desktop widths.
  *
- * `icon` is optional; when absent we render a small generic mark inside the
- * gradient square so every page renders with a consistent visual handle
- * without requiring changes to existing call sites.
+ * `icon` is optional; when absent we render the LogoTile so every page renders
+ * with a consistent visual handle without requiring changes to existing call sites.
  */
 export function PageHeader({
   title,
@@ -28,8 +27,8 @@ export function PageHeader({
   return (
     <div className="module-header">
       <div className="module-header__left">
-        <div className="module-header__icon" style={{ fontSize: 18 }}>
-          {icon ?? <AppstoreOutlined />}
+        <div className="module-header__icon" style={{ fontSize: 18, background: 'none', padding: 0, boxShadow: 'none' }}>
+          {icon ?? <LogoTile size={42} glow={false} />}
         </div>
         <div className="module-header__text">
           <div className="module-header__title">{title}</div>

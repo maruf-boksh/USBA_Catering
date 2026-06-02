@@ -19,6 +19,16 @@ import { useRole } from "@/lib/roles";
 
 const CURRENT_USER = "R. Hossain";
 
+const CHEFS = [
+  "Chef R. Karim",
+  "Chef N. Hasan",
+  "Chef A. Rahim",
+  "Chef T. Hossain",
+  "Chef S. Mahmud",
+  "Chef F. Begum",
+  "Chef M. Karim",
+];
+
 const FOOD_ITEMS = [
   "Chicken Biryani",
   "Veg Pulao",
@@ -627,12 +637,16 @@ export default function CookingTemp() {
                     <Label className="text-xs uppercase tracking-wider text-muted-foreground">
                       Cooked By <span className="text-destructive">*</span>
                     </Label>
-                    <Input
+                    <select
                       value={qcCookedBy}
                       onChange={(e) => setQcCookedBy(e.target.value)}
-                      className="mt-1"
-                      placeholder="Chef / cook name"
-                    />
+                      className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    >
+                      <option value="">— Select chef —</option>
+                      {CHEFS.map((chef) => (
+                        <option key={chef} value={chef}>{chef}</option>
+                      ))}
+                    </select>
                   </div>
                 </div>
               </div>

@@ -15,7 +15,6 @@ const PATH_META: Record<string, PathMeta> = {
   "/bom": { label: "Bill of Materials", parent: "Production" },
   "/production-entry": { label: "Production Order", parent: "Production" },
   "/production-entry-new": { label: "Production Entry", parent: "Production" },
-  "/mrp": { label: "Material Requirement Planning", parent: "Production" },
   "/production-reports": { label: "Production Reports", parent: "Production" },
   "/demand-orders": { label: "Demand Requests", parent: "Inventory & Store" },
   "/item-issue": { label: "Item Issue", parent: "Inventory & Store" },
@@ -58,8 +57,17 @@ const PATH_META: Record<string, PathMeta> = {
   "/config-warehouse": { label: "Warehouse", parent: "Configuration" },
   "/config-price": { label: "Price Setup", parent: "Configuration" },
   "/config-approval": { label: "Approval Setup", parent: "Configuration" },
-  "/bakery": { label: "Bakery" },
-  "/kitchen": { label: "Kitchen" },
+  "/config-meal-slots": { label: "Meal Slots", parent: "Configuration" },
+  "/operations-overview":           { label: "Operations Dashboard",   parent: "Operations" },
+  "/production-overview":           { label: "Production Dashboard",   parent: "Production" },
+  "/inventory-overview":            { label: "Inventory Dashboard",    parent: "Inventory & Store" },
+  "/supply-chain-overview":         { label: "Supply Chain Dashboard", parent: "Supply Chain" },
+  "/accounts-overview":             { label: "Accounts Dashboard",     parent: "Accounts" },
+  "/food-safety-overview":          { label: "Food Safety Dashboard",  parent: "Food Safety & QC" },
+  "/packaging-dispatch-overview":   { label: "Dispatch Dashboard",     parent: "Packaging & Dispatch" },
+  "/airline-consumables-overview":  { label: "Consumables Dashboard",  parent: "Airline Consumables" },
+  "/airline-equipments-overview":   { label: "Equipments Dashboard",   parent: "Airline Equipments" },
+  "/maintenance-overview":          { label: "Maintenance Dashboard",  parent: "Maintenance & Assets" },
 };
 
 function toTitleCase(str: string): string {

@@ -9,7 +9,6 @@ import MealPlanningPage from "@/routes/meal-planning";
 import BomPage from "@/routes/bom";
 import ProductionEntryPage from "@/routes/production-entry";
 import ProductionEntryNewPage from "@/routes/production-entry-new";
-import MrpPage from "@/routes/mrp";
 import ProductionReportsPage from "@/routes/production-reports";
 import DemandOrdersPage from "@/routes/demand-orders";
 import ItemIssuePage from "@/routes/item-issue";
@@ -53,9 +52,17 @@ import ConfigOfficePage from "@/routes/config-office";
 import ConfigWarehousePage from "@/routes/config-warehouse";
 import ConfigPricePage from "@/routes/config-price";
 import ConfigApprovalPage from "@/routes/config-approval";
-import AmenitiesPage from "@/routes/amenities";
-import BakeryPage from "@/routes/bakery";
-import KitchenPage from "@/routes/kitchen";
+import ConfigMealSlotsPage from "@/routes/config-meal-slots";
+import OperationsOverviewPage from "@/routes/operations-overview";
+import ProductionOverviewPage from "@/routes/production-overview";
+import InventoryOverviewPage from "@/routes/inventory-overview";
+import SupplyChainOverviewPage from "@/routes/supply-chain-overview";
+import AccountsOverviewPage from "@/routes/accounts-overview";
+import FoodSafetyOverviewPage from "@/routes/food-safety-overview";
+import PackagingDispatchOverviewPage from "@/routes/packaging-dispatch-overview";
+import AirlineConsumablesOverviewPage from "@/routes/airline-consumables-overview";
+import AirlineEquipmentsOverviewPage from "@/routes/airline-equipments-overview";
+import MaintenanceOverviewPage from "@/routes/maintenance-overview";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 1000 * 60 * 5 } },
@@ -74,7 +81,6 @@ export function App() {
             <Route path="/bom" element={<BomPage />} />
             <Route path="/production-entry" element={<ProductionEntryPage />} />
             <Route path="/production-entry-new" element={<ProductionEntryNewPage />} />
-            <Route path="/mrp" element={<MrpPage />} />
             <Route path="/production-reports" element={<ProductionReportsPage />} />
             <Route path="/demand-orders" element={<DemandOrdersPage />} />
             <Route path="/item-issue" element={<ItemIssuePage />} />
@@ -118,9 +124,17 @@ export function App() {
             <Route path="/config-warehouse" element={<ConfigWarehousePage />} />
             <Route path="/config-price" element={<ConfigPricePage />} />
             <Route path="/config-approval" element={<ConfigApprovalPage />} />
-            <Route path="/amenities" element={<AmenitiesPage />} />
-            <Route path="/bakery" element={<BakeryPage />} />
-            <Route path="/kitchen" element={<KitchenPage />} />
+            <Route path="/config-meal-slots" element={<ConfigMealSlotsPage />} />
+            <Route path="/operations-overview" element={<OperationsOverviewPage />} />
+            <Route path="/production-overview" element={<ProductionOverviewPage />} />
+            <Route path="/inventory-overview" element={<InventoryOverviewPage />} />
+            <Route path="/supply-chain-overview" element={<SupplyChainOverviewPage />} />
+            <Route path="/accounts-overview" element={<AccountsOverviewPage />} />
+            <Route path="/food-safety-overview" element={<FoodSafetyOverviewPage />} />
+            <Route path="/packaging-dispatch-overview" element={<PackagingDispatchOverviewPage />} />
+            <Route path="/airline-consumables-overview" element={<AirlineConsumablesOverviewPage />} />
+            <Route path="/airline-equipments-overview" element={<AirlineEquipmentsOverviewPage />} />
+            <Route path="/maintenance-overview" element={<MaintenanceOverviewPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

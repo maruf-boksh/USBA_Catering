@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Plus, FileText, Clock, Send, AlertTriangle,
   CheckCircle2, XCircle, ArrowUpRight, PackageCheck, Trash2,
-  ShieldCheck,
+  ShieldCheck, Eye,
 } from "lucide-react";
 import { inventory } from "@/lib/sample-data";
 import { KpiCard } from "@/components/common/KpiCard";
@@ -207,10 +207,14 @@ export default function DemandOrders() {
             actions={(row) => (
               <Button
                 size="sm"
+                variant="ghost"
+                className="h-7 px-2"
                 onClick={() => { setSelectedRequest(row); setNeedsPurchase({}); }}
                 disabled={row.status === "Fulfilled" || row.status === "Rejected"}
+                aria-label={`${row.status === "Pending Approval" ? "View" : "Review"} ${row.id}`}
+                title={row.status === "Pending Approval" ? "View" : "Review"}
               >
-                {row.status === "Pending Approval" ? "View" : "Review"}
+                <Eye className="h-4 w-4" />
               </Button>
             )}
           />

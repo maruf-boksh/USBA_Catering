@@ -909,7 +909,343 @@ const _billOfMaterialsRaw: BillOfMaterial[] = [
       { material: "RM-2702 - Additives (Litre)", type: "Raw Material", excludeScrap: "No", altQty: 0, quantity: 0.05, uom: "Litre", wastagePct: 0, totalQty: 0.05, avgRate: 626, total: 31.30 },
     ],
   },
+  ...buildMealPlanBoms(),
 ];
+
+// ── Meal-plan BOMs ──────────────────────────────────────────────────────────
+// Helper-generated recipes for every meal-plan item that appears in
+// `meal-planning-data.ts`. Without these, "Create All Orders" from the
+// Production Order page would create empty production orders with no
+// materials computed and no Demand Request raised. Each recipe lists
+// realistic raw + packaging components in catering-realistic quantities so
+// MRP, demand requests, and FEFO allocation flows can all light up.
+
+type MealBomSpec = {
+  name: string;
+  category: string;
+  section: string;
+  unitCost: number;
+  yieldPortions: number;
+  materials: Array<{
+    code: string;
+    name: string;
+    qty: number;
+    uom: string;
+    rate: number;
+    type?: "Raw Material" | "Packaging" | "Other";
+  }>;
+};
+
+function buildMealPlanBoms(): BillOfMaterial[] {
+  // Shared packaging stub — every catered meal item gets a meal-box tray so
+  // the Demand Request includes packaging shortfalls as well as raw inputs.
+  const PKG = {
+    code: "PKG-2710", name: "Meal Box (Foil/Paper)",
+    qty: 1, uom: "PCS", rate: 12, type: "Packaging" as const,
+  };
+
+  const specs: MealBomSpec[] = [
+    // ── Rice / grain main courses ──
+    { name: "Plain Polao", category: "Hot Kitchen", section: "Main Course", unitCost: 38, yieldPortions: 1, materials: [
+      { code: "RM-2701-RICE",  name: "Polao Rice",     qty: 0.18, uom: "KG", rate: 95 },
+      { code: "RM-2710-GHEE",  name: "Ghee",           qty: 0.01, uom: "KG", rate: 1100 },
+      PKG,
+    ]},
+    { name: "Saffron Rice", category: "Hot Kitchen", section: "Main Course", unitCost: 42, yieldPortions: 1, materials: [
+      { code: "RM-2701-RICE",  name: "Polao Rice",     qty: 0.17, uom: "KG", rate: 95 },
+      { code: "RM-2720-SAFF",  name: "Saffron",        qty: 0.0002, uom: "KG", rate: 12000 },
+      PKG,
+    ]},
+    { name: "Jeera Polao", category: "Hot Kitchen", section: "Main Course", unitCost: 39, yieldPortions: 1, materials: [
+      { code: "RM-2701-RICE",  name: "Polao Rice",     qty: 0.18, uom: "KG", rate: 95 },
+      { code: "RM-2721-JEERA", name: "Cumin Seed",     qty: 0.003, uom: "KG", rate: 800 },
+      PKG,
+    ]},
+    { name: "Steamed Rice", category: "Hot Kitchen", section: "Main Course", unitCost: 26, yieldPortions: 1, materials: [
+      { code: "RM-2702-PRICE", name: "Plain Rice",     qty: 0.18, uom: "KG", rate: 75 },
+      PKG,
+    ]},
+    { name: "Boiled Rice", category: "Hot Kitchen", section: "Main Course", unitCost: 24, yieldPortions: 1, materials: [
+      { code: "RM-2702-PRICE", name: "Plain Rice",     qty: 0.18, uom: "KG", rate: 70 },
+      PKG,
+    ]},
+    { name: "Plain Rice", category: "Hot Kitchen", section: "Main Course", unitCost: 24, yieldPortions: 1, materials: [
+      { code: "RM-2702-PRICE", name: "Plain Rice",     qty: 0.18, uom: "KG", rate: 70 },
+      PKG,
+    ]},
+    { name: "Vegetable Biryani", category: "Hot Kitchen", section: "Main Course", unitCost: 64, yieldPortions: 1, materials: [
+      { code: "RM-2701-RICE",  name: "Polao Rice",     qty: 0.20, uom: "KG", rate: 95 },
+      { code: "RM-2730-MIXV",  name: "Mixed Vegetables", qty: 0.10, uom: "KG", rate: 65 },
+      { code: "RM-2731-SPICE", name: "Biryani Spice Mix", qty: 0.008, uom: "KG", rate: 380 },
+      PKG,
+    ]},
+    { name: "Chicken Khichuri", category: "Hot Kitchen", section: "Main Course", unitCost: 72, yieldPortions: 1, materials: [
+      { code: "RM-2702-PRICE", name: "Plain Rice",     qty: 0.15, uom: "KG", rate: 70 },
+      { code: "RM-2740-MOOG",  name: "Moog Dal",       qty: 0.05, uom: "KG", rate: 140 },
+      { code: "RM-2750-CHKN",  name: "Chicken",        qty: 0.08, uom: "KG", rate: 280 },
+      PKG,
+    ]},
+
+    // ── Bread / wraps ──
+    { name: "Roti", category: "Hot Kitchen", section: "Bread", unitCost: 14, yieldPortions: 1, materials: [
+      { code: "RM-2760-FLOUR", name: "Wheat Flour",    qty: 0.06, uom: "KG", rate: 65 },
+      { code: "RM-2761-OIL",   name: "Cooking Oil",    qty: 0.003, uom: "Litre", rate: 180 },
+      PKG,
+    ]},
+    { name: "Garlic Naan", category: "Hot Kitchen", section: "Bread", unitCost: 22, yieldPortions: 1, materials: [
+      { code: "RM-2762-NAAN",  name: "Naan Flour",     qty: 0.07, uom: "KG", rate: 90 },
+      { code: "RM-2763-GARLC", name: "Garlic Paste",   qty: 0.005, uom: "KG", rate: 180 },
+      PKG,
+    ]},
+    { name: "Kulcha", category: "Hot Kitchen", section: "Bread", unitCost: 20, yieldPortions: 1, materials: [
+      { code: "RM-2762-NAAN",  name: "Naan Flour",     qty: 0.07, uom: "KG", rate: 90 },
+      { code: "RM-2764-DAIRY", name: "Yoghurt",        qty: 0.02, uom: "KG", rate: 110 },
+      PKG,
+    ]},
+    { name: "Paratha", category: "Hot Kitchen", section: "Bread", unitCost: 18, yieldPortions: 1, materials: [
+      { code: "RM-2760-FLOUR", name: "Wheat Flour",    qty: 0.07, uom: "KG", rate: 65 },
+      { code: "RM-2761-OIL",   name: "Cooking Oil",    qty: 0.008, uom: "Litre", rate: 180 },
+      PKG,
+    ]},
+    { name: "Roll Sandwich with Chicken & Cheese", category: "Cold Kitchen", section: "Sandwich", unitCost: 95, yieldPortions: 1, materials: [
+      { code: "RM-2770-WRAP",  name: "Wrap Bread",     qty: 1, uom: "PCS", rate: 24 },
+      { code: "RM-2750-CHKN",  name: "Chicken",        qty: 0.07, uom: "KG", rate: 280 },
+      { code: "RM-2771-CHEES", name: "Cheese Slice",   qty: 1, uom: "PCS", rate: 18 },
+      PKG,
+    ]},
+    { name: "Vegetable Sandwich", category: "Cold Kitchen", section: "Sandwich", unitCost: 52, yieldPortions: 1, materials: [
+      { code: "RM-2772-BREAD", name: "Sandwich Bread", qty: 2, uom: "PCS", rate: 8 },
+      { code: "RM-2773-VEGFL", name: "Veg Filling",    qty: 0.08, uom: "KG", rate: 220 },
+      { code: "RM-2774-BUTTR", name: "Butter",         qty: 0.005, uom: "KG", rate: 950 },
+      PKG,
+    ]},
+    { name: "Veg Frankie", category: "Cold Kitchen", section: "Sandwich", unitCost: 48, yieldPortions: 1, materials: [
+      { code: "RM-2770-WRAP",  name: "Wrap Bread",     qty: 1, uom: "PCS", rate: 24 },
+      { code: "RM-2773-VEGFL", name: "Veg Filling",    qty: 0.06, uom: "KG", rate: 220 },
+      PKG,
+    ]},
+
+    // ── Meat dishes ──
+    { name: "Beef Rezala", category: "Hot Kitchen", section: "Main Course", unitCost: 165, yieldPortions: 1, materials: [
+      { code: "RM-2780-BEEF",  name: "Beef",           qty: 0.10, uom: "KG", rate: 680 },
+      { code: "RM-2731-SPICE", name: "Biryani Spice Mix", qty: 0.005, uom: "KG", rate: 380 },
+      { code: "RM-2764-DAIRY", name: "Yoghurt",        qty: 0.02, uom: "KG", rate: 110 },
+      PKG,
+    ]},
+    { name: "Mutton Rezala", category: "Hot Kitchen", section: "Main Course", unitCost: 215, yieldPortions: 1, materials: [
+      { code: "RM-2781-MUTTN", name: "Mutton",         qty: 0.11, uom: "KG", rate: 820 },
+      { code: "RM-2731-SPICE", name: "Biryani Spice Mix", qty: 0.005, uom: "KG", rate: 380 },
+      { code: "RM-2764-DAIRY", name: "Yoghurt",        qty: 0.02, uom: "KG", rate: 110 },
+      PKG,
+    ]},
+    { name: "Chicken Masala", category: "Hot Kitchen", section: "Main Course", unitCost: 95, yieldPortions: 1, materials: [
+      { code: "RM-2750-CHKN",  name: "Chicken",        qty: 0.10, uom: "KG", rate: 280 },
+      { code: "RM-2790-MASLA", name: "Masala Mix",     qty: 0.008, uom: "KG", rate: 350 },
+      PKG,
+    ]},
+    { name: "Chicken Dopiaza", category: "Hot Kitchen", section: "Main Course", unitCost: 92, yieldPortions: 1, materials: [
+      { code: "RM-2750-CHKN",  name: "Chicken",        qty: 0.10, uom: "KG", rate: 280 },
+      { code: "RM-2791-ONION", name: "Onion",          qty: 0.06, uom: "KG", rate: 80 },
+      PKG,
+    ]},
+    { name: "Chicken Korma", category: "Hot Kitchen", section: "Main Course", unitCost: 105, yieldPortions: 1, materials: [
+      { code: "RM-2750-CHKN",  name: "Chicken",        qty: 0.10, uom: "KG", rate: 280 },
+      { code: "RM-2792-CASHW", name: "Cashew Paste",   qty: 0.01, uom: "KG", rate: 1400 },
+      { code: "RM-2764-DAIRY", name: "Yoghurt",        qty: 0.02, uom: "KG", rate: 110 },
+      PKG,
+    ]},
+    { name: "Tandoori Chicken", category: "Hot Kitchen", section: "Main Course", unitCost: 110, yieldPortions: 1, materials: [
+      { code: "RM-2750-CHKN",  name: "Chicken",        qty: 0.10, uom: "KG", rate: 280 },
+      { code: "RM-2793-TANDR", name: "Tandoori Marinade", qty: 0.02, uom: "KG", rate: 480 },
+      PKG,
+    ]},
+    { name: "Korean Fried Chicken", category: "Hot Kitchen", section: "Main Course", unitCost: 135, yieldPortions: 1, materials: [
+      { code: "RM-2750-CHKN",  name: "Chicken",        qty: 0.10, uom: "KG", rate: 280 },
+      { code: "RM-2794-KSAUC", name: "Korean Glaze",   qty: 0.025, uom: "KG", rate: 720 },
+      { code: "RM-2795-PFLR",  name: "Coating Flour",  qty: 0.02, uom: "KG", rate: 110 },
+      PKG,
+    ]},
+    { name: "Fish Curry", category: "Hot Kitchen", section: "Main Course", unitCost: 120, yieldPortions: 1, materials: [
+      { code: "RM-2796-FISH",  name: "Fish Fillet",    qty: 0.10, uom: "KG", rate: 720 },
+      { code: "RM-2790-MASLA", name: "Masala Mix",     qty: 0.008, uom: "KG", rate: 350 },
+      PKG,
+    ]},
+
+    // ── Veg / dal ──
+    { name: "Mug Dal", category: "Hot Kitchen", section: "Dal", unitCost: 32, yieldPortions: 1, materials: [
+      { code: "RM-2740-MOOG",  name: "Moog Dal",       qty: 0.06, uom: "KG", rate: 140 },
+      { code: "RM-2761-OIL",   name: "Cooking Oil",    qty: 0.005, uom: "Litre", rate: 180 },
+      PKG,
+    ]},
+    { name: "Mug Dal Vuna", category: "Hot Kitchen", section: "Dal", unitCost: 36, yieldPortions: 1, materials: [
+      { code: "RM-2740-MOOG",  name: "Moog Dal",       qty: 0.06, uom: "KG", rate: 140 },
+      { code: "RM-2791-ONION", name: "Onion",          qty: 0.03, uom: "KG", rate: 80 },
+      { code: "RM-2710-GHEE",  name: "Ghee",           qty: 0.005, uom: "KG", rate: 1100 },
+      PKG,
+    ]},
+    { name: "Dal Butter Fry", category: "Hot Kitchen", section: "Dal", unitCost: 38, yieldPortions: 1, materials: [
+      { code: "RM-2741-DAL",   name: "Yellow Dal",     qty: 0.06, uom: "KG", rate: 130 },
+      { code: "RM-2774-BUTTR", name: "Butter",         qty: 0.01, uom: "KG", rate: 950 },
+      PKG,
+    ]},
+    { name: "Dal Tadka", category: "Hot Kitchen", section: "Dal", unitCost: 30, yieldPortions: 1, materials: [
+      { code: "RM-2741-DAL",   name: "Yellow Dal",     qty: 0.06, uom: "KG", rate: 130 },
+      { code: "RM-2721-JEERA", name: "Cumin Seed",     qty: 0.002, uom: "KG", rate: 800 },
+      PKG,
+    ]},
+    { name: "Chana Dal", category: "Hot Kitchen", section: "Dal", unitCost: 34, yieldPortions: 1, materials: [
+      { code: "RM-2742-CHANA", name: "Chana Dal",      qty: 0.06, uom: "KG", rate: 160 },
+      { code: "RM-2761-OIL",   name: "Cooking Oil",    qty: 0.005, uom: "Litre", rate: 180 },
+      PKG,
+    ]},
+    { name: "Mixed Veg", category: "Hot Kitchen", section: "Vegetable", unitCost: 28, yieldPortions: 1, materials: [
+      { code: "RM-2730-MIXV",  name: "Mixed Vegetables", qty: 0.08, uom: "KG", rate: 65 },
+      { code: "RM-2761-OIL",   name: "Cooking Oil",    qty: 0.005, uom: "Litre", rate: 180 },
+      PKG,
+    ]},
+    { name: "Mixed Veg Curry", category: "Hot Kitchen", section: "Vegetable", unitCost: 32, yieldPortions: 1, materials: [
+      { code: "RM-2730-MIXV",  name: "Mixed Vegetables", qty: 0.08, uom: "KG", rate: 65 },
+      { code: "RM-2790-MASLA", name: "Masala Mix",     qty: 0.005, uom: "KG", rate: 350 },
+      PKG,
+    ]},
+    { name: "Sauteed Veg", category: "Hot Kitchen", section: "Vegetable", unitCost: 26, yieldPortions: 1, materials: [
+      { code: "RM-2730-MIXV",  name: "Mixed Vegetables", qty: 0.08, uom: "KG", rate: 65 },
+      { code: "RM-2774-BUTTR", name: "Butter",         qty: 0.005, uom: "KG", rate: 950 },
+      PKG,
+    ]},
+    { name: "Sauteed Vegetables", category: "Hot Kitchen", section: "Vegetable", unitCost: 26, yieldPortions: 1, materials: [
+      { code: "RM-2730-MIXV",  name: "Mixed Vegetables", qty: 0.08, uom: "KG", rate: 65 },
+      { code: "RM-2774-BUTTR", name: "Butter",         qty: 0.005, uom: "KG", rate: 950 },
+      PKG,
+    ]},
+    { name: "Buttered Veg", category: "Hot Kitchen", section: "Vegetable", unitCost: 24, yieldPortions: 1, materials: [
+      { code: "RM-2730-MIXV",  name: "Mixed Vegetables", qty: 0.06, uom: "KG", rate: 65 },
+      { code: "RM-2774-BUTTR", name: "Butter",         qty: 0.008, uom: "KG", rate: 950 },
+      PKG,
+    ]},
+    { name: "Paneer Tikka Masala", category: "Hot Kitchen", section: "Main Course", unitCost: 88, yieldPortions: 1, materials: [
+      { code: "RM-2800-PANER", name: "Paneer",         qty: 0.08, uom: "KG", rate: 540 },
+      { code: "RM-2790-MASLA", name: "Masala Mix",     qty: 0.008, uom: "KG", rate: 350 },
+      { code: "RM-2764-DAIRY", name: "Yoghurt",        qty: 0.02, uom: "KG", rate: 110 },
+      PKG,
+    ]},
+    { name: "Channa Masala", category: "Hot Kitchen", section: "Vegetable", unitCost: 42, yieldPortions: 1, materials: [
+      { code: "RM-2742-CHANA", name: "Chana Dal",      qty: 0.06, uom: "KG", rate: 160 },
+      { code: "RM-2790-MASLA", name: "Masala Mix",     qty: 0.006, uom: "KG", rate: 350 },
+      PKG,
+    ]},
+    { name: "Raita", category: "Cold Kitchen", section: "Side", unitCost: 18, yieldPortions: 1, materials: [
+      { code: "RM-2764-DAIRY", name: "Yoghurt",        qty: 0.05, uom: "KG", rate: 110 },
+      { code: "RM-2810-CUCMB", name: "Cucumber",       qty: 0.02, uom: "KG", rate: 55 },
+      PKG,
+    ]},
+
+    // ── Egg ──
+    { name: "Fried Egg", category: "Cold Kitchen", section: "Breakfast", unitCost: 22, yieldPortions: 1, materials: [
+      { code: "RM-2820-EGG",   name: "Egg",            qty: 1, uom: "PCS", rate: 12 },
+      { code: "RM-2761-OIL",   name: "Cooking Oil",    qty: 0.005, uom: "Litre", rate: 180 },
+      PKG,
+    ]},
+    { name: "Scrambled Egg", category: "Cold Kitchen", section: "Breakfast", unitCost: 28, yieldPortions: 1, materials: [
+      { code: "RM-2820-EGG",   name: "Egg",            qty: 2, uom: "PCS", rate: 12 },
+      { code: "RM-2774-BUTTR", name: "Butter",         qty: 0.003, uom: "KG", rate: 950 },
+      PKG,
+    ]},
+    { name: "Boiled Egg", category: "Cold Kitchen", section: "Breakfast", unitCost: 14, yieldPortions: 1, materials: [
+      { code: "RM-2820-EGG",   name: "Egg",            qty: 1, uom: "PCS", rate: 12 },
+      PKG,
+    ]},
+
+    // ── Sides ──
+    { name: "Potato Wedges", category: "Hot Kitchen", section: "Side", unitCost: 22, yieldPortions: 1, materials: [
+      { code: "RM-2830-POTAT", name: "Potato",         qty: 0.08, uom: "KG", rate: 45 },
+      { code: "RM-2761-OIL",   name: "Cooking Oil",    qty: 0.01, uom: "Litre", rate: 180 },
+      PKG,
+    ]},
+    { name: "Fruit Salad", category: "Cold Kitchen", section: "Side", unitCost: 38, yieldPortions: 1, materials: [
+      { code: "RM-2840-FRUIT", name: "Mixed Fruit",    qty: 0.08, uom: "KG", rate: 280 },
+      PKG,
+    ]},
+
+    // ── Desserts ──
+    { name: "Vanilla Pastry", category: "Bakery", section: "Dessert", unitCost: 48, yieldPortions: 1, materials: [
+      { code: "RM-2850-CAKE",  name: "Vanilla Sponge", qty: 0.05, uom: "KG", rate: 480 },
+      { code: "RM-2851-CREAM", name: "Cream",          qty: 0.02, uom: "KG", rate: 320 },
+      PKG,
+    ]},
+    { name: "Mango Mousse", category: "Bakery", section: "Dessert", unitCost: 52, yieldPortions: 1, materials: [
+      { code: "RM-2860-MANGO", name: "Mango Pulp",     qty: 0.05, uom: "KG", rate: 420 },
+      { code: "RM-2851-CREAM", name: "Cream",          qty: 0.03, uom: "KG", rate: 320 },
+      PKG,
+    ]},
+    { name: "Yoghurt", category: "Cold Kitchen", section: "Dessert", unitCost: 22, yieldPortions: 1, materials: [
+      { code: "RM-2764-DAIRY", name: "Yoghurt",        qty: 0.08, uom: "KG", rate: 110 },
+      PKG,
+    ]},
+    { name: "Yoghurt & Semolina", category: "Cold Kitchen", section: "Dessert", unitCost: 34, yieldPortions: 1, materials: [
+      { code: "RM-2764-DAIRY", name: "Yoghurt",        qty: 0.06, uom: "KG", rate: 110 },
+      { code: "RM-2870-SEMOL", name: "Semolina",       qty: 0.03, uom: "KG", rate: 95 },
+      PKG,
+    ]},
+    { name: "Firni & Semolina", category: "Cold Kitchen", section: "Dessert", unitCost: 38, yieldPortions: 1, materials: [
+      { code: "RM-2880-MILK",  name: "Milk",           qty: 0.05, uom: "Litre", rate: 95 },
+      { code: "RM-2870-SEMOL", name: "Semolina",       qty: 0.025, uom: "KG", rate: 95 },
+      { code: "RM-2890-SUGAR", name: "Sugar",          qty: 0.015, uom: "KG", rate: 130 },
+      PKG,
+    ]},
+    { name: "Firni & Vanilla Pastry", category: "Bakery", section: "Dessert", unitCost: 56, yieldPortions: 1, materials: [
+      { code: "RM-2880-MILK",  name: "Milk",           qty: 0.04, uom: "Litre", rate: 95 },
+      { code: "RM-2850-CAKE",  name: "Vanilla Sponge", qty: 0.03, uom: "KG", rate: 480 },
+      { code: "RM-2890-SUGAR", name: "Sugar",          qty: 0.015, uom: "KG", rate: 130 },
+      PKG,
+    ]},
+    { name: "Gulab Jamun", category: "Bakery", section: "Dessert", unitCost: 32, yieldPortions: 1, materials: [
+      { code: "RM-2900-KHOYA", name: "Khoya",          qty: 0.03, uom: "KG", rate: 380 },
+      { code: "RM-2890-SUGAR", name: "Sugar",          qty: 0.025, uom: "KG", rate: 130 },
+      PKG,
+    ]},
+
+    // ── Combo / multi-output ──
+    { name: "Plain Polao, Saffron Rice, Chicken Korma, Kitkat Chocolate", category: "Hot Kitchen", section: "Combo", unitCost: 220, yieldPortions: 1, materials: [
+      { code: "RM-2701-RICE",  name: "Polao Rice",     qty: 0.20, uom: "KG", rate: 95 },
+      { code: "RM-2750-CHKN",  name: "Chicken",        qty: 0.10, uom: "KG", rate: 280 },
+      { code: "RM-2792-CASHW", name: "Cashew Paste",   qty: 0.01, uom: "KG", rate: 1400 },
+      { code: "RM-2910-KKAT",  name: "Kitkat Bar",     qty: 1, uom: "PCS", rate: 35 },
+      PKG,
+    ]},
+  ];
+
+  return specs.map((s, idx) => {
+    const seq = String(100 + idx).padStart(3, "0");
+    const id = `BOM-MP-${seq}`;
+    const itemCode = `MP-${s.name.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+    const bomValue = s.materials.reduce((sum, m) => sum + m.qty * m.rate, 0);
+    return {
+      id, name: s.name, components: s.materials.length, version: "v1.0",
+      yield: `${s.yieldPortions} portion${s.yieldPortions === 1 ? "" : "s"}`,
+      lastUpdated: "2026-06-01", status: "Active", date: "2026-06-01",
+      itemCode, itemName: s.name,
+      category: s.category, section: s.section, uom: "PCS", altUom: "",
+      lotSize: 1, bomValue: Math.round(bomValue * 100) / 100,
+      createdBy: "Chef Auto", bomType: "Single Output",
+      productionItems: [
+        { item: `${itemCode} - ${s.name} (PCS)`, itemType: "Finished/Trading Goods", netWeight: 0, quantity: 1, costPct: 100 },
+      ],
+      inputMaterials: s.materials.map((m) => ({
+        material: `${m.code} - ${m.name} (${m.uom})`,
+        type: m.type ?? "Raw Material",
+        excludeScrap: "No" as const,
+        altQty: 0,
+        quantity: m.qty,
+        uom: m.uom,
+        wastagePct: 0,
+        totalQty: m.qty,
+        avgRate: m.rate,
+        total: Math.round(m.qty * m.rate * 100) / 100,
+      })),
+    };
+  });
+}
 
 // Backfill defaults so existing BOMs report under Head Office Dhaka · Hot Kitchen
 export const billOfMaterials: BillOfMaterial[] = _billOfMaterialsRaw.map((b) => ({
@@ -921,19 +1257,19 @@ export const billOfMaterials: BillOfMaterial[] = _billOfMaterialsRaw.map((b) => 
 const bomAt = (i: number) => billOfMaterials[i % billOfMaterials.length].name;
 
 export const seedProductionEntries = [
-  { id: "PO-2026-000031", date: "2026-05-19", bom: bomAt(0), producedQty: 280, status: "In Preparation" },
-  { id: "PO-2026-000030", date: "2026-05-18", bom: bomAt(2), producedQty: 150, status: "Ready for QC"   },
-  { id: "PO-2026-000029", date: "2026-05-17", bom: bomAt(1), producedQty: 320, status: "Approved"       },
-  { id: "PO-2026-000028", date: "2026-05-12", bom: bomAt(0), producedQty: 250, status: "Closed"         },
-  { id: "PO-2026-000025", date: "2026-05-10", bom: bomAt(1), producedQty: 180, status: "Closed"         },
-  { id: "PO-2026-000022", date: "2026-05-08", bom: bomAt(2), producedQty: 220, status: "Closed"         },
-  { id: "PO-2026-000019", date: "2026-05-05", bom: bomAt(3), producedQty: 130, status: "Closed"         },
-  { id: "PO-2026-000016", date: "2026-05-02", bom: bomAt(4), producedQty: 80,  status: "Closed"         },
-  { id: "PO-2026-000013", date: "2026-04-28", bom: bomAt(5), producedQty: 95,  status: "Closed"         },
-  { id: "PO-2026-000010", date: "2026-04-25", bom: bomAt(0), producedQty: 310, status: "Closed"         },
-  { id: "PO-2026-000007", date: "2026-04-22", bom: bomAt(1), producedQty: 160, status: "Closed"         },
-  { id: "PO-2026-000004", date: "2026-04-18", bom: bomAt(2), producedQty: 200, status: "Closed"         },
-  { id: "PO-2026-000001", date: "2026-04-15", bom: bomAt(3), producedQty: 140, status: "Closed"         },
+  { id: "PRO-2026-000031", date: "2026-05-19", bom: bomAt(0), producedQty: 280, status: "In Preparation" },
+  { id: "PRO-2026-000030", date: "2026-05-18", bom: bomAt(2), producedQty: 150, status: "Ready for QC"   },
+  { id: "PRO-2026-000029", date: "2026-05-17", bom: bomAt(1), producedQty: 320, status: "Approved"       },
+  { id: "PRO-2026-000028", date: "2026-05-12", bom: bomAt(0), producedQty: 250, status: "Closed"         },
+  { id: "PRO-2026-000025", date: "2026-05-10", bom: bomAt(1), producedQty: 180, status: "Closed"         },
+  { id: "PRO-2026-000022", date: "2026-05-08", bom: bomAt(2), producedQty: 220, status: "Closed"         },
+  { id: "PRO-2026-000019", date: "2026-05-05", bom: bomAt(3), producedQty: 130, status: "Closed"         },
+  { id: "PRO-2026-000016", date: "2026-05-02", bom: bomAt(4), producedQty: 80,  status: "Closed"         },
+  { id: "PRO-2026-000013", date: "2026-04-28", bom: bomAt(5), producedQty: 95,  status: "Closed"         },
+  { id: "PRO-2026-000010", date: "2026-04-25", bom: bomAt(0), producedQty: 310, status: "Closed"         },
+  { id: "PRO-2026-000007", date: "2026-04-22", bom: bomAt(1), producedQty: 160, status: "Closed"         },
+  { id: "PRO-2026-000004", date: "2026-04-18", bom: bomAt(2), producedQty: 200, status: "Closed"         },
+  { id: "PRO-2026-000001", date: "2026-04-15", bom: bomAt(3), producedQty: 140, status: "Closed"         },
 ];
 
 export type ProductionEntryRow = (typeof seedProductionEntries)[number];
@@ -967,7 +1303,12 @@ export function nextFlightStatus(s: FlightOrderStatus): FlightOrderStatus | null
 
 // ── Crew-meal slot helpers ──────────────────────────────────────────────────
 
-export type MealSlot = "Breakfast" | "Heavy Snacks" | "Lunch" | "Dinner";
+// `MealSlot` is a string because slots are user-configurable from the
+// Configuration → Meal Slots page (see `src/lib/meal-slot-settings.ts`).
+// Consumers should fetch the current slot list via `useMealSlots()` rather
+// than the legacy `MEAL_SLOTS` constant below — kept only for any pure (non-
+// React) caller that just needs a sensible default.
+export type MealSlot = string;
 
 export const MEAL_SLOTS: { name: MealSlot; range: string; from: number; to: number }[] = [
   { name: "Breakfast",    range: "06:00 - 11:00", from: 6,  to: 11 },
@@ -976,6 +1317,11 @@ export const MEAL_SLOTS: { name: MealSlot; range: string; from: number; to: numb
   { name: "Dinner",       range: "19:00 - 00:00", from: 19, to: 24 },
 ];
 
+/**
+ * Legacy resolver — uses the seeded defaults. Components that need to react
+ * to user-edited slot windows should call `resolveMealSlot` from
+ * `meal-slot-settings.ts` instead.
+ */
 export function getMealSlot(etd: string): MealSlot {
   const m = etd.match(/^(\d{1,2}):/);
   const h = m ? Number(m[1]) : 0;
@@ -1103,6 +1449,48 @@ const ROSTER_FO_007: SpecialMealEntry[] = [
   { id: "SM-210", pnr: "09DOHA", passengerName: "RUMANA AKTER",            seat: "26D", mealCode: "AVML" },
 ];
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Flight-order generator templates and helpers (declared above seedFlightOrders
+// because `const` bindings can't be referenced from the spread-call below before
+// they're initialised, even though the function declaration itself is hoisted).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const INTL_TEMPLATES: { sector: string; etd: string; flightCode: string; airline: string; pax: number }[] = [
+  { sector: "DAC → DXB", etd: "10:30", flightCode: "BG-401",  airline: "Air Astra",  pax: 186 },
+  { sector: "DXB → DAC", etd: "23:45", flightCode: "BG-402",  airline: "Air Astra",  pax: 174 },
+  { sector: "DAC → LHR", etd: "14:45", flightCode: "BG-522",  airline: "Air Astra",  pax: 214 },
+  { sector: "DAC → KUL", etd: "16:20", flightCode: "VQ-901",  airline: "US-Bangla",  pax: 162 },
+  { sector: "KUL → SIN", etd: "20:40", flightCode: "VQ-902",  airline: "US-Bangla",  pax: 158 },
+  { sector: "SIN → DAC", etd: "23:55", flightCode: "VQ-903",  airline: "US-Bangla",  pax: 144 },
+  { sector: "DAC → DOH", etd: "18:10", flightCode: "BS-203",  airline: "US-Bangla",  pax: 168 },
+  { sector: "DAC → BKK", etd: "20:00", flightCode: "BS-307",  airline: "US-Bangla",  pax: 282 },
+  { sector: "DAC → DXB", etd: "02:15", flightCode: "BG-403",  airline: "Air Astra",  pax: 192 },
+  { sector: "DAC → JED", etd: "05:30", flightCode: "BG-651",  airline: "Air Astra",  pax: 220 },
+  { sector: "DAC → KUL", etd: "03:45", flightCode: "VQ-905",  airline: "US-Bangla",  pax: 168 },
+];
+
+const DOMESTIC_TEMPLATES: { sector: string; etd: string; flightCode: string; airline: string; pax: number }[] = [
+  { sector: "DAC → CGP", etd: "06:30", flightCode: "BS-141",  airline: "US-Bangla",  pax: 68 },
+  { sector: "CGP → DAC", etd: "08:30", flightCode: "BS-142",  airline: "US-Bangla",  pax: 64 },
+  { sector: "DAC → CXB", etd: "07:15", flightCode: "BS-105",  airline: "US-Bangla",  pax: 72 },
+  { sector: "DAC → ZYL", etd: "09:45", flightCode: "BS-151",  airline: "US-Bangla",  pax: 65 },
+  { sector: "DAC → JSR", etd: "11:30", flightCode: "BS-195",  airline: "US-Bangla",  pax: 60 },
+  { sector: "DAC → CXB", etd: "13:20", flightCode: "BS-165",  airline: "US-Bangla",  pax: 72 },
+  { sector: "DAC → CGP", etd: "15:40", flightCode: "BS-147",  airline: "US-Bangla",  pax: 68 },
+  { sector: "DAC → ZYL", etd: "17:20", flightCode: "BS-149",  airline: "US-Bangla",  pax: 64 },
+  { sector: "DAC → CXB", etd: "19:30", flightCode: "BS-115",  airline: "US-Bangla",  pax: 72 },
+  { sector: "DAC → JSR", etd: "21:00", flightCode: "BS-159",  airline: "US-Bangla",  pax: 60 },
+  { sector: "DAC → CGP", etd: "22:30", flightCode: "BS-143",  airline: "US-Bangla",  pax: 65 },
+  { sector: "CXB → DAC", etd: "09:45", flightCode: "BS-106",  airline: "US-Bangla",  pax: 70 },
+  { sector: "ZYL → DAC", etd: "11:00", flightCode: "BS-152",  airline: "US-Bangla",  pax: 62 },
+  { sector: "JSR → DAC", etd: "13:00", flightCode: "BS-196",  airline: "US-Bangla",  pax: 58 },
+  { sector: "CXB → DAC", etd: "15:00", flightCode: "BS-166",  airline: "US-Bangla",  pax: 70 },
+  { sector: "CGP → DAC", etd: "17:00", flightCode: "BS-148",  airline: "US-Bangla",  pax: 68 },
+  { sector: "ZYL → DAC", etd: "18:45", flightCode: "BS-150",  airline: "US-Bangla",  pax: 62 },
+  { sector: "CXB → DAC", etd: "21:00", flightCode: "BS-116",  airline: "US-Bangla",  pax: 70 },
+  { sector: "JSR → DAC", etd: "23:00", flightCode: "BS-160",  airline: "US-Bangla",  pax: 58 },
+];
+
 export const seedFlightOrders: FlightOrderRow[] = [
   // ORD-3411 — completed rotation
   { id: "FO-001", orderNo: "ORD-3411", flight: "BG-401", airline: "Air Astra", sector: "DAC → DXB", date: "2026-05-20", etd: "10:30", pax: 186, crew: 14, specialMeals: 12, status: "Completed",  direction: "Outbound", specialMealRoster: ROSTER_FO_001 },
@@ -1137,7 +1525,80 @@ export const seedFlightOrders: FlightOrderRow[] = [
   // ── Domestic (Dinner 19:00-24:00)
   { id: "FO-017", orderNo: "ORD-3423", flight: "BS-115", airline: "US-Bangla", sector: "DAC → CXB", date: "2026-05-20", etd: "19:30", pax: 72,  crew: 4,  specialMeals: 2, status: "Pending",    direction: "Outbound" },
   { id: "FO-018", orderNo: "ORD-3424", flight: "BS-159", airline: "US-Bangla", sector: "DAC → JSR", date: "2026-05-20", etd: "21:00", pax: 60,  crew: 4,  specialMeals: 1, status: "Pending",    direction: "Outbound" },
+
+  // ── Procedurally-generated future demand ─────────────────────────────────
+  // One ORD per future date for the next 90 days, each containing 30-40
+  // flights. Deterministic so reloads produce identical data.
+  ...generateFutureFlightOrders(),
 ];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Flight-order generator
+// ─────────────────────────────────────────────────────────────────────────────
+// Builds one "ORD-NNNN" per day for 90 days starting 2026-06-01 (the system
+// "today" for this demo), each with 30-40 flight legs. Status is "Approved"
+// for the first 7 days (already in-pipeline) and "Pending" thereafter.
+// LCG-seeded by day index so the same set of rows is generated on every page
+// load — no data churn between reloads.
+// (INTL_TEMPLATES and DOMESTIC_TEMPLATES are declared above seedFlightOrders.)
+
+function makeLcg(seed: number) {
+  let state = seed >>> 0;
+  return () => {
+    state = (state * 1103515245 + 12345) & 0x7fffffff;
+    return state / 0x7fffffff;
+  };
+}
+
+function addDaysToDate(base: Date, days: number): Date {
+  const d = new Date(base);
+  d.setDate(base.getDate() + days);
+  return d;
+}
+
+function generateFutureFlightOrders(): FlightOrderRow[] {
+  const out: FlightOrderRow[] = [];
+  const startDate = new Date(2026, 5, 1); // 2026-06-01 (month is 0-indexed)
+  const DAYS = 90;
+  const APPROVED_HORIZON_DAYS = 7;
+  let foCounter = 19; // continue after FO-018; padded to 4 digits below
+
+  for (let d = 0; d < DAYS; d++) {
+    const dt = addDaysToDate(startDate, d);
+    const dateStr = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+    const orderNo = `ORD-${3425 + d}`;
+    const rand = makeLcg(d * 31 + 7);
+    const flightCount = 30 + Math.floor(rand() * 11); // 30-40 inclusive
+    const status: FlightOrderStatus = d < APPROVED_HORIZON_DAYS ? "Approved" : "Pending";
+
+    for (let i = 0; i < flightCount; i++) {
+      const isIntl = rand() < 0.35;
+      const pool = isIntl ? INTL_TEMPLATES : DOMESTIC_TEMPLATES;
+      const tmpl = pool[Math.floor(rand() * pool.length)];
+      const paxJitter = Math.floor((rand() - 0.5) * 30);
+      const pax = Math.max(40, tmpl.pax + paxJitter);
+      const crew = isIntl ? 12 + Math.floor(rand() * 7) : 4;
+      const specialMeals = 1 + Math.floor(rand() * (isIntl ? 25 : 4));
+      const direction: FlightDirection = tmpl.sector.startsWith("DAC") ? "Outbound" : "Return";
+      const foId = `FO-${String(foCounter++).padStart(4, "0")}`;
+      out.push({
+        id: foId,
+        orderNo,
+        flight: tmpl.flightCode,
+        airline: tmpl.airline,
+        sector: tmpl.sector,
+        date: dateStr,
+        etd: tmpl.etd,
+        pax,
+        crew,
+        specialMeals,
+        status,
+        direction,
+      });
+    }
+  }
+  return out;
+}
 
 // ── Master Item Profile ──────────────────────────────────────────────────────
 // Single source of truth for items used by all modules (BOM, PR, Transfer,
