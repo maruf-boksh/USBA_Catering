@@ -1050,7 +1050,7 @@ export default function Dispatch() {
                                     <ShieldCheck className="h-3 w-3 mr-1" /> Initiate QC
                                   </Button>
                                 ) : (
-                                  <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-muted text-muted-foreground">Pending</span>
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600 border border-slate-200">Pending</span>
                                 )}
                               </td>
                             )}
@@ -1226,7 +1226,7 @@ export default function Dispatch() {
                   </div>
                   <div>
                     <span className="text-muted-foreground">QC:</span>
-                    <span className={`ml-1 px-2 py-0.5 rounded-full text-xs font-semibold ${qs === "done" ? "bg-emerald-100 text-emerald-700" : qs === "in-progress" ? "bg-amber-100 text-amber-700" : "bg-muted text-muted-foreground"}`}>
+                    <span className={`ml-1 px-2 py-0.5 rounded-full text-xs font-semibold ${qs === "done" ? "bg-emerald-100 text-emerald-700" : qs === "in-progress" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-600"}`}>
                       {qs === "done" ? "QC Done" : qs === "in-progress" ? "QC In Progress" : "Pending"}
                     </span>
                   </div>
