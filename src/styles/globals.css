@@ -110,7 +110,11 @@
   --red-bright: #ff2d2d;
   --red-deep:   #a60303;
   --ink:        #1a0204;
-  --muted:      #6b6b72;
+  /* NOTE: `--muted` intentionally NOT redefined here. It is the Tailwind/shadcn
+     muted *background* token (light, from index.css). Muted *text* must use
+     --muted-foreground (see below). Overriding --muted to a dark text color
+     made every `bg-muted` surface dark with invisible `text-muted-foreground`
+     labels (empty-looking pills, unreadable tab strips). */
   --line:       #e6e2e0;
   --paper:      #ffffff;
   --paper-warm: #f7f3f1;
@@ -2026,7 +2030,7 @@ html[data-theme="dark"] .page-shell {
 
 .hc-sub {
   font-size: 14px;
-  color: var(--muted);
+  color: var(--muted-foreground);
   margin: 11px 0 0;
   line-height: 1.55;
 }
@@ -2321,7 +2325,7 @@ html[data-theme="dark"] .page-shell {
 }
 
 .hc-link-btn.muted {
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .hc-link-btn:disabled {

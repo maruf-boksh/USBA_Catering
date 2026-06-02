@@ -64,7 +64,7 @@ export function KpiCard({
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
         <span style={{
           fontSize: 10.5, fontWeight: 700, letterSpacing: '0.13em',
-          textTransform: 'uppercase', color: 'var(--muted, #6b6b72)',
+          textTransform: 'uppercase', color: 'var(--muted-foreground, #6b6b72)',
         }}>
           {label}
         </span>
@@ -87,7 +87,7 @@ export function KpiCard({
       }}>
         {curMatch ? (
           <>
-            <span style={{ fontSize: 24, fontWeight: 500, color: 'var(--muted, #6b6b72)', marginRight: 1 }}>
+            <span style={{ fontSize: 24, fontWeight: 500, color: 'var(--muted-foreground, #6b6b72)', marginRight: 1 }}>
               {curMatch[1].trim()}
             </span>
             {curMatch[2]}
@@ -97,7 +97,7 @@ export function KpiCard({
 
       {/* sub / delta footer */}
       {footer && (
-        <div style={{ fontSize: 12, color: 'var(--muted, #6b6b72)', marginTop: 9, display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div style={{ fontSize: 12, color: 'var(--muted-foreground, #6b6b72)', marginTop: 9, display: 'flex', alignItems: 'center', gap: 6 }}>
           {footer.delta && (
             <span style={{
               fontWeight: 600,

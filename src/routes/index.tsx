@@ -496,7 +496,7 @@ function ProductionMixDonut({ data }: { data: { name: string; v: number }[] }) {
           </span>
           <span style={{
             fontSize: 10.5, fontWeight: 700, letterSpacing: "0.12em",
-            textTransform: "uppercase", color: "var(--muted, #6b6b72)", marginTop: 4,
+            textTransform: "uppercase", color: "var(--muted-foreground, #6b6b72)", marginTop: 4,
           }}>
             Meals
           </span>
@@ -508,7 +508,7 @@ function ProductionMixDonut({ data }: { data: { name: string; v: number }[] }) {
           <span key={i} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "var(--ink, #1a0204)" }}>
             <span style={{ width: 10, height: 10, borderRadius: 3, flexShrink: 0, background: s.color }} />
             {s.name}
-            <span style={{ color: "var(--muted, #6b6b72)", fontVariantNumeric: "tabular-nums" }}>
+            <span style={{ color: "var(--muted-foreground, #6b6b72)", fontVariantNumeric: "tabular-nums" }}>
               {total > 0 ? Math.round((s.v / total) * 100) : 0}%
             </span>
           </span>
@@ -799,7 +799,7 @@ function ActiveOrdersTabs({ rows }: { rows: ReturnType<typeof pickActiveFlights>
               onClick={() => setTab(key)}
               style={{
                 position: "relative", padding: "13px 0", fontSize: 13.5, fontWeight: 600,
-                color: on ? "var(--ink, #1a0204)" : "var(--muted, #6b6b72)",
+                color: on ? "var(--ink, #1a0204)" : "var(--muted-foreground, #6b6b72)",
                 cursor: "pointer", background: "none", border: "none",
                 fontFamily: "inherit", whiteSpace: "nowrap",
               }}
@@ -818,7 +818,7 @@ function ActiveOrdersTabs({ rows }: { rows: ReturnType<typeof pickActiveFlights>
 
       <div style={{ maxHeight: 362, overflowY: "auto", padding: "8px 22px 18px" }}>
         {groups.length === 0 ? (
-          <div style={{ padding: "24px 0", textAlign: "center", fontSize: 12, color: "var(--muted, #6b6b72)" }}>
+          <div style={{ padding: "24px 0", textAlign: "center", fontSize: 12, color: "var(--muted-foreground, #6b6b72)" }}>
             No active orders.
           </div>
         ) : (
@@ -870,7 +870,7 @@ function OrderGroupCard({
             {legs.length} flights
           </span>
         )}
-        <span style={{ fontSize: 12.5, color: "var(--muted, #6b6b72)" }}>
+        <span style={{ fontSize: 12.5, color: "var(--muted-foreground, #6b6b72)" }}>
           ·&nbsp;<span style={{ color: "var(--ink, #1a0204)", fontWeight: 600 }}>
             {mode === "flight" ? totalPax : totalCrew}
           </span> {mode === "flight" ? "pax" : "crew"}
@@ -910,13 +910,13 @@ function OrderGroupCard({
             flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 500, color: "var(--ink, #1a0204)",
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}>
-            {l.flight} <span style={{ color: "var(--muted, #6b6b72)", fontWeight: 400 }}>· {l.sector}</span>
+            {l.flight} <span style={{ color: "var(--muted-foreground, #6b6b72)", fontWeight: 400 }}>· {l.sector}</span>
           </span>
           <span style={{ fontSize: 13, color: "var(--ink, #1a0204)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
             {l.etd}
           </span>
           <span style={{
-            fontSize: 12, color: "var(--muted, #6b6b72)", fontVariantNumeric: "tabular-nums",
+            fontSize: 12, color: "var(--muted-foreground, #6b6b72)", fontVariantNumeric: "tabular-nums",
             width: 42, textAlign: "right", flex: "none",
             display: "inline-flex", alignItems: "center", justifyContent: "flex-end", gap: 3,
           }}>
