@@ -172,9 +172,10 @@
 .sb-brand-name {
   position: relative;
   display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
   color: var(--app-sidebar-fg, #0f172a);
   font-family: 'Mulish', 'Inter', system-ui, sans-serif;
   padding-bottom: 5px;
