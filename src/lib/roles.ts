@@ -1,6 +1,9 @@
 import { createContext, useContext } from "react";
 
-export const ROLES = [
+// Built-in roles ship with the app. Additional roles can be created at runtime
+// from Configuration → User Access Control (see access-control.ts). Because
+// roles are now dynamic, `Role` is a plain string rather than a closed union.
+export const BUILTIN_ROLES = [
   "GM/Admin",
   "Meal Planner",
   "Production",
@@ -12,7 +15,10 @@ export const ROLES = [
   "Reports & Analytics",
 ] as const;
 
-export type Role = (typeof ROLES)[number];
+/** @deprecated kept for back-compat — prefer BUILTIN_ROLES / useAllRoles(). */
+export const ROLES = BUILTIN_ROLES;
+
+export type Role = string;
 
 export const RoleContext = createContext<{
   role: Role;

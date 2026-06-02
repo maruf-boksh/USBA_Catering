@@ -10,6 +10,7 @@ export interface ThemePreset {
 }
 
 export const THEME_PRESETS: ThemePreset[] = [
+  { name: 'harvest',   label: 'Harvest',   primary: '#E10101', dark: '#a60303', light: '#fff0f0' },
   { name: 'teal',      label: 'Teal',      primary: '#0f766e', dark: '#115e59', light: '#f0fdfa' },
   { name: 'blue',      label: 'Blue',      primary: '#2563eb', dark: '#1d4ed8', light: '#eff6ff' },
   { name: 'violet',    label: 'Violet',    primary: '#7c3aed', dark: '#6d28d9', light: '#f5f3ff' },
@@ -143,7 +144,7 @@ const DEFAULT_STATE = {
   topbarStyle:   'gradient' as TopbarStyle,
   fontSize:      'md'       as FontSizeMode,
   sidebarStyle:    'default' as SidebarStyle,
-  sidebarColor:    'primary' as SidebarColor,
+  sidebarColor:    'white'   as SidebarColor,
   sidebarCustomBg: '#ffffff',
   sidebarCustomFg: '',
   motionReduced:   false,
@@ -184,6 +185,6 @@ export const useThemeStore = create<ThemeState>()(
 
       reset: () => set({ ...DEFAULT_STATE }),
     }),
-    { name: 'vizyon-theme-v1' },
+    { name: 'vizyon-theme-v2' },
   ),
 );

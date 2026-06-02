@@ -53,7 +53,7 @@ export default function ConfigMealSlotsPage() {
 
   const handleSave = () => {
     const name = draft.name.trim();
-    if (!name) { toast.error("Slot name is required."); return; }
+    if (!name) { toast.error("Meal name is required."); return; }
     if (!isValidHour(draft.from) || !isValidHour(draft.to)) {
       toast.error("Start and end hours must be whole numbers between 0 and 24.");
       return;
@@ -120,15 +120,15 @@ export default function ConfigMealSlotsPage() {
   return (
     <>
       <PageHeader
-        title="Meal Slots"
-        subtitle="Define the day-parts used by the Crew Meals views — flights are grouped by ETD using these windows."
+        title="Meal Config"
+        subtitle="Define the meals (day-parts) available across Meal Planning. Each meal has a time window; flights are grouped by ETD using these windows."
         actions={
           <div className="flex items-center gap-2">
             <Button variant="outline" onClick={handleRestoreDefaults} title="Replace the list with the four built-in defaults">
               <RotateCcw className="h-4 w-4 mr-1.5" /> Defaults
             </Button>
             <Button onClick={openAdd}>
-              <Plus className="h-4 w-4 mr-1.5" /> Add Slot
+              <Plus className="h-4 w-4 mr-1.5" /> Add Meal
             </Button>
           </div>
         }
@@ -147,7 +147,7 @@ export default function ConfigMealSlotsPage() {
             <TableHeader>
               <TableRow>
                 <TableHead className="w-12">#</TableHead>
-                <TableHead>Slot Name</TableHead>
+                <TableHead>Meal Name</TableHead>
                 <TableHead className="text-right w-32">Start Hour</TableHead>
                 <TableHead className="text-right w-32">End Hour</TableHead>
                 <TableHead className="w-48">Window</TableHead>
@@ -186,14 +186,14 @@ export default function ConfigMealSlotsPage() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Clock className="h-5 w-5 text-primary" />
-              {editingName === null ? "Add Meal Slot" : `Edit "${editingName}"`}
+              {editingName === null ? "Add Meal" : `Edit "${editingName}"`}
             </DialogTitle>
           </DialogHeader>
 
           <div className="space-y-4">
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-                Slot Name <span className="text-destructive">*</span>
+                Meal Name <span className="text-destructive">*</span>
               </Label>
               <Input
                 value={draft.name}
@@ -240,7 +240,7 @@ export default function ConfigMealSlotsPage() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
             <Button onClick={handleSave}>
-              <Save className="h-4 w-4 mr-1.5" /> {editingName === null ? "Add Slot" : "Save"}
+              <Save className="h-4 w-4 mr-1.5" /> {editingName === null ? "Add Meal" : "Save"}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -5,6 +5,8 @@ import { RoleContext, type Role } from '@/lib/roles';
 import { WorkflowProvider } from '@/lib/workflow-store';
 import { Toaster } from '@/components/ui/sonner';
 import { isAuthenticated, getAuthUser, clearAuthUser } from '@/lib/auth';
+import { useThemeStore } from '@/stores/themeStore';
+import { applyTheme } from '@/lib/apply-theme';
 
 const SHELL_BYPASS = ['/login'];
 
@@ -18,6 +20,13 @@ export function CateringShell() {
   useEffect(() => {
     if (!isShellBypassed && !isAuthenticated()) navigate('/login');
   }, [isShellBypassed, navigate]);
+
+  // Make the Theme Center functional: apply the stored theme to the document on
+  // load, then re-apply on every change so presets/colours/layout take effect live.
+  useEffect(() => {
+    applyTheme(useThemeStore.getState());
+    return useThemeStore.subscribe((state) => applyTheme(state));
+  }, []);
 
   if (isShellBypassed) {
     return (

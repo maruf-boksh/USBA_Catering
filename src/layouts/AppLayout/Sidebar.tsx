@@ -12,11 +12,34 @@ import {
   RightOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
-import { MENU_ITEMS, NAV_EXPANDABLE_KEYS, NAV_ROUTE_META_MAP } from './navIndex';
+import { NAV_EXPANDABLE_KEYS, NAV_ROUTE_META_MAP } from './navIndex';
 import type { RouteMeta } from './navIndex';
-import { NAV_MODULES } from './navConfig';
 import type { NavModule, NavSubItem } from './navConfig';
+import { useRole } from '@/lib/roles';
+import { useAccess, visibleNavModules } from '@/lib/access-control';
 import './Sidebar.css';
+
+// Build antd Menu items from a (possibly access-filtered) module list, matching
+// the shape produced in navIndex so the expanded sidebar honours permissions.
+function buildSubMenuItems(children: NavSubItem[]): MenuProps['items'] {
+  return children.map((sub) => ({
+    key: sub.key,
+    label: sub.label,
+    icon: sub.icon,
+    ...(sub.children ? { children: buildSubMenuItems(sub.children) } : {}),
+  }));
+}
+
+function buildMenuItems(modules: NavModule[]): MenuProps['items'] {
+  return modules.map((mod) => ({
+    key: mod.key,
+    label: mod.label,
+    icon: mod.icon,
+    popupClassName: 'sb-popup',
+    popupOffset: [8, 0],
+    children: buildSubMenuItems(mod.children),
+  }));
+}
 
 const { Sider } = Layout;
 
@@ -152,14 +175,15 @@ const CascadingFlyout = memo(function CascadingFlyout({
 interface CollapsedRailProps {
   selectedKey: string;
   onNavigate: (path: string) => void;
+  modules: NavModule[];
 }
 
-const CollapsedRail = memo(function CollapsedRail({ selectedKey, onNavigate }: CollapsedRailProps) {
+const CollapsedRail = memo(function CollapsedRail({ selectedKey, onNavigate, modules }: CollapsedRailProps) {
   const activeModuleKey = NAV_ROUTE_META_MAP.get(selectedKey)?.openKeys[0];
 
   return (
     <ul className="sb-rail">
-      {NAV_MODULES.map((mod) => {
+      {modules.map((mod) => {
         const isActive = mod.key === activeModuleKey;
         const firstLeaf = getFirstLeafKey(mod.children);
 
@@ -214,6 +238,12 @@ export const AppSidebar = memo(function AppSidebar({
   onUnpin,
 }: AppSidebarProps) {
   const navigate = useNavigate();
+  const { role } = useRole();
+  const access = useAccess();
+
+  // Access-filtered nav — drives both the expanded menu and the collapsed rail.
+  const visibleModules = useMemo(() => visibleNavModules(role, access), [role, access]);
+  const menuItems = useMemo(() => buildMenuItems(visibleModules), [visibleModules]);
 
   const routeOpenKeys = useMemo(
     () => NAV_ROUTE_META_MAP.get(selectedKey)?.openKeys ?? [],
@@ -328,7 +358,7 @@ export const AppSidebar = memo(function AppSidebar({
 
         {collapsed ? (
           <div className="sb-rail-wrap">
-            <CollapsedRail selectedKey={selectedKey} onNavigate={navigate} />
+            <CollapsedRail selectedKey={selectedKey} onNavigate={navigate} modules={visibleModules} />
           </div>
         ) : (
           <div className="sb-menu-wrap">
@@ -340,7 +370,7 @@ export const AppSidebar = memo(function AppSidebar({
               selectedKeys={[selectedKey]}
               openKeys={openKeys}
               onOpenChange={(keys) => setOpenKeys(keys as string[])}
-              items={MENU_ITEMS}
+              items={menuItems}
               onClick={handleMenuClick}
             />
           </div>

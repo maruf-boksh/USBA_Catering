@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Plus, Info, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { useMealSlots } from "@/lib/meal-slot-settings";
 
 interface MealItem {
   name: string;
@@ -422,6 +423,16 @@ function getSampleMeals(): MealCard[] {
 
 export default function MealPlanning() {
   const navigate = useNavigate();
+  // Meal types are driven by the configurable Meal Config (Configuration → Meal
+  // Config). Adding/editing/removing a meal there flows straight into the chips
+  // and serving-time defaults below — no hardcoded meal list.
+  const mealSlots = useMealSlots();
+  const mealTypeOptions = useMemo(() => mealSlots.map((s) => s.name), [mealSlots]);
+  const defaultServingFor = (name: string): { start: string; end: string } => {
+    const s = mealSlots.find((m) => m.name === name);
+    const hh = (h: number) => `${String(h % 24).padStart(2, "0")}:00`;
+    return s ? { start: hh(s.from), end: hh(s.to) } : { start: "07:00", end: "10:00" };
+  };
   const [meals, setMeals] = useState<MealCard[]>(getSampleMeals());
   const [selectedDay, setSelectedDay] = useState(DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]);
   const [createModalOpen, setCreateModalOpen] = useState(false);
@@ -743,7 +754,12 @@ export default function MealPlanning() {
                   <div className="text-sm font-semibold mb-3">Meal Configuration</div>
                   {/* ── Meal type toggle buttons ── */}
                   <div className="flex flex-wrap gap-2 mb-4">
-                    {(["Breakfast", "Lunch", "Dinner", "Snacks", "Heavy Snacks"] as const).map((t) => {
+                    {mealTypeOptions.length === 0 && (
+                      <span className="text-xs text-muted-foreground">
+                        No meals configured. Add them in <strong>Configuration → Meal Config</strong>.
+                      </span>
+                    )}
+                    {mealTypeOptions.map((t) => {
                       const isSelected = createData.mealTypes.includes(t);
                       const isActive = activeMealTab === t;
                       return (
@@ -762,7 +778,7 @@ export default function MealPlanning() {
                               copy.dessertAllocationByType = { ...copy.dessertAllocationByType, [t]: copy.dessertAllocationByType[t] ?? [] };
                               copy.choicePercentagesByType = { ...copy.choicePercentagesByType, [t]: copy.choicePercentagesByType[t] ?? { c1: 60, c2: 40 } };
                               copy.specialMealsByType = { ...copy.specialMealsByType, [t]: copy.specialMealsByType[t] ?? [] };
-                              copy.servingTimes = { ...copy.servingTimes, [t]: copy.servingTimes[t] ?? (t === "Breakfast" ? { start: "07:00", end: "10:00" } : t === "Lunch" ? { start: "11:00", end: "14:00" } : t === "Snacks" ? { start: "14:00", end: "16:00" } : t === "Heavy Snacks" ? { start: "16:00", end: "19:00" } : { start: "19:00", end: "22:00" }) };
+                              copy.servingTimes = { ...copy.servingTimes, [t]: copy.servingTimes[t] ?? defaultServingFor(t) };
                               copy.mealTypes = [...copy.mealTypes, t];
                               setCreateData(copy);
                               setActiveMealTab(t);
@@ -815,7 +831,7 @@ export default function MealPlanning() {
                   </div>
 
                   {/* ── Content panel for regular meal types ── */}
-                  {(["Breakfast", "Lunch", "Dinner", "Snacks", "Heavy Snacks"] as const).map((type) => {
+                  {mealTypeOptions.map((type) => {
                     if (activeMealTab !== type) return null;
                     const isIncluded = createData.mealTypes.includes(type);
                     if (!isIncluded) {
@@ -976,14 +992,14 @@ export default function MealPlanning() {
                             <Label className="text-xs shrink-0">Start</Label>
                             <Input
                               type="time"
-                              value={createData.servingTimes[type]?.start ?? (type === "Breakfast" ? "07:00" : type === "Lunch" ? "11:00" : type === "Snacks" ? "14:00" : type === "Heavy Snacks" ? "16:00" : "19:00")}
+                              value={createData.servingTimes[type]?.start ?? defaultServingFor(type).start}
                               onChange={(e) => setCreateData({ ...createData, servingTimes: { ...createData.servingTimes, [type]: { ...(createData.servingTimes[type] || {}), start: e.target.value } } })}
                               className="h-8 w-32"
                             />
                             <Label className="text-xs shrink-0">End</Label>
                             <Input
                               type="time"
-                              value={createData.servingTimes[type]?.end ?? (type === "Breakfast" ? "10:00" : type === "Lunch" ? "14:00" : type === "Snacks" ? "16:00" : type === "Heavy Snacks" ? "19:00" : "22:00")}
+                              value={createData.servingTimes[type]?.end ?? defaultServingFor(type).end}
                               onChange={(e) => setCreateData({ ...createData, servingTimes: { ...createData.servingTimes, [type]: { ...(createData.servingTimes[type] || {}), end: e.target.value } } })}
                               className="h-8 w-32"
                             />

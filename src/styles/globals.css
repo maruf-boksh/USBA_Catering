@@ -105,10 +105,12 @@
   --shadow-md: 0 6px 18px rgba(26, 2, 4, 0.08);
   --shadow-lg: 0 18px 40px rgba(26, 2, 4, 0.12);
 
-  /* ── Harvest Catering brand tokens ── */
-  --red:        #E10101;
-  --red-bright: #ff2d2d;
-  --red-deep:   #a60303;
+  /* ── Harvest Catering brand tokens ──
+     Tied to the Theme Center primary so brand surfaces (CTA buttons, tiles,
+     accents) follow the selected colour instead of a fixed red. */
+  --red:        var(--color-primary, #E10101);
+  --red-bright: var(--color-primary, #ff2d2d);
+  --red-deep:   var(--color-primary-dark, #a60303);
   --ink:        #1a0204;
   /* NOTE: `--muted` intentionally NOT redefined here. It is the Tailwind/shadcn
      muted *background* token (light, from index.css). Muted *text* must use
@@ -120,10 +122,10 @@
   --paper-warm: #f7f3f1;
   --serif:      'Newsreader', Georgia, 'Times New Roman', serif;
   --sans:       'Hanken Grotesk', system-ui, -apple-system, sans-serif;
-  --gradient-button: linear-gradient(120deg, #ff2d2d 0%, #E10101 55%, #a60303 100%);
+  --gradient-button: linear-gradient(120deg, var(--color-primary, #ff2d2d) 0%, var(--color-primary, #E10101) 55%, var(--color-primary-dark, #a60303) 100%);
   --gradient-hero:   radial-gradient(120% 120% at 8% 95%, #7e0206 0%, #470206 40%, #1d0204 75%, #130103 100%);
-  --gradient-tile:   linear-gradient(150deg, #ff2d2d 0%, #E10101 45%, #a60303 100%);
-  --shadow-tile-glow:  0 0 0 1px rgba(255,255,255,.10), 0 10px 34px -8px rgba(225,1,1,.75), 0 0 46px -6px rgba(225,1,1,.55);
+  --gradient-tile:   linear-gradient(150deg, var(--color-primary, #ff2d2d) 0%, var(--color-primary, #E10101) 45%, var(--color-primary-dark, #a60303) 100%);
+  --shadow-tile-glow:  0 0 0 1px rgba(255,255,255,.10), 0 10px 34px -8px rgba(var(--color-primary-rgb, 225,1,1),.75), 0 0 46px -6px rgba(var(--color-primary-rgb, 225,1,1),.55);
   --shadow-tile-light: 0 1px 2px rgba(0,0,0,.18), 0 0 0 1px rgba(225,1,1,.10);
 }
 
@@ -779,6 +781,19 @@ html[data-topbar="minimal"] .header-profile-chevron {
   padding: 20px 24px;
 }
 
+/* ── Theme Center: live hooks ────────────────────────────────────────────────
+   Drive sidebar colour/elevation and UI density from the Theme Center. The
+   colour family, radius, fonts, topbar & motion are handled by existing tokens
+   / data-attributes elsewhere; these three needed a hook. */
+.sb-sider.ant-layout-sider {
+  background: var(--app-sidebar-bg, #ffffff) !important;
+}
+html[data-sidebar-style="elevated"] .sb-sider.ant-layout-sider {
+  box-shadow: 6px 0 18px -6px rgba(0, 0, 0, 0.18);
+}
+html[data-density="compact"]  .app-content-shell { padding: 10px 14px; }
+html[data-density="spacious"] .app-content-shell { padding: 32px 40px; }
+
 /* ============================================================
    TabBar — browser-style open pages strip (below content)
    ============================================================ */
@@ -1127,9 +1142,9 @@ html[data-theme="dark"] .app-tabbar-clear-btn {
       transparent 1px,
       transparent 8px
     ),
-    linear-gradient(135deg, #ff2d2d 0%, #E10101 55%, #a60303 100%) !important;
+    linear-gradient(135deg, var(--color-primary, #ff2d2d) 0%, var(--color-primary, #E10101) 55%, var(--color-primary-dark, #a60303) 100%) !important;
   background-size: 12px 12px, 100% 100%, 100% 100% !important;
-  box-shadow: 0 10px 26px -8px rgba(225, 1, 1, 0.55) !important;
+  box-shadow: 0 10px 26px -8px rgba(var(--color-primary-rgb, 225, 1, 1), 0.55) !important;
   transition: transform 0.14s ease, box-shadow 0.18s ease, filter 0.18s ease !important;
 }
 .hc-cta .anticon, .hc-cta svg,

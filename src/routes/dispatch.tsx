@@ -305,7 +305,7 @@ const INITIAL_RECORDS: DispatchRecord[] = [
 export default function Dispatch() {
   useArrivalFlash();
   const navigate = useNavigate();
-  const { applyStockDeltas, productionEntries } = useWorkflow();
+  const { applyStockDeltas, productionEntries, qcClearedFlights } = useWorkflow();
   const flightOrders = useFlightOrders();
   // ── Dispatch records state ──────────────────────────────────────────────────
   const [records, setRecords] = useState<DispatchRecord[]>(INITIAL_RECORDS);
@@ -568,6 +568,14 @@ export default function Dispatch() {
       if (dspRef) setRecords((prev) => prev.map((r) => r.id === dspRef ? { ...r, status: "Ready For Dispatch" as DispatchStatus } : r));
       toast.success(`QC Done for flight ${flight}. Status → Ready for Dispatch.`);
     }
+  };
+
+  // Initiate QC → start QC for this flight AND open the Dispatch Monitoring
+  // sheet scoped to the flight number, so the QC executive can fill the
+  // temperature/vehicle monitoring record straight away.
+  const handleInitiateQC = (flight: string) => {
+    handleQCAction(flight);
+    navigate(`/dispatch-monitoring?flight=${encodeURIComponent(flight)}`);
   };
 
   const openWarningForFlightGroup = (fg: FlightGroup) => {
@@ -940,7 +948,13 @@ export default function Dispatch() {
                   <tbody key={timeGroup.depTime}>
                     {timeGroup.flightGroups.flatMap((flightGroup, fgIdx) => {
                       const flightRowSpan = flightGroup.rows.length;
-                      const flightQCData = flightQCStates.get(flightGroup.flight);
+                      // A completed Dispatch Monitoring entry (qcClearedFlights)
+                      // clears the flight for dispatch, overriding local QC state.
+                      const monitoredAt = qcClearedFlights[flightGroup.flight];
+                      const localQCData = flightQCStates.get(flightGroup.flight);
+                      const flightQCData = monitoredAt
+                        ? { qcState: "done" as QCState, qcCheckedAt: monitoredAt }
+                        : localQCData;
                       const flightQCState = flightQCData?.qcState ?? "not-started";
                       const allPackagingDone = flightGroup.rows.every(
                         (r) => r.packagingStatus === "Packaging Done" || r.packagingStatus === "Ready for Dispatch"
@@ -1046,7 +1060,7 @@ export default function Dispatch() {
                                 ) : allPackagingDone ? (
                                   <Button size="sm"
                                     className="h-7 px-3 text-xs shrink-0 bg-violet-600 hover:bg-violet-700 text-white border-0"
-                                    onClick={() => handleQCAction(flightGroup.flight)}>
+                                    onClick={() => handleInitiateQC(flightGroup.flight)}>
                                     <ShieldCheck className="h-3 w-3 mr-1" /> Initiate QC
                                   </Button>
                                 ) : (
@@ -1064,7 +1078,7 @@ export default function Dispatch() {
                                   >
                                     <Eye className="h-3 w-3 mr-1" /> View
                                   </Button>
-                                  {flightGroup.rows.some((r) => r.packagingStatus === "Ready for Packaging") && (
+                                  {flightQCState !== "done" && flightGroup.rows.some((r) => r.packagingStatus === "Ready for Packaging") && (
                                     <Button
                                       size="sm"
                                       variant="outline"
@@ -1283,12 +1297,16 @@ export default function Dispatch() {
             </DialogTitle>
           </div>
           {materialsRow && (() => {
-            const summaryRows = packagingRows.filter(
-              (r) => r.flight === materialsRow.flight
-                && r.depTime === materialsRow.depTime
-                && r.packagingStatus === "Ready for Packaging"
-            );
-            const totalUnits = summaryRows.reduce((s, r) => s + r.qty, 0);
+            // Full manifest for this flight/slot — every meal, whatever its status.
+            const flightRows = packagingRows
+              .filter((r) => r.flight === materialsRow.flight && r.depTime === materialsRow.depTime)
+              .slice()
+              .sort((a, b) =>
+                (a.packagingStatus === "Ready for Packaging" ? 0 : 1) -
+                (b.packagingStatus === "Ready for Packaging" ? 0 : 1));
+            // Only the "Ready for Packaging" meals will actually be started.
+            const readyRows = flightRows.filter((r) => r.packagingStatus === "Ready for Packaging");
+            const unitsToStart = readyRows.reduce((s, r) => s + r.qty, 0);
             return (
               <>
                 <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
@@ -1308,8 +1326,9 @@ export default function Dispatch() {
                       <span className="font-semibold ml-1">{materialsRow.depTime}</span>
                     </div>
                     <div>
-                      <span className="text-muted-foreground">Items:</span>
-                      <span className="font-semibold ml-1">{summaryRows.length}</span>
+                      <span className="text-muted-foreground">To start:</span>
+                      <span className="font-semibold ml-1">{readyRows.length}</span>
+                      <span className="text-muted-foreground ml-1">of {flightRows.length} meal{flightRows.length === 1 ? "" : "s"}</span>
                     </div>
                   </div>
 
@@ -1324,42 +1343,58 @@ export default function Dispatch() {
                             <th className="p-2.5 text-left font-semibold">Meal</th>
                             <th className="p-2.5 text-left font-semibold w-28">Type</th>
                             <th className="p-2.5 text-left font-semibold w-36">Section</th>
+                            <th className="p-2.5 text-left font-semibold w-40">Status</th>
                             <th className="p-2.5 text-right font-semibold w-24">Qty</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {summaryRows.map((r) => (
-                            <tr key={r.id} className="border-t border-border/50">
-                              <td className="p-2.5">
-                                <div className="flex items-center gap-2">
-                                  <Package className="h-4 w-4 text-violet-500 shrink-0" />
-                                  {r.mealName}
-                                </div>
-                              </td>
-                              <td className="p-2.5">
-                                <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${MEAL_TYPE_BADGE[r.mealType] ?? "bg-muted text-foreground"}`}>
-                                  {r.mealType}
-                                </span>
-                              </td>
-                              <td className="p-2.5 text-muted-foreground">{r.section}</td>
-                              <td className="p-2.5 text-right font-medium tabular-nums">{r.qty}</td>
-                            </tr>
-                          ))}
+                          {flightRows.map((r) => {
+                            const ready = r.packagingStatus === "Ready for Packaging";
+                            return (
+                              <tr key={r.id} className={`border-t border-border/50 ${ready ? "" : "opacity-50"}`}>
+                                <td className="p-2.5">
+                                  <div className="flex items-center gap-2">
+                                    <Package className={`h-4 w-4 shrink-0 ${ready ? "text-violet-500" : "text-muted-foreground"}`} />
+                                    {r.mealName}
+                                  </div>
+                                </td>
+                                <td className="p-2.5">
+                                  <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${MEAL_TYPE_BADGE[r.mealType] ?? "bg-muted text-foreground"}`}>
+                                    {r.mealType}
+                                  </span>
+                                </td>
+                                <td className="p-2.5 text-muted-foreground">{r.section}</td>
+                                <td className="p-2.5">
+                                  <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${PACKAGING_BADGE[r.packagingStatus] ?? "bg-muted text-foreground"}`}>
+                                    {r.packagingStatus}
+                                  </span>
+                                </td>
+                                <td className="p-2.5 text-right font-medium tabular-nums">{r.qty}</td>
+                              </tr>
+                            );
+                          })}
                         </tbody>
                         <tfoot>
                           <tr className="border-t border-border bg-muted/40">
-                            <td className="p-2.5 font-semibold" colSpan={3}>Total units</td>
-                            <td className="p-2.5 text-right font-semibold tabular-nums">{totalUnits.toLocaleString()}</td>
+                            <td className="p-2.5 font-semibold" colSpan={4}>Units to start packaging</td>
+                            <td className="p-2.5 text-right font-semibold tabular-nums">{unitsToStart.toLocaleString()}</td>
                           </tr>
                         </tfoot>
                       </table>
                     </div>
+                    {readyRows.length < flightRows.length && (
+                      <p className="text-xs text-muted-foreground mt-2">
+                        Greyed-out meals are already in progress or done — only the{" "}
+                        <strong className="text-foreground">{readyRows.length}</strong> meal{readyRows.length === 1 ? "" : "s"} marked{" "}
+                        <span className="font-semibold text-amber-700">Ready for Packaging</span> will be started.
+                      </p>
+                    )}
                   </div>
                 </div>
                 <div className="px-6 py-4 border-t shrink-0 flex justify-end gap-2">
                   <Button variant="outline" onClick={() => setMaterialsRow(null)}>Cancel</Button>
                   <Button
-                    disabled={summaryRows.length === 0}
+                    disabled={readyRows.length === 0}
                     onClick={() => handleConfirmMaterials(materialsRow)}
                   >
                     Confirm — Start Packaging

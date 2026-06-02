@@ -1,4 +1,5 @@
-import { useState, Fragment, useEffect } from "react";
+import { useState, Fragment, useEffect, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -19,6 +20,7 @@ import {
 } from "lucide-react";
 import { flights } from "@/lib/sample-data";
 import { useRole } from "@/lib/roles";
+import { useWorkflow } from "@/lib/workflow-store";
 import { KpiCard } from "@/components/common/KpiCard";
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -174,6 +176,9 @@ export default function DispatchMonitoring() {
   const [viewEntryId, setViewEntryId] = useState<string | null>(null);
   const [fsRemarksInput, setFsRemarksInput] = useState("");
   const [hocRemarksInput, setHocRemarksInput] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const deepLinkHandled = useRef(false);
+  const { markFlightQcCleared } = useWorkflow();
 
   // ── Mobile App View state ───────────────────────────────────────────────────
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -230,6 +235,28 @@ export default function DispatchMonitoring() {
     setTimeout(() => document.getElementById("dispatch-entry-form")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
   };
 
+  // Deep link from Packaging & Dispatch → "Initiate QC": open a new monitoring
+  // entry pre-scoped to the flight number passed via ?flight=BS-225.
+  useEffect(() => {
+    if (deepLinkHandled.current) return;
+    const flightNo = searchParams.get("flight");
+    if (!flightNo) return;
+    deepLinkHandled.current = true;
+    const f = flights.find((x) => x.flight === flightNo);
+    openNew();
+    if (f) {
+      setDepTime(f.dep);
+      handleFlightSelect(f.id);
+      toast.info(`Dispatch monitoring opened for flight ${flightNo}.`);
+    } else {
+      toast.info(`New dispatch entry — flight ${flightNo} isn't in the flight list, please select it manually.`);
+    }
+    // Clear the param so a refresh / re-render doesn't reopen the form.
+    searchParams.delete("flight");
+    setSearchParams(searchParams, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
   const openEdit = (entry: DispatchEntry) => {
     const fl = flights.find((f) => f.id === entry.flightId);
     setDepTime(fl?.dep ?? "");
@@ -277,6 +304,10 @@ export default function DispatchMonitoring() {
     if (!validate()) return;
     const label = flightLabel(form.flightId);
     const at = nowTimeStr();
+    // Completing the dispatch monitoring entry clears the flight for dispatch —
+    // Packaging & Dispatch reads this to unlock "Initiate Dispatch".
+    const flightNo = flights.find((f) => f.id === form.flightId)?.flight;
+    if (flightNo) markFlightQcCleared(flightNo, at);
     const existing = editId ? entries.find((e) => e.id === editId) : null;
     const base: Omit<DispatchEntry, "id"> = {
       flightId: form.flightId, packagingDate: form.packagingDate,
@@ -512,7 +543,7 @@ export default function DispatchMonitoring() {
         <div className="rounded-xl border border-border bg-card overflow-x-auto mb-6 shadow-sm">
           <table className="w-full text-xs border-collapse" style={{ minWidth: 1640 }}>
             <thead>
-              <tr className="bg-slate-800 text-white">
+              <tr className="bg-slate-100 text-slate-600 border-b border-border">
                 {([
                   ["Flight", true, false], ["Pkg. Date", false, false], ["Qty", false, false],
                   ["Vehicle", false, false], ["Clean", false, false],
@@ -522,10 +553,10 @@ export default function DispatchMonitoring() {
                   ["Result", false, false],
                   ["Gate 08 Temp", false, false], ["Unloading", false, false],
                   ["APT Exec.", false, false], ["Remarks", false, false],
-                  ["", false, true],
+                  ["Actions", false, true],
                 ] as [string, boolean, boolean][]).map(([h, sl, sr]) => (
                   <th key={h || "act"}
-                    className={`px-3 py-2.5 text-left font-semibold whitespace-nowrap text-[11px] ${sl ? "sticky left-0 z-10 bg-slate-800" : sr ? "sticky right-0 z-10 bg-slate-800" : ""}`}>
+                    className={`px-3 py-2.5 text-left font-semibold whitespace-nowrap text-[11px] uppercase tracking-wider bg-slate-100 ${sl ? "sticky left-0 z-10" : sr ? "sticky right-0 z-10" : ""}`}>
                     {h}
                   </th>
                 ))}

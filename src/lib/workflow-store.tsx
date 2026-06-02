@@ -259,6 +259,13 @@ type WorkflowCtx = {
   mrpRuns: WfMrpRun[];
   addMrpRun: (run: WfMrpRun) => void;
   updateMrpRun: (id: string, patch: Partial<WfMrpRun>) => void;
+
+  // ── Dispatch QC clearance ──────────────────────────────────────────────────
+  // Flight numbers whose Dispatch Monitoring entry has been completed. Set on the
+  // Dispatch Monitoring sheet; read by Packaging & Dispatch to unlock "Initiate
+  // Dispatch" for the flight. Keyed by flight number → completion timestamp.
+  qcClearedFlights: Record<string, string>;
+  markFlightQcCleared: (flight: string, at: string) => void;
 };
 
 const WorkflowContext = createContext<WorkflowCtx>({
@@ -272,6 +279,7 @@ const WorkflowContext = createContext<WorkflowCtx>({
   productionEntries: [], addProductionEntry: () => {}, updateProductionEntryStatus: () => {},
   productionEntryRecords: [], addProductionEntryRecord: () => {},
   mrpRuns: [], addMrpRun: () => {}, updateMrpRun: () => {},
+  qcClearedFlights: {}, markFlightQcCleared: () => {},
 });
 
 // ── Provider ───────────────────────────────────────────────────────────────────
@@ -423,6 +431,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   ]);
 
   const [mrpRuns, setMrpRuns] = useState<WfMrpRun[]>([]);
+  const [qcClearedFlights, setQcClearedFlights] = useState<Record<string, string>>({});
 
   return (
     <WorkflowContext.Provider value={{
@@ -463,6 +472,10 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       addMrpRun: (run) => setMrpRuns((prev) => [run, ...prev]),
       updateMrpRun: (id, patch) =>
         setMrpRuns((prev) => prev.map((r) => r.id === id ? { ...r, ...patch } : r)),
+
+      qcClearedFlights,
+      markFlightQcCleared: (flight, at) =>
+        setQcClearedFlights((prev) => ({ ...prev, [flight]: at })),
 
       productionEntryRecords,
       addProductionEntryRecord: (record) => {

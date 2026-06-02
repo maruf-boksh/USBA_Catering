@@ -53,6 +53,8 @@ import ConfigWarehousePage from "@/routes/config-warehouse";
 import ConfigPricePage from "@/routes/config-price";
 import ConfigApprovalPage from "@/routes/config-approval";
 import ConfigMealSlotsPage from "@/routes/config-meal-slots";
+import ConfigAccessControlPage from "@/routes/config-access-control";
+import ReportBuilderPage from "@/routes/report-builder";
 import OperationsOverviewPage from "@/routes/operations-overview";
 import ProductionOverviewPage from "@/routes/production-overview";
 import InventoryOverviewPage from "@/routes/inventory-overview";
@@ -125,6 +127,8 @@ export function App() {
             <Route path="/config-price" element={<ConfigPricePage />} />
             <Route path="/config-approval" element={<ConfigApprovalPage />} />
             <Route path="/config-meal-slots" element={<ConfigMealSlotsPage />} />
+            <Route path="/config-access-control" element={<ConfigAccessControlPage />} />
+            <Route path="/report-builder" element={<ReportBuilderPage />} />
             <Route path="/operations-overview" element={<OperationsOverviewPage />} />
             <Route path="/production-overview" element={<ProductionOverviewPage />} />
             <Route path="/inventory-overview" element={<InventoryOverviewPage />} />

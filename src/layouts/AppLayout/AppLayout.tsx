@@ -3,6 +3,9 @@ import type { ReactNode } from 'react';
 import { Layout, Button, Avatar, Badge, Tooltip, Breadcrumb, Dropdown, Divider } from 'antd';
 import { ThemeCenter } from '@/components/ThemeCenter';
 import type { MenuProps } from 'antd';
+import { useRole } from '@/lib/roles';
+import { useAllRoles, useAccess, canViewPage } from '@/lib/access-control';
+import { Lock } from 'lucide-react';
 import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
@@ -17,6 +20,7 @@ import {
   DownOutlined,
   ClockCircleOutlined,
   IdcardOutlined,
+  CheckOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { GlobalSearch } from './GlobalSearch';
@@ -130,14 +134,6 @@ function NotificationPanel() {
   );
 }
 
-// ─── Profile dropdown menu items ───────────────────────────────────────────────
-const PROFILE_MENU_ITEMS: MenuProps['items'] = [
-  { key: 'view-profile', label: 'View Profile', icon: <IdcardOutlined /> },
-  { key: 'settings', label: 'Account Settings', icon: <SettingOutlined /> },
-  { type: 'divider' },
-  { key: 'logout', label: 'Sign Out', icon: <LogoutOutlined />, danger: true },
-];
-
 interface AppLayoutProps {
   children: ReactNode;
   currentUser?: {
@@ -151,6 +147,9 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
   const [collapsed, setCollapsed] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
+  const { role, setRole } = useRole();
+  const allRoles = useAllRoles();
+  const access = useAccess();
 
   const selectedKey = useMemo(() => resolveSelectedNavKey(location.pathname), [location.pathname]);
 
@@ -171,8 +170,36 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
   const handleProfileMenuClick: MenuProps['onClick'] = ({ key }) => {
     if (key === 'logout') {
       onSignOut?.();
+      return;
+    }
+    if (key.startsWith('role:')) {
+      setRole(key.slice('role:'.length));
     }
   };
+
+  // Profile dropdown — the acting-role switcher now lives here (under the avatar),
+  // instead of as a standalone control in the top bar.
+  const profileMenuItems: MenuProps['items'] = [
+    { key: 'view-profile', label: 'View Profile', icon: <IdcardOutlined /> },
+    { key: 'settings', label: 'Account Settings', icon: <SettingOutlined /> },
+    { type: 'divider' },
+    {
+      key: 'acting-role',
+      icon: <IdcardOutlined />,
+      label: `Acting role · ${role}`,
+      children: allRoles.map((r) => ({
+        key: `role:${r}`,
+        label: (
+          <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, minWidth: 168 }}>
+            <span>{r}</span>
+            {r === role && <CheckOutlined style={{ fontSize: 12, color: 'var(--color-primary)' }} />}
+          </span>
+        ),
+      })),
+    },
+    { type: 'divider' },
+    { key: 'logout', label: 'Sign Out', icon: <LogoutOutlined />, danger: true },
+  ];
 
   const togglePinCurrentPage = () => {
     if (!NAV_VALID_ROUTE_KEYS.has(selectedKey)) return;
@@ -293,7 +320,7 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
 
               {/* Profile dropdown */}
               <Dropdown
-                menu={{ items: PROFILE_MENU_ITEMS, onClick: handleProfileMenuClick }}
+                menu={{ items: profileMenuItems, onClick: handleProfileMenuClick }}
                 trigger={['click']}
                 placement="bottomRight"
                 overlayClassName="app-profile-dropdown"
@@ -309,6 +336,7 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
                   />
                   <div className="header-profile-copy">
                     <div className="header-profile-name">{currentUser?.displayName ?? currentUser?.userId ?? 'Admin User'}</div>
+                    <div style={{ fontSize: 11, fontWeight: 500, lineHeight: 1.1, color: 'var(--color-muted-foreground)' }}>{role}</div>
                   </div>
                   <DownOutlined className="header-profile-chevron" />
                 </div>
@@ -318,7 +346,20 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
         </Header>
 
         <Content className="app-content-shell" style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', position: 'relative' }}>
-          {children}
+          {NAV_VALID_ROUTE_KEYS.has(selectedKey) && !canViewPage(role, selectedKey, access) ? (
+            <div style={{ display: 'grid', placeItems: 'center', minHeight: '60vh', padding: 24 }}>
+              <div style={{ textAlign: 'center', maxWidth: 420 }}>
+                <Lock style={{ width: 32, height: 32, color: 'var(--color-muted-foreground)', margin: '0 auto 12px' }} />
+                <div style={{ fontWeight: 600, color: 'var(--color-foreground)' }}>Access restricted</div>
+                <p style={{ fontSize: 13, color: 'var(--color-muted-foreground)', marginTop: 6 }}>
+                  Your role (<strong>{role}</strong>) doesn’t have view access to this page. Ask a GM/Admin to grant it in
+                  Configuration → User Access Control.
+                </p>
+              </div>
+            </div>
+          ) : (
+            children
+          )}
         </Content>
         <TabBar menuItems={MENU_ITEMS} />
       </Layout>

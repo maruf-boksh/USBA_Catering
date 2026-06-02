@@ -39,6 +39,8 @@ import {
 } from "@/lib/flight-orders-store";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useArrivalFlash } from "@/lib/arrival-flash";
+import { useRole } from "@/lib/roles";
+import { useAccess, canElement, useElementPermission } from "@/lib/access-control";
 
 // Coloured 3px left edge on an order-group band, keyed to its status — green
 // family for done/approved, amber for production, gold for pending. (Design:
@@ -171,6 +173,9 @@ type RecentUploadRow = (typeof recentUploads)[number];
 export default function OrderManagementPage() {
   useArrivalFlash();
   const orders = useFlightOrders();
+  // Action buttons are permissioned elements — shown only with "create".
+  const canCreate = useElementPermission("/order-management", "action-create").create;
+  const canBulk = useElementPermission("/order-management", "action-bulk").create;
   const [view, setView] = useState<"list" | "create" | "bulk" | "crew-create">("list");
   const [selectedOrder, setSelectedOrder] = useState<FlightOrder | null>(null);
   const [activeTab, setActiveTab] = useState<"flights" | "crew">("flights");
@@ -222,16 +227,20 @@ export default function OrderManagementPage() {
         actions={
           view === "list" ? (
             <>
-              <Button variant="outline" className="no-brand" onClick={() => setView("bulk")}>
-                <Upload className="h-4 w-4 mr-1 text-primary" /> Bulk Upload
-              </Button>
-              <Button
-                onClick={() => {
-                  setView(activeTab === "crew" ? "crew-create" : "create");
-                }}
-              >
-                <Plus className="h-4 w-4 mr-1" /> Create Order
-              </Button>
+              {canBulk && (
+                <Button variant="outline" className="no-brand" onClick={() => setView("bulk")}>
+                  <Upload className="h-4 w-4 mr-1 text-primary" /> Bulk Upload
+                </Button>
+              )}
+              {canCreate && (
+                <Button
+                  onClick={() => {
+                    setView(activeTab === "crew" ? "crew-create" : "create");
+                  }}
+                >
+                  <Plus className="h-4 w-4 mr-1" /> Create Order
+                </Button>
+              )}
             </>
           ) : (
             <Button variant="outline" onClick={() => setView("list")}>
@@ -582,6 +591,11 @@ function OrdersList({
   orders: FlightOrder[];
   onView: (o: FlightOrder) => void;
 }) {
+  const { role } = useRole();
+  const access = useAccess();
+  // The Special Meals column is a permissioned element (view).
+  const showSpecMeals = canElement(role, "/order-management", "col:spec-meals", "view", access);
+  const colCount = showSpecMeals ? 8 : 7;
   const today = new Date().toISOString().slice(0, 10);
   const [from, setFrom] = useState<string>("");
   const [to, setTo] = useState<string>("");
@@ -808,14 +822,14 @@ function OrdersList({
                 <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
                 <TableHead className="text-xs uppercase tracking-wider">ETD</TableHead>
                 <TableHead className="text-xs uppercase tracking-wider text-right">PAX</TableHead>
-                <TableHead className="text-xs uppercase tracking-wider text-right">Spec. Meals</TableHead>
+                {showSpecMeals && <TableHead className="text-xs uppercase tracking-wider text-right">Spec. Meals</TableHead>}
                 <TableHead className="text-xs uppercase tracking-wider">Action</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {filteredOrders.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-8">
+                  <TableCell colSpan={colCount} className="text-center text-sm text-muted-foreground py-8">
                     No flight orders match the selected filters.
                   </TableCell>
                 </TableRow>
@@ -832,7 +846,7 @@ function OrdersList({
                     "#E10101"; // Pending / default — brand red
                   rows.push(
                     <TableRow key={`grp-${orderNo}`} className="border-0 hover:bg-transparent">
-                      <TableCell colSpan={8} className="p-0">
+                      <TableCell colSpan={colCount} className="p-0">
                         <div
                           className="relative flex items-center flex-wrap gap-[11px] border-t border-b py-3 pl-[18px] pr-4"
                           style={{
@@ -879,7 +893,7 @@ function OrdersList({
                         <TableCell className="tabular-nums text-xs">{o.date}</TableCell>
                         <TableCell>{o.etd}</TableCell>
                         <TableCell className="text-right tabular-nums">{o.pax}</TableCell>
-                        <TableCell className={"text-right tabular-nums" + (o.specialMeals === 0 ? " text-muted-foreground/60" : "")}>{o.specialMeals}</TableCell>
+                        {showSpecMeals && <TableCell className={"text-right tabular-nums" + (o.specialMeals === 0 ? " text-muted-foreground/60" : "")}>{o.specialMeals}</TableCell>}
                         <TableCell>
                           <Button
                             size="sm"

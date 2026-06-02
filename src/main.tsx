@@ -4,15 +4,15 @@ import { ConfigProvider, theme as antTheme } from "antd"
 
 import { ThemeProvider, useTheme } from "@/components/theme-provider.tsx"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import {
-  useThemeSettings,
-  FONT_FAMILY_STACK,
-  FONT_SIZE_PX,
-  RADIUS_PX,
-  resolveSidebarBg,
-  readableForeground,
-} from "@/lib/theme-settings"
+import { FONT_FAMILY_STACK, RADIUS_PX, readableForeground } from "@/lib/theme-settings"
+import { useThemeStore } from "@/stores/themeStore"
 import App from "./App.tsx"
+
+// Theme Center (useThemeStore) enum → AntD token mappings.
+const FONT_PX = { sm: 12, md: 13, lg: 15 } as const
+const SIDEBAR_SOLID: Record<string, string> = {
+  white: "#FFFFFF", slate: "#F1F5F9", dark: "#1E293B", midnight: "#0F172A",
+}
 import "./index.css"
 import "@/styles/globals.css"
 import "@/styles/sidebar.css"
@@ -26,7 +26,10 @@ import "@/styles/sidebar.css"
  */
 function AntThemeBridge({ children }: { children: React.ReactNode }) {
   const { theme } = useTheme()
-  const settings = useThemeSettings()
+  // Read the SAME store the Theme Center writes, so changing a preset/colour/
+  // font/radius live re-themes every AntD surface (top-bar Buttons, Menu,
+  // modals, Tags, links, …) — not just the CSS-variable chrome.
+  const s = useThemeStore()
   const resolved =
     theme === "system"
       ? window.matchMedia("(prefers-color-scheme: dark)").matches
@@ -36,23 +39,20 @@ function AntThemeBridge({ children }: { children: React.ReactNode }) {
 
   const isDark = resolved === "dark"
 
-  // Bridge Theme Center settings into AntD tokens so antd-rendered surfaces
-  // (sidebar Menu, modals, top-bar Buttons, etc) match the rest of the app.
-  const primary = settings.primary
-  const primaryFg = readableForeground(primary)
-  const sidebarBg = resolveSidebarBg(settings)
-  const fontStack = FONT_FAMILY_STACK[settings.fontFamily]
-  const fontPx = FONT_SIZE_PX[settings.fontSize]
-  const radiusPx = RADIUS_PX[settings.cornerRadius]
-  // Sidebar swatch backgrounds may be CSS gradients — antd's `siderBg` only
-  // takes a colour, so we fall back to a plain colour when the choice is a
-  // gradient (the gradient itself is still painted via the CSS variable that
-  // AppShell reads).
+  const primary = s.primaryColor
+  const fontStack = FONT_FAMILY_STACK[s.fontFamily] ?? FONT_FAMILY_STACK.manrope
+  const fontPx = FONT_PX[s.fontSize] ?? 13
+  const radiusPx = RADIUS_PX[s.borderRadius] ?? 8
   const siderBgColor =
-    settings.sidebarColor === "gradient" ? "#EEF2FF"
-    : settings.sidebarColor === "primary" ? `${primary}0D`
-    : sidebarBg.bg
-  const siderFg = sidebarBg.fg
+    isDark ? "#131826"
+    : s.sidebarColor === "primary" ? `${primary}0D`
+    : s.sidebarColor === "custom" ? s.sidebarCustomBg
+    : SIDEBAR_SOLID[s.sidebarColor] ?? "#FFFFFF"
+  const siderFg =
+    isDark ? "#CBD5E1"
+    : s.sidebarColor === "dark" || s.sidebarColor === "midnight" ? "#F8FAFC"
+    : s.sidebarColor === "custom" ? (s.sidebarCustomFg || readableForeground(s.sidebarCustomBg))
+    : "#0F172A"
 
   return (
     <ConfigProvider

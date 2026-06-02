@@ -227,6 +227,7 @@ export const NAV_MODULES: NavModule[] = [
     icon: I(BarChart3),
     children: [
       { key: '/reports', label: 'Reports', icon: I(BarChart3) },
+      { key: '/report-builder', label: 'Report Builder', icon: I(FileText) },
     ],
   },
 
@@ -256,7 +257,8 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/config-warehouse',  label: 'Warehouse',        icon: I(Warehouse) },
       { key: '/config-price',      label: 'Price Setup',      icon: I(BadgeDollarSign) },
       { key: '/config-approval',   label: 'Approval Setup',   icon: I(GitBranch) },
-      { key: '/config-meal-slots', label: 'Meal Slots',       icon: I(Clock) },
+      { key: '/config-meal-slots', label: 'Meal Config',       icon: I(Clock) },
+      { key: '/config-access-control', label: 'User Access Control', icon: I(ShieldCheck) },
     ],
   },
 ];

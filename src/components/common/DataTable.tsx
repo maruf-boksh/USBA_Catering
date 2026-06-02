@@ -1,8 +1,12 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Table, Input, Button } from "antd";
 import type { TableColumnType } from "antd";
 import { SearchOutlined, DownloadOutlined } from "@ant-design/icons";
 import { toast } from "sonner";
+import { useLocation } from "react-router-dom";
+import { resolveSelectedNavKey } from "@/layouts/AppLayout/navIndex";
+import { useRole } from "@/lib/roles";
+import { useAccess, canElement, can, registerElements, columnElementId } from "@/lib/access-control";
 
 /**
  * Same external API as the legacy shadcn DataTable so the 54 consumer pages
@@ -41,6 +45,26 @@ export function DataTable<T extends { id: string }>({
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
 
+  // ── Per-role column visibility (applies to every page using DataTable) ──────
+  const { role } = useRole();
+  const access = useAccess();
+  const route = resolveSelectedNavKey(useLocation().pathname);
+
+  // Register this table's columns so they appear in User Access Control.
+  useEffect(() => {
+    registerElements(
+      route,
+      columns.map((c) => ({ id: columnElementId(String(c.key)), label: `${c.header} column`, kind: "column" as const })),
+    );
+  }, [route, columns]);
+
+  // Drop columns the current role may not view; bulk actions need "edit".
+  const visibleColumns = useMemo(
+    () => columns.filter((c) => canElement(role, route, columnElementId(String(c.key)), "view", access)),
+    [columns, role, route, access],
+  );
+  const canBulk = can(role, route, "edit", access);
+
   const filtered = useMemo(() => {
     if (!q || !searchKeys) return data;
     const ql = q.toLowerCase();
@@ -60,7 +84,7 @@ export function DataTable<T extends { id: string }>({
     return next || undefined;
   };
   const antColumns: TableColumnType<T>[] = useMemo(() => {
-    const cols: TableColumnType<T>[] = columns.map((c) => ({
+    const cols: TableColumnType<T>[] = visibleColumns.map((c) => ({
       title: c.header,
       dataIndex: String(c.key),
       key: String(c.key),
@@ -89,12 +113,12 @@ export function DataTable<T extends { id: string }>({
       });
     }
     return cols;
-  }, [columns, actions]);
+  }, [visibleColumns, actions]);
 
   const exportCsv = () => {
-    const header = columns.map((c) => c.header).join(",");
+    const header = visibleColumns.map((c) => c.header).join(",");
     const rows = filtered.map((r) =>
-      columns
+      visibleColumns
         .map((c) => `"${String((r as Record<string, unknown>)[String(c.key)] ?? "")}"`)
         .join(","),
     );
@@ -136,7 +160,7 @@ export function DataTable<T extends { id: string }>({
           onChange={(e) => setQ(e.target.value)}
           style={{ flex: "1 1 200px", maxWidth: 320 }}
         />
-        {selectable && selected.length > 0 && (
+        {selectable && canBulk && selected.length > 0 && (
           <>
             <span style={{ fontSize: 13, color: "var(--color-muted-foreground)" }}>
               {selected.length} selected

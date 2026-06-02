@@ -18,6 +18,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { useRole } from "@/lib/roles";
+import { useAccess, canElement } from "@/lib/access-control";
 import {
   flights, productionOrders, purchaseOrders, dispatch, qcChecks,
   seedFlightOrders, inventory, inventoryValue,
@@ -520,6 +521,9 @@ function ProductionMixDonut({ data }: { data: { name: string; v: number }[] }) {
 
 export default function Dashboard() {
   const { role } = useRole();
+  const access = useAccess();
+  // KPI cards are permissioned elements — hidden when the role lacks view.
+  const showKpi = (id: string) => canElement(role, "/", id, "view", access);
   const [period, setPeriod] = useState<Period>("today");
   const [range, setRange] = useState<DateRange | null>(null);
   const data = useDashboardKpis(period, range ?? undefined);
@@ -586,33 +590,49 @@ export default function Dashboard() {
       }} aria-hidden />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {showKpi("kpi-flights") && (
         <KpiLink to="/order-management" highlight="active-orders" ids={data.kpis.flights.ids}>
           <KpiCard label="Flights Today"   value={data.kpis.flights.value}   sub={data.kpis.flights.sub}   icon={RocketOutlined}            tone="navy"    />
         </KpiLink>
+        )}
+        {showKpi("kpi-meals") && (
         <KpiLink to="/production-entry" highlight="production-list" ids={data.kpis.meals.ids}>
           <KpiCard label="Meals Prepared"  value={data.kpis.meals.value}     sub={data.kpis.meals.sub}     icon={CoffeeOutlined}            tone="success" />
         </KpiLink>
+        )}
+        {showKpi("kpi-delayed") && (
         <KpiLink to="/order-management" ord={data.kpis.delayed.ord} highlight="active-orders" ids={data.kpis.delayed.ids}>
           <KpiCard label="Delayed Flights" value={data.kpis.delayed.value}   sub={data.kpis.delayed.sub}   icon={WarningOutlined}           tone="warning" />
         </KpiLink>
+        )}
+        {showKpi("kpi-qc") && (
         <KpiLink to="/cooking-temp" highlight="qc-issues" ids={data.kpis.qcIssues.ids}>
           <KpiCard label="QC Issues"       value={data.kpis.qcIssues.value}  sub={data.kpis.qcIssues.sub}  icon={SafetyCertificateOutlined} tone="red"     />
         </KpiLink>
+        )}
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
+        {showKpi("kpi-pos") && (
         <KpiLink to="/procurement" highlight="po-list" ids={data.kpis.pendingPOs.ids}>
           <KpiCard label="Pending POs"      value={data.kpis.pendingPOs.value} sub={data.kpis.pendingPOs.sub} icon={ShoppingCartOutlined} tone="info"    />
         </KpiLink>
+        )}
+        {showKpi("kpi-inv") && (
         <KpiLink to="/inventory" highlight="inv-alerts" ids={data.kpis.invAlerts.ids}>
           <KpiCard label="Inventory Alerts" value={data.kpis.invAlerts.value}  sub={data.kpis.invAlerts.sub}  icon={InboxOutlined}        tone="warning" />
         </KpiLink>
+        )}
+        {showKpi("kpi-dispatch") && (
         <KpiLink to="/dispatch" highlight="dispatch-list" ids={data.kpis.dispatch.ids}>
           <KpiCard label="Dispatch Active"  value={data.kpis.dispatch.value}   sub={data.kpis.dispatch.sub}   icon={CarOutlined}          tone="success" />
         </KpiLink>
+        )}
+        {showKpi("kpi-cost") && (
         <KpiLink to="/inventory" highlight="inv-value">
           <KpiCard label="Daily Cost"       value={data.kpis.dailyCost.value}  sub={data.kpis.dailyCost.sub}  icon={DollarOutlined}       tone="ink"     />
         </KpiLink>
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-6">
