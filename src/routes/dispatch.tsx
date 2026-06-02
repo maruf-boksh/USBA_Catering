@@ -5,9 +5,10 @@ import { Button } from "@/components/ui/button";
 import {
   Truck, Package, Plus, AlertTriangle, Bell, MoreHorizontal,
   Eye, Croissant, Pill, ChefHat, ShieldCheck, Download,
-  CheckCircle2, AlertCircle,
+  CheckCircle2,
 } from "lucide-react";
-import { flights } from "@/lib/sample-data";
+import { flights, meals } from "@/lib/sample-data";
+import { useFlightOrders, type FlightOrder } from "@/lib/flight-orders-store";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import {
@@ -18,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { useArrivalFlash } from "@/lib/arrival-flash";
+import { useWorkflow } from "@/lib/workflow-store";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -111,10 +113,37 @@ type DispatchedFlightEntry = {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const PAX_MEAL_OPTIONS   = ["PBDR", "JPCV", "JPBD", "VRSCV", "CHRS", "BDBR", "SFBD", "HNML"];
 const CREW_MEAL_TYPES    = ["Breakfast", "Lunch", "Dinner", "Light Snacks", "Fruit", "Beverages"];
 const SPECIAL_MEAL_TYPES = ["VGML", "CHML", "SPML", "HNML", "LCML", "DBML", "BLML", "KSML"];
 const ADDITIONAL_OPTIONS = ["Garlic Toast", "Soft Bun & Croissant", "Fruit Platter", "Mineral Water", "Juice Pack", "Date Cake", "Nuts & Seeds"];
+
+/** "15:40" → "3:40 PM" (matches the packaging table's dep-time style). */
+function to12h(hhmm: string): string {
+  const [h, m] = hhmm.split(":").map(Number);
+  if (Number.isNaN(h)) return hhmm;
+  const ap = h >= 12 ? "PM" : "AM";
+  const h12 = ((h + 11) % 12) + 1;
+  return `${h12}:${String(m ?? 0).padStart(2, "0")} ${ap}`;
+}
+
+/** Resolve a meal name to its kitchen section + packaging meal-type via the
+ *  Meal Planning catalog, with sensible fallbacks. */
+function mealMeta(name: string): { section: string; mealType: PackagingRow["mealType"] } {
+  const m = meals.find((x) => x.name === name);
+  const cat = m?.category;
+  const section =
+    /veg|vegetable/i.test(name) ? "Veg Section"
+      : cat === "Cold" ? "Cold Kitchen"
+      : cat === "Special" ? "Special Meal"
+      : "Hot Kitchen";
+  const t = m?.type;
+  const mealType: PackagingRow["mealType"] =
+    t === "Breakfast" ? "Breakfast"
+      : t === "Dinner" ? "Dinner"
+      : t === "Snacks" || t === "H.Snacks" ? "Snack"
+      : "Lunch";
+  return { section, mealType };
+}
 
 const STATUS_BADGE: Record<DispatchStatus, string> = {
   "Preparing":          "bg-slate-100 text-slate-600",
@@ -160,21 +189,6 @@ function getFlightStatus(rows: PackagingRow[], qcState: QCState): string {
   if (rows.every((r) => r.packagingStatus === "Packaging Done" || r.packagingStatus === "Ready for Dispatch")) return "Packaging Done";
   if (rows.some((r) => r.packagingStatus === "Packaging In Progress")) return "Packaging In Progress";
   return "Packaging Pending";
-}
-
-const MATERIAL_NAMES = [
-  "Passenger tray", "Crew tray", "Main course container",
-  "Bread roll wrapper", "Dessert cup", "Cutlery set", "Tray liner", "Cart label",
-];
-const MATERIAL_BUFFERS = [24, 18, 32, 40, 15, 28, 36, 20];
-
-function getMaterials(qty: number) {
-  const req = Math.ceil(qty * 1.05);
-  return MATERIAL_NAMES.map((name, i) => ({
-    name,
-    required: req,
-    available: req + MATERIAL_BUFFERS[i],
-  }));
 }
 
 // ─── Packaging Seed Data ─────────────────────────────────────────────────────
@@ -291,6 +305,8 @@ const INITIAL_RECORDS: DispatchRecord[] = [
 export default function Dispatch() {
   useArrivalFlash();
   const navigate = useNavigate();
+  const { applyStockDeltas, productionEntries } = useWorkflow();
+  const flightOrders = useFlightOrders();
   // ── Dispatch records state ──────────────────────────────────────────────────
   const [records, setRecords] = useState<DispatchRecord[]>(INITIAL_RECORDS);
   const [configuredFlights, setConfiguredFlights] = useState<Set<string>>(
@@ -342,13 +358,27 @@ export default function Dispatch() {
 
   // ── Derived ─────────────────────────────────────────────────────────────────
 
-  const distinctDepTimes = useMemo(
-    () => [...new Set(flights.map((f) => f.dep))].sort(),
-    []
+  // Flights selectable for dispatch come from Order Management (flight orders),
+  // narrowed to the chosen date — one entry per flight number, earliest ETD
+  // first. Selecting one auto-loads the rest of the form (see autoLoadFromFlight).
+  const orderFlightOptions = useMemo(() => {
+    const seen = new Map<string, FlightOrder>();
+    for (const o of flightOrders) {
+      if (configDate && o.date !== configDate) continue;
+      if (!seen.has(o.flight)) seen.set(o.flight, o);
+    }
+    return [...seen.values()].sort((a, b) => a.etd.localeCompare(b.etd) || a.flight.localeCompare(b.flight));
+  }, [flightOrders, configDate]);
+  const selectedOrder = useMemo(
+    () =>
+      flightOrders.find((o) => o.flight === configFlight && (!configDate || o.date === configDate)) ??
+      flightOrders.find((o) => o.flight === configFlight),
+    [flightOrders, configFlight, configDate],
   );
-  const availableFlights = useMemo(
-    () => flights.filter((f) => f.dep === configDepTime),
-    [configDepTime]
+  // PAX main-meal menu sourced from Meal Planning (approved passenger main dishes).
+  const paxMenu = useMemo(
+    () => meals.filter((m) => m.serviceGroup === "Passenger" && (m.category === "Hot" || m.category === "Cold") && m.status === "Approved"),
+    [],
   );
   const today = useMemo(() => {
     const d = new Date();
@@ -359,9 +389,88 @@ export default function Dispatch() {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   }, []);
   const selectedSector = useMemo(
-    () => flights.find((f) => f.flight === configFlight)?.sector ?? "",
-    [configFlight]
+    () => selectedOrder?.sector ?? flights.find((f) => f.flight === configFlight)?.sector ?? "",
+    [selectedOrder, configFlight]
   );
+
+  // Select a flight → auto-load the rest of the form from Order Management
+  // (ETD, sector, PAX, crew, special-meal roster) and Meal Planning (the PAX
+  // main-meal menu, split across the passenger count). The user only picks the
+  // flight; everything below is filled in and remains editable.
+  const autoLoadFromFlight = (flightNo: string) => {
+    setConfigFlight(flightNo);
+    if (!flightNo) return;
+    const order =
+      flightOrders.find((o) => o.flight === flightNo && (!configDate || o.date === configDate)) ??
+      flightOrders.find((o) => o.flight === flightNo);
+    if (!order) return;
+
+    setConfigDepTime(to12h(order.etd));
+
+    // PAX main meal — split the passenger count across two menu choices (60/40).
+    const pax = order.pax;
+    const lead = Math.round(pax * 0.6);
+    if (paxMenu.length >= 2) {
+      setConfigPaxLines([
+        { id: "p1", itemName: paxMenu[0].name, percent: 60, qty: lead },
+        { id: "p2", itemName: paxMenu[1].name, percent: 40, qty: pax - lead },
+      ]);
+    } else if (paxMenu.length === 1) {
+      setConfigPaxLines([{ id: "p1", itemName: paxMenu[0].name, percent: 60, qty: pax }]);
+    }
+
+    // Crew meals — one line carrying the crew headcount.
+    setConfigCrewMeals([{ id: "c1", type: "Lunch", qty: String(order.crew) }]);
+
+    // Special meals — aggregate the order's special-meal roster by meal code.
+    // Fall back to the order's special-meal count when no roster is attached.
+    const byCode = new Map<string, number>();
+    for (const e of order.specialMealRoster ?? []) {
+      byCode.set(e.mealCode, (byCode.get(e.mealCode) ?? 0) + 1);
+    }
+    let special = [...byCode.entries()].map(([type, qty], i) => ({ id: `s${i}`, type, qty: String(qty) }));
+    if (special.length === 0 && order.specialMeals > 0) {
+      special = [{ id: "s0", type: "VGML", qty: String(order.specialMeals) }];
+    }
+    setConfigSpecialMeals(special);
+  };
+
+  // Special-meal dropdown options: the standard set plus any code the auto-load
+  // pulled from a flight's roster (e.g. AVML, FPML) so it renders selected.
+  const specialMealOptions = useMemo(
+    () => [...new Set([...SPECIAL_MEAL_TYPES, ...configSpecialMeals.map((m) => m.type)])],
+    [configSpecialMeals],
+  );
+
+  // Production Entry linkup — for the meals auto-loaded onto the selected flight,
+  // surface the matching production order (produced qty + status) from the
+  // Production Entry workflow store. This is what shows once production is done.
+  const productionForSelected = useMemo(() => {
+    if (!configFlight) return [];
+    return configPaxLines
+      .filter((l) => l.itemName)
+      .map((l) => {
+        const matches = productionEntries.filter((e) => (e.outputItemName ?? e.bom) === l.itemName);
+        // A meal is dispatch-ready only when it has a QC-passed (Completed)
+        // production order. Prefer showing that one; otherwise show the latest
+        // in-progress order so the user sees why it's blocked.
+        const completed = matches.find((e) => e.status === "Completed");
+        const pe = completed ?? matches[0];
+        return {
+          meal: l.itemName,
+          needQty: l.qty,
+          proId: pe?.id ?? null,
+          producedQty: pe?.producedQty ?? null,
+          status: pe?.status ?? "Not in production",
+          ready: !!completed,
+        };
+      });
+  }, [configFlight, configPaxLines, productionEntries]);
+
+  // Dispatch validation: every PAX meal must be produced & QC-passed first.
+  const productionReady =
+    productionForSelected.length > 0 && productionForSelected.every((p) => p.ready);
+  const blockingMeals = productionForSelected.filter((p) => !p.ready).map((p) => p.meal);
 
   // ── Packaging derived ───────────────────────────────────────────────────────
 
@@ -415,13 +524,16 @@ export default function Dispatch() {
   // ── Packaging handlers ──────────────────────────────────────────────────────
 
   const handleConfirmMaterials = (row: PackagingRow) => {
+    // Start packaging for every "Ready for Packaging" meal on this flight/slot.
     const updated = packagingRows.map((r) =>
-      r.id === row.id ? { ...r, packagingStatus: "Packaging In Progress" as PackagingStatus } : r
+      r.flight === row.flight && r.depTime === row.depTime && r.packagingStatus === "Ready for Packaging"
+        ? { ...r, packagingStatus: "Packaging In Progress" as PackagingStatus }
+        : r
     );
     setPackagingRows(updated);
     if (row.dspRef) recalcDSP(updated, row.dspRef);
     setMaterialsRow(null);
-    toast.success(`${row.id} — materials confirmed. Packaging In Progress.`);
+    toast.success(`${row.flight} — packaging started.`);
   };
 
   const handleMarkPackagingDone = (row: PackagingRow) => {
@@ -555,6 +667,10 @@ export default function Dispatch() {
     if (!configDepTime) { toast.error("Please select a departure time."); return; }
     if (!configFlight)  { toast.error("Please select a flight."); return; }
     if (configuredFlights.has(configFlight)) { toast.error(`${configFlight} is already configured for dispatch.`); return; }
+    if (!productionReady) {
+      toast.error(`Cannot dispatch — not yet produced & QC-passed: ${blockingMeals.join(", ")}.`);
+      return;
+    }
 
     const now = new Date();
     const dateStr = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
@@ -577,6 +693,53 @@ export default function Dispatch() {
 
     const hotTotal = configPaxLines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
     const existingRec = records.find((r) => r.date === configDate && r.depTime === configDepTime);
+    const recId = existingRec ? existingRec.id : `DSP-${Date.now().toString().slice(-4)}`;
+
+    // Build packaging rows for this flight from the configured meals so the new
+    // dispatch shows up in the main packaging/dispatch list. Each row is linked
+    // back to its dispatch record (dspRef), the flight order (orderNo) and — when
+    // the meal matches a production order — the Production Entry (productionOrderId).
+    const proFor = (mealName: string) =>
+      productionEntries.find((e) => (e.outputItemName ?? e.bom) === mealName)?.id;
+    const newPackagingRows: PackagingRow[] = [
+      ...configPaxLines
+        .filter((l) => l.itemName && (Number(l.qty) || 0) > 0)
+        .map((l, i) => {
+          const meta = mealMeta(l.itemName);
+          return {
+            id: `PRD-${Date.now()}-${i}`,
+            date: configDate,
+            depTime: configDepTime,
+            flight: configFlight,
+            mealType: meta.mealType,
+            mealName: l.itemName,
+            qty: Number(l.qty) || 0,
+            section: meta.section,
+            packagingStatus: "Ready for Packaging" as PackagingStatus,
+            dspRef: recId,
+            orderNo: selectedOrder?.orderNo,
+            productionOrderId: proFor(l.itemName),
+          };
+        }),
+      ...configSpecialMeals
+        .filter((m) => (Number(m.qty) || 0) > 0)
+        .map((m, i) => ({
+          id: `PRD-${Date.now()}-S${i}`,
+          date: configDate,
+          depTime: configDepTime,
+          flight: configFlight,
+          mealType: "Special" as PackagingRow["mealType"],
+          mealName: m.type,
+          qty: Number(m.qty) || 0,
+          section: "Special Meal",
+          packagingStatus: "Ready for Packaging" as PackagingStatus,
+          dspRef: recId,
+          orderNo: selectedOrder?.orderNo,
+        })),
+    ];
+    if (newPackagingRows.length > 0) {
+      setPackagingRows((prev) => [...newPackagingRows, ...prev]);
+    }
 
     if (existingRec) {
       setRecords((prev) =>
@@ -602,7 +765,7 @@ export default function Dispatch() {
       toast.success(`${configFlight} added to dispatch ${existingRec.id} (dep ${configDepTime}).`);
     } else {
       const newRec: DispatchRecord = {
-        id: `DSP-${Date.now().toString().slice(-4)}`,
+        id: recId,
         date: configDate,
         depTime: configDepTime,
         kitchenName: "Flight Kitchen A",
@@ -654,6 +817,17 @@ export default function Dispatch() {
       }));
       setDispatchedFlightEntries((prev) => [...prev, ...newEntries]);
       const dispatchedFlightSet = new Set(dispatchingRecord.flightNos);
+      const dispatchedRows = packagingRows.filter((r) => dispatchedFlightSet.has(r.flight));
+
+      // Dispatched meals leave inventory. Key the negative delta by meal name so
+      // it nets against the positive delta QC adds on production completion
+      // (see cooking-temp.tsx → applyStockDeltas). The Inventory report sums
+      // these into its In/Out columns.
+      const outDeltas = dispatchedRows
+        .filter((r) => r.qty > 0)
+        .map((r) => ({ itemId: r.mealName, delta: -r.qty }));
+      if (outDeltas.length > 0) applyStockDeltas(outDeltas);
+
       setPackagingRows((prev) => prev.filter((r) => !dispatchedFlightSet.has(r.flight)));
     }
     setDispatched(true);
@@ -778,6 +952,23 @@ export default function Dispatch() {
                         const isFirstInTime = isFirstInFlight && !timeDepRendered;
                         if (isFirstInTime) timeDepRendered = true;
                         const isAbsoluteLast = isLastFlightGroup && rIdx === flightGroup.rows.length - 1;
+                        // Merge the Order cell across consecutive rows that share
+                        // the same order number (within this flight group). Rows
+                        // without an order number are never merged.
+                        const isFirstInOrder =
+                          !row.orderNo ||
+                          rIdx === 0 ||
+                          flightGroup.rows[rIdx - 1].orderNo !== row.orderNo;
+                        let orderRowSpan = 1;
+                        if (row.orderNo && isFirstInOrder) {
+                          for (
+                            let k = rIdx + 1;
+                            k < flightGroup.rows.length && flightGroup.rows[k].orderNo === row.orderNo;
+                            k++
+                          ) {
+                            orderRowSpan++;
+                          }
+                        }
                         return (
                           <tr
                             key={row.id}
@@ -794,20 +985,22 @@ export default function Dispatch() {
                                 {flightGroup.flight}
                               </td>
                             )}
-                            <td className="p-3 align-middle">
-                              {row.orderNo ? (
-                                <button
-                                  type="button"
-                                  className="text-xs font-mono font-semibold text-primary hover:underline whitespace-nowrap"
-                                  title="Open Order Management"
-                                  onClick={() => navigate(`/order-management?ord=${row.orderNo}`)}
-                                >
-                                  {row.orderNo}
-                                </button>
-                              ) : (
-                                <span className="text-xs text-muted-foreground">—</span>
-                              )}
-                            </td>
+                            {isFirstInOrder && (
+                              <td rowSpan={orderRowSpan} className="p-3 align-middle">
+                                {row.orderNo ? (
+                                  <button
+                                    type="button"
+                                    className="text-xs font-mono font-semibold text-primary hover:underline whitespace-nowrap"
+                                    title="Open Order Management"
+                                    onClick={() => navigate(`/order-management?ord=${row.orderNo}`)}
+                                  >
+                                    {row.orderNo}
+                                  </button>
+                                ) : (
+                                  <span className="text-xs text-muted-foreground">—</span>
+                                )}
+                              </td>
+                            )}
                             <td className="p-3 align-middle">
                               {row.productionOrderId ? (
                                 <button
@@ -857,7 +1050,7 @@ export default function Dispatch() {
                                     <ShieldCheck className="h-3 w-3 mr-1" /> Initiate QC
                                   </Button>
                                 ) : (
-                                  <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-muted text-muted-foreground">Pending</span>
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600 border border-slate-200">Pending</span>
                                 )}
                               </td>
                             )}
@@ -996,115 +1189,169 @@ export default function Dispatch() {
 
       {/* ── View Packaging Row Modal ────────────────────────────────────────── */}
       <Dialog open={!!viewPackagingRow} onOpenChange={(v) => !v && setViewPackagingRow(null)}>
-        <DialogContent className="w-full max-w-full sm:max-w-md">
+        <DialogContent className="w-full max-w-full sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>Order Details — {viewPackagingRow?.id}</DialogTitle>
+            <DialogTitle>Order Details — {viewPackagingRow?.orderNo ?? viewPackagingRow?.flight}</DialogTitle>
           </DialogHeader>
-          {viewPackagingRow && (
-            <div className="space-y-3 text-sm">
-              <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                <div><span className="text-muted-foreground">Meal:</span><span className="font-semibold ml-1">{viewPackagingRow.mealName}</span></div>
-                <div><span className="text-muted-foreground">Type:</span><span className={`ml-1 px-2 py-0.5 rounded-full text-xs font-semibold ${MEAL_TYPE_BADGE[viewPackagingRow.mealType]}`}>{viewPackagingRow.mealType}</span></div>
-                <div><span className="text-muted-foreground">Qty:</span><span className="font-semibold ml-1">{viewPackagingRow.qty} units</span></div>
-                <div><span className="text-muted-foreground">Warehouse:</span><span className="font-semibold ml-1">{viewPackagingRow.section}</span></div>
-                <div><span className="text-muted-foreground">Dep Time:</span><span className="font-semibold ml-1">{viewPackagingRow.depTime}</span></div>
-                <div><span className="text-muted-foreground">Date:</span><span className="font-semibold ml-1">{viewPackagingRow.date}</span></div>
-                <div className="col-span-2"><span className="text-muted-foreground">Flight:</span><span className="font-semibold ml-1">{viewPackagingRow.flight}</span></div>
-                {viewPackagingRow.dspRef && (
-                  <div className="col-span-2"><span className="text-muted-foreground">Dispatch Ref:</span><span className="font-semibold ml-1">{viewPackagingRow.dspRef}</span></div>
-                )}
-              </div>
-              <div className="pt-2 border-t border-border flex gap-3 flex-wrap">
-                <div>
-                  <span className="text-muted-foreground">Packaging:</span>
-                  <span className={`ml-1 px-2 py-0.5 rounded-full text-xs font-semibold ${PACKAGING_BADGE[viewPackagingRow.packagingStatus]}`}>{viewPackagingRow.packagingStatus}</span>
+          {viewPackagingRow && (() => {
+            const v = viewPackagingRow;
+            // Show the WHOLE order — every meal on this flight at this dep time —
+            // not just the row whose View button was clicked.
+            const orderRows = packagingRows.filter(
+              (r) => r.flight === v.flight && r.depTime === v.depTime && r.date === v.date,
+            );
+            // Match by flight (reliable) rather than orderNo — seed packaging
+            // order numbers can collide with unrelated real flight orders.
+            const sector =
+              flightOrders.find((o) => o.flight === v.flight)?.sector ??
+              flights.find((f) => f.flight === v.flight)?.sector;
+            const totalQty = orderRows.reduce((s, r) => s + r.qty, 0);
+            const qc = flightQCStates.get(v.flight);
+            const qs = qc?.qcState ?? "not-started";
+            return (
+              <div className="space-y-4 text-sm">
+                <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                  <div><span className="text-muted-foreground">Flight:</span><span className="font-semibold ml-1">{v.flight}</span></div>
+                  <div><span className="text-muted-foreground">Sector:</span><span className="font-semibold ml-1">{sector ?? "—"}</span></div>
+                  <div><span className="text-muted-foreground">Order:</span><span className="font-semibold ml-1">{v.orderNo ?? "—"}</span></div>
+                  <div><span className="text-muted-foreground">Dispatch Ref:</span><span className="font-semibold ml-1">{v.dspRef ?? "—"}</span></div>
+                  <div><span className="text-muted-foreground">Dep Time:</span><span className="font-semibold ml-1">{v.depTime}</span></div>
+                  <div><span className="text-muted-foreground">Date:</span><span className="font-semibold ml-1">{v.date}</span></div>
                 </div>
-                {(() => {
-                  const qc = flightQCStates.get(viewPackagingRow.flight);
-                  const qs = qc?.qcState ?? "not-started";
-                  return (
-                    <>
-                      <div>
-                        <span className="text-muted-foreground">QC:</span>
-                        <span className={`ml-1 px-2 py-0.5 rounded-full text-xs font-semibold ${qs === "done" ? "bg-emerald-100 text-emerald-700" : qs === "in-progress" ? "bg-amber-100 text-amber-700" : "bg-muted text-muted-foreground"}`}>
-                          {qs === "done" ? "QC Done" : qs === "in-progress" ? "QC In Progress" : "Pending"}
-                        </span>
-                      </div>
-                      {qc?.qcCheckedAt && (
-                        <div><span className="text-muted-foreground">QC at:</span><span className="font-semibold ml-1">{qc.qcCheckedAt}</span></div>
-                      )}
-                    </>
-                  );
-                })()}
+
+                <div className="pt-2 border-t border-border flex gap-3 flex-wrap">
+                  <div>
+                    <span className="text-muted-foreground">Packaging:</span>
+                    <span className={`ml-1 px-2 py-0.5 rounded-full text-xs font-semibold ${PACKAGING_BADGE[v.packagingStatus]}`}>{v.packagingStatus}</span>
+                  </div>
+                  <div>
+                    <span className="text-muted-foreground">QC:</span>
+                    <span className={`ml-1 px-2 py-0.5 rounded-full text-xs font-semibold ${qs === "done" ? "bg-emerald-100 text-emerald-700" : qs === "in-progress" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-600"}`}>
+                      {qs === "done" ? "QC Done" : qs === "in-progress" ? "QC In Progress" : "Pending"}
+                    </span>
+                  </div>
+                  {qc?.qcCheckedAt && (
+                    <div><span className="text-muted-foreground">QC at:</span><span className="font-semibold ml-1">{qc.qcCheckedAt}</span></div>
+                  )}
+                </div>
+
+                <div>
+                  <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-1">Meals ({orderRows.length})</div>
+                  <table className="w-full text-xs border border-slate-200 rounded-md overflow-hidden">
+                    <thead className="bg-slate-50 border-b border-slate-200">
+                      <tr>
+                        <th className="p-2 text-left font-semibold">Production</th>
+                        <th className="p-2 text-left font-semibold">Meal</th>
+                        <th className="p-2 text-left font-semibold">Type</th>
+                        <th className="p-2 text-right font-semibold">Qty</th>
+                        <th className="p-2 text-left font-semibold">Warehouse</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {orderRows.map((r) => (
+                        <tr key={r.id} className="border-t border-slate-100">
+                          <td className="p-2 font-mono text-primary">{r.productionOrderId ?? "—"}</td>
+                          <td className="p-2">{r.mealName}</td>
+                          <td className="p-2"><span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${MEAL_TYPE_BADGE[r.mealType] ?? "bg-muted text-foreground"}`}>{r.mealType}</span></td>
+                          <td className="p-2 text-right tabular-nums font-medium">{r.qty}</td>
+                          <td className="p-2 text-muted-foreground">{r.section}</td>
+                        </tr>
+                      ))}
+                      <tr className="border-t-2 border-slate-300 bg-slate-50/80">
+                        <td className="p-2 font-bold" colSpan={3}>Total</td>
+                        <td className="p-2 text-right font-bold tabular-nums">{totalQty}</td>
+                        <td></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
           <DialogFooter>
             <Button variant="outline" onClick={() => setViewPackagingRow(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* ── Packaging Materials Check Modal ─────────────────────────────────── */}
+      {/* ── Start Packaging Summary Modal ───────────────────────────────────── */}
       <Dialog open={!!materialsRow} onOpenChange={(v) => !v && setMaterialsRow(null)}>
         <DialogContent className="w-full max-w-full sm:max-w-2xl max-h-[100vh] sm:max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden">
           <div className="px-6 pt-5 pb-4 border-b shrink-0">
             <DialogTitle className="text-base font-semibold">
-              Packaging Materials Check — {materialsRow?.id}
+              Start Packaging — {materialsRow?.flight}
             </DialogTitle>
           </div>
           {materialsRow && (() => {
-            const materials = getMaterials(materialsRow.qty);
-            const anyShort = materials.some((m) => m.available < m.required);
+            const summaryRows = packagingRows.filter(
+              (r) => r.flight === materialsRow.flight
+                && r.depTime === materialsRow.depTime
+                && r.packagingStatus === "Ready for Packaging"
+            );
+            const totalUnits = summaryRows.reduce((s, r) => s + r.qty, 0);
             return (
               <>
                 <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-                  <div className="flex gap-6 text-sm flex-wrap">
+                  <div className="flex gap-x-8 gap-y-2 text-sm flex-wrap">
                     <div>
-                      <span className="text-muted-foreground">Meal:</span>
-                      <span className="font-semibold ml-1">{materialsRow.mealName}</span>
+                      <span className="text-muted-foreground">Flight:</span>
+                      <span className="font-semibold ml-1">{materialsRow.flight}</span>
+                    </div>
+                    {materialsRow.orderNo && (
+                      <div>
+                        <span className="text-muted-foreground">Order #:</span>
+                        <span className="font-semibold ml-1 font-mono">{materialsRow.orderNo}</span>
+                      </div>
+                    )}
+                    <div>
+                      <span className="text-muted-foreground">Departure:</span>
+                      <span className="font-semibold ml-1">{materialsRow.depTime}</span>
                     </div>
                     <div>
-                      <span className="text-muted-foreground">Qty:</span>
-                      <span className="font-semibold ml-1">{materialsRow.qty} units</span>
+                      <span className="text-muted-foreground">Items:</span>
+                      <span className="font-semibold ml-1">{summaryRows.length}</span>
                     </div>
                   </div>
 
                   <div>
                     <div className="text-xs font-semibold text-muted-foreground mb-2 uppercase tracking-wide">
-                      Required Materials
+                      Meals to Package
                     </div>
                     <div className="rounded-md border border-border overflow-hidden">
                       <table className="w-full text-sm">
                         <thead className="bg-muted/50 border-b border-border">
                           <tr>
-                            <th className="p-2.5 text-left font-semibold">Material</th>
-                            <th className="p-2.5 text-center font-semibold w-28">Required</th>
-                            <th className="p-2.5 text-center font-semibold w-28">Available</th>
+                            <th className="p-2.5 text-left font-semibold">Meal</th>
+                            <th className="p-2.5 text-left font-semibold w-28">Type</th>
+                            <th className="p-2.5 text-left font-semibold w-36">Section</th>
+                            <th className="p-2.5 text-right font-semibold w-24">Qty</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {materials.map((m, i) => {
-                            const ok = m.available >= m.required;
-                            return (
-                              <tr key={i} className={`border-t border-border/50 ${!ok ? "bg-red-50" : ""}`}>
-                                <td className="p-2.5">
-                                  <div className="flex items-center gap-2">
-                                    {ok
-                                      ? <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" />
-                                      : <AlertCircle  className="h-4 w-4 text-red-500 shrink-0" />
-                                    }
-                                    {m.name}
-                                  </div>
-                                </td>
-                                <td className="p-2.5 text-center">{m.required}</td>
-                                <td className={`p-2.5 text-center font-semibold ${ok ? "text-emerald-700" : "text-red-700"}`}>
-                                  {m.available}
-                                </td>
-                              </tr>
-                            );
-                          })}
+                          {summaryRows.map((r) => (
+                            <tr key={r.id} className="border-t border-border/50">
+                              <td className="p-2.5">
+                                <div className="flex items-center gap-2">
+                                  <Package className="h-4 w-4 text-violet-500 shrink-0" />
+                                  {r.mealName}
+                                </div>
+                              </td>
+                              <td className="p-2.5">
+                                <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${MEAL_TYPE_BADGE[r.mealType] ?? "bg-muted text-foreground"}`}>
+                                  {r.mealType}
+                                </span>
+                              </td>
+                              <td className="p-2.5 text-muted-foreground">{r.section}</td>
+                              <td className="p-2.5 text-right font-medium tabular-nums">{r.qty}</td>
+                            </tr>
+                          ))}
                         </tbody>
+                        <tfoot>
+                          <tr className="border-t border-border bg-muted/40">
+                            <td className="p-2.5 font-semibold" colSpan={3}>Total units</td>
+                            <td className="p-2.5 text-right font-semibold tabular-nums">{totalUnits.toLocaleString()}</td>
+                          </tr>
+                        </tfoot>
                       </table>
                     </div>
                   </div>
@@ -1112,7 +1359,7 @@ export default function Dispatch() {
                 <div className="px-6 py-4 border-t shrink-0 flex justify-end gap-2">
                   <Button variant="outline" onClick={() => setMaterialsRow(null)}>Cancel</Button>
                   <Button
-                    disabled={anyShort}
+                    disabled={summaryRows.length === 0}
                     onClick={() => handleConfirmMaterials(materialsRow)}
                   >
                     Confirm — Start Packaging
@@ -1152,56 +1399,95 @@ export default function Dispatch() {
         <DialogContent className="w-full max-w-full sm:max-w-2xl max-h-[100vh] sm:max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
           <div className="px-6 pt-5 pb-4 border-b shrink-0">
             <DialogTitle className="text-base font-semibold">Configure New Dispatch</DialogTitle>
-            <p className="text-xs text-muted-foreground mt-0.5">Select date, departure time, and flight. Flights already dispatched are shown as (Already configured).</p>
+            <p className="text-xs text-muted-foreground mt-0.5">Pick a date and flight — sector, departure time, PAX, crew and meals auto-load from Order Management &amp; Meal Planning.</p>
           </div>
 
           <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
-            <div>
-              <Label className="text-xs font-semibold">Date</Label>
-              <Input type="date" value={configDate} onChange={(e) => setConfigDate(e.target.value)} min={today} max={maxDate} className="h-9 mt-1" />
-            </div>
-
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <Label className="text-xs font-semibold">Departure Time</Label>
-                <select
-                  value={configDepTime}
-                  onChange={(e) => { setConfigDepTime(e.target.value); setConfigFlight(""); }}
-                  className="h-9 mt-1 w-full rounded-md border border-input bg-background px-3 text-sm"
-                >
-                  <option value="">— Select time —</option>
-                  {distinctDepTimes.map((t) => <option key={t} value={t}>{t}</option>)}
-                </select>
+                <Label className="text-xs font-semibold">Date</Label>
+                <Input type="date" value={configDate} onChange={(e) => { setConfigDate(e.target.value); setConfigFlight(""); }} min={today} max={maxDate} className="h-9 mt-1" />
               </div>
               <div>
                 <Label className="text-xs font-semibold">Select Flight</Label>
                 <select
                   value={configFlight}
-                  onChange={(e) => setConfigFlight(e.target.value)}
-                  disabled={!configDepTime}
-                  className="h-9 mt-1 w-full rounded-md border border-input bg-background px-3 text-sm disabled:opacity-50"
+                  onChange={(e) => autoLoadFromFlight(e.target.value)}
+                  className="h-9 mt-1 w-full rounded-md border border-input bg-background px-3 text-sm"
                 >
                   <option value="">— Select flight —</option>
-                  {availableFlights.map((f) => {
-                    const alreadyConfigured = configuredFlights.has(f.flight);
+                  {orderFlightOptions.map((o) => {
+                    const alreadyConfigured = configuredFlights.has(o.flight);
                     return (
-                      <option key={f.id} value={f.flight} disabled={alreadyConfigured}>
-                        {f.flight}{alreadyConfigured ? " (Already configured)" : ""}
+                      <option key={o.id} value={o.flight} disabled={alreadyConfigured}>
+                        {o.flight} · {o.sector}{alreadyConfigured ? " (Already configured)" : ""}
                       </option>
                     );
                   })}
                 </select>
-                {configFlight && selectedSector && (
-                  <div className="mt-1.5 flex items-center gap-1.5 text-xs">
-                    <span className="text-muted-foreground">Sector:</span>
-                    <span className="font-semibold text-slate-700">{selectedSector}</span>
-                  </div>
-                )}
-                {configDepTime && availableFlights.length === 0 && (
-                  <p className="text-xs text-muted-foreground mt-1">No flights scheduled at this time.</p>
+                {configDate && orderFlightOptions.length === 0 && (
+                  <p className="text-xs text-muted-foreground mt-1">No flight orders on this date.</p>
                 )}
               </div>
             </div>
+
+            {/* Auto-loaded order summary */}
+            {selectedOrder && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 rounded-md border border-slate-200 bg-slate-50/70 p-3 text-xs">
+                <div><div className="text-muted-foreground">Sector</div><div className="font-semibold text-slate-700">{selectedSector || "—"}</div></div>
+                <div><div className="text-muted-foreground">Departure (ETD)</div><div className="font-semibold text-slate-700">{selectedOrder.etd}</div></div>
+                <div><div className="text-muted-foreground">PAX</div><div className="font-semibold text-slate-700">{selectedOrder.pax}</div></div>
+                <div><div className="text-muted-foreground">Crew</div><div className="font-semibold text-slate-700">{selectedOrder.crew}</div></div>
+              </div>
+            )}
+
+            {/* Production Entry linkup — produced meals for the selected flight */}
+            {configFlight && productionForSelected.length > 0 && (
+              <div>
+                <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2">Production Status</div>
+                <table className="w-full text-xs border border-slate-200 rounded-md overflow-hidden">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr>
+                      <th className="p-2 text-left font-semibold">Production Order</th>
+                      <th className="p-2 text-left font-semibold">Meal</th>
+                      <th className="p-2 text-center font-semibold w-24">Produced</th>
+                      <th className="p-2 text-left font-semibold w-40">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {productionForSelected.map((p) => (
+                      <tr key={p.meal} className="border-t border-slate-100">
+                        <td className="p-2">
+                          {p.proId ? (
+                            <button
+                              type="button"
+                              className="font-mono font-semibold text-primary hover:underline"
+                              onClick={() => navigate(`/production-entry?pro=${p.proId}`)}
+                            >
+                              {p.proId}
+                            </button>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td className="p-2">{p.meal}</td>
+                        <td className="p-2 text-center tabular-nums">{p.producedQty ?? "—"}</td>
+                        <td className="p-2">
+                          <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${p.status === "Completed" ? "bg-emerald-100 text-emerald-700" : p.status === "Ready for QC" ? "bg-amber-100 text-amber-700" : p.status === "Not in production" ? "bg-muted text-muted-foreground" : "bg-sky-100 text-sky-700"}`}>
+                            {p.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {productionReady ? (
+                  <p className="text-[11px] font-medium text-emerald-700 mt-1.5">✓ All meals produced &amp; QC-passed — ready to dispatch.</p>
+                ) : (
+                  <p className="text-[11px] font-medium text-rose-600 mt-1.5">⚠ Cannot dispatch — these meals are not yet produced &amp; QC-passed: {blockingMeals.join(", ")}. Complete production &amp; QC first.</p>
+                )}
+              </div>
+            )}
 
             {/* PAX Main Meal */}
             <div>
@@ -1225,7 +1511,7 @@ export default function Dispatch() {
                           className="h-8 w-full rounded border border-input bg-background px-2 text-xs"
                         >
                           <option value="">— Select —</option>
-                          {PAX_MEAL_OPTIONS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                          {paxMenu.map((m) => <option key={m.id} value={m.name}>{m.name}</option>)}
                         </select>
                       </td>
                       <td className="p-1.5">
@@ -1310,7 +1596,7 @@ export default function Dispatch() {
                       onChange={(e) => setConfigSpecialMeals((prev) => prev.map((m) => m.id === meal.id ? { ...m, type: e.target.value } : m))}
                       className="h-8 flex-1 rounded border border-input bg-background px-2 text-sm"
                     >
-                      {SPECIAL_MEAL_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                      {specialMealOptions.map((t) => <option key={t} value={t}>{t}</option>)}
                     </select>
                     <Input
                       type="number" min={0}
@@ -1368,7 +1654,7 @@ export default function Dispatch() {
 
           <div className="px-6 py-4 border-t shrink-0 flex justify-between gap-2">
             <Button variant="outline" onClick={() => { setConfigOpen(false); resetConfig(); }}>Cancel</Button>
-            <Button onClick={handleConfigSave} disabled={!configFlight}>
+            <Button onClick={handleConfigSave} disabled={!configFlight || !productionReady} title={!productionReady ? "Meals must be produced & QC-passed before dispatch" : undefined}>
               Save &amp; Create Dispatch
             </Button>
           </div>

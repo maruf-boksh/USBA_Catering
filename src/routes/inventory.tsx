@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { useState, useSyncExternalStore } from "react";
+import { useState, useSyncExternalStore, useMemo } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { StatusBadge } from "@/components/common/StatusBadge";
@@ -23,6 +23,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import { useArrivalFlash } from "@/lib/arrival-flash";
+import { useWorkflow } from "@/lib/workflow-store";
 
 type BaseItem = (typeof inventory)[number];
 type Item = BaseItem & {
@@ -243,6 +244,30 @@ export default function Inventory() {
   const lowStockCount = items.filter((i) => i.status === "Low").length;
   const criticalCount = items.filter((i) => i.status === "Critical").length;
 
+  // Stock movements ledger (workflow-store). Positive deltas = goods IN
+  // (received via GRN, or finished meals added on QC pass); negative deltas =
+  // goods OUT (finished meals dispatched). Aggregated per ledger key, then
+  // matched to each row by its id or name.
+  const { stockDeltas } = useWorkflow();
+  const movementByKey = useMemo(() => {
+    const m = new Map<string, { inQty: number; outQty: number }>();
+    for (const d of stockDeltas) {
+      const cur = m.get(d.itemId) ?? { inQty: 0, outQty: 0 };
+      if (d.delta >= 0) cur.inQty += d.delta;
+      else cur.outQty += -d.delta;
+      m.set(d.itemId, cur);
+    }
+    return m;
+  }, [stockDeltas]);
+  const movementFor = (r: Item) => {
+    const byId = movementByKey.get(r.id);
+    const byName = movementByKey.get(r.name);
+    return {
+      inQty: (byId?.inQty ?? 0) + (byName?.inQty ?? 0),
+      outQty: (byId?.outQty ?? 0) + (byName?.outQty ?? 0),
+    };
+  };
+
   const cols: Column<Item>[] = [
     { key: "id", header: "Code" },
     { key: "name", header: "Item" },
@@ -255,6 +280,28 @@ export default function Inventory() {
     {
       key: "stock", header: "Stock",
       render: (r) => <StockCell item={r} onClick={() => openBatches(r)} />,
+    },
+    {
+      key: "id" as keyof Item, header: "In Qty",
+      render: (r) => {
+        const { inQty } = movementFor(r);
+        return (
+          <span className="tabular-nums font-medium text-emerald-700">
+            {inQty > 0 ? `+${inQty.toLocaleString()}` : "—"}
+          </span>
+        );
+      },
+    },
+    {
+      key: "id" as keyof Item, header: "Out Qty",
+      render: (r) => {
+        const { outQty } = movementFor(r);
+        return (
+          <span className="tabular-nums font-medium text-rose-700">
+            {outQty > 0 ? `−${outQty.toLocaleString()}` : "—"}
+          </span>
+        );
+      },
     },
     { key: "reorder", header: "Reorder Lvl" },
     {

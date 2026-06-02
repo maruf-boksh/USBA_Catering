@@ -35,6 +35,8 @@ import {
   bomForItemCode,
   BOM_REQUIRED_ITEM_TYPES,
   getAllocationMethodForMaster,
+  getAllocationChoiceForMaster,
+  clearAllocationOverride,
   setAllocationMethod,
   isBatchTrackedForMaster,
   setBatchTracked,
@@ -50,6 +52,10 @@ type ItemRow = ItemMaster;
 const CATEGORIES = ITEM_CATEGORIES;
 const SUB_CATEGORIES = ITEM_SUB_CATEGORIES;
 const UOMS = ITEM_UOMS;
+
+/** Sentinel option value used by the Category / Sub Category dropdowns to open
+ *  the inline "add new" input. */
+const ADD_NEW = "__add_new__";
 
 const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
@@ -143,17 +149,17 @@ export default function ConfigItemPage() {
         }}
       />
 
-      <Tabs value={tab} onValueChange={(v) => setTab(v as "items" | "category")} className="space-y-4">
-        <TabsList className="h-auto bg-transparent p-0 border-b border-border w-full justify-start rounded-none">
+      <Tabs value={tab} onValueChange={(v) => setTab(v as "items" | "category")} className="space-y-5">
+        <TabsList className="h-auto gap-6 bg-transparent p-0 pt-2 border-b border-border w-full justify-start rounded-none">
           <TabsTrigger
             value="items"
-            className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-4 pb-3"
+            className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-1 pb-3"
           >
             Item Profile
           </TabsTrigger>
           <TabsTrigger
             value="category"
-            className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-4 pb-3"
+            className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-1 pb-3"
           >
             Category
           </TabsTrigger>
@@ -407,7 +413,6 @@ function TreeNode({
 }
 
 function MethodToggle({ master }: { master: ItemRow }) {
-  const current = getAllocationMethodForMaster(master.id);
   const batched = isBatchTrackedForMaster(master.id);
 
   if (!batched) {
@@ -421,33 +426,46 @@ function MethodToggle({ master }: { master: ItemRow }) {
     );
   }
 
-  const setMethod = (m: AllocationMethod) => {
-    if (m === current) return;
-    setAllocationMethod(master.id, m);
-    toast.success(`${master.name} switched to ${m}.`);
+  // "Auto" = follow the system's smart default (no explicit override). FEFO/FIFO
+  // set an explicit override. `resolved` is what Auto currently maps to.
+  const choice = getAllocationChoiceForMaster(master.id);
+  const resolved = getAllocationMethodForMaster(master.id);
+  const setChoice = (c: "Auto" | AllocationMethod) => {
+    if (c === choice) return;
+    if (c === "Auto") {
+      clearAllocationOverride(master.id);
+      toast.success(`${master.name} set to Auto (${resolved}).`);
+    } else {
+      setAllocationMethod(master.id, c);
+      toast.success(`${master.name} switched to ${c}.`);
+    }
   };
+  const titleFor = (c: "Auto" | AllocationMethod) =>
+    c === "Auto" ? `Auto — resolves to ${resolved} by item type/category`
+      : c === "FEFO" ? "First-Expiry-First-Out"
+      : "First-In-First-Out";
   return (
     <div
       className="inline-flex items-center rounded-md border border-input bg-background p-0.5 shadow-sm"
       role="group"
       aria-label={`Allocation method for ${master.name}`}
     >
-      {(["FEFO", "FIFO"] as const).map((m) => {
-        const active = current === m;
+      {(["Auto", "FEFO", "FIFO"] as const).map((m) => {
+        const active = choice === m;
         return (
           <button
             key={m}
             type="button"
-            onClick={() => setMethod(m)}
+            onClick={() => setChoice(m)}
             className={cn(
               "px-2 py-0.5 text-[10px] font-semibold rounded-sm transition-colors",
               active
                 ? "bg-primary/10 text-primary"
                 : "text-muted-foreground hover:text-foreground",
             )}
-            title={m === "FEFO" ? "First-Expiry-First-Out" : "First-In-First-Out"}
+            title={titleFor(m)}
           >
-            {m}
+            {m === "Auto" ? "AUTO" : m}
           </button>
         );
       })}
@@ -621,8 +639,158 @@ function ItemList({ data, onToggle }: { data: ItemRow[]; onToggle: (id: string) 
       columns={cols}
       searchKeys={["id", "code", "name", "itemType", "category"]}
       selectable={false}
-      actions={(r) => <RowActions row={r} actions={["view", "edit", "print"]} />}
+      actions={(r) => <RowActions row={r} actions={["view", "edit", "print"]} editDetail={<ItemEditForm row={r} />} />}
     />
+  );
+}
+
+/** Edit form shown inside the row-actions modal — mirrors the Create Item
+ *  layout (sectioned fields, inline "+ Add new" category/sub-category) but
+ *  pre-filled from the selected row. */
+function ItemEditForm({ row }: { row: ItemRow }) {
+  const [code, setCode] = useState(row.code ?? "");
+  const [name, setName] = useState(row.name ?? "");
+  const [itemType, setItemType] = useState<string>(row.itemType ?? ITEM_TYPES[0]);
+  const [category, setCategory] = useState(row.category ?? "");
+  const [subCategory, setSubCategory] = useState(row.subCategory ?? "");
+  const [uom, setUom] = useState<string>(row.uom ?? UOMS[0]);
+  const [status, setStatus] = useState<string>(row.status ?? "Active");
+  const [costPrice, setCostPrice] = useState(String(row.costPrice ?? ""));
+  const [allocation, setAllocation] = useState<"Auto" | AllocationMethod>(getAllocationChoiceForMaster(row.id));
+  const [batchTracked, setBatchTracked] = useState(isBatchTrackedForMaster(row.id));
+
+  const [categoryOptions, setCategoryOptions] = useState<string[]>(() => {
+    const base = [...CATEGORIES] as string[];
+    if (row.category && !base.includes(row.category)) base.push(row.category);
+    return base;
+  });
+  const [subCategoryOptions, setSubCategoryOptions] = useState<string[]>(() => {
+    const base = [...SUB_CATEGORIES] as string[];
+    if (row.subCategory && !base.includes(row.subCategory)) base.push(row.subCategory);
+    return base;
+  });
+  const [addingCategory, setAddingCategory] = useState(false);
+  const [newCategory, setNewCategory] = useState("");
+  const [addingSubCategory, setAddingSubCategory] = useState(false);
+  const [newSubCategory, setNewSubCategory] = useState("");
+
+  const commitNewCategory = () => {
+    const val = newCategory.trim();
+    if (!val) { toast.error("Enter a category name."); return; }
+    if (!categoryOptions.some((c) => c.toLowerCase() === val.toLowerCase())) setCategoryOptions((p) => [...p, val]);
+    setCategory(val); setNewCategory(""); setAddingCategory(false);
+  };
+  const commitNewSubCategory = () => {
+    const val = newSubCategory.trim();
+    if (!val) { toast.error("Enter a sub category name."); return; }
+    if (!subCategoryOptions.some((s) => s.toLowerCase() === val.toLowerCase())) setSubCategoryOptions((p) => [...p, val]);
+    setSubCategory(val); setNewSubCategory(""); setAddingSubCategory(false);
+  };
+
+  const lbl = "text-xs uppercase tracking-wider text-muted-foreground";
+  return (
+    <div className="space-y-5 max-h-[62vh] overflow-y-auto pr-1">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <Label className={lbl}>Item ID</Label>
+          <Input value={row.id} disabled className="mt-1 bg-muted/40" />
+        </div>
+        <div>
+          <Label className={lbl}>Item Code <span className="text-destructive">*</span></Label>
+          <Input value={code} onChange={(e) => setCode(e.target.value)} className="mt-1" />
+        </div>
+      </div>
+
+      <div>
+        <Label className={lbl}>Item Name <span className="text-destructive">*</span></Label>
+        <Input value={name} onChange={(e) => setName(e.target.value)} className="mt-1" />
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <Label className={lbl}>Item Type</Label>
+          <select value={itemType} onChange={(e) => setItemType(e.target.value)} className={selectCls}>
+            {ITEM_TYPES.map((t) => <option key={t}>{t}</option>)}
+          </select>
+        </div>
+        <div>
+          <Label className={lbl}>Category</Label>
+          <select
+            value={category}
+            onChange={(e) => { e.target.value === ADD_NEW ? setAddingCategory(true) : setCategory(e.target.value); }}
+            className={selectCls}
+          >
+            <option value="">Select category</option>
+            {categoryOptions.map((c) => <option key={c}>{c}</option>)}
+            <option value={ADD_NEW}>+ Add new category…</option>
+          </select>
+          {addingCategory && (
+            <div className="mt-2 flex items-center gap-2">
+              <Input autoFocus value={newCategory} onChange={(e) => setNewCategory(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewCategory(); } }} placeholder="New category name" className="h-9" />
+              <Button type="button" size="sm" onClick={commitNewCategory}>Add</Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => { setAddingCategory(false); setNewCategory(""); }}>Cancel</Button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <Label className={lbl}>Sub Category</Label>
+          <select
+            value={subCategory}
+            onChange={(e) => { e.target.value === ADD_NEW ? setAddingSubCategory(true) : setSubCategory(e.target.value); }}
+            className={selectCls}
+          >
+            <option value="">Select sub category</option>
+            {subCategoryOptions.map((s) => <option key={s}>{s}</option>)}
+            <option value={ADD_NEW}>+ Add new sub category…</option>
+          </select>
+          {addingSubCategory && (
+            <div className="mt-2 flex items-center gap-2">
+              <Input autoFocus value={newSubCategory} onChange={(e) => setNewSubCategory(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewSubCategory(); } }} placeholder="New sub category name" className="h-9" />
+              <Button type="button" size="sm" onClick={commitNewSubCategory}>Add</Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => { setAddingSubCategory(false); setNewSubCategory(""); }}>Cancel</Button>
+            </div>
+          )}
+        </div>
+        <div>
+          <Label className={lbl}>Primary UOM</Label>
+          <select value={uom} onChange={(e) => setUom(e.target.value)} className={selectCls}>
+            {UOMS.map((u) => <option key={u}>{u}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div>
+          <Label className={lbl}>Cost Price (৳)</Label>
+          <Input type="number" min={0} value={costPrice} onChange={(e) => setCostPrice(e.target.value)} className="mt-1" />
+        </div>
+        <div>
+          <Label className={lbl}>Allocation Method</Label>
+          <select value={allocation} onChange={(e) => setAllocation(e.target.value as "Auto" | AllocationMethod)} className={selectCls}>
+            <option value="Auto">Auto</option>
+            <option value="FEFO">FEFO</option>
+            <option value="FIFO">FIFO</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-center">
+        <div>
+          <Label className={lbl}>Status</Label>
+          <select value={status} onChange={(e) => setStatus(e.target.value)} className={selectCls}>
+            <option value="Active">Active</option>
+            <option value="Inactive">Inactive</option>
+          </select>
+        </div>
+        <div className="flex items-center gap-3 pt-5">
+          <Switch checked={batchTracked} onCheckedChange={setBatchTracked} />
+          <span className="text-sm font-medium">{batchTracked ? "Batch-tracked" : "Single item"}</span>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -634,6 +802,38 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
   const [category, setCategory] = useState("");
   const [subCategory, setSubCategory] = useState("");
   const [uom, setUom] = useState<string>(UOMS[0]);
+
+  // Category / Sub Category are editable: users can add a new one inline via the
+  // "+ Add new…" option. Options seed from the master list and grow per session.
+  const [categoryOptions, setCategoryOptions] = useState<string[]>([...CATEGORIES]);
+  const [subCategoryOptions, setSubCategoryOptions] = useState<string[]>([...SUB_CATEGORIES]);
+  const [addingCategory, setAddingCategory] = useState(false);
+  const [newCategory, setNewCategory] = useState("");
+  const [addingSubCategory, setAddingSubCategory] = useState(false);
+  const [newSubCategory, setNewSubCategory] = useState("");
+
+  const commitNewCategory = () => {
+    const val = newCategory.trim();
+    if (!val) { toast.error("Enter a category name."); return; }
+    if (!categoryOptions.some((c) => c.toLowerCase() === val.toLowerCase())) {
+      setCategoryOptions((prev) => [...prev, val]);
+      toast.success(`Category "${val}" added.`);
+    }
+    setCategory(val);
+    setNewCategory("");
+    setAddingCategory(false);
+  };
+  const commitNewSubCategory = () => {
+    const val = newSubCategory.trim();
+    if (!val) { toast.error("Enter a sub category name."); return; }
+    if (!subCategoryOptions.some((s) => s.toLowerCase() === val.toLowerCase())) {
+      setSubCategoryOptions((prev) => [...prev, val]);
+      toast.success(`Sub category "${val}" added.`);
+    }
+    setSubCategory(val);
+    setNewSubCategory("");
+    setAddingSubCategory(false);
+  };
 
   const requiresBom = BOM_REQUIRED_ITEM_TYPES.includes(itemType as ItemRow["itemType"]);
   const existingBomForCode = useMemo(
@@ -798,17 +998,55 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Category</Label>
-            <select value={category} onChange={(e) => setCategory(e.target.value)} className={selectCls}>
+            <select
+              value={category}
+              onChange={(e) => { e.target.value === ADD_NEW ? setAddingCategory(true) : setCategory(e.target.value); }}
+              className={selectCls}
+            >
               <option value="">Select category</option>
-              {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+              {categoryOptions.map((c) => <option key={c}>{c}</option>)}
+              <option value={ADD_NEW}>+ Add new category…</option>
             </select>
+            {addingCategory && (
+              <div className="mt-2 flex items-center gap-2">
+                <Input
+                  autoFocus
+                  value={newCategory}
+                  onChange={(e) => setNewCategory(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewCategory(); } }}
+                  placeholder="New category name"
+                  className="h-9"
+                />
+                <Button type="button" size="sm" onClick={commitNewCategory}>Add</Button>
+                <Button type="button" size="sm" variant="outline" onClick={() => { setAddingCategory(false); setNewCategory(""); }}>Cancel</Button>
+              </div>
+            )}
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Sub Category</Label>
-            <select value={subCategory} onChange={(e) => setSubCategory(e.target.value)} className={selectCls}>
+            <select
+              value={subCategory}
+              onChange={(e) => { e.target.value === ADD_NEW ? setAddingSubCategory(true) : setSubCategory(e.target.value); }}
+              className={selectCls}
+            >
               <option value="">Select sub category</option>
-              {SUB_CATEGORIES.map((s) => <option key={s}>{s}</option>)}
+              {subCategoryOptions.map((s) => <option key={s}>{s}</option>)}
+              <option value={ADD_NEW}>+ Add new sub category…</option>
             </select>
+            {addingSubCategory && (
+              <div className="mt-2 flex items-center gap-2">
+                <Input
+                  autoFocus
+                  value={newSubCategory}
+                  onChange={(e) => setNewSubCategory(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewSubCategory(); } }}
+                  placeholder="New sub category name"
+                  className="h-9"
+                />
+                <Button type="button" size="sm" onClick={commitNewSubCategory}>Add</Button>
+                <Button type="button" size="sm" variant="outline" onClick={() => { setAddingSubCategory(false); setNewSubCategory(""); }}>Cancel</Button>
+              </div>
+            )}
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Primary UOM</Label>

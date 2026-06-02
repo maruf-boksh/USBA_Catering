@@ -30,7 +30,15 @@ import {
 } from "recharts";
 import { toast } from "sonner";
 
-type Period = "today" | "week" | "custom";
+type Period = "today" | "week" | "month" | "quarter" | "year" | "custom";
+
+// Days back from "today" each rolling window covers. seedFlightOrders' date
+// column is ISO yyyy-mm-dd, so a string threshold compares without parsing.
+const PERIOD_WINDOW_DAYS: Record<"month" | "quarter" | "year", number> = {
+  month: 30,
+  quarter: 90,
+  year: 365,
+};
 
 type DateRange = { from: string; to: string };
 
@@ -85,6 +93,27 @@ function useDashboardKpis(period: Period, range?: DateRange) {
     ? new Set(customOrders.map((o) => o.date)).size
     : 0;
 
+  // Rolling windows for This Month / Quarter / Year (relative to seed "today").
+  const windowDays =
+    period === "month" || period === "quarter" || period === "year"
+      ? PERIOD_WINDOW_DAYS[period]
+      : null;
+  const windowStart = (() => {
+    if (windowDays == null || !today) return null;
+    const t = new Date(today);
+    if (Number.isNaN(t.getTime())) return null;
+    t.setDate(t.getDate() - (windowDays - 1));
+    return t.toISOString().slice(0, 10);
+  })();
+  const windowOrders = windowStart
+    ? seedFlightOrders.filter((o) => o.date >= windowStart && o.date <= today)
+    : [];
+  const flightsWindow = windowOrders.length;
+  const flightsWindowIds = windowOrders.map((o) => o.id);
+  const windowDayCount = windowStart
+    ? new Set(windowOrders.map((o) => o.date)).size
+    : 0;
+
   const producedTotal = productionEntryRecords.reduce((s, r) => s + r.producedQty, 0);
   const targetTotal = productionEntries.reduce(
     (s, p) => s + (p.orderQty ?? p.producedQty),
@@ -95,10 +124,13 @@ function useDashboardKpis(period: Period, range?: DateRange) {
 
   const delayedFlights = flights.filter((f) => f.status === "Delayed");
   const delayed = delayedFlights.length;
+  const delayedPax = delayedFlights.reduce((s, f) => s + f.pax, 0);
   const delayedFlightCodes = new Set(delayedFlights.map((f) => f.flight));
-  const delayedRowIds = seedFlightOrders
-    .filter((o) => delayedFlightCodes.has(o.flight))
-    .map((o) => o.id);
+  const delayedOrders = seedFlightOrders.filter((o) => delayedFlightCodes.has(o.flight));
+  const delayedRowIds = delayedOrders.map((o) => o.id);
+  // Deep-link target: the first delayed flight's catering order. Order Management
+  // jumps to that order's page (?ord=) so the arrival-flash can tint the row.
+  const delayedOrderNo = delayedOrders[0]?.orderNo;
 
   const qcFailed = qcChecks.filter((q) => q.result === "Fail");
   const qcOpen = qcFailed.length;
@@ -149,30 +181,33 @@ function useDashboardKpis(period: Period, range?: DateRange) {
 
   const isWeek = period === "week";
   const isCustom = period === "custom" && !!range;
+  const isWindow = period === "month" || period === "quarter" || period === "year";
 
-  const flightsValue = isCustom ? flightsCustom : isWeek ? flightsWeek : flightsToday;
+  const flightsValue = isCustom ? flightsCustom : isWindow ? flightsWindow : isWeek ? flightsWeek : flightsToday;
   const flightsSub = isCustom
     ? `${customDayCount} day${customDayCount === 1 ? "" : "s"} in range`
-    : isWeek
-      ? `${allDates.length} days covered`
-      : `${flightsDelta >= 0 ? "+" : ""}${flightsDelta} vs yesterday`;
-  const flightsIds = isCustom ? flightsCustomIds : isWeek ? flightsAllIds : flightsTodayIds;
+    : isWindow
+      ? `${windowDayCount} day${windowDayCount === 1 ? "" : "s"} covered`
+      : isWeek
+        ? `${allDates.length} days covered`
+        : `${flightsDelta >= 0 ? "+" : ""}${flightsDelta} vs yesterday`;
+  const flightsIds = isCustom ? flightsCustomIds : isWindow ? flightsWindowIds : isWeek ? flightsAllIds : flightsTodayIds;
 
   return {
     kpis: {
       flights: { value: flightsValue, sub: flightsSub, ids: flightsIds },
       meals:   { value: producedTotal.toLocaleString(), sub: targetTotal > 0 ? `${targetPct}% of target` : "no targets yet", ids: mealsRowIds },
-      delayed: { value: delayed, sub: delayed > 0 ? `${Math.max(1, Math.floor(delayed * 0.66))} catering related` : "none", ids: delayedRowIds },
+      delayed: { value: delayed, sub: delayed > 0 ? `${delayedPax.toLocaleString()} pax affected` : "none on time", ids: delayedRowIds, ord: delayedOrderNo },
       qcIssues:{ value: qcOpen, sub: `${qcOpen} open, ${qcResolved} resolved`, ids: qcRowIds },
       pendingPOs:{ value: pendingPOCount, sub: pendingPOAmount > 0 ? `${formatLakh(pendingPOAmount)} pending` : "no value pending", ids: pendingPORowIds },
       invAlerts:{ value: invAlerts, sub: `${criticalItems.length} critical`, ids: invAlertRowIds },
       dispatch: { value: dispatchActive, sub: `${dispatchEnRoute} en route`, ids: dispatchRowIds },
       dailyCost:{ value: formatLakh(stockValue), sub: "FEFO stock value", ids: [] as string[] },
     },
-    trend: isCustom ? buildCustomTrend(range!, producedTotal, targetTotal) : isWeek ? trendWeek : trendToday,
+    trend: isCustom ? buildCustomTrend(range!, producedTotal, targetTotal) : (isWeek || isWindow) ? trendWeek : trendToday,
     trendTitle: isCustom
       ? `Meal Production Trend (${range!.from || "…"} → ${range!.to || "…"})`
-      : isWeek ? "Meal Production Trend (Last 7 Days)" : "Meal Production Trend (Today)",
+      : (isWeek || isWindow) ? "Meal Production Trend (Last 7 Days)" : "Meal Production Trend (Today)",
     sectionMix: computeSectionMix(producedTotal),
     activeFlights: pickActiveFlights(),
     activityFeed: buildActivityFeed({
@@ -461,7 +496,7 @@ function ProductionMixDonut({ data }: { data: { name: string; v: number }[] }) {
           </span>
           <span style={{
             fontSize: 10.5, fontWeight: 700, letterSpacing: "0.12em",
-            textTransform: "uppercase", color: "var(--muted, #6b6b72)", marginTop: 4,
+            textTransform: "uppercase", color: "var(--muted-foreground, #6b6b72)", marginTop: 4,
           }}>
             Meals
           </span>
@@ -473,7 +508,7 @@ function ProductionMixDonut({ data }: { data: { name: string; v: number }[] }) {
           <span key={i} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "var(--ink, #1a0204)" }}>
             <span style={{ width: 10, height: 10, borderRadius: 3, flexShrink: 0, background: s.color }} />
             {s.name}
-            <span style={{ color: "var(--muted, #6b6b72)", fontVariantNumeric: "tabular-nums" }}>
+            <span style={{ color: "var(--muted-foreground, #6b6b72)", fontVariantNumeric: "tabular-nums" }}>
               {total > 0 ? Math.round((s.v / total) * 100) : 0}%
             </span>
           </span>
@@ -492,6 +527,9 @@ export default function Dashboard() {
   const periodLabel =
     period === "today" ? "Today's"
     : period === "week" ? "Weekly"
+    : period === "month" ? "Monthly"
+    : period === "quarter" ? "Quarterly"
+    : period === "year" ? "Yearly"
     : range ? `${range.from} → ${range.to}` : "Custom";
 
   return (
@@ -501,28 +539,37 @@ export default function Dashboard() {
         subtitle="Live operational overview — US-Bangla Airlines Flight Catering"
         actions={
           <>
-            <Button.Group>
-              <Button
-                type={period === "today" ? "primary" : "default"}
-                onClick={() => { setPeriod("today"); setRange(null); }}
-              >
-                Today
-              </Button>
-              <Button
-                type={period === "week" ? "primary" : "default"}
-                onClick={() => { setPeriod("week"); setRange(null); }}
-              >
-                This Week
-              </Button>
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+              {([
+                { value: "today",   label: "Today"        },
+                { value: "week",    label: "This Week"    },
+                { value: "month",   label: "This Month"   },
+                { value: "quarter", label: "This Quarter" },
+                { value: "year",    label: "This Year"    },
+              ] as { value: Period; label: string }[]).map((opt) => {
+                const selected = period === opt.value;
+                return (
+                  <Button
+                    key={opt.value}
+                    size="small"
+                    type={selected ? "primary" : "default"}
+                    className={selected ? undefined : "period-toggle-idle"}
+                    onClick={() => { setPeriod(opt.value); setRange(null); }}
+                  >
+                    {opt.label}
+                  </Button>
+                );
+              })}
               <CustomRangePicker
                 active={period === "custom"}
                 range={range}
                 onApply={(r) => { setRange(r); setPeriod("custom"); }}
                 onClear={() => { setRange(null); setPeriod("today"); }}
               />
-            </Button.Group>
+            </div>
             <Button
               type="primary"
+              size="small"
               onClick={() => toast.success(`${periodLabel} report exported.`)}
             >
               Export Report
@@ -545,7 +592,7 @@ export default function Dashboard() {
         <KpiLink to="/production-entry" highlight="production-list" ids={data.kpis.meals.ids}>
           <KpiCard label="Meals Prepared"  value={data.kpis.meals.value}     sub={data.kpis.meals.sub}     icon={CoffeeOutlined}            tone="success" />
         </KpiLink>
-        <KpiLink to="/order-management" highlight="active-orders" ids={data.kpis.delayed.ids}>
+        <KpiLink to="/order-management" ord={data.kpis.delayed.ord} highlight="active-orders" ids={data.kpis.delayed.ids}>
           <KpiCard label="Delayed Flights" value={data.kpis.delayed.value}   sub={data.kpis.delayed.sub}   icon={WarningOutlined}           tone="warning" />
         </KpiLink>
         <KpiLink to="/cooking-temp" highlight="qc-issues" ids={data.kpis.qcIssues.ids}>
@@ -752,7 +799,7 @@ function ActiveOrdersTabs({ rows }: { rows: ReturnType<typeof pickActiveFlights>
               onClick={() => setTab(key)}
               style={{
                 position: "relative", padding: "13px 0", fontSize: 13.5, fontWeight: 600,
-                color: on ? "var(--ink, #1a0204)" : "var(--muted, #6b6b72)",
+                color: on ? "var(--ink, #1a0204)" : "var(--muted-foreground, #6b6b72)",
                 cursor: "pointer", background: "none", border: "none",
                 fontFamily: "inherit", whiteSpace: "nowrap",
               }}
@@ -771,7 +818,7 @@ function ActiveOrdersTabs({ rows }: { rows: ReturnType<typeof pickActiveFlights>
 
       <div style={{ maxHeight: 362, overflowY: "auto", padding: "8px 22px 18px" }}>
         {groups.length === 0 ? (
-          <div style={{ padding: "24px 0", textAlign: "center", fontSize: 12, color: "var(--muted, #6b6b72)" }}>
+          <div style={{ padding: "24px 0", textAlign: "center", fontSize: 12, color: "var(--muted-foreground, #6b6b72)" }}>
             No active orders.
           </div>
         ) : (
@@ -820,10 +867,10 @@ function OrderGroupCard({
             fontSize: 10.5, fontWeight: 700, letterSpacing: ".04em", color: "#b45309",
             background: "#fbf1e6", padding: "2px 7px", borderRadius: 6, textTransform: "uppercase",
           }}>
-            {legs.length} legs
+            {legs.length} flights
           </span>
         )}
-        <span style={{ fontSize: 12.5, color: "var(--muted, #6b6b72)" }}>
+        <span style={{ fontSize: 12.5, color: "var(--muted-foreground, #6b6b72)" }}>
           ·&nbsp;<span style={{ color: "var(--ink, #1a0204)", fontWeight: 600 }}>
             {mode === "flight" ? totalPax : totalCrew}
           </span> {mode === "flight" ? "pax" : "crew"}
@@ -863,13 +910,13 @@ function OrderGroupCard({
             flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 500, color: "var(--ink, #1a0204)",
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
           }}>
-            {l.flight} <span style={{ color: "var(--muted, #6b6b72)", fontWeight: 400 }}>· {l.sector}</span>
+            {l.flight} <span style={{ color: "var(--muted-foreground, #6b6b72)", fontWeight: 400 }}>· {l.sector}</span>
           </span>
           <span style={{ fontSize: 13, color: "var(--ink, #1a0204)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
             {l.etd}
           </span>
           <span style={{
-            fontSize: 12, color: "var(--muted, #6b6b72)", fontVariantNumeric: "tabular-nums",
+            fontSize: 12, color: "var(--muted-foreground, #6b6b72)", fontVariantNumeric: "tabular-nums",
             width: 42, textAlign: "right", flex: "none",
             display: "inline-flex", alignItems: "center", justifyContent: "flex-end", gap: 3,
           }}>
@@ -989,6 +1036,8 @@ function CustomRangePicker({
     >
       <Button
         type={active ? "primary" : "default"}
+        size="small"
+        className={active ? undefined : "period-toggle-idle"}
         icon={<CalendarOutlined />}
         style={{ fontVariantNumeric: "tabular-nums" }}
       >
@@ -1026,17 +1075,21 @@ function CustomRangePicker({
 }
 
 function KpiLink({
-  to, highlight, ids, children,
+  to, ord, highlight, ids, children,
 }: {
   to: "/order-management" | "/production-entry" | "/cooking-temp"
     | "/procurement" | "/inventory" | "/dispatch";
+  ord?: string;
   highlight?: string;
   ids?: string[];
   children: ReactNode;
 }) {
+  // When an order number is supplied, deep-link via ?ord= so the destination
+  // page scrolls to (and paginates to) the matching row before flashing it.
+  const target = ord ? `${to}?ord=${encodeURIComponent(ord)}` : to;
   return (
     <Link
-      to={to}
+      to={target}
       onClick={() => {
         if (highlight) flagArrival({ target: highlight, ids });
       }}

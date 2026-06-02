@@ -197,6 +197,19 @@ export function getAllocationMethodForMaster(masterId: string): AllocationMethod
   return master?.allocationMethod ?? "FEFO";
 }
 
+/** The user's allocation CHOICE for a master — "Auto" when no explicit FEFO/FIFO
+ *  override is set (the item follows the system's smart default). */
+export function getAllocationChoiceForMaster(masterId: string): "Auto" | AllocationMethod {
+  return allocationOverrides.has(masterId) ? allocationOverrides.get(masterId)! : "Auto";
+}
+
+/** Clear an explicit override, returning the item to Auto (smart default). */
+export function clearAllocationOverride(masterId: string): void {
+  if (!allocationOverrides.has(masterId)) return;
+  allocationOverrides.delete(masterId);
+  notify();
+}
+
 /** Whether an Item Profile master is tracked by batch/lot. Defaults true. */
 export function isBatchTrackedForMaster(masterId: string): boolean {
   if (batchTrackedOverrides.has(masterId)) return batchTrackedOverrides.get(masterId)!;
@@ -1525,6 +1538,11 @@ export const seedFlightOrders: FlightOrderRow[] = [
   // ── Domestic (Dinner 19:00-24:00)
   { id: "FO-017", orderNo: "ORD-3423", flight: "BS-115", airline: "US-Bangla", sector: "DAC → CXB", date: "2026-05-20", etd: "19:30", pax: 72,  crew: 4,  specialMeals: 2, status: "Pending",    direction: "Outbound" },
   { id: "FO-018", orderNo: "ORD-3424", flight: "BS-159", airline: "US-Bangla", sector: "DAC → JSR", date: "2026-05-20", etd: "21:00", pax: 60,  crew: 4,  specialMeals: 1, status: "Pending",    direction: "Outbound" },
+
+  // ── Delayed flight (BS-225 in the operational schedule is flagged "Delayed").
+  // Its catering order is kept here so the dashboard "Delayed Flights" KPI can
+  // deep-link to a real, highlightable row in Order Management.
+  { id: "FO-225", orderNo: "ORD-3410", flight: "BS-225", airline: "US-Bangla", sector: "DAC → DOH", date: "2026-06-02", etd: "15:40", pax: 174, crew: 8,  specialMeals: 12, status: "Production", direction: "Outbound" },
 
   // ── Procedurally-generated future demand ─────────────────────────────────
   // One ORD per future date for the next 90 days, each containing 30-40

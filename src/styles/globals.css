@@ -110,7 +110,11 @@
   --red-bright: #ff2d2d;
   --red-deep:   #a60303;
   --ink:        #1a0204;
-  --muted:      #6b6b72;
+  /* NOTE: `--muted` intentionally NOT redefined here. It is the Tailwind/shadcn
+     muted *background* token (light, from index.css). Muted *text* must use
+     --muted-foreground (see below). Overriding --muted to a dark text color
+     made every `bg-muted` surface dark with invisible `text-muted-foreground`
+     labels (empty-looking pills, unreadable tab strips). */
   --line:       #e6e2e0;
   --paper:      #ffffff;
   --paper-warm: #f7f3f1;
@@ -1167,6 +1171,31 @@ html[data-theme="dark"] .app-tabbar-clear-btn {
   filter: none !important;
 }
 
+/* ── Period toggle (idle) ────────────────────────────────────────────────────
+   Dashboard date-range toggles: unselected stays white with a neutral label so
+   only the active period reads as the red CTA. Overrides the brand-CTA rule
+   above (which otherwise paints every labeled button red). */
+/* Specificity must exceed the brand-CTA selector's :not() chain above, so the
+   full chain is repeated with the .period-toggle-idle class added. */
+.period-toggle-idle.ant-btn-default:not(.ant-btn-icon-only):not(.ant-btn-dangerous):not(.ant-btn-text):not(.ant-btn-link),
+.period-toggle-idle.ant-btn-default:not(.ant-btn-icon-only):not(.ant-btn-dangerous):not(.ant-btn-text):not(.ant-btn-link):focus {
+  background: #ffffff !important;
+  background-image: none !important;
+  color: var(--color-foreground, #3c3a40) !important;
+  border: 1px solid var(--color-border-strong, #e0d9d5) !important;
+  box-shadow: none !important;
+}
+.period-toggle-idle.ant-btn-default:not(.ant-btn-icon-only):not(.ant-btn-dangerous):not(.ant-btn-text):not(.ant-btn-link):not(:disabled):hover {
+  background: var(--color-primary-light, #fff5f5) !important;
+  background-image: none !important;
+  color: var(--color-primary) !important;
+  border-color: var(--color-primary) !important;
+  box-shadow: none !important;
+}
+.period-toggle-idle.ant-btn-default:not(.ant-btn-icon-only):not(.ant-btn-dangerous):not(.ant-btn-text):not(.ant-btn-link) .anticon {
+  color: inherit !important;
+}
+
 /* Popup consistency: modal, drawer, popover, dropdown */
 .ant-modal .ant-modal-content,
 .ant-drawer .ant-drawer-content,
@@ -2001,7 +2030,7 @@ html[data-theme="dark"] .page-shell {
 
 .hc-sub {
   font-size: 14px;
-  color: var(--muted);
+  color: var(--muted-foreground);
   margin: 11px 0 0;
   line-height: 1.55;
 }
@@ -2296,7 +2325,7 @@ html[data-theme="dark"] .page-shell {
 }
 
 .hc-link-btn.muted {
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .hc-link-btn:disabled {
