@@ -781,67 +781,9 @@ export default function ProductionEntryPage() {
                     GM/Admin · {mealOrderConfirmation.timestamp} · {mealOrderConfirmation.totalFlights} flight{mealOrderConfirmation.totalFlights !== 1 ? "s" : ""} · {mealOrderConfirmation.totalMeals.toLocaleString()} meals
                   </p>
                 </div>
-                <div className="mt-1 text-sm text-foreground">
-                  <span className="font-bold">{forwardedOrders.length}</span>{" "}
-                  date{forwardedOrders.length === 1 ? "" : "s"} pending ·{" "}
-                  <span className="font-bold text-success">
-                    {totalMealsFromOrders.toLocaleString()}
-                  </span>{" "}
-                  meals
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <select
-                  value={dateRange}
-                  onChange={(e) => setDateRange(e.target.value as ForwardedRange)}
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  title="Date range to show"
-                >
-                  <option value="96h">Next 96 hours (4 days)</option>
-                  <option value="7d">Next 7 days</option>
-                  <option value="custom">Custom range…</option>
-                </select>
-                {dateRange === "custom" && (
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      type="date"
-                      value={customFrom}
-                      max={customTo || undefined}
-                      onChange={(e) => setCustomFrom(e.target.value)}
-                      className="h-9 rounded-md border border-input bg-background px-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                      title="From date"
-                    />
-                    <span className="text-xs text-muted-foreground">to</span>
-                    <input
-                      type="date"
-                      value={customTo}
-                      min={customFrom || undefined}
-                      onChange={(e) => setCustomTo(e.target.value)}
-                      className="h-9 rounded-md border border-input bg-background px-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                      title="To date"
-                    />
-                  </div>
-                )}
-                <select
-                  value={selectedForwardedDate}
-                  onChange={(e) => setSelectedForwardedDate(e.target.value)}
-                  disabled={visibleForwarded.length === 0}
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
-                >
-                  {visibleForwarded.length === 0 ? (
-                    <option value="">No dates in this range</option>
-                  ) : (
-                    visibleForwarded.map((f) => (
-                      <option key={f.date} value={f.date}>
-                        {f.date} — {f.totalMeals.toLocaleString()} meals
-                      </option>
-                    ))
-                  )}
-                </select>
                 <Button
                   className="bg-success text-success-foreground hover:bg-success/90 shrink-0"
                   size="sm"
-                  disabled={!selectedForwardedDate}
                   onClick={() => setDetailsOpen(true)}
                 >
                   View Details
@@ -986,18 +928,56 @@ export default function ProductionEntryPage() {
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <select
+                    value={dateRange}
+                    onChange={(e) => setDateRange(e.target.value as ForwardedRange)}
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    title="Date range to show"
+                  >
+                    <option value="96h">Next 96 hours (4 days)</option>
+                    <option value="7d">Next 7 days</option>
+                    <option value="custom">Custom range…</option>
+                  </select>
+                  {dateRange === "custom" && (
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="date"
+                        value={customFrom}
+                        max={customTo || undefined}
+                        onChange={(e) => setCustomFrom(e.target.value)}
+                        className="h-9 rounded-md border border-input bg-background px-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        title="From date"
+                      />
+                      <span className="text-xs text-muted-foreground">to</span>
+                      <input
+                        type="date"
+                        value={customTo}
+                        min={customFrom || undefined}
+                        onChange={(e) => setCustomTo(e.target.value)}
+                        className="h-9 rounded-md border border-input bg-background px-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        title="To date"
+                      />
+                    </div>
+                  )}
+                  <select
                     value={selectedForwardedDate}
                     onChange={(e) => setSelectedForwardedDate(e.target.value)}
-                    className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    disabled={visibleForwarded.length === 0}
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
                   >
-                    {forwardedOrders.map((f) => (
-                      <option key={f.date} value={f.date}>
-                        {f.date} — {f.totalMeals.toLocaleString()} meals
-                      </option>
-                    ))}
+                    {visibleForwarded.length === 0 ? (
+                      <option value="">No dates in this range</option>
+                    ) : (
+                      visibleForwarded.map((f) => (
+                        <option key={f.date} value={f.date}>
+                          {f.date} — {f.totalMeals.toLocaleString()} meals
+                        </option>
+                      ))
+                    )}
                   </select>
                   <Button
-                    className="bg-success text-success-foreground hover:bg-success/90"
+                    className="bg-success text-success-foreground hover:bg-success/90 shrink-0"
+                    size="sm"
+                    disabled={!selectedForwardedDate}
                     onClick={() => setDetailsOpen(true)}
                   >
                     View Details
