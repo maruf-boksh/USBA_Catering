@@ -617,8 +617,8 @@ export default function CookingTemp() {
                     </Label>
                     <Input
                       value={qcBatchNo}
-                      onChange={(e) => setQcBatchNo(e.target.value)}
-                      className="mt-1 tabular-nums"
+                      readOnly
+                      className="mt-1 tabular-nums bg-muted/50 cursor-not-allowed"
                       placeholder="Batch number"
                     />
                   </div>
@@ -821,8 +821,8 @@ export default function CookingTemp() {
                           <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Batch No *</label>
                           <input
                             value={qcBatchNo}
-                            onChange={e => setQcBatchNo(e.target.value)}
-                            className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-400"
+                            readOnly
+                            className="mt-1 w-full border border-slate-300 rounded-xl px-3 py-2 text-sm bg-slate-100 text-slate-600 cursor-not-allowed focus:outline-none"
                             placeholder="Batch number"
                           />
                         </div>

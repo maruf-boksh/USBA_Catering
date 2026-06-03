@@ -1350,7 +1350,7 @@ export default function Dispatch() {
                     </div>
                     {materialsRow.orderNo && (
                       <div>
-                        <span className="text-muted-foreground">Order #:</span>
+                        <span className="text-muted-foreground">Order:</span>
                         <span className="font-semibold ml-1 font-mono">{materialsRow.orderNo}</span>
                       </div>
                     )}

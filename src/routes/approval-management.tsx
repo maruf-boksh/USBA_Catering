@@ -18,7 +18,7 @@ import {
   BadgeCheck, Check, X as XIcon, Clock, ShieldCheck, Search,
   FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, Layers, UserCog,
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
-  PackageCheck, AlertTriangle, CheckCircle2, Share2,
+  PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -27,9 +27,11 @@ import {
   type WfDemandRequest, type WfDemandStatus,
 } from "@/lib/workflow-store";
 import { inventory, warehouses } from "@/lib/sample-data";
+import { useFlightOrders, updateFlightOrdersWhere } from "@/lib/flight-orders-store";
 import { useRole } from "@/lib/roles";
 
 type Category =
+  | "Flight Order"
   | "Demand Request"
   | "Purchase Requisition"
   | "Purchase Order"
@@ -41,6 +43,7 @@ type Category =
   | "User Account";
 
 const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
+  { key: "Flight Order",         label: "Flight Orders",      icon: Plane           },
   { key: "Demand Request",       label: "Demand Req.",        icon: FileSearch      },
   { key: "Purchase Requisition", label: "Purchase Req.",      icon: FileText        },
   { key: "Purchase Order",       label: "Purchase Orders",    icon: ShoppingCart    },
@@ -113,8 +116,16 @@ export default function ApprovalManagementPage() {
     addTransferNote, addRequisition,
     mrpRuns, updateMrpRun,
   } = useWorkflow();
+  const flightOrders = useFlightOrders();
 
   const [items, setItems] = useState<ApprovalItem[]>(SEED);
+  // Flight orders have no "Rejected" status in their store flow, so approval
+  // decisions made here are tracked locally. Approve also advances the order's
+  // Pending legs to "Approved" in the shared store (reflected on Order Mgmt &
+  // the dashboard); reject is recorded here only.
+  const [foDecisions, setFoDecisions] = useState<
+    Record<string, { status: ApprovalStatus; by: string; at: string; reason?: string }>
+  >({});
   const [activeTab, setActiveTab] = useState<Category | "all">("all");
   const [search, setSearch] = useState("");
   const [rejectOpen, setRejectOpen] = useState(false);
@@ -159,7 +170,47 @@ export default function ApprovalManagementPage() {
     }));
   }, [demands]);
 
-  const allItems = useMemo(() => [...demandItems, ...items], [demandItems, items]);
+  // Project flight orders (grouped by Order #) into ApprovalItem shape. Only
+  // orders that still have a Pending leg — or that were decided here — surface,
+  // so the queue stays focused. One pass over the (large) order list keeps it
+  // cheap even with thousands of legs.
+  const flightOrderItems: ApprovalItem[] = useMemo(() => {
+    const byOrder = new Map<string, FlightOrder[]>();
+    for (const o of flightOrders) {
+      const list = byOrder.get(o.orderNo);
+      if (list) list.push(o);
+      else byOrder.set(o.orderNo, [o]);
+    }
+    const result: ApprovalItem[] = [];
+    for (const [orderNo, legs] of byOrder) {
+      const decision = foDecisions[orderNo];
+      const hasPending = legs.some((l) => l.status === "Pending");
+      if (!hasPending && !decision) continue;
+      const airlines = Array.from(new Set(legs.map((l) => l.airline)));
+      const totalPax = legs.reduce((s, l) => s + (l.pax ?? 0), 0);
+      const flightList = legs.map((l) => l.flight).slice(0, 4).join(", ");
+      result.push({
+        id: `FO-AP-${orderNo}`,
+        category: "Flight Order",
+        refId: orderNo,
+        title: `Flight order — ${legs.length} flight${legs.length === 1 ? "" : "s"}`,
+        requestedBy: "Operations",
+        requestedAt: legs[0].date,
+        summary: `${airlines.join(", ")} · ${flightList}${legs.length > 4 ? ` +${legs.length - 4} more` : ""} · ${totalPax} pax`,
+        itemsCount: legs.length,
+        status: decision ? decision.status : "Pending",
+        processedBy: decision?.by,
+        processedAt: decision?.at,
+        rejectionReason: decision?.reason,
+      });
+    }
+    return result;
+  }, [flightOrders, foDecisions]);
+
+  const allItems = useMemo(
+    () => [...flightOrderItems, ...demandItems, ...items],
+    [flightOrderItems, demandItems, items],
+  );
 
   const counts = useMemo(() => {
     const pendingByCat = new Map<Category, number>();
@@ -300,6 +351,18 @@ export default function ApprovalManagementPage() {
       approveDemand(dr);
       return;
     }
+    if (it.category === "Flight Order") {
+      const moved = updateFlightOrdersWhere(
+        (o) => o.orderNo === it.refId && o.status === "Pending",
+        { status: "Approved" },
+      );
+      setFoDecisions((p) => ({
+        ...p,
+        [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
+      }));
+      toast.success(`${it.refId} approved — ${moved} flight${moved === 1 ? "" : "s"} moved to Approved.`);
+      return;
+    }
     setItems((p) =>
       p.map((x) =>
         x.id === it.id
@@ -330,6 +393,17 @@ export default function ApprovalManagementPage() {
         rejectedAt: new Date().toLocaleString(),
         rejectionReason: reason,
       });
+      toast.success(`${rejectTarget.refId} rejected.`);
+      setRejectOpen(false);
+      setRejectTarget(null);
+      return;
+    }
+
+    if (rejectTarget.category === "Flight Order") {
+      setFoDecisions((p) => ({
+        ...p,
+        [rejectTarget.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+      }));
       toast.success(`${rejectTarget.refId} rejected.`);
       setRejectOpen(false);
       setRejectTarget(null);
@@ -438,6 +512,11 @@ export default function ApprovalManagementPage() {
         rejectedAt: new Date().toLocaleString(),
         rejectionReason: reason,
       });
+    } else if (detailItem.category === "Flight Order") {
+      setFoDecisions((p) => ({
+        ...p,
+        [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+      }));
     } else {
       setItems((p) =>
         p.map((x) =>

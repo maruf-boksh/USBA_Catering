@@ -277,23 +277,21 @@ export default function ReportBuilderPage() {
         <Card>
           <CardContent className="py-4">
             <div className="text-xs uppercase tracking-wider text-muted-foreground mb-2">1 · Dataset</div>
-            <div className="flex flex-col gap-1.5">
+            <select
+              value={datasetKey}
+              onChange={(e) => onPickDataset(e.target.value)}
+              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+            >
               {REPORT_DATASETS.map((ds) => (
-                <button
-                  key={ds.key}
-                  type="button"
-                  onClick={() => onPickDataset(ds.key)}
-                  className={`flex items-center gap-2 px-3 py-2 rounded-md text-sm font-medium border text-left transition-colors ${
-                    datasetKey === ds.key ? "bg-primary text-primary-foreground border-primary" : "bg-white text-foreground border-border hover:bg-muted"
-                  }`}
-                >
-                  <FileBarChart className="h-4 w-4 shrink-0" />
-                  <span className="flex-1">{ds.label}</span>
-                  <Badge variant="outline" className={`h-5 px-1.5 text-[10px] ${datasetKey === ds.key ? "border-white/40 text-primary-foreground" : ""}`}>
-                    {ds.columns.length} cols
-                  </Badge>
-                </button>
+                <option key={ds.key} value={ds.key}>{ds.label}</option>
               ))}
+            </select>
+            <p className="text-[11px] text-muted-foreground mt-2">
+              Pick the data source to report on. {REPORT_DATASETS.length} datasets available across the system.
+            </p>
+            <div className="mt-3 rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground flex items-center gap-2">
+              <FileBarChart className="h-3.5 w-3.5 shrink-0" />
+              <span><strong className="text-foreground tabular-nums">{dataset?.columns.length ?? 0}</strong> columns in this dataset</span>
             </div>
           </CardContent>
         </Card>

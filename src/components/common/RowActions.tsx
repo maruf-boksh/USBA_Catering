@@ -48,17 +48,25 @@ export function RowActions({
   actions = ["view", "edit", "approve", "delete"],
   detail,
   editDetail,
+  onView,
+  onEdit,
 }: {
   row: Record<string, unknown>;
   actions?: ActionKey[];
   detail?: ReactNode;
   editDetail?: ReactNode;
+  /** When provided, View is handled by the page instead of the built-in modal. */
+  onView?: (row: Record<string, unknown>) => void;
+  /** When provided, Edit is handled by the page instead of the built-in modal. */
+  onEdit?: (row: Record<string, unknown>) => void;
 }) {
   const [open, setOpen] = useState<ModalKind>(null);
   const [rejectionReason, setRejectionReason] = useState("");
   const rowId = String(row.id ?? "record");
 
   const handle = (a: ActionKey) => {
+    if (a === "view" && onView) { onView(row); return; }
+    if (a === "edit" && onEdit) { onEdit(row); return; }
     if (a === "view" || a === "edit" || a === "delete" || a === "approve" || a === "reject") {
       setOpen(a);
       return;
