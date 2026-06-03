@@ -1,5 +1,5 @@
 import { useState, Fragment, useEffect, useRef } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, useNavigate } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -179,6 +179,12 @@ export default function DispatchMonitoring() {
   const [searchParams, setSearchParams] = useSearchParams();
   const deepLinkHandled = useRef(false);
   const { markFlightQcCleared } = useWorkflow();
+  const navigate = useNavigate();
+  const qcOnlyMode = searchParams.get("mode") === "qc-only";
+
+  // ── Airport receive panel state ──────────────────────────────────────────────
+  const [showAirportPanel, setShowAirportPanel] = useState(false);
+  const [isAirportReceiveMode, setIsAirportReceiveMode] = useState(false);
 
   // ── Mobile App View state ───────────────────────────────────────────────────
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -227,7 +233,10 @@ export default function DispatchMonitoring() {
     }));
   };
 
-  const resetForm = () => { setShowForm(false); setEditId(null); setForm({ ...EMPTY_FORM }); setDepTime(""); setErrors({}); };
+  const resetForm = () => {
+    setShowForm(false); setEditId(null); setForm({ ...EMPTY_FORM }); setDepTime(""); setErrors({});
+    setShowAirportPanel(false); setIsAirportReceiveMode(false);
+  };
 
   const openNew = () => {
     setForm({ ...EMPTY_FORM }); setDepTime(""); setEditId(null); setErrors({});
@@ -277,6 +286,13 @@ export default function DispatchMonitoring() {
     setFsRemarksInput(entry.verifiedBy?.remarks ?? "");
     setHocRemarksInput(entry.approvedBy?.remarks ?? "");
     setShowForm(true);
+    setTimeout(() => document.getElementById("dispatch-entry-form")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+  };
+
+  const openAirportReceive = (entry: DispatchEntry) => {
+    openEdit(entry);
+    setShowAirportPanel(true);
+    setIsAirportReceiveMode(true);
     setTimeout(() => document.getElementById("dispatch-entry-form")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
   };
 
@@ -408,6 +424,7 @@ export default function DispatchMonitoring() {
       setEditId(newId);
     }
     toast.success(`Receipt accepted — ${label}`);
+    resetForm();
   };
 
   const forwardToAirport = () => {
@@ -417,6 +434,7 @@ export default function DispatchMonitoring() {
       prev.map((e) => e.id === editId ? { ...e, approvalStage: 4 as const, forwardedToAirportAt: at } : e)
     );
     toast.success("Forwarded to Airport Catering");
+    resetForm();
   };
 
   const approveInline = (stage: 0 | 1 | 2) => {
@@ -434,6 +452,17 @@ export default function DispatchMonitoring() {
     );
     const msgs = ["Forwarded to Food Safety & Hygiene", "Forwarded to Head of Catering", "Dispatch Approved!"];
     toast.success(msgs[stage]);
+    if (stage === 2) {
+      const entry = entries.find((e) => e.id === editId);
+      if (entry) {
+        const flightNo = flights.find((f) => f.id === entry.flightId)?.flight;
+        if (flightNo) markFlightQcCleared(flightNo, nowTimeStr());
+      }
+      if (qcOnlyMode) {
+        resetForm();
+        navigate("/dispatch");
+      }
+    }
   };
 
   const confirmDelete = () => {
@@ -669,9 +698,20 @@ export default function DispatchMonitoring() {
                             )}
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] w-fit">
-                            <Clock className="h-2.5 w-2.5" /> Awaiting Airport Receipt
-                          </span>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px]">
+                              <Clock className="h-2.5 w-2.5" /> Awaiting Airport Receipt
+                            </span>
+                            {entry.approvalStage >= 3 && (
+                              <Button
+                                size="sm"
+                                className="h-6 px-2.5 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white border-0"
+                                onClick={() => openAirportReceive(entry)}
+                              >
+                                <PlaneLanding className="h-3 w-3 mr-1" /> Airport Receive
+                              </Button>
+                            )}
+                          </div>
                         )}
                       </div>
                     </td>
@@ -704,7 +744,7 @@ export default function DispatchMonitoring() {
 
         {showForm && (
           <>
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+            <div className={`grid grid-cols-1 ${showAirportPanel ? "xl:grid-cols-2" : ""} gap-5`}>
 
               {/* ══ LEFT: Catering Point ══════════════════════════════════════ */}
               <div className="rounded-xl border border-blue-300 bg-white shadow-sm overflow-hidden">
@@ -719,7 +759,7 @@ export default function DispatchMonitoring() {
                   <span className="text-xs bg-blue-800/60 px-2.5 py-1 rounded-full">USBA-FSH-PDM-01</span>
                 </div>
 
-                <div className="p-5 space-y-4">
+                <div className={`p-5 space-y-4${isAirportReceiveMode ? " pointer-events-none opacity-60 select-none" : ""}`}>
                   <MaxTempBanner />
 
                   {/* ─ Flight & Packaging ─ */}
@@ -1023,15 +1063,6 @@ export default function DispatchMonitoring() {
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 text-[10px] font-semibold w-fit">
                                   <CheckCircle2 className="h-2.5 w-2.5" /> Dispatch Done
                                 </span>
-                                {curStage === 3 ? (
-                                  <Button type="button" size="sm" className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700 text-white border-0" onClick={forwardToAirport}>
-                                    <PlaneLanding className="h-3 w-3 mr-1" /> Forward To Airport Catering
-                                  </Button>
-                                ) : (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-semibold w-fit">
-                                    <PlaneLanding className="h-2.5 w-2.5" /> Forwarded To Airport Catering
-                                  </span>
-                                )}
                               </div>
                             </>
                           ) : curStage === 2 ? (
@@ -1073,8 +1104,8 @@ export default function DispatchMonitoring() {
                 </div>
               </div>
 
-              {/* ══ RIGHT: Airport Point ══════════════════════════════════════ */}
-              <div className="rounded-xl border border-emerald-300 bg-white shadow-sm overflow-hidden self-start">
+              {/* ══ RIGHT: Airport Point (only shown when Airport Receive is triggered) ══ */}
+              {showAirportPanel && <div className="rounded-xl border border-emerald-300 bg-white shadow-sm overflow-hidden self-start">
                 <div className="bg-gradient-to-r from-emerald-700 to-emerald-600 text-white px-5 py-3.5 flex items-center justify-between">
                   <div className="flex items-center gap-2.5">
                     <PlaneLanding className="h-5 w-5" />
@@ -1168,16 +1199,18 @@ export default function DispatchMonitoring() {
                     </div>
                   </div>
                 </div>
-              </div>
+              </div>}
             </div>
 
             {/* Save / Cancel */}
             <div className="mt-5 flex items-center justify-end gap-3 border-t border-border pt-4">
               <Button variant="outline" onClick={resetForm}>Cancel</Button>
-              <Button className="bg-indigo-600 hover:bg-indigo-700 text-white px-8 shadow-md" onClick={saveEntry}>
-                <ShieldCheck className="h-4 w-4 mr-2" />
-                {editId ? "Save Changes" : "Save Dispatch Entry"}
-              </Button>
+              {!isAirportReceiveMode && (
+                <Button className="bg-indigo-600 hover:bg-indigo-700 text-white px-8 shadow-md" onClick={saveEntry}>
+                  <ShieldCheck className="h-4 w-4 mr-2" />
+                  {editId ? "Save Changes" : "Save Dispatch Entry"}
+                </Button>
+              )}
             </div>
           </>
         )}
