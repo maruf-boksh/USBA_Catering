@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Button } from "@/components/ui/button";
@@ -27,7 +28,7 @@ const selectCls =
 
 export default function EquipmentReturnsPage() {
   const [view, setView] = useState<"list" | "create">("list");
-  const [returns, setReturns] = useState<EquipmentReturn[]>(SEED_RETURNS);
+  const [returns, setReturns] = usePersistedState<EquipmentReturn[]>("equipment-returns", SEED_RETURNS);
 
   const nextId = `ER-${String(7000 + returns.length + 1).padStart(4, "0")}`;
 

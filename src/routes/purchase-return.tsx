@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -100,7 +101,7 @@ const selectCls =
 
 export default function PurchaseReturnPage() {
   const [view, setView] = useState<"list" | "create">("list");
-  const [rows, setRows] = useState<PurchaseReturn[]>(SEED_RETURNS);
+  const [rows, setRows] = usePersistedState<PurchaseReturn[]>("purchase-return-rows", SEED_RETURNS);
 
   const nextId = `RT-${new Date().getFullYear()}-${String(rows.length + 15).padStart(4, "0")}`;
 

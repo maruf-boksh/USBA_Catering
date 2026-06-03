@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
@@ -16,7 +17,7 @@ import { airlines as SEED, type Airline } from "@/lib/sample-data";
 const COUNTRIES = ["Bangladesh", "India", "United Arab Emirates", "Qatar", "Singapore", "Thailand", "Malaysia", "Saudi Arabia", "United Kingdom"];
 
 export default function ConfigAirlinePage() {
-  const [rows, setRows] = useState<Airline[]>(SEED);
+  const [rows, setRows] = usePersistedState<Airline[]>("config-airline-rows", SEED);
   const [view, setView] = useState<"list" | "create">("list");
 
   const toggle = (id: string) =>

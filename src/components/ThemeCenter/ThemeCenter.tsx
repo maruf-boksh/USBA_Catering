@@ -849,10 +849,10 @@ export function ThemeCenter() {
               <div className="tc-label" style={{ color: textMuted }}>Preview</div>
               <div style={{ fontFamily: FONTS.find(f => f.value === fontFamily)?.stack }}>
                 <div style={{ fontSize: 17, fontWeight: 800, color: textPrimary, lineHeight: 1.25, marginBottom: 6, letterSpacing: '-0.01em' }}>
-                  Smart HRM Platform
+                  Flight Catering Platform
                 </div>
                 <div style={{ fontSize: 12, color: textSecondary, lineHeight: 1.65, marginBottom: 12 }}>
-                  Manage your workforce with ease. Track performance, process payroll, and streamline HR operations.
+                  Plan meals across every route. Track production, manage inventory, and streamline dispatch operations.
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   <span style={{

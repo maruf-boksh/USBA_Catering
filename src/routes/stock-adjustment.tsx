@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { StatusBadge } from "@/components/common/StatusBadge";
@@ -73,7 +74,7 @@ const REASONS: AdjReason[] = [
 ];
 
 export default function StockAdjustment() {
-  const [adjustments, setAdjustments] = useState<Adjustment[]>(INITIAL_ADJUSTMENTS);
+  const [adjustments, setAdjustments] = usePersistedState<Adjustment[]>("stock-adjustments", INITIAL_ADJUSTMENTS);
   const [newOpen, setNewOpen] = useState(false);
   const [newItem, setNewItem] = useState("");
   const [newQty, setNewQty] = useState("");

@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { StatusBadge } from "@/components/common/StatusBadge";
@@ -60,7 +61,7 @@ export default function CookingTemp() {
   useArrivalFlash();
   const { role } = useRole();
   const { productionEntries, updateProductionEntryStatus, applyStockDeltas } = useWorkflow();
-  const [records, setRecords] = useState<T[]>(
+  const [records, setRecords] = usePersistedState<T[]>("cooking-temp-records", () =>
     cookingTempLogs.map(r => ({ ...r, date: "2026-05-22" }))
   );
 
@@ -499,6 +500,7 @@ export default function CookingTemp() {
           title="cooking-temp"
           data={filteredRecords}
           columns={cols}
+          selectable={false}
           searchKeys={["id", "batch", "item", "cookedBy", "checkedBy"]}
           actions={(row) => (
             <Button size="sm" variant="outline" onClick={() => setViewRecord(row)}>

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
@@ -20,7 +21,7 @@ const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
 export default function ConfigOfficePage() {
-  const [rows, setRows] = useState<Office[]>(SEED);
+  const [rows, setRows] = usePersistedState<Office[]>("config-office-rows", SEED);
   const [view, setView] = useState<"list" | "create">("list");
 
   const toggle = (id: string) =>

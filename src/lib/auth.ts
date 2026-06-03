@@ -5,8 +5,6 @@ export type AuthUser = {
   name: string;
   email: string;
   role: string;
-  department?: string;
-  empId?: string;
 };
 
 export function getAuthUser(): AuthUser | null {
@@ -43,8 +41,6 @@ export const DEMO_USERS: ReadonlyArray<{ userId: string; password: string; user:
       name: "R. Hossain",
       email: "md.hossain@usbair.com",
       role: "GM/Admin",
-      department: "Flight Catering Management",
-      empId: "EMP-1001",
     },
   },
   {
@@ -55,8 +51,6 @@ export const DEMO_USERS: ReadonlyArray<{ userId: string; password: string; user:
       name: "S. Karim",
       email: "s.karim@usbair.com",
       role: "Operations Manager",
-      department: "Operations",
-      empId: "EMP-1042",
     },
   },
   {
@@ -67,8 +61,6 @@ export const DEMO_USERS: ReadonlyArray<{ userId: string; password: string; user:
       name: "F. Ahmed",
       email: "f.ahmed@usbair.com",
       role: "Head Chef",
-      department: "Production Kitchen",
-      empId: "EMP-1077",
     },
   },
 ];

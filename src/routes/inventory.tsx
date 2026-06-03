@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { useState, useSyncExternalStore, useMemo } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { StatusBadge } from "@/components/common/StatusBadge";
@@ -93,7 +94,7 @@ export default function Inventory() {
   const { role } = useRole();
   const navigate = useNavigate();
   // Backfill existing inventory rows with default Office + Central Warehouse
-  const [items, setItems] = useState<Item[]>(
+  const [items, setItems] = usePersistedState<Item[]>("inventory-items", () =>
     inventory.map((i) => {
       const profile = findItemProfileFor(i);
       return {

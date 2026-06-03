@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Button } from "@/components/ui/button";
@@ -35,7 +36,7 @@ const selectCls =
 
 export default function EquipmentMaintenancePage() {
   const [view, setView] = useState<"list" | "create">("list");
-  const [assets, setAssets] = useState<EquipmentAsset[]>(SEED_ASSETS);
+  const [assets, setAssets] = usePersistedState<EquipmentAsset[]>("equipment-maintenance-assets", SEED_ASSETS);
   const [logs, setLogs] = useState<MaintenanceLog[]>([]);
 
   const nextLogId = useMemo(

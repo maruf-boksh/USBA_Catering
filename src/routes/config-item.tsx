@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { useMemo, useState, useSyncExternalStore } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
@@ -62,7 +63,7 @@ const selectCls =
 
 
 export default function ConfigItemPage() {
-  const [rows, setRows] = useState<ItemRow[]>(MASTER_ITEMS);
+  const [rows, setRows] = usePersistedState<ItemRow[]>("config-item-rows", MASTER_ITEMS);
   const [view, setView] = useState<"list" | "create">("list");
   const [tab, setTab] = useState<"items" | "category">("items");
   const [openingOpen, setOpeningOpen] = useState(false);

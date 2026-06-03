@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
@@ -60,7 +61,7 @@ function initials(name: string) {
 }
 
 export default function UserManagementPage() {
-  const [rows, setRows] = useState<UserRow[]>(SEED);
+  const [rows, setRows] = usePersistedState<UserRow[]>("users-rows", SEED);
   const [view, setView] = useState<"list" | "create">("list");
 
   const toggle = (id: string) =>

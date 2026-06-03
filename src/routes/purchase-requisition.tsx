@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { StatusBadge } from "@/components/common/StatusBadge";
@@ -179,7 +180,7 @@ type PRPrefill = {
 export default function PurchaseRequisitionPage() {
   useArrivalFlash();
   const { wfRequisitions, updateRequisition } = useWorkflow();
-  const [requisitions, setRequisitions] = useState<PurchaseRequisition[]>(seedRequisitions);
+  const [requisitions, setRequisitions] = usePersistedState<PurchaseRequisition[]>("purchase-requisitions", seedRequisitions);
   const [view, setView] = useState<"list" | "create">("list");
   const [selected, setSelected] = useState<PurchaseRequisition | null>(null);
   const [editing, setEditing] = useState<PurchaseRequisition | null>(null);

@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { useNavigate } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -312,13 +313,13 @@ export default function Dispatch() {
   const { applyStockDeltas, productionEntries, qcClearedFlights } = useWorkflow();
   const flightOrders = useFlightOrders();
   // ── Dispatch records state ──────────────────────────────────────────────────
-  const [records, setRecords] = useState<DispatchRecord[]>(INITIAL_RECORDS);
+  const [records, setRecords] = usePersistedState<DispatchRecord[]>("dispatch-records", INITIAL_RECORDS);
   const [configuredFlights, setConfiguredFlights] = useState<Set<string>>(
     new Set(INITIAL_RECORDS.flatMap((r) => r.flightNos))
   );
 
   // ── Packaging pipeline state ────────────────────────────────────────────────
-  const [packagingRows, setPackagingRows] = useState<PackagingRow[]>(INITIAL_PACKAGING_ROWS);
+  const [packagingRows, setPackagingRows] = usePersistedState<PackagingRow[]>("dispatch-packaging-rows", INITIAL_PACKAGING_ROWS);
   const [flightQCStates, setFlightQCStates] = useState<Map<string, FlightQCData>>(
     new Map([["BS-101", { qcState: "done", qcCheckedAt: "08:00 AM" }]])
   );

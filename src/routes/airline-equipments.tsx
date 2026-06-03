@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { StatusBadge } from "@/components/common/StatusBadge";
@@ -32,7 +33,7 @@ const selectCls =
 
 export default function EquipmentAssetsPage() {
   const [view, setView] = useState<"list" | "create">("list");
-  const [assets, setAssets] = useState<EquipmentAsset[]>(SEED_ASSETS);
+  const [assets, setAssets] = usePersistedState<EquipmentAsset[]>("airline-equipments-assets", SEED_ASSETS);
 
   const nextId = useMemo(() => `EQP-NEW-${String(assets.length + 1).padStart(3, "0")}`, [assets]);
 

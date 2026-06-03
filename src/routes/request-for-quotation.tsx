@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -96,7 +97,7 @@ const selectCls =
 
 export default function RfqPage() {
   const [view, setView] = useState<"list" | "create">("list");
-  const [rows, setRows] = useState<Rfq[]>(SEED_RFQS);
+  const [rows, setRows] = usePersistedState<Rfq[]>("request-for-quotation-rows", SEED_RFQS);
 
   const nextId = `RFQ-${new Date().getFullYear()}-${String(rows.length + 43).padStart(4, "0")}`;
 

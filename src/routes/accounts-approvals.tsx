@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -81,7 +82,7 @@ export default function PaymentApprovals() {
   const wf = useWorkflow();
   const { wfPurchaseOrders, updatePOStatus, updateRequisitionStatus } = wf;
 
-  const [invoices, setInvoices] = useState<Invoice[]>(INITIAL_INVOICES);
+  const [invoices, setInvoices] = usePersistedState<Invoice[]>("accounts-approvals-invoices", INITIAL_INVOICES);
   const [rejectOpen, setRejectOpen] = useState(false);
   const [selected, setSelected] = useState<Invoice | null>(null);
   const [rejectReason, setRejectReason] = useState("");

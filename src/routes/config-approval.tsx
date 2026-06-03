@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
@@ -94,7 +95,7 @@ const SEED: Workflow[] = [
 ];
 
 export default function ConfigApprovalPage() {
-  const [rows, setRows] = useState<Workflow[]>(SEED);
+  const [rows, setRows] = usePersistedState<Workflow[]>("config-approval-rows", SEED);
   const [view, setView] = useState<"list" | "form">("list");
   const [editing, setEditing] = useState<Workflow | null>(null);
   const [viewing, setViewing] = useState<Workflow | null>(null);

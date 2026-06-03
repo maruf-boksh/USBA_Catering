@@ -1,4 +1,5 @@
 import { useState, type ComponentType, type ReactNode } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,7 +26,7 @@ const DEFAULT_COMPANY = {
 };
 
 export default function ConfigCompanyPage() {
-  const [c, setC] = useState(DEFAULT_COMPANY);
+  const [c, setC] = usePersistedState("config-company", DEFAULT_COMPANY);
 
   const set = <K extends keyof typeof DEFAULT_COMPANY>(k: K, v: (typeof DEFAULT_COMPANY)[K]) =>
     setC((prev) => ({ ...prev, [k]: v }));

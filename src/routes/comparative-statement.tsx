@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -112,7 +113,7 @@ const SEED_CS: ComparativeStatement[] = [
 
 export default function ComparativeStatementPage() {
   const [view, setView] = useState<"list" | "create">("list");
-  const [rows, setRows] = useState<ComparativeStatement[]>(SEED_CS);
+  const [rows, setRows] = usePersistedState<ComparativeStatement[]>("comparative-statement-rows", SEED_CS);
 
   const nextId = `CS-${new Date().getFullYear()}-${String(rows.length + 22).padStart(4, "0")}`;
 

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
@@ -47,7 +48,7 @@ const SEED: Supplier[] = [
 ];
 
 export default function ConfigSupplierPage() {
-  const [rows, setRows] = useState<Supplier[]>(SEED);
+  const [rows, setRows] = usePersistedState<Supplier[]>("config-supplier-rows", SEED);
   const [view, setView] = useState<"list" | "create" | "bulk">("list");
 
   const toggle = (id: string) =>

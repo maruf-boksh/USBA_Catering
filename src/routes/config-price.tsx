@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
@@ -53,7 +54,7 @@ const SEED: Price[] = [
 ];
 
 export default function ConfigPricePage() {
-  const [rows, setRows] = useState<Price[]>(SEED);
+  const [rows, setRows] = usePersistedState<Price[]>("config-price-rows", SEED);
   const [view, setView] = useState<"list" | "create" | "bulk">("list");
 
   const add = (p: Price) => { setRows((prev) => [p, ...prev]); setView("list"); };

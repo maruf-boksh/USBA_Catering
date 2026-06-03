@@ -10,15 +10,41 @@ import {
 // AND the dashboard's "Active Orders" panel (and any other surface that needs
 // to react to order create / edit / status-advance events).
 //
-// In-memory only (session-scoped). The seeded data is huge (~3k rows after
-// the procedural generator) and we don't want to bloat localStorage; users
-// who add orders in this session will see them everywhere, and a refresh
-// restarts from the seed snapshot.
+// The seeded data is huge (~3k rows after the procedural generator) so we do
+// NOT persist the whole list to localStorage. Instead we persist only the
+// delta — orders the user creates this session — and merge them on top of the
+// seed on load. This keeps created orders alive across reloads without bloating
+// storage. (Status/edit changes to those created orders are persisted too,
+// since the delta is recomputed from the live list on every mutation.)
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type FlightOrder = FlightOrderRow;
 
-let current: FlightOrder[] = [...seedFlightOrders];
+const ADDED_KEY = "harvest-data-v1:flight-orders-added";
+
+function loadAddedOrders(): FlightOrder[] {
+  try {
+    const raw = window.localStorage.getItem(ADDED_KEY);
+    if (raw) return JSON.parse(raw) as FlightOrder[];
+  } catch {
+    /* unavailable / corrupt — start empty */
+  }
+  return [];
+}
+
+function saveAddedOrders() {
+  try {
+    const added = current.filter((o) => addedIds.has(o.id));
+    window.localStorage.setItem(ADDED_KEY, JSON.stringify(added));
+  } catch {
+    /* quota / serialization errors are non-fatal */
+  }
+}
+
+const persistedAdded = loadAddedOrders();
+const addedIds = new Set<string>(persistedAdded.map((o) => o.id));
+// Persisted creates take precedence over (and sit above) the seed snapshot.
+let current: FlightOrder[] = [...persistedAdded, ...seedFlightOrders];
 const listeners = new Set<() => void>();
 
 function notify() {
@@ -31,12 +57,15 @@ export function getFlightOrders(): FlightOrder[] {
 
 export function setFlightOrders(next: FlightOrder[]) {
   current = next;
+  saveAddedOrders();
   notify();
 }
 
 /** Prepends new orders (UI convention: newest first). */
 export function addFlightOrders(orders: FlightOrder[]) {
+  for (const o of orders) addedIds.add(o.id);
   current = [...orders, ...current];
+  saveAddedOrders();
   notify();
 }
 
@@ -50,6 +79,7 @@ export function updateFlightOrder(id: string, patch: Partial<FlightOrder>) {
   });
   if (changed) {
     current = next;
+    if (addedIds.has(id)) saveAddedOrders();
     notify();
   }
 }
@@ -74,6 +104,7 @@ export function updateFlightOrdersWhere(
   });
   if (changedCount > 0) {
     current = next;
+    saveAddedOrders();
     notify();
   }
   return changedCount;

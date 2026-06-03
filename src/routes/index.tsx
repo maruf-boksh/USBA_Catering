@@ -529,7 +529,7 @@ function getInitials(name: string): string {
 /**
  * Personalised dashboard greeting banner — replaces the static module title.
  * Shows the signed-in user's avatar initials, a live date/time, a time-of-day
- * greeting, and their role · department · employee-id. Period/export controls
+ * greeting, and their role. Period/export controls
  * are passed through as `actions` so they keep their place on the right.
  */
 function DashboardGreeting({ actions }: { actions?: ReactNode }) {
@@ -545,7 +545,7 @@ function DashboardGreeting({ actions }: { actions?: ReactNode }) {
   const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
   const dateStr = now.toLocaleDateString("en-GB", { weekday: "long", day: "2-digit", month: "long", year: "numeric" });
   const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
-  const subParts = [user?.role, user?.department, user?.empId].filter(Boolean) as string[];
+  const subParts = [user?.role].filter(Boolean) as string[];
 
   return (
     <div
@@ -602,6 +602,32 @@ export default function Dashboard() {
   const [period, setPeriod] = useState<Period>("today");
   const [range, setRange] = useState<DateRange | null>(null);
   const data = useDashboardKpis(period, range ?? undefined);
+
+  // Show the post-login welcome message once, handed off from the sign-in flow.
+  // Deferred via setTimeout so the <Toaster> in the shell has subscribed to sonner's
+  // store before we fire — firing during mount races (and loses) the subscription.
+  useEffect(() => {
+    const id = setTimeout(() => {
+      let payload: { name?: string; role?: string } | null = null;
+      try {
+        const raw = sessionStorage.getItem("welcome-toast");
+        if (raw) {
+          payload = JSON.parse(raw);
+          sessionStorage.removeItem("welcome-toast");
+        }
+      } catch {
+        /* ignore storage errors */
+      }
+      if (payload?.name) {
+        const role = payload.role ?? "";
+        toast.success(`Welcome back, ${payload.name}! 👋`, {
+          description: role ? `Signed in as ${role}.` : undefined,
+          duration: 5000,
+        });
+      }
+    }, 120);
+    return () => clearTimeout(id);
+  }, []);
 
   const periodLabel =
     period === "today" ? "Today's"

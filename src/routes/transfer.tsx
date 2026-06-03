@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
@@ -167,7 +168,7 @@ function wfTransferNoteToTransfer(wf: WfTransferNote): Transfer {
 export default function TransferPage() {
   useArrivalFlash();
   const { transferNotes } = useWorkflow();
-  const [rows, setRows] = useState<Transfer[]>(SEED);
+  const [rows, setRows] = usePersistedState<Transfer[]>("transfer-rows", SEED);
   const [view, setView] = useState<"list" | "create">("list");
   const [actionTransfer, setActionTransfer] = useState<Transfer | null>(null);
   const [actionMode, setActionMode] = useState<ActionMode>("receive");

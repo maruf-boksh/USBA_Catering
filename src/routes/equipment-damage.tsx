@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { StatusBadge } from "@/components/common/StatusBadge";
@@ -29,7 +30,7 @@ const selectCls =
 
 export default function EquipmentDamagePage() {
   const [view, setView] = useState<"list" | "create">("list");
-  const [reports, setReports] = useState<DamageReport[]>(SEED_REPORTS);
+  const [reports, setReports] = usePersistedState<DamageReport[]>("equipment-damage-reports", SEED_REPORTS);
 
   const nextId = `DR-${String(2200 + reports.length + 1).padStart(4, "0")}`;
 

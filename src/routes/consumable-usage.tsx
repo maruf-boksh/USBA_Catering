@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Button } from "@/components/ui/button";
@@ -24,7 +25,7 @@ const selectCls =
 
 export default function ConsumableUsagePage() {
   const [view, setView] = useState<"list" | "create">("list");
-  const [usage, setUsage] = useState<ConsumableUsage[]>(SEED_USAGE);
+  const [usage, setUsage] = usePersistedState<ConsumableUsage[]>("consumable-usage", SEED_USAGE);
 
   const nextId = `CU-${String(9000 + usage.length + 1).padStart(4, "0")}`;
 

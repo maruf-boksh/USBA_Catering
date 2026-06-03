@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -70,7 +71,7 @@ const COLS: { key: keyof Invoice; label: string }[] = [
 ];
 
 export default function InvoicesPayments() {
-  const [invoices, setInvoices] = useState<Invoice[]>(INITIAL_INVOICES);
+  const [invoices, setInvoices] = usePersistedState<Invoice[]>("accounts-invoices", INITIAL_INVOICES);
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<keyof Invoice>("date");
   const [sortDesc, setSortDesc] = useState(true);

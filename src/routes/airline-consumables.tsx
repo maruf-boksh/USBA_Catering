@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { StatusBadge } from "@/components/common/StatusBadge";
@@ -34,7 +35,7 @@ function computeStatus(stock: number, reorder: number): "OK" | "Low" | "Critical
 
 export default function ConsumableInventoryPage() {
   const [view, setView] = useState<"list" | "create">("list");
-  const [items, setItems] = useState<ConsumableItem[]>(consumableItems);
+  const [items, setItems] = usePersistedState<ConsumableItem[]>("airline-consumables-items", consumableItems);
 
   const nextId = `CNS-${String(items.length + 1).padStart(3, "0")}`;
 

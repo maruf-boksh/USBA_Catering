@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
@@ -95,7 +96,7 @@ const SEED: TransferRequest[] = [
 ];
 
 export default function TransferRequestPage() {
-  const [rows, setRows] = useState<TransferRequest[]>(SEED);
+  const [rows, setRows] = usePersistedState<TransferRequest[]>("transfer-request-rows", SEED);
   const [view, setView] = useState<"list" | "create">("list");
 
   const add = (tr: TransferRequest) => { setRows((p) => [tr, ...p]); setView("list"); };

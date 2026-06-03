@@ -129,38 +129,38 @@ export default function ConfigAccessControlPage() {
                         {admin ? "All" : `${vp}/${totalPages}`}
                       </TableCell>
                       <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                        <div className="inline-flex items-center gap-1.5 justify-end">
+                        <div className="inline-flex items-center gap-1 justify-end">
                           <Button
                             size="sm"
                             variant="outline"
-                            className="h-7 w-7 p-0"
+                            className="h-6 w-6 p-0"
                             title="Manage permissions"
                             aria-label="Manage permissions"
                             onClick={() => openPermissions(r)}
                           >
-                            <ShieldCheck className="h-3.5 w-3.5" />
+                            <ShieldCheck className="h-3 w-3" />
                           </Button>
                           {!isRoot && (
                             <>
                               <Button
                                 size="sm"
                                 variant="outline"
-                                className="h-7 w-7 p-0"
+                                className="h-6 w-6 p-0"
                                 title="Rename role"
                                 aria-label="Rename role"
                                 onClick={() => setRoleDialog({ mode: "rename", value: r, target: r })}
                               >
-                                <Pencil className="h-3.5 w-3.5" />
+                                <Pencil className="h-3 w-3" />
                               </Button>
                               <Button
                                 size="sm"
                                 variant="outline"
-                                className="h-7 w-7 p-0 text-destructive"
+                                className="h-6 w-6 p-0 text-destructive"
                                 title="Delete role"
                                 aria-label="Delete role"
                                 onClick={() => setDeleteTarget(r)}
                               >
-                                <Trash2 className="h-3.5 w-3.5" />
+                                <Trash2 className="h-3 w-3" />
                               </Button>
                             </>
                           )}

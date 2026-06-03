@@ -250,7 +250,20 @@ function RightPanel() {
     setTimeout(() => {
       setAuthUser(user);
       setLoading(false);
-      toast.success(`Welcome back, ${user.name}!`);
+      // Hand the welcome message off to the dashboard: the <Toaster> that should
+      // display it lives in the authenticated shell, which isn't mounted yet.
+      // Firing here would be lost, so stash it and let the dashboard show it on mount.
+      try {
+        sessionStorage.setItem(
+          "welcome-toast",
+          JSON.stringify({
+            name: user.name,
+            role: user.role,
+          }),
+        );
+      } catch {
+        /* ignore storage errors */
+      }
       navigate("/");
     }, 700);
   }

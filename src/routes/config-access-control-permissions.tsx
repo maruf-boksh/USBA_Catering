@@ -157,11 +157,11 @@ export default function ConfigAccessControlPermissionsPage() {
               <Switch checked={isAdmin} disabled={isRoot} onCheckedChange={onToggleAdmin} />
               <span className="whitespace-nowrap">Administrator <span className="text-muted-foreground">(full access)</span></span>
             </label>
-            <Button variant="outline" onClick={() => setRole(role)} title="Switch the app to this role to preview its access live">
-              <Eye className="h-4 w-4 mr-1.5" /> Preview as {role}
+            <Button size="icon" className="hc-cta" onClick={() => setRole(role)} title={`Preview as ${role}`} aria-label={`Preview as ${role}`}>
+              <Eye className="h-4 w-4" />
             </Button>
-            <Button variant="outline" onClick={backToRoles}>
-              <ArrowLeft className="h-4 w-4 mr-1.5" /> Back to roles
+            <Button size="icon" className="hc-cta" onClick={backToRoles} title="Back to roles" aria-label="Back to roles">
+              <ArrowLeft className="h-4 w-4" />
             </Button>
           </div>
         }
@@ -190,10 +190,10 @@ export default function ConfigAccessControlPermissionsPage() {
               <strong className="text-foreground">{role}</strong>
             </div>
             <div className="flex items-center gap-2">
-              <Button size="sm" variant="outline" onClick={() => grantAllPages(role, ["view"])}><CheckCheck className="h-4 w-4 mr-1.5" /> View all</Button>
-              <Button size="sm" variant="outline" onClick={() => grantAllPages(role, [...ACTIONS])}><CheckCheck className="h-4 w-4 mr-1.5" /> Full CRUD all</Button>
-              <Button size="sm" variant="outline" onClick={() => clearRole(role)}><Square className="h-4 w-4 mr-1.5" /> Clear</Button>
-              <Button size="sm" variant="outline" onClick={() => { resetRoleToDefaults(role); toast.success(`Reset "${role}" to defaults.`); }}><RotateCcw className="h-4 w-4 mr-1.5" /> Defaults</Button>
+              <Button size="icon" className="hc-cta" onClick={() => grantAllPages(role, ["view"])} title="View all" aria-label="Grant view on all pages"><CheckCheck className="h-4 w-4" /></Button>
+              <Button size="icon" className="hc-cta" onClick={() => grantAllPages(role, [...ACTIONS])} title="Full CRUD all" aria-label="Grant full CRUD on all pages"><ShieldCheck className="h-4 w-4" /></Button>
+              <Button size="icon" className="hc-cta" onClick={() => clearRole(role)} title="Clear" aria-label="Clear all permissions"><Square className="h-4 w-4" /></Button>
+              <Button size="icon" className="hc-cta" onClick={() => { resetRoleToDefaults(role); toast.success(`Reset "${role}" to defaults.`); }} title="Defaults" aria-label="Reset to defaults"><RotateCcw className="h-4 w-4" /></Button>
             </div>
           </div>
 

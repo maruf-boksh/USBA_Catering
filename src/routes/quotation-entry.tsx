@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -111,7 +112,7 @@ const selectCls =
 
 export default function QuotationEntryPage() {
   const [view, setView] = useState<"list" | "create">("list");
-  const [rows, setRows] = useState<Quotation[]>(SEED_QUOTATIONS);
+  const [rows, setRows] = usePersistedState<Quotation[]>("quotation-entry-rows", SEED_QUOTATIONS);
 
   const nextId = `QT-${new Date().getFullYear()}-${String(rows.length + 92).padStart(4, "0")}`;
 
