@@ -1,4 +1,4 @@
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -361,8 +361,25 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
   );
 }
 
+type MealOrderConfirmation = {
+  timestamp: string;
+  totalFlights: number;
+  totalMeals: number;
+  tomorrowDayName: string;
+  dayAfterDayName: string;
+  dayAfterDateStr: string;
+  validIntl: { bcMeal?: number; ecMeal?: number; chml?: number; vgml?: number; etd?: string; airline?: string; zenLoad?: number; pax?: number; flight?: string; sector?: string }[];
+  validDom: { etd?: string; airline?: string; zenLoad?: number; pax?: number; flight?: string; sector?: string }[];
+  dayAfterMenu?: {
+    intl: { depMealName: string; depChmlName: string; retMealName: string; retVgmlName: string };
+    dom: { usbaBreakfastName: string; usbaLunchName: string; aaaBreakfastName: string; aaaLunchName: string; crewSnackName: string; crewLunchName: string; crewDinnerName: string };
+  };
+};
+
 export default function ProductionEntryPage() {
   useArrivalFlash();
+  const location = useLocation();
+  const mealOrderConfirmation = (location.state as { mealOrderConfirmation?: MealOrderConfirmation } | null)?.mealOrderConfirmation ?? null;
   const {
     productionEntries, addProductionEntry, mrpRuns,
     demands, addDemands, addMrpRun,
@@ -378,6 +395,26 @@ export default function ProductionEntryPage() {
     ),
     [flightOrders],
   );
+  const dayAfterComputed = useMemo(() => {
+    if (!mealOrderConfirmation) return null;
+    const { validIntl, validDom } = mealOrderConfirmation;
+    const depMeal = validIntl.reduce((s, r) => s + (r.bcMeal ?? 0) + (r.ecMeal ?? 0), 0);
+    const chml = validIntl.reduce((s, r) => s + (r.chml ?? 0), 0);
+    const vgml = validIntl.reduce((s, r) => s + (r.vgml ?? 0), 0);
+    const usbaRows = validDom.filter((r) => (r.airline ?? "").toLowerCase().includes("bangla"));
+    const aaaRows = validDom.filter((r) => (r.airline ?? "").toLowerCase().includes("astra"));
+    const usbaZenith = usbaRows.reduce((s, r) => s + (r.zenLoad ?? r.pax ?? 0), 0);
+    const usbaPax = usbaRows.reduce((s, r) => s + (r.pax ?? 0), 0);
+    const usbaBreakfast = usbaRows.filter((r) => (r.etd ?? "") <= "10:30").reduce((s, r) => s + (r.pax ?? 0), 0);
+    const usbaLunch = usbaRows.filter((r) => (r.etd ?? "") > "10:30").reduce((s, r) => s + (r.pax ?? 0), 0);
+    const aaaZenith = aaaRows.reduce((s, r) => s + (r.zenLoad ?? r.pax ?? 0), 0);
+    const aaaPax = aaaRows.reduce((s, r) => s + (r.pax ?? 0), 0);
+    return {
+      depMeal, chml, vgml, grandTotal: depMeal + chml + vgml,
+      usbaZenith, usbaPax, usbaBreakfast, usbaLunch,
+      aaaZenith, aaaPax, totalZenith: usbaZenith + aaaZenith,
+    };
+  }, [mealOrderConfirmation]);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [selectedForwardedDate, setSelectedForwardedDate] = useState(
     forwardedOrders[0]?.date ?? "",
@@ -700,42 +737,186 @@ export default function ProductionEntryPage() {
 
       {view === "list" ? (
         <>
-          <div className="mb-6 rounded-lg border border-success/30 bg-success/10 px-5 py-4">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div>
-                <div className="text-xs font-semibold uppercase tracking-wider text-success">
-                  Forwarded from Order Management
+          {mealOrderConfirmation ? (
+            <>
+              {/* Green banner — Meal Order for 24 Hours generated */}
+              <div className="mb-4 rounded-lg border border-success/40 bg-success/5 px-4 py-3 flex items-center gap-3">
+                <CheckCircle2 className="h-5 w-5 text-success flex-shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-semibold text-foreground">
+                    Meal Order for Next 24 Hours ({mealOrderConfirmation.tomorrowDayName}) has been generated
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    GM/Admin · {mealOrderConfirmation.timestamp} · {mealOrderConfirmation.totalFlights} flight{mealOrderConfirmation.totalFlights !== 1 ? "s" : ""} · {mealOrderConfirmation.totalMeals.toLocaleString()} meals
+                  </p>
                 </div>
-                <div className="mt-1 text-sm text-foreground">
-                  <span className="font-bold">{forwardedOrders.length}</span>{" "}
-                  date{forwardedOrders.length === 1 ? "" : "s"} pending ·{" "}
-                  <span className="font-bold text-success">
-                    {totalMealsFromOrders.toLocaleString()}
-                  </span>{" "}
-                  meals
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <select
-                  value={selectedForwardedDate}
-                  onChange={(e) => setSelectedForwardedDate(e.target.value)}
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                >
-                  {forwardedOrders.map((f) => (
-                    <option key={f.date} value={f.date}>
-                      {f.date} — {f.totalMeals.toLocaleString()} meals
-                    </option>
-                  ))}
-                </select>
                 <Button
-                  className="bg-success text-success-foreground hover:bg-success/90"
+                  className="bg-success text-success-foreground hover:bg-success/90 shrink-0"
+                  size="sm"
                   onClick={() => setDetailsOpen(true)}
                 >
                   View Details
                 </Button>
               </div>
+              {/* Amber blinking banner — Day After Tomorrow */}
+              <div
+                className="mb-6 rounded-lg border border-amber-300 p-4"
+                style={{ animation: "amber-banner-blink 2s ease-in-out infinite" }}
+              >
+                <style>{`@keyframes amber-banner-blink { 0%, 100% { background-color: rgb(255 251 235); } 50% { background-color: rgb(254 240 138); } }`}</style>
+                <div className="flex items-start gap-4 flex-wrap mb-4">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <span className="relative flex-shrink-0 h-3 w-3 mt-0.5">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
+                      <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500" />
+                    </span>
+                    <div>
+                      <div className="text-sm font-semibold text-amber-900">
+                        Meal Order — Day After Tomorrow ({mealOrderConfirmation.dayAfterDayName}, {mealOrderConfirmation.dayAfterDateStr})
+                      </div>
+                      <div className="text-xs text-amber-700 mt-0.5">
+                        Draft ready · Order Meal will be available after current 24 hours pass
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="rounded-lg border border-navy/20 bg-navy/5 p-4 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-semibold uppercase tracking-wider text-navy">International</h4>
+                      <Button variant="outline" size="sm" className="text-xs">Edit Menu</Button>
+                    </div>
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Departure</div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Total Departure Meal</span>
+                        <span className="font-medium tabular-nums">{dayAfterComputed?.depMeal ?? 0}</span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Departure CHML</span>
+                        <span className="font-medium tabular-nums">{dayAfterComputed?.chml ?? 0}</span>
+                      </div>
+                      <div className="flex justify-between text-sm font-semibold border-t border-navy/20 pt-1">
+                        <span>Departure Total</span>
+                        <span className="tabular-nums">{(dayAfterComputed?.depMeal ?? 0) + (dayAfterComputed?.chml ?? 0)}</span>
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Return</div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Return VGML</span>
+                        <span className="font-medium tabular-nums">{dayAfterComputed?.vgml ?? 0}</span>
+                      </div>
+                      <div className="flex justify-between text-sm font-semibold border-t border-navy/20 pt-1">
+                        <span>Return Total</span>
+                        <span className="tabular-nums">{dayAfterComputed?.vgml ?? 0}</span>
+                      </div>
+                    </div>
+                    <div className="flex justify-between text-sm font-bold border-t-2 border-navy/30 pt-2 mt-1">
+                      <span>Total Meal (Departure+Return)</span>
+                      <span className="tabular-nums">{dayAfterComputed?.grandTotal ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between text-sm pt-2 border-t border-navy/10 mt-1">
+                      <span className="text-muted-foreground">Total Passenger Meal</span>
+                      <span className="font-medium tabular-nums">{(dayAfterComputed?.grandTotal ?? 0) + (dayAfterComputed?.usbaBreakfast ?? 0) + (dayAfterComputed?.usbaLunch ?? 0) + (dayAfterComputed?.aaaPax ?? 0)}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Total Crew Meal</span>
+                      <span className="font-medium tabular-nums">0</span>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-semibold uppercase tracking-wider text-primary">Domestic</h4>
+                      <Button variant="outline" size="sm" className="text-xs">Edit Menu</Button>
+                    </div>
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">US-Bangla</div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Zenith Load</span>
+                        <span className="font-medium tabular-nums">{dayAfterComputed?.usbaZenith ?? 0}</span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Pax Load</span>
+                        <span className="font-medium tabular-nums">{dayAfterComputed?.usbaPax ?? 0}</span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Breakfast</span>
+                        <span className="font-medium tabular-nums">{dayAfterComputed?.usbaBreakfast ?? 0}</span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Lunch</span>
+                        <span className="font-medium tabular-nums">{dayAfterComputed?.usbaLunch ?? 0}</span>
+                      </div>
+                    </div>
+                    <div className="space-y-1.5">
+                      <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Air Astra</div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Zenith Load</span>
+                        <span className="font-medium tabular-nums">{dayAfterComputed?.aaaZenith ?? 0}</span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Pax Load</span>
+                        <span className="font-medium tabular-nums">{dayAfterComputed?.aaaPax ?? 0}</span>
+                      </div>
+                    </div>
+                    <div className="flex justify-between text-sm font-semibold border-t border-primary/20 pt-2">
+                      <span>Total Zenith (USBA + Air Astra)</span>
+                      <span className="tabular-nums">{dayAfterComputed?.totalZenith ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between text-sm pt-2 border-t border-primary/10 mt-1">
+                      <span className="text-muted-foreground">Total Passenger Meal</span>
+                      <span className="font-medium tabular-nums">{(dayAfterComputed?.grandTotal ?? 0) + (dayAfterComputed?.usbaBreakfast ?? 0) + (dayAfterComputed?.usbaLunch ?? 0) + (dayAfterComputed?.aaaPax ?? 0)}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Total Crew Meal</span>
+                      <span className="font-medium tabular-nums">0</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="mt-4 text-[11px] text-amber-700 bg-amber-100/60 rounded px-3 py-2">
+                  Tag &amp; Forward to Production for {mealOrderConfirmation.dayAfterDayName} will become available once the current 24-hour window closes.
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="mb-6 rounded-lg border border-success/30 bg-success/10 px-5 py-4">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-success">
+                    Forwarded from Order Management
+                  </div>
+                  <div className="mt-1 text-sm text-foreground">
+                    <span className="font-bold">{forwardedOrders.length}</span>{" "}
+                    date{forwardedOrders.length === 1 ? "" : "s"} pending ·{" "}
+                    <span className="font-bold text-success">
+                      {totalMealsFromOrders.toLocaleString()}
+                    </span>{" "}
+                    meals
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    value={selectedForwardedDate}
+                    onChange={(e) => setSelectedForwardedDate(e.target.value)}
+                    className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    {forwardedOrders.map((f) => (
+                      <option key={f.date} value={f.date}>
+                        {f.date} — {f.totalMeals.toLocaleString()} meals
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    className="bg-success text-success-foreground hover:bg-success/90"
+                    onClick={() => setDetailsOpen(true)}
+                  >
+                    View Details
+                  </Button>
+                </div>
+              </div>
             </div>
-          </div>
+          )}
 
           <div className="mb-4">
             <LocationFilter

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import {
   Truck, Package, Plus, AlertTriangle, Bell, MoreHorizontal,
   Eye, Croissant, Pill, ChefHat, ShieldCheck, Download,
-  CheckCircle2,
+  CheckCircle2, ThermometerSun, PlaneLanding, User, Clock,
 } from "lucide-react";
 import { flights, meals } from "@/lib/sample-data";
 import { useFlightOrders, type FlightOrder } from "@/lib/flight-orders-store";
@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { useArrivalFlash } from "@/lib/arrival-flash";
 import { useWorkflow } from "@/lib/workflow-store";
@@ -109,6 +110,9 @@ type DispatchedFlightEntry = {
   dispatchedDate: string;
   dispatchedTime: string;
   recordId: string;
+  sections: FlightSection[];
+  dynamicItems: DynamicItem[];
+  airportReceived: boolean;
 };
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -327,6 +331,12 @@ export default function Dispatch() {
   const [viewPackagingRow, setViewPackagingRow]     = useState<PackagingRow | null>(null);
   const [dispatchedFlightEntries, setDispatchedFlightEntries] = useState<DispatchedFlightEntry[]>([]);
   const [viewDispatchedEntry, setViewDispatchedEntry] = useState<DispatchedFlightEntry | null>(null);
+
+  // ── Airport Receive dialog state ───────────────────────────────────────────
+  const [airportReceiveTarget, setAirportReceiveTarget] = useState<DispatchedFlightEntry | null>(null);
+  const [aptGateTemp, setAptGateTemp] = useState("");
+  const [aptUnloadTime, setAptUnloadTime] = useState("");
+  const [aptRemarks, setAptRemarks] = useState("");
 
   // ── New Dispatch Config modal ───────────────────────────────────────────────
   const [configOpen, setConfigOpen]         = useState(false);
@@ -575,7 +585,7 @@ export default function Dispatch() {
   // temperature/vehicle monitoring record straight away.
   const handleInitiateQC = (flight: string) => {
     handleQCAction(flight);
-    navigate(`/dispatch-monitoring?flight=${encodeURIComponent(flight)}`);
+    navigate(`/dispatch-monitoring?flight=${encodeURIComponent(flight)}&mode=qc-only`);
   };
 
   const openWarningForFlightGroup = (fg: FlightGroup) => {
@@ -822,6 +832,9 @@ export default function Dispatch() {
         dispatchedDate: dateStr,
         dispatchedTime: timeStr,
         recordId: dispatchingRecord.id,
+        sections: sections.filter((s) => s.flightNo === flight || dispatchingRecord.flightNos.length === 1),
+        dynamicItems: dynamicItems.filter((d) => d.name),
+        airportReceived: false,
       }));
       setDispatchedFlightEntries((prev) => [...prev, ...newEntries]);
       const dispatchedFlightSet = new Set(dispatchingRecord.flightNos);
@@ -839,7 +852,9 @@ export default function Dispatch() {
       setPackagingRows((prev) => prev.filter((r) => !dispatchedFlightSet.has(r.flight)));
     }
     setDispatched(true);
-    toast.success("Dispatch initiated successfully.");
+    toast.success("Dispatch initiated — awaiting airport receipt.");
+    setFormOpen(false);
+    setWarningOpen(false);
   };
 
   const handleNotify = () => {
@@ -1172,9 +1187,27 @@ export default function Dispatch() {
                     <td className="p-3 text-muted-foreground">{entry.date}</td>
                     <td className="p-3 text-right font-medium">{entry.totalQty}</td>
                     <td className="p-3">
-                      <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">
-                        Dispatched
-                      </span>
+                      {entry.airportReceived ? (
+                        <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">
+                          Airport Received
+                        </span>
+                      ) : (
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700">
+                            Awaiting Airport Receipt
+                          </span>
+                          <Button
+                            size="sm"
+                            className="h-6 px-2.5 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white border-0"
+                            onClick={() => {
+                              setAirportReceiveTarget(entry);
+                              setAptGateTemp(""); setAptUnloadTime(""); setAptRemarks("");
+                            }}
+                          >
+                            <PlaneLanding className="h-3 w-3 mr-1" /> Airport Receive
+                          </Button>
+                        </div>
+                      )}
                     </td>
                     <td className="p-3 text-sm">{entry.dispatchExecName}</td>
                     <td className="p-3 text-sm text-muted-foreground">
@@ -2040,17 +2073,13 @@ export default function Dispatch() {
             </div>
             <div className="flex gap-2">
               <Button variant="outline" onClick={() => setFormOpen(false)}>Close</Button>
-              {!dispatched ? (
+              {!dispatched && (
                 <Button
                   disabled={!declared}
                   className="bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-40"
                   onClick={handleDispatch}
                 >
-                  <Truck className="h-4 w-4 mr-1" /> Dispatch
-                </Button>
-              ) : (
-                <Button className="bg-blue-600 hover:bg-blue-700 text-white" onClick={() => setNotifyOpen(true)}>
-                  <Bell className="h-4 w-4 mr-1" /> Notify Airport Executive
+                  <Truck className="h-4 w-4 mr-1" /> Dispatch and Forward to Airport
                 </Button>
               )}
             </div>
@@ -2072,6 +2101,168 @@ export default function Dispatch() {
           <DialogFooter>
             <Button onClick={handleNotify}>Done</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Airport Receive Dialog ───────────────────────────────────────────── */}
+      <Dialog open={!!airportReceiveTarget} onOpenChange={(v) => !v && setAirportReceiveTarget(null)}>
+        <DialogContent className="w-full max-w-full sm:max-w-5xl max-h-[100vh] sm:max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
+          <div className="px-6 pt-4 pb-3 border-b shrink-0 bg-slate-50">
+            <DialogTitle className="text-base font-semibold flex items-center gap-2">
+              <PlaneLanding className="h-4 w-4 text-emerald-600" />
+              Airport Receipt — {airportReceiveTarget?.flight}
+            </DialogTitle>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              Catering point data (read-only) · Airport Point Receiving Entry
+            </p>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {airportReceiveTarget && (
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-0 divide-y xl:divide-y-0 xl:divide-x divide-border h-full">
+
+                {/* ── LEFT: Catering Point (read-only) ── */}
+                <div className="p-5 space-y-4 pointer-events-none opacity-70 select-none">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="h-2 w-2 rounded-full bg-blue-600" />
+                    <span className="text-xs font-bold uppercase tracking-widest text-blue-700">Catering Point Dispatch Entry</span>
+                    <span className="ml-auto text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">Read Only</span>
+                  </div>
+                  {airportReceiveTarget.sections.map((sec, i) => {
+                    const hotTotal = sec.paxLines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
+                    return (
+                      <div key={i} className="rounded-lg border border-slate-200 overflow-hidden text-sm">
+                        <div className="bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600 flex gap-4">
+                          <span>Flight: {sec.flightNo}</span>
+                          {sec.sector && <span>Sector: {sec.sector}</span>}
+                        </div>
+                        <div className="p-3 space-y-2">
+                          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">PAX Main Meal</div>
+                          {sec.paxLines.map((l, li) => (
+                            <div key={li} className="flex justify-between text-xs">
+                              <span className="text-slate-600">{l.itemName || "—"}</span>
+                              <span className="font-medium">{l.qty} ({l.percent}%)</span>
+                            </div>
+                          ))}
+                          <div className="flex justify-between text-xs border-t border-slate-100 pt-1 font-semibold">
+                            <span>Hot Meal Total</span><span>{hotTotal}</span>
+                          </div>
+                          <div className="flex gap-4 text-xs mt-1">
+                            <span>VGML: <strong>{sec.vgml}</strong></span>
+                            <span>CHML: <strong>{sec.chml}</strong></span>
+                            <span>SPML: <strong>{sec.spml}</strong></span>
+                          </div>
+                          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-2">Crew Meals</div>
+                          {sec.crewMeals.map((cm, ci) => (
+                            <div key={ci} className="flex justify-between text-xs">
+                              <span className="text-slate-600">{cm.type}</span>
+                              <span className="font-medium">{cm.qty}</span>
+                            </div>
+                          ))}
+                          <div className="flex gap-4 text-xs mt-1">
+                            <span>Pastry: <strong>{sec.pastry}</strong></span>
+                            <span>Child Meals: <strong>{sec.childMealsPastry}</strong></span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {airportReceiveTarget.dynamicItems.length > 0 && (
+                    <div className="rounded-lg border border-slate-200 overflow-hidden text-sm">
+                      <div className="bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600">Additional Items</div>
+                      <div className="p-3 space-y-1">
+                        {airportReceiveTarget.dynamicItems.map((item) => (
+                          <div key={item.id} className="flex justify-between text-xs">
+                            <span className="text-slate-600">{item.name}</span>
+                            <span className="font-medium">{item.qty}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* ── RIGHT: Airport Point Receiving Entry ── */}
+                <div className="p-5 space-y-4">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="h-2 w-2 rounded-full bg-emerald-600" />
+                    <span className="text-xs font-bold uppercase tracking-widest text-emerald-700">Airport Point Receiving Entry</span>
+                    <span className="ml-auto text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full">Gate No. 08</span>
+                  </div>
+                  <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-300 text-amber-800 text-xs font-semibold">
+                    <ThermometerSun className="h-4 w-4 text-amber-500 shrink-0" />
+                    Max. Temp. Limit: +8°C — Cold chain integrity must be maintained
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label className="text-xs">Gate 08 Temp (°C)</Label>
+                      <Input type="number" step="0.1" placeholder="e.g. 6.5" value={aptGateTemp}
+                        onChange={(e) => setAptGateTemp(e.target.value)}
+                        className={`mt-1 h-9 ${aptGateTemp !== "" && parseFloat(aptGateTemp) > 8 ? "border-red-400 bg-red-50" : ""}`} />
+                      <p className="text-[11px] text-blue-600/80 mt-0.5 italic">Max: +8°C at gate</p>
+                      {aptGateTemp !== "" && parseFloat(aptGateTemp) > 8 && (
+                        <p className="text-xs text-red-600 mt-0.5 font-semibold">⚠ Exceeds +8°C</p>
+                      )}
+                    </div>
+                    <div>
+                      <Label className="text-xs">Time of Unloading</Label>
+                      <Input type="time" value={aptUnloadTime} onChange={(e) => setAptUnloadTime(e.target.value)} className="mt-1 h-9" />
+                      <p className="text-[11px] text-blue-600/80 mt-0.5 italic">Time when unloading begins at gate</p>
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3.5">
+                    <p className="text-xs font-bold text-emerald-800 flex items-center gap-1.5 mb-2">
+                      <ShieldCheck className="h-3.5 w-3.5" /> Airport Receiving Protocol
+                    </p>
+                    <ul className="text-xs text-emerald-700 space-y-1">
+                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>Verify vehicle temperature at gate before unloading begins</li>
+                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>Check product seal integrity and packaging condition upon arrival</li>
+                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>Record unloading time accurately in the system</li>
+                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>APT executive must physically verify and countersign</li>
+                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>Any temperature breach must be escalated immediately</li>
+                    </ul>
+                  </div>
+                  <div className="rounded-lg bg-emerald-50/70 border border-emerald-200 p-3.5 space-y-3">
+                    <p className="text-[11px] text-emerald-700 font-bold flex items-center gap-1.5">
+                      <PlaneLanding className="h-3.5 w-3.5" /> Received By (Airport Catering)
+                    </p>
+                    <p className="text-[11px] text-slate-400 italic flex items-center gap-1">
+                      <User className="h-3 w-3" /> Name &amp; designation auto-filled by system
+                    </p>
+                    <div>
+                      <Label className="text-xs">Remarks</Label>
+                      <Textarea
+                        value={aptRemarks}
+                        onChange={(e) => setAptRemarks(e.target.value)}
+                        placeholder="Remarks by receiving officer..."
+                        className="mt-1 min-h-[60px] text-xs resize-none"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <p className="text-[11px] text-muted-foreground flex items-center gap-1">
+                        <Clock className="h-3 w-3" /> Date &amp; time auto-recorded on accept
+                      </p>
+                      <Button
+                        size="sm"
+                        className="h-8 text-xs bg-emerald-600 hover:bg-emerald-700 text-white border-0 px-4"
+                        onClick={() => {
+                          setDispatchedFlightEntries((prev) =>
+                            prev.map((e) => e.id === airportReceiveTarget.id ? { ...e, airportReceived: true } : e)
+                          );
+                          toast.success(`Airport receipt accepted — ${airportReceiveTarget.flight}`);
+                          setAirportReceiveTarget(null);
+                        }}
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" /> Save And Accept
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="px-6 py-3 border-t shrink-0 flex justify-end bg-slate-50">
+            <Button variant="outline" onClick={() => setAirportReceiveTarget(null)}>Close</Button>
+          </div>
         </DialogContent>
       </Dialog>
 

@@ -298,9 +298,9 @@ export default function OrderManagementPage() {
         <>
           {/* Banner 1 — Meal order confirmed */}
           {confirmedOrder && (
-            <div className="mt-4 rounded-lg border border-success/40 bg-success/5 px-4 py-3 flex items-start gap-3">
-              <CheckCircle2 className="h-5 w-5 text-success flex-shrink-0 mt-0.5" />
-              <div className="min-w-0">
+            <div className="mt-4 rounded-lg border border-success/40 bg-success/5 px-4 py-3 flex items-center gap-3">
+              <CheckCircle2 className="h-5 w-5 text-success flex-shrink-0" />
+              <div className="min-w-0 flex-1">
                 <p className="text-sm font-semibold text-foreground">
                   Meal Order for Next 24 Hours ({confirmedOrder.tomorrowDayName}) has been generated
                 </p>
@@ -308,6 +308,9 @@ export default function OrderManagementPage() {
                   GM/Admin · {confirmedOrder.timestamp} · {confirmedOrder.totalFlights} flight{confirmedOrder.totalFlights !== 1 ? "s" : ""} · {confirmedOrder.totalMeals.toLocaleString()} meals
                 </p>
               </div>
+              <Button variant="outline" size="sm" className="shrink-0 text-xs" onClick={() => setShowNextDaySummary(true)}>
+                View Details
+              </Button>
             </div>
           )}
 
@@ -338,24 +341,16 @@ export default function OrderManagementPage() {
                 <div className="rounded-lg border border-navy/20 bg-navy/5 p-4 space-y-4">
                   <div className="flex items-center justify-between">
                     <h4 className="text-xs font-semibold uppercase tracking-wider text-navy">International</h4>
-                    <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => navigate("/meal-planning", { state: { backUrl: "/order-management?view=bulk" } })}>
-                      <Pencil className="h-3 w-3 mr-1" />Edit Menu
-                    </Button>
+                    <Button variant="outline" size="sm" className="text-xs">Edit Menu</Button>
                   </div>
                   <div className="space-y-1.5">
                     <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Departure</div>
                     <div className="flex justify-between text-sm">
-                      <div>
-                        <span className="text-muted-foreground">Total Departure Meal</span>
-                        <div className="text-[10px] text-muted-foreground">{confirmedOrder.dayAfterMenu?.intl.depMealName}</div>
-                      </div>
+                      <span className="text-muted-foreground">Total Departure Meal</span>
                       <span className="font-medium tabular-nums">{dayAfterComputed?.depMeal ?? 0}</span>
                     </div>
                     <div className="flex justify-between text-sm">
-                      <div>
-                        <span className="text-muted-foreground">Departure CHML</span>
-                        <div className="text-[10px] text-muted-foreground">{confirmedOrder.dayAfterMenu?.intl.depChmlName}</div>
-                      </div>
+                      <span className="text-muted-foreground">Departure CHML</span>
                       <span className="font-medium tabular-nums">{dayAfterComputed?.chml ?? 0}</span>
                     </div>
                     <div className="flex justify-between text-sm font-semibold border-t border-navy/20 pt-1">
@@ -366,10 +361,7 @@ export default function OrderManagementPage() {
                   <div className="space-y-1.5">
                     <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Return</div>
                     <div className="flex justify-between text-sm">
-                      <div>
-                        <span className="text-muted-foreground">Return VGML</span>
-                        <div className="text-[10px] text-muted-foreground">{confirmedOrder.dayAfterMenu?.intl.retVgmlName}</div>
-                      </div>
+                      <span className="text-muted-foreground">Return VGML</span>
                       <span className="font-medium tabular-nums">{dayAfterComputed?.vgml ?? 0}</span>
                     </div>
                     <div className="flex justify-between text-sm font-semibold border-t border-navy/20 pt-1">
@@ -381,13 +373,19 @@ export default function OrderManagementPage() {
                     <span>Total Meal (Departure+Return)</span>
                     <span className="tabular-nums">{dayAfterComputed?.grandTotal ?? 0}</span>
                   </div>
+                  <div className="flex justify-between text-sm pt-2 border-t border-navy/10 mt-1">
+                    <span className="text-muted-foreground">Total Passenger Meal</span>
+                    <span className="font-medium tabular-nums">{(dayAfterComputed?.grandTotal ?? 0) + (dayAfterComputed?.usbaBreakfast ?? 0) + (dayAfterComputed?.usbaLunch ?? 0) + (dayAfterComputed?.aaaPax ?? 0)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Total Crew Meal</span>
+                    <span className="font-medium tabular-nums">0</span>
+                  </div>
                 </div>
                 <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-4">
                   <div className="flex items-center justify-between">
                     <h4 className="text-xs font-semibold uppercase tracking-wider text-primary">Domestic</h4>
-                    <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => navigate("/meal-planning", { state: { backUrl: "/order-management?view=bulk" } })}>
-                      <Pencil className="h-3 w-3 mr-1" />Edit Menu
-                    </Button>
+                    <Button variant="outline" size="sm" className="text-xs">Edit Menu</Button>
                   </div>
                   <div className="space-y-1.5">
                     <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">US-Bangla</div>
@@ -400,40 +398,36 @@ export default function OrderManagementPage() {
                       <span className="font-medium tabular-nums">{dayAfterComputed?.usbaPax ?? 0}</span>
                     </div>
                     <div className="flex justify-between text-sm">
-                      <div>
-                        <span className="text-muted-foreground">Breakfast</span>
-                        <div className="text-[10px] text-muted-foreground">{confirmedOrder.dayAfterMenu?.dom.usbaBreakfastName}</div>
-                      </div>
+                      <span className="text-muted-foreground">Breakfast</span>
                       <span className="font-medium tabular-nums">{dayAfterComputed?.usbaBreakfast ?? 0}</span>
                     </div>
                     <div className="flex justify-between text-sm">
-                      <div>
-                        <span className="text-muted-foreground">Lunch</span>
-                        <div className="text-[10px] text-muted-foreground">{confirmedOrder.dayAfterMenu?.dom.usbaLunchName}</div>
-                      </div>
+                      <span className="text-muted-foreground">Lunch</span>
                       <span className="font-medium tabular-nums">{dayAfterComputed?.usbaLunch ?? 0}</span>
                     </div>
                   </div>
                   <div className="space-y-1.5">
                     <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Air Astra</div>
                     <div className="flex justify-between text-sm">
-                      <div>
-                        <span className="text-muted-foreground">Zenith Load</span>
-                        <div className="text-[10px] text-muted-foreground">{confirmedOrder.dayAfterMenu?.dom.aaaBreakfastName}</div>
-                      </div>
+                      <span className="text-muted-foreground">Zenith Load</span>
                       <span className="font-medium tabular-nums">{dayAfterComputed?.aaaZenith ?? 0}</span>
                     </div>
                     <div className="flex justify-between text-sm">
-                      <div>
-                        <span className="text-muted-foreground">Pax Load</span>
-                        <div className="text-[10px] text-muted-foreground">{confirmedOrder.dayAfterMenu?.dom.aaaLunchName}</div>
-                      </div>
+                      <span className="text-muted-foreground">Pax Load</span>
                       <span className="font-medium tabular-nums">{dayAfterComputed?.aaaPax ?? 0}</span>
                     </div>
                   </div>
                   <div className="flex justify-between text-sm font-semibold border-t border-primary/20 pt-2">
                     <span>Total Zenith (USBA + Air Astra)</span>
                     <span className="tabular-nums">{dayAfterComputed?.totalZenith ?? 0}</span>
+                  </div>
+                  <div className="flex justify-between text-sm pt-2 border-t border-primary/10 mt-1">
+                    <span className="text-muted-foreground">Total Passenger Meal</span>
+                    <span className="font-medium tabular-nums">{(dayAfterComputed?.grandTotal ?? 0) + (dayAfterComputed?.usbaBreakfast ?? 0) + (dayAfterComputed?.usbaLunch ?? 0) + (dayAfterComputed?.aaaPax ?? 0)}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Total Crew Meal</span>
+                    <span className="font-medium tabular-nums">0</span>
                   </div>
                 </div>
               </div>
@@ -569,29 +563,10 @@ export default function OrderManagementPage() {
                       </div>
                     </div>
                   </div>
-                  <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
-                    "Order Meal" for {confirmedOrder.dayAfterDayName} will be available after the current 24-hour window closes. Save as Draft to confirm the menu now.
-                  </div>
                 </div>
                 <DialogFooter>
                   <Button variant="outline" onClick={() => setShowNextDaySummary(false)}>
                     <ArrowLeft className="h-3.5 w-3.5 mr-1.5" /> Back
-                  </Button>
-                  <Button
-                    variant={nextDayDraftSaved ? "secondary" : "default"}
-                    className={nextDayDraftSaved ? "text-success" : ""}
-                    onClick={() => {
-                      setNextDayDraftSaved(true);
-                      setShowNextDaySummary(false);
-                      toast.success(`Draft saved for ${confirmedOrder.dayAfterDayName} — activates after current 24 hours.`);
-                    }}
-                    disabled={nextDayDraftSaved}
-                  >
-                    {nextDayDraftSaved ? (
-                      <><CheckCircle2 className="h-4 w-4 mr-1.5" /> Draft Saved</>
-                    ) : (
-                      <><Save className="h-4 w-4 mr-1.5" /> Save as Draft</>
-                    )}
                   </Button>
                 </DialogFooter>
               </DialogContent>
@@ -2338,6 +2313,12 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
     aaaZenith: number; aaaPax: number;
     crewHSnacks: number; crewLunch: number; crewDinner: number;
   } | null>(null);
+  const [savedEdit, setSavedEdit] = useState<{
+    intlDepMeal: number; intlDepChml: number; intlRetMeal: number; intlRetChml: number; intlRetVgml: number;
+    usbaZenith: number; usbaPax: number; usbaBreakfast: number; usbaLunch: number;
+    aaaZenith: number; aaaPax: number;
+    crewHSnacks: number; crewLunch: number; crewDinner: number;
+  } | null>(null);
   const [showCrewMenuModal, setShowCrewMenuModal] = useState(false);
   const [crewMenuContext, setCrewMenuContext] = useState<"intl" | "dom">("dom");
   const [showViewMenuModal, setShowViewMenuModal] = useState<"intl" | "dom" | null>(null);
@@ -2485,10 +2466,12 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
       addLog(
         `Meal order for next 24 hours has been created and forwarded to Meal Planner — Ref: ${refId} · ${totalFlights} flights · ${totalMeals} meals · Confirmed by system`,
       );
-      onOrderConfirmed?.({ timestamp: ts, totalFlights, totalMeals, tomorrowDayName, dayAfterDayName, dayAfterDateStr, validIntl, validDom, dayAfterMenu });
+      const confirmationData = { timestamp: ts, totalFlights, totalMeals, tomorrowDayName, dayAfterDayName, dayAfterDateStr, validIntl, validDom, dayAfterMenu };
+      onOrderConfirmed?.(confirmationData);
       onImport(importedOrders);
       toast.success("Meal plan tagged and forwarded to Production.");
       onComplete?.();
+      navigate("/production-entry", { state: { mealOrderConfirmation: confirmationData } });
     }, 1500);
   };
 
@@ -3349,10 +3332,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {/* International column */}
                 <div className="rounded-lg border border-navy/20 bg-navy/5 p-4 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-xs font-semibold uppercase tracking-wider text-navy">International</h4>
-                    <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => navigate("/meal-planning", { state: { backUrl: "/order-management?view=bulk" } })}><Pencil className="h-3 w-3 mr-1" />Edit Menu</Button>
-                  </div>
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-navy">International</h4>
                   <div className="space-y-1.5">
                     <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Departure</div>
                     <div className="flex justify-between text-sm">
@@ -3362,7 +3342,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, intlDepMeal: Number(e.target.value) })}
                           className="w-24 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
                       ) : (
-                        <span className="font-medium tabular-nums">{intlDepMeal}</span>
+                        <span className="font-medium tabular-nums">{savedEdit ? savedEdit.intlDepMeal : intlDepMeal}</span>
                       )}
                     </div>
                     <div className="flex justify-between text-sm">
@@ -3372,13 +3352,13 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, intlDepChml: Number(e.target.value) })}
                           className="w-24 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
                       ) : (
-                        <span className="font-medium tabular-nums">{intlDepChml}</span>
+                        <span className="font-medium tabular-nums">{savedEdit ? savedEdit.intlDepChml : intlDepChml}</span>
                       )}
                     </div>
                     <div className="flex justify-between text-sm font-semibold border-t border-navy/20 pt-1">
                       <span>Departure Total</span>
                       <span className="tabular-nums">
-                        {mealEditMode && summaryEdit ? summaryEdit.intlDepMeal + summaryEdit.intlDepChml : intlDepTotal}
+                        {mealEditMode && summaryEdit ? summaryEdit.intlDepMeal + summaryEdit.intlDepChml : savedEdit ? savedEdit.intlDepMeal + savedEdit.intlDepChml : intlDepTotal}
                       </span>
                     </div>
                   </div>
@@ -3391,7 +3371,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, intlRetMeal: Number(e.target.value) })}
                           className="w-24 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
                       ) : (
-                        <span className="font-medium tabular-nums">0</span>
+                        <span className="font-medium tabular-nums">{savedEdit ? savedEdit.intlRetMeal : 0}</span>
                       )}
                     </div>
                     <div className="flex justify-between text-sm">
@@ -3401,7 +3381,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, intlRetChml: Number(e.target.value) })}
                           className="w-24 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
                       ) : (
-                        <span className="font-medium tabular-nums">0</span>
+                        <span className="font-medium tabular-nums">{savedEdit ? savedEdit.intlRetChml : 0}</span>
                       )}
                     </div>
                     <div className="flex justify-between text-sm">
@@ -3411,13 +3391,13 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, intlRetVgml: Number(e.target.value) })}
                           className="w-24 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
                       ) : (
-                        <span className="font-medium tabular-nums">{intlRetVgml}</span>
+                        <span className="font-medium tabular-nums">{savedEdit ? savedEdit.intlRetVgml : intlRetVgml}</span>
                       )}
                     </div>
                     <div className="flex justify-between text-sm font-semibold border-t border-navy/20 pt-1">
                       <span>Return Total</span>
                       <span className="tabular-nums">
-                        {mealEditMode && summaryEdit ? summaryEdit.intlRetMeal + summaryEdit.intlRetChml + summaryEdit.intlRetVgml : intlRetTotal}
+                        {mealEditMode && summaryEdit ? summaryEdit.intlRetMeal + summaryEdit.intlRetChml + summaryEdit.intlRetVgml : savedEdit ? savedEdit.intlRetMeal + savedEdit.intlRetChml + savedEdit.intlRetVgml : intlRetTotal}
                       </span>
                     </div>
                   </div>
@@ -3426,17 +3406,36 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                     <span className="tabular-nums">
                       {mealEditMode && summaryEdit
                         ? summaryEdit.intlDepMeal + summaryEdit.intlDepChml + summaryEdit.intlRetMeal + summaryEdit.intlRetChml + summaryEdit.intlRetVgml
-                        : intlGrandTotal}
+                        : savedEdit
+                          ? savedEdit.intlDepMeal + savedEdit.intlDepChml + savedEdit.intlRetMeal + savedEdit.intlRetChml + savedEdit.intlRetVgml
+                          : intlGrandTotal}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm pt-2 border-t border-navy/10 mt-1">
+                    <span className="text-muted-foreground">Total Passenger Meal</span>
+                    <span className="font-medium tabular-nums">
+                      {mealEditMode && summaryEdit
+                        ? summaryEdit.intlDepMeal + summaryEdit.intlDepChml + summaryEdit.intlRetMeal + summaryEdit.intlRetChml + summaryEdit.intlRetVgml + summaryEdit.usbaBreakfast + summaryEdit.usbaLunch + summaryEdit.aaaPax
+                        : savedEdit
+                          ? savedEdit.intlDepMeal + savedEdit.intlDepChml + savedEdit.intlRetMeal + savedEdit.intlRetChml + savedEdit.intlRetVgml + savedEdit.usbaBreakfast + savedEdit.usbaLunch + savedEdit.aaaPax
+                          : intlGrandTotal + usbaBreakfast + usbaLunch + aaaPax}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Total Crew Meal</span>
+                    <span className="font-medium tabular-nums">
+                      {mealEditMode && summaryEdit
+                        ? summaryEdit.crewHSnacks + summaryEdit.crewLunch + summaryEdit.crewDinner
+                        : savedEdit
+                          ? savedEdit.crewHSnacks + savedEdit.crewLunch + savedEdit.crewDinner
+                          : crewHSnacks + crewLunch + crewDinner}
                     </span>
                   </div>
                 </div>
 
                 {/* Domestic column */}
                 <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <h4 className="text-xs font-semibold uppercase tracking-wider text-primary">Domestic</h4>
-                    <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => navigate("/meal-planning", { state: { backUrl: "/order-management?view=bulk" } })}><Pencil className="h-3 w-3 mr-1" />Edit Menu</Button>
-                  </div>
+                  <h4 className="text-xs font-semibold uppercase tracking-wider text-primary">Domestic</h4>
                   <div className="space-y-1.5">
                     <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">US-Bangla</div>
                     <div className="flex justify-between text-sm">
@@ -3446,7 +3445,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, usbaZenith: Number(e.target.value) })}
                           className="w-24 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
                       ) : (
-                        <span className="font-medium tabular-nums">{usbaZenith}</span>
+                        <span className="font-medium tabular-nums">{savedEdit ? savedEdit.usbaZenith : usbaZenith}</span>
                       )}
                     </div>
                     <div className="flex justify-between text-sm">
@@ -3456,7 +3455,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, usbaPax: Number(e.target.value) })}
                           className="w-24 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
                       ) : (
-                        <span className="font-medium tabular-nums">{usbaPax}</span>
+                        <span className="font-medium tabular-nums">{savedEdit ? savedEdit.usbaPax : usbaPax}</span>
                       )}
                     </div>
                     <div className="flex justify-between text-sm">
@@ -3466,7 +3465,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, usbaBreakfast: Number(e.target.value) })}
                           className="w-24 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
                       ) : (
-                        <span className="font-medium tabular-nums">{usbaBreakfast}</span>
+                        <span className="font-medium tabular-nums">{savedEdit ? savedEdit.usbaBreakfast : usbaBreakfast}</span>
                       )}
                     </div>
                     <div className="flex justify-between text-sm">
@@ -3476,7 +3475,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, usbaLunch: Number(e.target.value) })}
                           className="w-24 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
                       ) : (
-                        <span className="font-medium tabular-nums">{usbaLunch}</span>
+                        <span className="font-medium tabular-nums">{savedEdit ? savedEdit.usbaLunch : usbaLunch}</span>
                       )}
                     </div>
                   </div>
@@ -3489,7 +3488,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, aaaZenith: Number(e.target.value) })}
                           className="w-24 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
                       ) : (
-                        <span className="font-medium tabular-nums">{aaaZenith}</span>
+                        <span className="font-medium tabular-nums">{savedEdit ? savedEdit.aaaZenith : aaaZenith}</span>
                       )}
                     </div>
                     <div className="flex justify-between text-sm">
@@ -3499,7 +3498,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, aaaPax: Number(e.target.value) })}
                           className="w-24 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
                       ) : (
-                        <span className="font-medium tabular-nums">{aaaPax}</span>
+                        <span className="font-medium tabular-nums">{savedEdit ? savedEdit.aaaPax : aaaPax}</span>
                       )}
                     </div>
                   </div>
@@ -3512,7 +3511,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, crewHSnacks: Number(e.target.value) })}
                           className="w-24 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
                       ) : (
-                        <span className="font-medium tabular-nums">{crewHSnacks}</span>
+                        <span className="font-medium tabular-nums">{savedEdit ? savedEdit.crewHSnacks : crewHSnacks}</span>
                       )}
                     </div>
                     <div className="flex justify-between text-sm">
@@ -3522,7 +3521,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, crewLunch: Number(e.target.value) })}
                           className="w-24 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
                       ) : (
-                        <span className="font-medium tabular-nums">{crewLunch}</span>
+                        <span className="font-medium tabular-nums">{savedEdit ? savedEdit.crewLunch : crewLunch}</span>
                       )}
                     </div>
                     <div className="flex justify-between text-sm">
@@ -3532,14 +3531,34 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, crewDinner: Number(e.target.value) })}
                           className="w-24 h-7 rounded border border-input bg-background text-right text-sm px-2 tabular-nums" />
                       ) : (
-                        <span className="font-medium tabular-nums">{crewDinner}</span>
+                        <span className="font-medium tabular-nums">{savedEdit ? savedEdit.crewDinner : crewDinner}</span>
                       )}
                     </div>
                   </div>
                   <div className="flex justify-between text-sm font-semibold border-t border-primary/20 pt-2">
                     <span>Total Zenith (USBA + Air Astra)</span>
                     <span className="tabular-nums">
-                      {mealEditMode && summaryEdit ? summaryEdit.usbaZenith + summaryEdit.aaaZenith : totalZenith}
+                      {mealEditMode && summaryEdit ? summaryEdit.usbaZenith + summaryEdit.aaaZenith : savedEdit ? savedEdit.usbaZenith + savedEdit.aaaZenith : totalZenith}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm pt-2 border-t border-primary/10 mt-1">
+                    <span className="text-muted-foreground">Total Passenger Meal</span>
+                    <span className="font-medium tabular-nums">
+                      {mealEditMode && summaryEdit
+                        ? summaryEdit.intlDepMeal + summaryEdit.intlDepChml + summaryEdit.intlRetMeal + summaryEdit.intlRetChml + summaryEdit.intlRetVgml + summaryEdit.usbaBreakfast + summaryEdit.usbaLunch + summaryEdit.aaaPax
+                        : savedEdit
+                          ? savedEdit.intlDepMeal + savedEdit.intlDepChml + savedEdit.intlRetMeal + savedEdit.intlRetChml + savedEdit.intlRetVgml + savedEdit.usbaBreakfast + savedEdit.usbaLunch + savedEdit.aaaPax
+                          : intlGrandTotal + usbaBreakfast + usbaLunch + aaaPax}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Total Crew Meal</span>
+                    <span className="font-medium tabular-nums">
+                      {mealEditMode && summaryEdit
+                        ? summaryEdit.crewHSnacks + summaryEdit.crewLunch + summaryEdit.crewDinner
+                        : savedEdit
+                          ? savedEdit.crewHSnacks + savedEdit.crewLunch + savedEdit.crewDinner
+                          : crewHSnacks + crewLunch + crewDinner}
                     </span>
                   </div>
                 </div>
@@ -3555,9 +3574,26 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                   <span className="mx-2">·</span>
                   <span>{totalFlights} flight{totalFlights !== 1 ? "s" : ""}</span>
                   <span className="mx-2">·</span>
-                  <span>{totalMeals.toLocaleString()} meals</span>
+                  <span>{(mealEditMode && summaryEdit
+                    ? summaryEdit.intlDepMeal + summaryEdit.intlDepChml + summaryEdit.intlRetMeal + summaryEdit.intlRetChml + summaryEdit.intlRetVgml + summaryEdit.usbaZenith + summaryEdit.aaaZenith + summaryEdit.crewHSnacks + summaryEdit.crewLunch + summaryEdit.crewDinner
+                    : savedEdit
+                      ? savedEdit.intlDepMeal + savedEdit.intlDepChml + savedEdit.intlRetMeal + savedEdit.intlRetChml + savedEdit.intlRetVgml + savedEdit.usbaZenith + savedEdit.aaaZenith + savedEdit.crewHSnacks + savedEdit.crewLunch + savedEdit.crewDinner
+                      : totalMeals
+                  ).toLocaleString()} meals</span>
                 </div>
                 <div className="flex items-center gap-2">
+                  {!orderSent && mealEditMode && summaryEdit && (
+                    <Button
+                      onClick={() => {
+                        setSavedEdit(summaryEdit);
+                        setSummaryEdit(null);
+                        setMealEditMode(false);
+                        toast.success("Meal numbers saved.");
+                      }}
+                    >
+                      <Save className="h-4 w-4 mr-1.5" /> Save
+                    </Button>
+                  )}
                   {!orderSent && (
                     <Button
                       variant="outline"
@@ -3566,7 +3602,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                           setMealEditMode(false);
                           setSummaryEdit(null);
                         } else {
-                          setSummaryEdit({
+                          setSummaryEdit(savedEdit ?? {
                             intlDepMeal, intlDepChml, intlRetMeal: 0, intlRetChml: 0, intlRetVgml,
                             usbaZenith, usbaPax, usbaBreakfast, usbaLunch,
                             aaaZenith, aaaPax,
@@ -3580,7 +3616,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                     </Button>
                   )}
                   <Button
-                    onClick={orderSent ? undefined : () => setTagForwardOpen(true)}
+                    onClick={orderSent ? undefined : () => { setPendingDay(tomorrowDayName); setDaySelectionOpen(true); }}
                     disabled={orderLoading || orderSent}
                     className={cn(orderSent && "bg-success hover:bg-success text-white")}
                   >
@@ -3790,7 +3826,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                             size="sm"
                             variant="outline"
                             className="h-7 text-xs"
-                            onClick={() => { setDaySelectionOpen(false); navigate("/meal-planning"); }}
+                            onClick={() => { setDaySelectionOpen(false); navigate("/meal-planning", { state: { backUrl: "/order-management" } }); }}
                           >
                             + Add New
                           </Button>
