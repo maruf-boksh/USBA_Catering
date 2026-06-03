@@ -781,9 +781,6 @@ function CreateIssueDialog({
                                 Shortfall: {fefo.shortfall} {inv.uom}
                               </div>
                             )}
-                            <div className="text-muted-foreground">
-                              Cost: ৳ {Math.round(fefo.totalCost).toLocaleString()}
-                            </div>
                           </div>
                         )}
                       </td>

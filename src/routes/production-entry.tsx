@@ -25,7 +25,7 @@ import {
 import { toast } from "sonner";
 import {
   billOfMaterials, inventory, warehouses as ALL_WAREHOUSES,
-  isDomesticSector, itemsByType, allocateFefo,
+  isDomesticSector, itemsByType, allocateFefo, SPECIAL_MEAL_BY_CODE,
   type FlightOrderRow, type MealSlot, type ItemMaster,
 } from "@/lib/sample-data";
 import { useFlightOrders, updateFlightOrdersWhere } from "@/lib/flight-orders-store";
@@ -64,6 +64,20 @@ function buildForwardedOrders(orders: FlightOrderRow[]): { date: string; totalMe
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([date, totalMeals]) => ({ date, totalMeals }));
 }
+
+/** Local yyyy-mm-dd for a Date (avoids the UTC shift of toISOString). */
+function toLocalDateStr(dt: Date): string {
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+}
+
+/** Add `n` days to a yyyy-mm-dd string, returning yyyy-mm-dd (local). */
+function addDaysStr(dateStr: string, n: number): string {
+  const dt = new Date(dateStr + "T00:00:00");
+  dt.setDate(dt.getDate() + n);
+  return toLocalDateStr(dt);
+}
+
+type ForwardedRange = "96h" | "7d" | "custom";
 
 const DOMESTIC_AIRPORTS = new Set(["DAC", "CXB", "CGP", "ZYL", "JSR"]);
 
@@ -379,16 +393,34 @@ export default function ProductionEntryPage() {
     [flightOrders],
   );
   const [detailsOpen, setDetailsOpen] = useState(false);
+  // Date-range scope. Default is the next 96 hours (4 days) of upcoming orders.
+  // Past dates are viewable for reference only — no creating/ordering allowed.
+  const [dateRange, setDateRange] = useState<ForwardedRange>("96h");
+  const today = useMemo(() => toLocalDateStr(new Date()), []);
+  const [customFrom, setCustomFrom] = useState(today);
+  const [customTo, setCustomTo] = useState(addDaysStr(today, 6));
+  const visibleForwarded = useMemo(() => {
+    if (dateRange === "custom") {
+      return forwardedOrders.filter(
+        (f) => (!customFrom || f.date >= customFrom) && (!customTo || f.date <= customTo),
+      );
+    }
+    const end = addDaysStr(today, dateRange === "7d" ? 6 : 3); // 96h = today + 3 (4 days)
+    return forwardedOrders.filter((f) => f.date >= today && f.date <= end);
+  }, [forwardedOrders, dateRange, today, customFrom, customTo]);
   const [selectedForwardedDate, setSelectedForwardedDate] = useState(
     forwardedOrders[0]?.date ?? "",
   );
-  // Keep the selected date valid as orders advance — if the previously selected
-  // date no longer has any production-pending demand, pick the earliest one.
+  // A past date is read-only: it can be opened to inspect what was planned, but
+  // no production orders can be created from it.
+  const isViewOnly = !!selectedForwardedDate && selectedForwardedDate < today;
+  // Keep the selected date valid for the current range — if it falls outside the
+  // visible window (range change, or orders advancing), pick the first in-range.
   useEffect(() => {
-    if (!forwardedOrders.some((f) => f.date === selectedForwardedDate)) {
-      setSelectedForwardedDate(forwardedOrders[0]?.date ?? "");
+    if (!visibleForwarded.some((f) => f.date === selectedForwardedDate)) {
+      setSelectedForwardedDate(visibleForwarded[0]?.date ?? "");
     }
-  }, [forwardedOrders, selectedForwardedDate]);
+  }, [visibleForwarded, selectedForwardedDate]);
   const [view, setView] = useState<"list" | "create">("list");
   const [pendingItem, setPendingItem] = useState<OutputLine | undefined>(undefined);
   const [createKey, setCreateKey] = useState(0);
@@ -585,12 +617,11 @@ export default function ProductionEntryPage() {
       created.push(entry);
     });
 
-    const { dr, mrpRun, skippedNoRecipe } = autoFulfillOrders(created);
+    const { dr, skippedNoRecipe } = autoFulfillOrders(created);
 
     const parts: string[] = [
       `${created.length} Production Order${created.length === 1 ? "" : "s"}`,
     ];
-    if (mrpRun) parts.push(`MRP ${mrpRun.id}`);
     if (dr) parts.push(`Demand ${dr.id} (pending approval)`);
 
     if (dr) {
@@ -717,18 +748,55 @@ export default function ProductionEntryPage() {
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <select
+                  value={dateRange}
+                  onChange={(e) => setDateRange(e.target.value as ForwardedRange)}
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  title="Date range to show"
+                >
+                  <option value="96h">Next 96 hours (4 days)</option>
+                  <option value="7d">Next 7 days</option>
+                  <option value="custom">Custom range…</option>
+                </select>
+                {dateRange === "custom" && (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="date"
+                      value={customFrom}
+                      max={customTo || undefined}
+                      onChange={(e) => setCustomFrom(e.target.value)}
+                      className="h-9 rounded-md border border-input bg-background px-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      title="From date"
+                    />
+                    <span className="text-xs text-muted-foreground">to</span>
+                    <input
+                      type="date"
+                      value={customTo}
+                      min={customFrom || undefined}
+                      onChange={(e) => setCustomTo(e.target.value)}
+                      className="h-9 rounded-md border border-input bg-background px-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      title="To date"
+                    />
+                  </div>
+                )}
+                <select
                   value={selectedForwardedDate}
                   onChange={(e) => setSelectedForwardedDate(e.target.value)}
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  disabled={visibleForwarded.length === 0}
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
                 >
-                  {forwardedOrders.map((f) => (
-                    <option key={f.date} value={f.date}>
-                      {f.date} — {f.totalMeals.toLocaleString()} meals
-                    </option>
-                  ))}
+                  {visibleForwarded.length === 0 ? (
+                    <option value="">No dates in this range</option>
+                  ) : (
+                    visibleForwarded.map((f) => (
+                      <option key={f.date} value={f.date}>
+                        {f.date} — {f.totalMeals.toLocaleString()} meals
+                      </option>
+                    ))
+                  )}
                 </select>
                 <Button
                   className="bg-success text-success-foreground hover:bg-success/90"
+                  disabled={!selectedForwardedDate}
                   onClick={() => setDetailsOpen(true)}
                 >
                   View Details
@@ -765,6 +833,7 @@ export default function ProductionEntryPage() {
         onSelectItem={startFromMealPlan}
         onBulkCreate={bulkCreateFromMealPlan}
         date={selectedForwardedDate}
+        readOnly={isViewOnly}
       />
     </>
   );
@@ -1016,6 +1085,22 @@ function extractMealPlanItems(): MealPlanPickItem[] {
           });
         }
       }
+    }
+    // Dessert is served to the full audience — register it so it can be
+    // selected for production like any choice item.
+    const dCode = `MP-${slugifyItem(meal.dessert.name)}`;
+    if (!map.has(dCode)) {
+      map.set(dCode, {
+        code: dCode,
+        name: meal.dessert.name,
+        day: meal.day,
+        mealType: meal.mealType,
+        flightType: ftLabel,
+        forType: meal.forType,
+        kind: "Choice",
+        weight: meal.dessert.weight,
+        calories: meal.dessert.calories,
+      });
     }
   }
   return Array.from(map.values()).sort((a, b) => {
@@ -1737,11 +1822,15 @@ function ProductionEntryCreate({
 }
 
 function MealCardView({
-  meal, onSelect, requirements,
+  meal, onSelect, requirements, readOnly = false, extraSpecialMeals = [],
 }: {
   meal: MealCard;
-  onSelect: (payload: { code: string; computedQty: number; breakdown: string }) => void;
+  onSelect: (payload: { code: string; computedQty: number; breakdown: string; item?: MealPlanPickItem }) => void;
   requirements: OrderRequirement[];
+  readOnly?: boolean;
+  /** Special meals derived from the actual order rosters (e.g. FPML) that are
+   *  not part of the static template. Rendered alongside template specials. */
+  extraSpecialMeals?: { code: string; name: string; count: number }[];
 }) {
   return (
     <Card>
@@ -1807,15 +1896,6 @@ function MealCardView({
                           )}
                         </div>
                       </div>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 px-2 text-[11px] shrink-0"
-                        onClick={() => onSelect({ code, computedQty: qty, breakdown })}
-                        title={breakdown}
-                      >
-                        Select →
-                      </Button>
                     </li>
                   );
                 })}
@@ -1824,7 +1904,7 @@ function MealCardView({
           ))}
         </div>
 
-        {meal.specialMeals.filter((s) => s.enabled).length > 0 && (
+        {(meal.specialMeals.filter((s) => s.enabled).length > 0 || extraSpecialMeals.length > 0) && (
           <div>
             <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">
               Special Meals
@@ -1872,47 +1952,89 @@ function MealCardView({
                               )}
                             </div>
                           </div>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-7 px-2 text-[11px] shrink-0"
-                            onClick={() => onSelect({ code, computedQty: qty, breakdown })}
-                            title={breakdown}
-                          >
-                            Select →
-                          </Button>
                         </li>
                       );
                     })}
                   </ul>
                 </div>
               ))}
+
+              {/* Special meals taken from the actual flight-order rosters
+                  (e.g. FPML on a crew/passenger order) that aren't in the
+                  static menu template. */}
+              {extraSpecialMeals.map((sp) => {
+                const code = `MP-${slugifyItem(sp.name)}`;
+                const breakdown = `${sp.count} ${sp.code} portion${sp.count === 1 ? "" : "s"} from flight order rosters`;
+                const item: MealPlanPickItem = {
+                  code, name: sp.name, day: meal.day, mealType: meal.mealType,
+                  flightType: meal.flightType.join(" / "), forType: meal.forType,
+                  kind: "Special", weight: 0, calories: 0,
+                };
+                return (
+                  <div key={`extra-${sp.code}`} className="rounded-md border border-primary/30 bg-primary/5 p-2.5">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-semibold text-foreground inline-flex items-center gap-1.5">
+                        {sp.code}
+                        <Badge variant="outline" className="text-[9px] h-4 px-1">from orders</Badge>
+                      </span>
+                      <span className="text-[11px] text-muted-foreground tabular-nums">{sp.count} portions</span>
+                    </div>
+                    <ul className="space-y-1.5">
+                      <li className="text-[11px] flex items-center gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-foreground truncate">{sp.name}</div>
+                          <div className="text-[10px] text-muted-foreground">
+                            <span className="text-primary font-medium tabular-nums">{sp.count.toLocaleString()} pcs</span>
+                          </div>
+                        </div>
+                      </li>
+                    </ul>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
 
-        <div className="flex items-center justify-between rounded-md bg-muted/40 px-3 py-2">
-          <span className="text-xs text-muted-foreground">Dessert</span>
-          <span className="text-xs font-medium text-foreground">
-            {meal.dessert.name}{" "}
-            <span className="text-muted-foreground font-normal">
-              ({meal.dessert.weight}g · {meal.dessert.calories} kcal)
-            </span>
-          </span>
-        </div>
+        {(() => {
+          const dessertCode = `MP-${slugifyItem(meal.dessert.name)}`;
+          const { qty, breakdown } = computeMealQty({
+            requirements,
+            day: meal.day,
+            flightTypes: meal.flightType,
+            forType: meal.forType,
+            kind: "Choice",
+            percentage: 100,
+          });
+          return (
+            <div className="flex items-center justify-between gap-2 rounded-md bg-muted/40 px-3 py-2">
+              <span className="text-xs text-muted-foreground">Dessert</span>
+              <div className="flex items-center gap-3">
+                <span className="text-xs font-medium text-foreground">
+                  {meal.dessert.name}{" "}
+                  <span className="text-muted-foreground font-normal">
+                    ({meal.dessert.weight}g · {meal.dessert.calories} kcal
+                    {qty > 0 && <> · <span className="text-primary font-medium tabular-nums">{qty.toLocaleString()} pcs</span></>})
+                  </span>
+                </span>
+              </div>
+            </div>
+          );
+        })()}
       </CardContent>
     </Card>
   );
 }
 
 function MealPlanningDetailsDialog({
-  open, onOpenChange, onSelectItem, onBulkCreate, date,
+  open, onOpenChange, onSelectItem, onBulkCreate, date, readOnly = false,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   onSelectItem: (item: MealPlanPickItem) => void;
   onBulkCreate: (items: MealPlanPickItem[]) => void;
   date: string;
+  readOnly?: boolean;
 }) {
   const navigate = useNavigate();
   const flightOrders = useFlightOrders();
@@ -1929,11 +2051,30 @@ function MealPlanningDetailsDialog({
     return m;
   }, []);
 
-  const handleSelect = (payload: { code: string; computedQty: number; breakdown: string }) => {
-    const item = itemByCode.get(payload.code);
+  const handleSelect = (payload: { code: string; computedQty: number; breakdown: string; item?: MealPlanPickItem }) => {
+    // Roster-derived specials aren't in the static catalog, so accept a
+    // fallback item built by the caller.
+    const item = itemByCode.get(payload.code) ?? payload.item;
     if (!item) return;
     onSelectItem({ ...item, computedQty: payload.computedQty, qtyBreakdown: payload.breakdown });
   };
+
+  // Special meals actually ordered (per-passenger rosters) for this date,
+  // grouped by day → code → count. Surfaces codes like FPML that aren't in the
+  // static menu template so they show in (and can be produced from) the plan.
+  const orderedSpecialsByDay = useMemo(() => {
+    const m = new Map<string, Map<string, number>>();
+    for (const o of ordersForDate) {
+      if (!o.specialMealRoster?.length) continue;
+      const day = getDayFromDate(o.date);
+      let codeMap = m.get(day);
+      if (!codeMap) { codeMap = new Map(); m.set(day, codeMap); }
+      for (const e of o.specialMealRoster) {
+        codeMap.set(e.mealCode, (codeMap.get(e.mealCode) ?? 0) + 1);
+      }
+    }
+    return m;
+  }, [ordersForDate]);
 
   const byDay = useMemo(() => {
     const groups = new Map<string, MealCard[]>();
@@ -1989,17 +2130,82 @@ function MealPlanningDetailsDialog({
             if (base) out.push({ ...base, computedQty: qty, qtyBreakdown: breakdown });
           }
         }
+        // Dessert — served to the whole audience for this card.
+        {
+          const { qty, breakdown } = computeMealQty({
+            requirements,
+            day: meal.day,
+            flightTypes: meal.flightType,
+            forType: meal.forType,
+            kind: "Choice",
+            percentage: 100,
+          });
+          const base = itemByCode.get(`MP-${slugifyItem(meal.dessert.name)}`);
+          if (base && qty > 0) out.push({ ...base, computedQty: qty, qtyBreakdown: breakdown });
+        }
+      }
+
+      // Ordered special meals (roster codes not in the template) — once per day.
+      const orderedMap = orderedSpecialsByDay.get(meals[0]?.day ?? "");
+      if (orderedMap && meals[0]) {
+        const meal = meals[0];
+        const templateCodes = new Set<string>();
+        for (const m of meals) for (const sp of m.specialMeals) if (sp.enabled) templateCodes.add(sp.type);
+        for (const [code, count] of orderedMap) {
+          if (templateCodes.has(code) || count <= 0) continue;
+          const name = SPECIAL_MEAL_BY_CODE[code]?.name ?? code;
+          out.push({
+            code: `MP-${slugifyItem(name)}`, name,
+            day: meal.day, mealType: meal.mealType,
+            flightType: meal.flightType.join(" / "), forType: meal.forType,
+            kind: "Special", weight: 0, calories: 0,
+            computedQty: count,
+            qtyBreakdown: `${count} ${code} portion${count === 1 ? "" : "s"} from flight order rosters`,
+          });
+        }
       }
     }
     return out;
-  }, [byDay, requirements, itemByCode]);
+  }, [byDay, requirements, itemByCode, orderedSpecialsByDay]);
 
   const totalPax = ordersForDate.reduce((s, o) => s + o.pax, 0);
   const totalCrew = ordersForDate.reduce((s, o) => s + o.crew, 0);
   const totalSpecial = ordersForDate.reduce((s, o) => s + o.specialMeals, 0);
   const totalMeals = totalPax + totalCrew + totalSpecial;
 
+  // ── Create-All review step ────────────────────────────────────────────────
+  // "Create All Orders" first opens a review where the user sees, item-wise,
+  // the current finished-good stock vs the required production qty and can
+  // deselect items. Only the selected items become Production Orders; the rest
+  // of the flow (Demand Request + Purchase Requisition) is unchanged.
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [selectedIdx, setSelectedIdx] = useState<Set<number>>(new Set());
+
+  const stockFor = (name: string) =>
+    inventory.find((i) => i.name.toLowerCase() === name.toLowerCase());
+
+  const openReview = () => {
+    setSelectedIdx(new Set(availableItems.map((_, i) => i)));
+    setReviewOpen(true);
+  };
+  const toggleIdx = (i: number) =>
+    setSelectedIdx((prev) => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i); else next.add(i);
+      return next;
+    });
+  const allSelected = availableItems.length > 0 && selectedIdx.size === availableItems.length;
+  const toggleAll = () =>
+    setSelectedIdx(allSelected ? new Set() : new Set(availableItems.map((_, i) => i)));
+  const confirmReview = () => {
+    const chosen = availableItems.filter((_, i) => selectedIdx.has(i));
+    if (chosen.length === 0) return;
+    setReviewOpen(false);
+    onBulkCreate(chosen);
+  };
+
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-5xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
         <DialogHeader className="px-6 pt-6 pb-4 border-b border-border">
@@ -2063,26 +2269,35 @@ function MealPlanningDetailsDialog({
           <TabsContent value="meals" className="flex-1 overflow-hidden flex flex-col mt-0">
             <div className="flex-1 overflow-y-auto">
               <div className="px-6 pt-5 pb-3">
-                <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-foreground flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <UtensilsCrossed className="h-3.5 w-3.5 text-primary shrink-0" />
+                {readOnly ? (
+                  <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 flex items-center gap-2">
+                    <Eye className="h-3.5 w-3.5 shrink-0" />
                     <span>
-                      Click <span className="font-semibold">Select</span> beside any meal item to start a single
-                      production entry, or use <span className="font-semibold">Create All Orders</span> — that
-                      raises Pending orders for every available menu, runs MRP, and bundles everything into one
-                      Demand Request (in-stock items become one Issue, shortfalls become one Purchase Requisition).
+                      <span className="font-semibold">View only — past date.</span> This is a historical snapshot of what
+                      was planned for {date}. Production orders can only be created for current and upcoming dates.
                     </span>
                   </div>
-                  <Button
-                    size="sm"
-                    disabled={availableItems.length === 0}
-                    onClick={() => onBulkCreate(availableItems)}
-                    className="shrink-0"
-                  >
-                    <Zap className="h-3.5 w-3.5 mr-1.5" />
-                    Create All Orders ({availableItems.length})
-                  </Button>
-                </div>
+                ) : (
+                  <div className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-foreground flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <UtensilsCrossed className="h-3.5 w-3.5 text-primary shrink-0" />
+                      <span>
+                        Use <span className="font-semibold">Create All Orders</span> to raise Pending production
+                        orders for every available menu and bundle everything into one
+                        Demand Request (in-stock items become one Issue, shortfalls become one Purchase Requisition).
+                      </span>
+                    </div>
+                    <Button
+                      size="sm"
+                      disabled={availableItems.length === 0}
+                      onClick={openReview}
+                      className="shrink-0"
+                    >
+                      <Zap className="h-3.5 w-3.5 mr-1.5" />
+                      Create All Orders ({availableItems.length})
+                    </Button>
+                  </div>
+                )}
               </div>
               <div className="px-6 pb-4">
                 <RequirementsSummary requirements={requirements} />
@@ -2101,7 +2316,22 @@ function MealPlanningDetailsDialog({
                   </div>
                 ) : (
                   <div className="space-y-6">
-                    {byDay.map(([day, meals]) => (
+                    {byDay.map(([day, meals]) => {
+                      // Codes ordered for this day that the templates don't
+                      // already cover — attach them to the first card so they
+                      // appear once (not duplicated across every meal slot).
+                      const orderedMap = orderedSpecialsByDay.get(day);
+                      const templateCodes = new Set<string>();
+                      for (const m of meals) for (const sp of m.specialMeals) if (sp.enabled) templateCodes.add(sp.type);
+                      const extras = orderedMap
+                        ? Array.from(orderedMap.entries())
+                            .filter(([code]) => !templateCodes.has(code))
+                            .map(([code, count]) => ({
+                              code, count,
+                              name: SPECIAL_MEAL_BY_CODE[code]?.name ?? code,
+                            }))
+                        : [];
+                      return (
                       <div key={day}>
                         <div className="flex items-center gap-2 mb-3">
                           <h3 className="text-sm font-bold uppercase tracking-wider text-foreground">
@@ -2112,17 +2342,20 @@ function MealPlanningDetailsDialog({
                           </span>
                         </div>
                         <div className="space-y-3">
-                          {meals.map((m) => (
+                          {meals.map((m, idx) => (
                             <MealCardView
                               key={m.id}
                               meal={m}
                               onSelect={handleSelect}
                               requirements={requirements}
+                              readOnly={readOnly}
+                              extraSpecialMeals={idx === 0 ? extras : []}
                             />
                           ))}
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -2131,6 +2364,104 @@ function MealPlanningDetailsDialog({
         </Tabs>
       </DialogContent>
     </Dialog>
+
+    {/* Review step — current stock vs required production qty, item-wise */}
+    <Dialog open={reviewOpen} onOpenChange={setReviewOpen}>
+      <DialogContent className="max-w-3xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
+        <DialogHeader className="px-6 pt-6 pb-4 border-b border-border">
+          <DialogTitle>Create Production Orders — Review</DialogTitle>
+          <p className="text-sm text-muted-foreground mt-1">
+            Current stock vs required production quantity for {date}. Select the items to produce —
+            only selected items become Production Orders; the Demand Request &amp; Purchase Requisition
+            flow runs as usual on them.
+          </p>
+        </DialogHeader>
+
+        <div className="flex-1 overflow-y-auto px-6 py-4">
+          {availableItems.length === 0 ? (
+            <div className="text-center text-sm text-muted-foreground py-10">No items to produce.</div>
+          ) : (
+            <div className="rounded-md border border-border overflow-hidden">
+              <Table>
+                <TableHeader className="bg-muted/40">
+                  <TableRow>
+                    <TableHead className="w-10">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 accent-primary align-middle"
+                        checked={allSelected}
+                        onChange={toggleAll}
+                        aria-label="Select all items"
+                      />
+                    </TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right">Current Stock</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right">Required Qty</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right">Shortfall</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {availableItems.map((it, i) => {
+                    const inv = stockFor(it.name);
+                    const stock = inv?.stock ?? 0;
+                    const uom = inv?.uom ?? "";
+                    const req = it.computedQty ?? 0;
+                    const shortfall = Math.max(0, req - stock);
+                    const checked = selectedIdx.has(i);
+                    return (
+                      <TableRow
+                        key={`${it.code}-${i}`}
+                        className={cn("cursor-pointer hover:bg-muted/30", checked && "bg-primary/5")}
+                        onClick={() => toggleIdx(i)}
+                      >
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 accent-primary align-middle"
+                            checked={checked}
+                            onChange={() => toggleIdx(i)}
+                            aria-label={`Select ${it.name}`}
+                          />
+                        </TableCell>
+                        <TableCell>
+                          <div className="text-sm text-foreground">{it.name}</div>
+                          <div className="text-[10px] text-muted-foreground">
+                            {it.day} · {it.mealType} · {it.kind}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right text-sm tabular-nums">
+                          {stock.toLocaleString()}{uom ? <span className="text-[10px] text-muted-foreground"> {uom}</span> : null}
+                        </TableCell>
+                        <TableCell className="text-right text-sm tabular-nums font-medium">
+                          {req.toLocaleString()}
+                        </TableCell>
+                        <TableCell className="text-right text-sm tabular-nums">
+                          {shortfall > 0
+                            ? <span className="text-destructive font-medium">{shortfall.toLocaleString()}</span>
+                            : <span className="text-success">0</span>}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter className="px-6 py-3 border-t border-border bg-muted/20">
+          <div className="flex-1 text-xs text-muted-foreground">
+            {selectedIdx.size} of {availableItems.length} item{availableItems.length === 1 ? "" : "s"} selected
+          </div>
+          <Button variant="outline" onClick={() => setReviewOpen(false)}>Cancel</Button>
+          <Button disabled={selectedIdx.size === 0} onClick={confirmReview}>
+            <Zap className="h-4 w-4 mr-1.5" />
+            Create Production Orders ({selectedIdx.size})
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 }
 
@@ -2917,7 +3248,7 @@ function MaterialRequirementPlanningDialog({
                 <TableHeader className="bg-muted/40 sticky top-0">
                   <TableRow>
                     <TableHead className="w-10" />
-                    <TableHead className="text-[10px] uppercase tracking-wider">Order #</TableHead>
+                    <TableHead className="text-[10px] uppercase tracking-wider">Order</TableHead>
                     <TableHead className="text-[10px] uppercase tracking-wider">Output Item</TableHead>
                     <TableHead className="text-[10px] uppercase tracking-wider">BOM</TableHead>
                     <TableHead className="text-[10px] uppercase tracking-wider text-right">Order Qty</TableHead>

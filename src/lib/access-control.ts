@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { BUILTIN_ROLES, useRole, type Role } from "./roles";
 import { NAV_MODULES, type NavModule, type NavSubItem } from "@/layouts/AppLayout/navConfig";
+import { PAGE_CONTENT_CATALOG } from "./page-content-catalog";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // User Access Control (RBAC) — dynamic roles + per-resource CRUD permissions.
@@ -35,7 +36,7 @@ export const ALWAYS_ON_PAGES = new Set<string>(["/"]);
 
 // ── Resource registry ────────────────────────────────────────────────────────
 
-export type ElementKind = "kpi" | "column" | "action" | "section";
+export type ElementKind = "kpi" | "column" | "field" | "action" | "section";
 export type RbacElement = { id: string; label: string; kind: ElementKind };
 export type RbacPage = { key: string; label: string; elements: RbacElement[] };
 export type RbacModule = { key: string; label: string; pages: RbacPage[] };
@@ -167,6 +168,24 @@ function buildDefaultPerms(roles: string[]): PermMap {
 const PERMS_KEY = "harvest-rbac-v2";
 const ROLES_KEY = "harvest-roles-v2";        // full ordered role list (built-ins are editable/deletable)
 const LEGACY_ROLES_KEY = "harvest-roles-v1"; // legacy: custom-only list
+const ADMIN_ROLES_KEY = "harvest-admin-roles-v1"; // roles promoted to full-access administrators
+
+/**
+ * Load the set of administrator roles — roles that get unconditional full
+ * access, exactly like GM/Admin. GM/Admin is always an admin and can never be
+ * demoted; any other role can be promoted/demoted at runtime.
+ */
+function loadAdminRoles(): Set<string> {
+  if (typeof window === "undefined") return new Set([ADMIN_ROLE]);
+  try {
+    const raw = window.localStorage.getItem(ADMIN_ROLES_KEY);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+    const list = Array.isArray(parsed) ? parsed.filter((r): r is string => typeof r === "string") : [];
+    return new Set([ADMIN_ROLE, ...list]);
+  } catch {
+    return new Set([ADMIN_ROLE]);
+  }
+}
 
 /**
  * Load the full ordered list of roles. The list is now fully editable — built-in
@@ -217,15 +236,28 @@ function loadPerms(roles: string[]): PermMap {
 
 let allRoles: string[] = loadRoles();
 let perms: PermMap = loadPerms(allRoles);
+let adminRoles: string[] = Array.from(loadAdminRoles());
 const listeners = new Set<() => void>();
 
 function notify() { for (const l of listeners) l(); }
 function persistPerms() { try { window?.localStorage?.setItem(PERMS_KEY, JSON.stringify(perms)); } catch { /* ignore */ } }
 function persistRoles() { try { window?.localStorage?.setItem(ROLES_KEY, JSON.stringify(allRoles)); } catch { /* ignore */ } }
+function persistAdminRoles() {
+  try { window?.localStorage?.setItem(ADMIN_ROLES_KEY, JSON.stringify(adminRoles.filter((r) => r !== ADMIN_ROLE))); } catch { /* ignore */ }
+}
 
 function subscribe(fn: () => void): () => void {
   listeners.add(fn);
   return () => listeners.delete(fn);
+}
+
+// Seed the registry with the exhaustive page-content catalog so User Access
+// Control shows every page's KPIs, columns, fields, actions and sections up
+// front — without needing to visit each page first. registerElements is
+// additive + first-wins, so any element already seeded in SEED_ELEMENTS keeps
+// its label. Done here (after listeners/notify exist) to avoid TDZ at load.
+for (const [route, els] of Object.entries(PAGE_CONTENT_CATALOG)) {
+  registerElements(route, els);
 }
 
 // ── Reads ────────────────────────────────────────────────────────────────────
@@ -235,6 +267,11 @@ export function getCustomRoles(): string[] { return allRoles.filter((r) => r !==
 /** True if `role` is one of the original factory roles (informational; built-ins are still editable). */
 export function isBuiltinRole(role: string): boolean { return (BUILTIN_ROLES as readonly string[]).includes(role); }
 export function getPerms(): PermMap { return perms; }
+export function getAdminRoles(): string[] { return adminRoles; }
+/** True if `role` is a full-access administrator (GM/Admin or a promoted role). */
+export function isAdminRole(role: string): boolean { return adminRoles.includes(role); }
+/** GM/Admin is the root admin and can never be demoted. */
+export function isRootAdmin(role: string): boolean { return role === ADMIN_ROLE; }
 
 export function useAllRoles(): string[] {
   return useSyncExternalStore((cb) => subscribe(cb), getAllRoles, getAllRoles);
@@ -242,18 +279,21 @@ export function useAllRoles(): string[] {
 export function useAccess(): PermMap {
   return useSyncExternalStore((cb) => subscribe(cb), getPerms, getPerms);
 }
+export function useAdminRoles(): string[] {
+  return useSyncExternalStore((cb) => subscribe(cb), getAdminRoles, getAdminRoles);
+}
 
 // ── Permission checks ────────────────────────────────────────────────────────
 
 export function can(role: Role, resourceId: string, action: Action, map: PermMap = perms): boolean {
-  if (role === ADMIN_ROLE) return true;
+  if (isAdminRole(role)) return true;
   if (action === "view" && ALWAYS_ON_PAGES.has(resourceId)) return true;
   return (map[role]?.[resourceId] ?? []).includes(action);
 }
 
 /** Element check with page-level fallback when no explicit element rule exists. */
 export function canElement(role: Role, route: string, elementId: string, action: Action = "view", map: PermMap = perms): boolean {
-  if (role === ADMIN_ROLE) return true;
+  if (isAdminRole(role)) return true;
   const resId = elementResourceId(route, elementId);
   const explicit = map[role]?.[resId];
   if (explicit) return explicit.includes(action);
@@ -266,7 +306,7 @@ export function canViewPage(role: Role, route: string, map: PermMap = perms): bo
 
 /** Nav tree filtered to pages the role may view. */
 export function visibleNavModules(role: Role, map: PermMap = perms): NavModule[] {
-  if (role === ADMIN_ROLE) return NAV_MODULES;
+  if (isAdminRole(role)) return NAV_MODULES;
   const filterItems = (items: NavSubItem[]): NavSubItem[] =>
     items
       .map((it) => (it.children?.length ? { ...it, children: filterItems(it.children) } : it))
@@ -305,7 +345,12 @@ export function useElementPermission(route: string, elementId: string): Record<A
 export function setActions(role: string, resourceId: string, actions: Action[]) {
   if (role === ADMIN_ROLE) return; // admin is immutable (always full)
   const next: PermMap = { ...perms, [role]: { ...(perms[role] ?? {}) } };
-  if (actions.length === 0) delete next[role][resourceId];
+  // Element resources (id contains "#") keep an explicit empty array so an
+  // element can be DENIED even while its page stays viewable — canElement only
+  // falls back to the page when no rule exists at all. Page resources still
+  // delete-on-empty (an empty page rule == no access == correct default).
+  const isElement = resourceId.includes("#");
+  if (actions.length === 0 && !isElement) delete next[role][resourceId];
   else next[role][resourceId] = Array.from(new Set(actions));
   perms = next;
   persistPerms();
@@ -364,6 +409,23 @@ export function clearRole(role: string) {
   notify();
 }
 
+/**
+ * Promote a role to (or demote it from) full-access administrator. Admins behave
+ * exactly like GM/Admin — every permission on every resource. GM/Admin itself is
+ * the root admin and cannot be demoted. Bumps the perms reference so every
+ * useAccess() consumer re-renders with the new effective access.
+ */
+export function setRoleAdmin(role: string, isAdmin: boolean) {
+  if (role === ADMIN_ROLE) return;            // root admin is fixed
+  if (!allRoles.includes(role)) return;
+  const has = adminRoles.includes(role);
+  if (has === isAdmin) return;
+  adminRoles = isAdmin ? [...adminRoles, role] : adminRoles.filter((r) => r !== role);
+  perms = { ...perms };                        // force useAccess() re-render
+  persistAdminRoles();
+  notify();
+}
+
 // ── Role CRUD ────────────────────────────────────────────────────────────────
 
 export function createRole(name: string): { ok: boolean; error?: string } {
@@ -390,6 +452,10 @@ export function renameRole(oldName: string, newName: string): { ok: boolean; err
   const moved = perms[oldName] ?? {};
   perms = { ...perms, [trimmed]: moved };
   delete perms[oldName];
+  if (adminRoles.includes(oldName)) {
+    adminRoles = adminRoles.map((r) => (r === oldName ? trimmed : r));
+    persistAdminRoles();
+  }
   persistRoles();
   persistPerms();
   notify();
@@ -403,6 +469,10 @@ export function deleteRole(name: string): { ok: boolean; error?: string } {
   const next = { ...perms };
   delete next[name];
   perms = next;
+  if (adminRoles.includes(name)) {
+    adminRoles = adminRoles.filter((r) => r !== name);
+    persistAdminRoles();
+  }
   persistRoles();
   persistPerms();
   notify();

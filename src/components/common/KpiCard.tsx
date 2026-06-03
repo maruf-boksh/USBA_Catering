@@ -48,8 +48,8 @@ export function KpiCard({
       position: 'relative', overflow: 'hidden',
       background: t.bg,
       border: '1px solid var(--line, #e6e2e0)',
-      borderRadius: 16,
-      padding: '18px 18px 16px',
+      borderRadius: 14,
+      padding: '13px 15px 12px',
       boxShadow: '0 1px 2px rgba(26,2,4,.04), 0 12px 30px -22px rgba(26,2,4,.18)',
       transition: 'box-shadow 150ms, transform 150ms',
       height: '100%',
@@ -63,31 +63,31 @@ export function KpiCard({
       {/* top row: label + icon */}
       <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
         <span style={{
-          fontSize: 10.5, fontWeight: 700, letterSpacing: '0.13em',
+          fontSize: 10, fontWeight: 700, letterSpacing: '0.12em',
           textTransform: 'uppercase', color: 'var(--muted-foreground, #6b6b72)',
         }}>
           {label}
         </span>
         <div style={{
-          width: 38, height: 38, borderRadius: 11,
+          width: 31, height: 31, borderRadius: 9,
           display: 'grid', placeItems: 'center', flexShrink: 0,
           color: '#fff', background: t.accent,
           boxShadow: `0 8px 18px -9px ${t.accent}`,
         }}>
-          {React.createElement(icon, { style: { width: 18, height: 18 } })}
+          {React.createElement(icon, { style: { width: 15, height: 15 } })}
         </div>
       </div>
 
       {/* number */}
       <div style={{
         fontFamily: "var(--serif, 'Newsreader', Georgia, serif)",
-        fontWeight: 600, fontSize: 42, lineHeight: 1,
-        letterSpacing: '-0.015em', marginTop: 14,
+        fontWeight: 600, fontSize: 30, lineHeight: 1,
+        letterSpacing: '-0.015em', marginTop: 9,
         color: 'var(--ink, #1a0204)',
       }}>
         {curMatch ? (
           <>
-            <span style={{ fontSize: 24, fontWeight: 500, color: 'var(--muted-foreground, #6b6b72)', marginRight: 1 }}>
+            <span style={{ fontSize: 18, fontWeight: 500, color: 'var(--muted-foreground, #6b6b72)', marginRight: 1 }}>
               {curMatch[1].trim()}
             </span>
             {curMatch[2]}
@@ -97,7 +97,7 @@ export function KpiCard({
 
       {/* sub / delta footer */}
       {footer && (
-        <div style={{ fontSize: 12, color: 'var(--muted-foreground, #6b6b72)', marginTop: 9, display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div style={{ fontSize: 11, color: 'var(--muted-foreground, #6b6b72)', marginTop: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
           {footer.delta && (
             <span style={{
               fontWeight: 600,

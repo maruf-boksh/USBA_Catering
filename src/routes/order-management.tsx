@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/table";
 import {
   Plus, Upload, Download, Save, FileSpreadsheet, FileText, FileType,
-  History, CheckCircle2, AlertCircle, Eye, CalendarRange, X, Plane, ArrowLeft, Pencil,
+  History, CheckCircle2, AlertCircle, Eye, CalendarRange, X, Plane, ArrowLeft, Pencil, CircleDot,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -205,14 +205,25 @@ export default function OrderManagementPage() {
   // Clicking View on a row surfaces THAT individual flight's details.
   const selectedLegs = selectedOrder ? [selectedOrder] : [];
 
+  // After creating an order, jump straight to it in the list. The list is
+  // sorted by date (desc) and the seed data runs months into the future, so a
+  // freshly created order (dated today) otherwise lands several pages down and
+  // looks "missing". Deep-linking via ?ord=<orderNo> makes the list paginate to
+  // and scroll the new order into view.
+  const revealOrder = (orderNo?: string) => {
+    setActiveTab("flights");
+    setView("list");
+    if (orderNo) navigate(`/order-management?ord=${encodeURIComponent(orderNo)}`);
+  };
+
   const addOrder = (legs: FlightOrder[]) => {
     addFlightOrders(legs);
-    setView("list");
+    revealOrder(legs[0]?.orderNo);
   };
 
   const addOrdersBulk = (newOrders: FlightOrder[]) => {
     addFlightOrders(newOrders);
-    setView("list");
+    revealOrder(newOrders[0]?.orderNo);
   };
 
   const advanceStatus = (rowId: string) => {
@@ -920,6 +931,7 @@ function OrdersList({
   const [to, setTo] = useState<string>("");
   const [airline, setAirline] = useState<string>("All");
   const [scope, setScope] = useState<"All" | "Domestic" | "International">("All");
+  const [status, setStatus] = useState<"All" | FlightOrderStatus>("All");
 
   const airlineOptions = Array.from(new Set(orders.map((o) => o.airline))).sort();
 
@@ -932,10 +944,11 @@ function OrdersList({
           if (airline !== "All" && o.airline !== airline) return false;
           if (scope === "Domestic" && !isDomesticSector(o.sector)) return false;
           if (scope === "International" && isDomesticSector(o.sector)) return false;
+          if (status !== "All" && o.status !== status) return false;
           return true;
         })
         .sort((a, b) => b.date.localeCompare(a.date) || b.etd.localeCompare(a.etd)),
-    [orders, from, to, airline, scope],
+    [orders, from, to, airline, scope, status],
   );
 
   // Group filtered rows by Order # — memoised so we don't redo this work each
@@ -959,7 +972,7 @@ function OrdersList({
   const totalPages = Math.max(1, Math.ceil(groupedOrders.length / pageSize));
 
   // Whenever the filter/sort inputs change the result set, jump back to page 1.
-  useEffect(() => { setPage(1); }, [from, to, airline, scope]);
+  useEffect(() => { setPage(1); }, [from, to, airline, scope, status]);
   // Defensive: if `page` is now past the last page (e.g. after a filter
   // narrowed the list), clamp it.
   useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
@@ -1013,7 +1026,7 @@ function OrdersList({
 
   const pendingCount = filteredOrders.filter((o) => o.status === "Pending").length;
   const rangeActive = from !== "" || to !== "";
-  const filtersActive = rangeActive || airline !== "All" || scope !== "All";
+  const filtersActive = rangeActive || airline !== "All" || scope !== "All" || status !== "All";
   const rangeLabel =
     from && to
       ? from === to
@@ -1027,7 +1040,7 @@ function OrdersList({
 
   const clearRange = () => { setFrom(""); setTo(""); };
   const setToday = () => { setFrom(today); setTo(today); };
-  const clearAll = () => { setFrom(""); setTo(""); setAirline("All"); setScope("All"); };
+  const clearAll = () => { setFrom(""); setTo(""); setAirline("All"); setScope("All"); setStatus("All"); };
 
   return (
     <Card>
@@ -1103,6 +1116,19 @@ function OrdersList({
                 {airlineOptions.map((a) => <option key={a} value={a}>{a}</option>)}
               </select>
             </div>
+            <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
+              <CircleDot className="h-3.5 w-3.5 text-primary" />
+              <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">Status</Label>
+              <select
+                value={status}
+                onChange={(e) => setStatus(e.target.value as "All" | FlightOrderStatus)}
+                className="h-7 bg-transparent border-0 text-sm focus:outline-none focus:ring-0 pr-1"
+                aria-label="Filter by order status"
+              >
+                <option value="All">All</option>
+                {FLIGHT_ORDER_STATUS_FLOW.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
             {filtersActive && (
               <Button
                 size="sm"
@@ -1125,7 +1151,7 @@ function OrdersList({
 
         <div className="text-xs text-muted-foreground mb-2">
           Showing <strong className="text-foreground tabular-nums">{filteredOrders.length}</strong> of {orders.length} order{orders.length === 1 ? "" : "s"} ·{" "}
-          <strong className="text-foreground tabular-nums">{groupedOrders.length}</strong> Order #{groupedOrders.length === 1 ? "" : "s"}{" "}
+          <strong className="text-foreground tabular-nums">{groupedOrders.length}</strong> Order{groupedOrders.length === 1 ? "" : "s"}{" "}
           {groupedOrders.length > 0 && (
             <>· Page <strong className="text-foreground tabular-nums">{page}</strong> of <strong className="text-foreground tabular-nums">{totalPages}</strong></>
           )}
@@ -1461,7 +1487,7 @@ function OrderCreate({
               Create Flight Order
             </h3>
             <p className="text-xs text-muted-foreground mt-0.5">
-              All flights added below share this Order # — each flight becomes its own row in the list.
+              All flights added below share this Order — each flight becomes its own row in the list.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -1987,12 +2013,9 @@ function CrewMealCreate({
           <div>
             <h3 className="text-sm font-semibold tracking-wider uppercase text-foreground">
               Create Crew Meal Order
-              <span className="ml-2 font-mono text-xs text-primary normal-case tracking-normal">
-                {nextOrderNo}
-              </span>
             </h3>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Add flights under this Order #. The meal slot (Breakfast / Heavy Snacks / Lunch / Dinner) is derived from each flight's ETD.
+              Add flights under this Order. The meal slot (Breakfast / Heavy Snacks / Lunch / Dinner) is derived from each flight's ETD.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -2187,7 +2210,7 @@ function CrewMealCreate({
               <TableHeader className="bg-muted/40">
                 <TableRow>
                   <TableHead className="w-12 text-xs uppercase tracking-wider">SL</TableHead>
-                  <TableHead className="text-xs uppercase tracking-wider w-28">Order #</TableHead>
+                  <TableHead className="text-xs uppercase tracking-wider w-28">Order</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider w-20">ETD</TableHead>
@@ -3990,7 +4013,7 @@ function FlightOrderDetailsDialog({
           </DialogHeader>
           <div className="mt-2 space-y-4">
             <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
-              <DetailRow label="Order #" value={leg.orderNo} mono />
+              <DetailRow label="Order" value={leg.orderNo} mono />
               <DetailRow label="Flight" value={leg.flight} bold />
               <DetailRow label="Airline" value={leg.airline} />
               <DetailRow label="Sector" value={leg.sector} />
@@ -4052,7 +4075,7 @@ function FlightOrderDetailsDialog({
         {order && (
           <div className="mt-2 space-y-4">
             <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
-              <DetailRow label="Order #" value={order.orderNo} mono />
+              <DetailRow label="Order" value={order.orderNo} mono />
               <DetailRow label="Airline" value={order.airline} />
               <DetailRow label="Date" value={order.date} />
               <DetailRow label="Flights" value={legs.length.toString()} />

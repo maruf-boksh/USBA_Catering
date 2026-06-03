@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { useState, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { Button, Input, Popover, DatePicker } from "antd";
 import {
   RocketOutlined,
@@ -14,7 +14,7 @@ import {
   CalendarOutlined,
   CloseOutlined,
 } from "@ant-design/icons";
-import { PageHeader } from "@/components/layout/PageHeader";
+import { getAuthUser } from "@/lib/auth";
 import { KpiCard } from "@/components/common/KpiCard";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { useRole } from "@/lib/roles";
@@ -519,6 +519,81 @@ function ProductionMixDonut({ data }: { data: { name: string; v: number }[] }) {
   );
 }
 
+/** First letters of each name token (drops the "." in "R. Hossain" → "RH"). */
+function getInitials(name: string): string {
+  const parts = name.replace(/\./g, " ").split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "U";
+  return parts.map((p) => p[0]!.toUpperCase()).slice(0, 3).join("");
+}
+
+/**
+ * Personalised dashboard greeting banner — replaces the static module title.
+ * Shows the signed-in user's avatar initials, a live date/time, a time-of-day
+ * greeting, and their role · department · employee-id. Period/export controls
+ * are passed through as `actions` so they keep their place on the right.
+ */
+function DashboardGreeting({ actions }: { actions?: ReactNode }) {
+  const user = getAuthUser();
+  const name = user?.name ?? "there";
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(new Date()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const hour = now.getHours();
+  const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+  const dateStr = now.toLocaleDateString("en-GB", { weekday: "long", day: "2-digit", month: "long", year: "numeric" });
+  const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
+  const subParts = [user?.role, user?.department, user?.empId].filter(Boolean) as string[];
+
+  return (
+    <div
+      style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        gap: 16, flexWrap: "wrap",
+        background: "#fff",
+        border: "1px solid var(--line, #e6e2e0)",
+        borderRadius: 14,
+        padding: "12px 16px",
+        boxShadow: "0 1px 2px rgba(26,2,4,.04), 0 12px 30px -22px rgba(26,2,4,.18)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+        <div
+          aria-hidden
+          style={{
+            width: 44, height: 44, borderRadius: "50%", flexShrink: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            color: "#fff",
+            background: "linear-gradient(135deg, var(--color-primary, #a60303), var(--color-primary-dark, #7a0202))",
+            boxShadow: "0 6px 16px -8px rgba(var(--color-primary-dark-rgb, 122, 2, 2), 0.7)",
+            fontSize: 15, fontWeight: 700, letterSpacing: 0.5,
+          }}
+        >
+          {getInitials(name)}
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 500, color: "var(--muted-foreground, #6b6b72)", letterSpacing: 0.2 }}>
+            {dateStr} · {timeStr}
+          </div>
+          <div style={{ fontSize: 17, fontWeight: 700, lineHeight: 1.2, margin: "1px 0", whiteSpace: "nowrap", color: "var(--ink, #1a0204)" }}>
+            {greeting}, {name} <span aria-hidden>👋</span>
+          </div>
+          {subParts.length > 0 && (
+            <div style={{ fontSize: 11.5, color: "var(--muted-foreground, #6b6b72)" }}>{subParts.join(" · ")}</div>
+          )}
+        </div>
+      </div>
+      {actions && (
+        <div className="module-header__actions" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+          {actions}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const { role } = useRole();
   const access = useAccess();
@@ -538,9 +613,7 @@ export default function Dashboard() {
 
   return (
     <>
-      <PageHeader
-        title={`${role} Dashboard`}
-        subtitle="Live operational overview — US-Bangla Airlines Flight Catering"
+      <DashboardGreeting
         actions={
           <>
             <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
@@ -585,11 +658,11 @@ export default function Dashboard() {
       {/* Harvest decorative brand stripe */}
       <div style={{
         height: 3, borderRadius: 99, margin: '18px 0 22px',
-        background: 'linear-gradient(90deg, #E10101 0%, #a60303 46%, #1a0204 100%)',
+        background: 'linear-gradient(90deg, var(--color-primary, #E10101) 0%, var(--color-primary-dark, #a60303) 46%, var(--color-primary-dark, #1a0204) 100%)',
         opacity: 0.9,
       }} aria-hidden />
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {showKpi("kpi-flights") && (
         <KpiLink to="/order-management" highlight="active-orders" ids={data.kpis.flights.ids}>
           <KpiCard label="Flights Today"   value={data.kpis.flights.value}   sub={data.kpis.flights.sub}   icon={RocketOutlined}            tone="navy"    />
@@ -612,7 +685,7 @@ export default function Dashboard() {
         )}
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-3">
         {showKpi("kpi-pos") && (
         <KpiLink to="/procurement" highlight="po-list" ids={data.kpis.pendingPOs.ids}>
           <KpiCard label="Pending POs"      value={data.kpis.pendingPOs.value} sub={data.kpis.pendingPOs.sub} icon={ShoppingCartOutlined} tone="info"    />

@@ -7,12 +7,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Boxes, AlertTriangle, Eye, Pencil, FileText } from "lucide-react";
+import { Select as AntSelect, Button as AntButton } from "antd";
+import { AppstoreOutlined, TagsOutlined, CloseOutlined, ProfileOutlined } from "@ant-design/icons";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
   inventory, inventoryValue, nearExpiryCount,
   getAllocationMethod, setAllocationMethod, resolveMasterForInventory,
-  isBatchTrackedForInventory,
+  isBatchTrackedForInventory, findItemProfileFor,
   subscribeAllocationMethod, getAllocationVersion,
   type BatchLot, type AllocationMethod,
 } from "@/lib/sample-data";
@@ -33,11 +35,16 @@ type Item = BaseItem & {
   lastEditedTime?: string;
   officeId?: string;
   warehouseId?: string;
+  itemType?: string;
+  subCategory?: string;
 };
 
 const CATEGORIES = ["Grains", "Protein", "Beverage", "Dairy", "Vegetable", "Oil", "Misc"];
 const UOM_OPTIONS = ["Kg", "Litre", "Bottle", "Unit", "Pcs", "Box", "Pack"];
 const STORAGE_OPTIONS = ["Dry", "Cold", "Frozen"];
+
+// Sort helper for filter option lists.
+const sortStr = (a: string, b: string) => a.localeCompare(b);
 
 function computeStatus(
   stock: number,
@@ -87,7 +94,18 @@ export default function Inventory() {
   const navigate = useNavigate();
   // Backfill existing inventory rows with default Office + Central Warehouse
   const [items, setItems] = useState<Item[]>(
-    inventory.map((i) => ({ ...i, officeId: "OFF-001", warehouseId: "WH-001" })),
+    inventory.map((i) => {
+      const profile = findItemProfileFor(i);
+      return {
+        ...i,
+        officeId: "OFF-001",
+        warehouseId: "WH-001",
+        itemType: profile?.itemType ?? "",
+        // Prefer the Item Profile's category/sub-category (authoritative taxonomy).
+        category: profile?.category ?? i.category,
+        subCategory: profile?.subCategory ?? "",
+      };
+    }),
   );
   const [newItemOpen, setNewItemOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -135,6 +153,21 @@ export default function Inventory() {
   };
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
+  const [filterType, setFilterType] = useState("");
+  const [filterCategory, setFilterCategory] = useState("");
+  const [filterSubCategory, setFilterSubCategory] = useState("");
+
+  // Cascading filter options, all derived from the live items. Item Type comes
+  // first; Category is scoped to the chosen type; Sub-category to type + category.
+  const typeOptions = Array.from(new Set(items.map((i) => i.itemType).filter(Boolean) as string[])).sort(sortStr);
+  const categoryOptions = Array.from(new Set(
+    items.filter((i) => !filterType || i.itemType === filterType).map((i) => i.category).filter(Boolean),
+  )).sort(sortStr);
+  const subCategoryOptions = Array.from(new Set(
+    items
+      .filter((i) => (!filterType || i.itemType === filterType) && (!filterCategory || i.category === filterCategory))
+      .map((i) => i.subCategory).filter(Boolean) as string[],
+  )).sort(sortStr);
 
   const f = (field: keyof FormState, value: string) =>
     setForm((prev) => ({ ...prev, [field]: value }));
@@ -315,6 +348,9 @@ export default function Inventory() {
   const filteredItems = items.filter((i) => {
     if (filterOffice && i.officeId !== filterOffice) return false;
     if (filterWarehouse && i.warehouseId !== filterWarehouse) return false;
+    if (filterType && i.itemType !== filterType) return false;
+    if (filterCategory && i.category !== filterCategory) return false;
+    if (filterSubCategory && i.subCategory !== filterSubCategory) return false;
     return true;
   });
 
@@ -345,12 +381,64 @@ export default function Inventory() {
         </div>
       </div>
 
-      <div className="mb-4">
+      <div className="mb-4 flex items-center gap-2 flex-wrap">
         <LocationFilter
           officeId={filterOffice}
           warehouseId={filterWarehouse}
           onChange={(n) => { setFilterOffice(n.officeId); setFilterWarehouse(n.warehouseId); }}
         />
+        <div className="inline-flex items-center gap-1.5 bg-card border border-border rounded-lg px-2 py-1 shadow-sm">
+          <ProfileOutlined style={{ color: "var(--color-muted-foreground)", fontSize: 12 }} />
+          <span className="field-label">Item Type</span>
+          <AntSelect
+            value={filterType || ""}
+            onChange={(next: string) => { setFilterType(next); setFilterCategory(""); setFilterSubCategory(""); }}
+            size="small"
+            variant="borderless"
+            style={{ minWidth: 150 }}
+            options={[{ value: "", label: "All" }, ...typeOptions.map((t) => ({ value: t, label: t }))]}
+          />
+        </div>
+        <div className="inline-flex items-center gap-1.5 bg-card border border-border rounded-lg px-2 py-1 shadow-sm">
+          <AppstoreOutlined style={{ color: "var(--color-muted-foreground)", fontSize: 12 }} />
+          <span className="field-label">Category</span>
+          <AntSelect
+            value={filterCategory || ""}
+            onChange={(next: string) => { setFilterCategory(next); setFilterSubCategory(""); }}
+            size="small"
+            variant="borderless"
+            disabled={categoryOptions.length === 0}
+            style={{ minWidth: 130 }}
+            options={[{ value: "", label: "All" }, ...categoryOptions.map((c) => ({ value: c, label: c }))]}
+          />
+        </div>
+        <div className="inline-flex items-center gap-1.5 bg-card border border-border rounded-lg px-2 py-1 shadow-sm">
+          <TagsOutlined style={{ color: "var(--color-muted-foreground)", fontSize: 12 }} />
+          <span className="field-label">Sub-category</span>
+          <AntSelect
+            value={filterSubCategory || ""}
+            onChange={(next: string) => setFilterSubCategory(next)}
+            size="small"
+            variant="borderless"
+            disabled={subCategoryOptions.length === 0}
+            style={{ minWidth: 150 }}
+            options={[
+              { value: "", label: subCategoryOptions.length === 0 ? "—" : "All" },
+              ...subCategoryOptions.map((s) => ({ value: s, label: s })),
+            ]}
+          />
+        </div>
+        {(filterType || filterCategory || filterSubCategory) && (
+          <AntButton
+            size="small"
+            type="text"
+            icon={<CloseOutlined />}
+            onClick={() => { setFilterType(""); setFilterCategory(""); setFilterSubCategory(""); }}
+            style={{ color: "var(--color-muted-foreground)" }}
+          >
+            Clear
+          </AntButton>
+        )}
       </div>
 
       <div data-arrival-id="inv-alerts">
