@@ -4,6 +4,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
+import { rowEditors } from "@/lib/row-editors";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -16,6 +17,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { activeItems, vendors } from "@/lib/sample-data";
+import { getApprovedRfqs } from "@/lib/rfqs";
 
 type QuoteStatus = "Draft" | "Submitted" | "Selected" | "Rejected" | "Expired";
 
@@ -33,7 +35,7 @@ type Quotation = {
   rfqRef: string;
   supplier: string;
   validity: string;
-  leadTimeDays: number;
+  leadTimeDays?: number;
   paymentTerms: string;
   lines: QuoteLine[];
   total: number;
@@ -125,7 +127,7 @@ export default function QuotationEntryPage() {
     <>
       <PageHeader
         title="Quotation Entry"
-        subtitle="Capture supplier responses against open RFQs — line prices, validity, lead time"
+        subtitle="Capture supplier responses against open RFQs — line prices and validity"
         actions={
           <Button
             variant={view === "create" ? "outline" : "default"}
@@ -139,13 +141,16 @@ export default function QuotationEntryPage() {
       />
 
       {view === "list"
-        ? <QuotationList rows={rows} />
+        ? <QuotationList rows={rows} editors={rowEditors(setRows)} />
         : <QuotationCreate nextId={nextId} onSave={addQuotation} />}
     </>
   );
 }
 
-function QuotationList({ rows }: { rows: Quotation[] }) {
+function QuotationList({ rows, editors }: {
+  rows: Quotation[];
+  editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
+}) {
   const total = rows.length;
   const submitted = rows.filter((r) => r.status === "Submitted").length;
   const selected = rows.filter((r) => r.status === "Selected").length;
@@ -162,10 +167,6 @@ function QuotationList({ rows }: { rows: Quotation[] }) {
       render: (r) => <span className="tabular-nums font-medium">{r.total.toLocaleString()}</span>,
     },
     { key: "validity", header: "Valid Till" },
-    {
-      key: "leadTimeDays", header: "Lead Time",
-      render: (r) => <span className="text-xs">{r.leadTimeDays}d</span>,
-    },
     { key: "status", header: "Status", render: (r) => <StatusBadge status={r.status} /> },
   ];
 
@@ -189,28 +190,83 @@ function QuotationList({ rows }: { rows: Quotation[] }) {
         columns={cols}
         searchKeys={["id", "rfqRef", "supplier", "status"]}
         selectable={false}
-        actions={(r) => <RowActions row={r} actions={["view", "edit", "print", "delete"]} />}
+        actions={(r) => (
+          <RowActions
+            row={r}
+            actions={["view", "edit", "print", "delete"]}
+            onSave={editors.onSave}
+            onDelete={editors.onDelete}
+            editDetail={({ save, close }) => <QuotationFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
+          />
+        )}
       />
     </>
   );
 }
 
 function QuotationCreate({ nextId, onSave }: { nextId: string; onSave: (q: Quotation) => void }) {
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <QuotationFields mode="create" nextId={nextId} onSave={onSave} />
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Shared Quotation form fields. Used by the Create page (mode="create") and the
+ * row Edit modal (mode="edit", pre-filled from `initial`) so both share an
+ * identical layout including the dynamic priced-line table + computed total.
+ */
+function QuotationFields({
+  mode, nextId, initial, onSave, onSubmit, onClose,
+}: {
+  mode: "create" | "edit";
+  nextId?: string;
+  initial?: Quotation;
+  onSave?: (q: Quotation) => void;
+  onSubmit?: (patch: Record<string, unknown>) => void;
+  onClose?: () => void;
+}) {
+  const isEdit = mode === "edit";
   const today = new Date().toISOString().slice(0, 10);
   const oneMonthOut = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
 
-  const [date] = useState(today);
-  const [rfqRef, setRfqRef] = useState("");
-  const [supplier, setSupplier] = useState(vendors[0]?.name ?? "");
-  const [validity, setValidity] = useState(oneMonthOut);
-  const [leadTimeDays, setLeadTimeDays] = useState("3");
-  const [paymentTerms, setPaymentTerms] = useState(PAYMENT_TERMS[1]);
-  const [notes, setNotes] = useState("");
-  const [lines, setLines] = useState<QuoteLine[]>([
+  const [date] = useState(initial?.date ?? today);
+  const [rfqRef, setRfqRef] = useState(initial?.rfqRef ?? "");
+  const [supplier, setSupplier] = useState(initial?.supplier ?? vendors[0]?.name ?? "");
+  const [validity, setValidity] = useState(initial?.validity ?? oneMonthOut);
+  const [paymentTerms, setPaymentTerms] = useState(initial?.paymentTerms ?? PAYMENT_TERMS[1]);
+  const [notes, setNotes] = useState(initial?.notes ?? "");
+  const [lines, setLines] = useState<QuoteLine[]>(initial?.lines ?? [
     { id: `l-${Date.now()}`, itemName: "", uom: "Kg", qty: 0, unitPrice: 0 },
   ]);
 
   const itemOptions = useMemo(() => activeItems.slice(0, 80), []);
+  // RFQ Reference choices come from the RFQ table — only approved RFQs can be quoted.
+  const rfqOptions = useMemo(() => getApprovedRfqs(), []);
+
+  // Selecting an RFQ loads its requested items as priced lines (price starts
+  // from the item's cost price, for the supplier to confirm/adjust).
+  const handleRfqChange = (id: string) => {
+    setRfqRef(id);
+    const rfq = rfqOptions.find((r) => r.id === id);
+    if (rfq) {
+      setLines(
+        rfq.lines.map((l, i) => {
+          const it = itemOptions.find((x) => x.name === l.itemName);
+          return {
+            id: `rfq-${i}-${l.id}`,
+            itemName: l.itemName,
+            uom: l.uom,
+            qty: l.qty,
+            unitPrice: it?.costPrice ?? 0,
+          };
+        }),
+      );
+    }
+  };
 
   const total = useMemo(
     () => lines.reduce((s, l) => s + l.qty * l.unitPrice, 0),
@@ -234,27 +290,31 @@ function QuotationCreate({ nextId, onSave }: { nextId: string; onSave: (q: Quota
     if (!supplier) { toast.error("Select a supplier."); return; }
     const cleanLines = lines.filter((l) => l.itemName.trim() && l.qty > 0);
     if (cleanLines.length === 0) { toast.error("Add at least one priced item line."); return; }
-    onSave({
-      id: nextId,
+    const payload = {
       date,
       rfqRef: rfqRef.trim(),
       supplier,
       validity,
-      leadTimeDays: Number(leadTimeDays) || 0,
       paymentTerms,
       lines: cleanLines,
       total,
       status,
       notes: notes.trim() || undefined,
-    });
-    toast.success(status === "Draft"
-      ? `${nextId} saved as draft.`
-      : `${nextId} submitted from ${supplier}.`);
+    };
+    if (isEdit) {
+      onSubmit?.(payload);
+      onClose?.();
+    } else {
+      onSave?.({ id: nextId!, ...payload });
+      toast.success(status === "Draft"
+        ? `${nextId} saved as draft.`
+        : `${nextId} submitted from ${supplier}.`);
+    }
   };
 
   return (
-    <Card>
-      <CardContent className="pt-6">
+    <>
+      {!isEdit && (
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-sm font-semibold uppercase tracking-wider">New Quotation</h3>
           <div className="flex items-center gap-2">
@@ -266,11 +326,12 @@ function QuotationCreate({ nextId, onSave }: { nextId: string; onSave: (q: Quota
             </Button>
           </div>
         </div>
+      )}
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-4 mb-6">
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Quotation #</Label>
-            <Input value={nextId} disabled className="mt-1 font-mono" />
+            <Input value={initial?.id ?? nextId ?? ""} disabled className="mt-1 font-mono" />
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Date</Label>
@@ -278,12 +339,18 @@ function QuotationCreate({ nextId, onSave }: { nextId: string; onSave: (q: Quota
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">RFQ Reference *</Label>
-            <Input
+            <select
               value={rfqRef}
-              onChange={(e) => setRfqRef(e.target.value)}
-              placeholder="e.g. RFQ-2026-0042"
-              className="mt-1 font-mono"
-            />
+              onChange={(e) => handleRfqChange(e.target.value)}
+              className={`${selectCls} font-mono`}
+            >
+              <option value="">Select RFQ</option>
+              {rfqOptions.map((rfq) => (
+                <option key={rfq.id} value={rfq.id}>
+                  {rfq.id} · {rfq.lines.length} item{rfq.lines.length === 1 ? "" : "s"} · {rfq.status}
+                </option>
+              ))}
+            </select>
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Supplier *</Label>
@@ -294,16 +361,6 @@ function QuotationCreate({ nextId, onSave }: { nextId: string; onSave: (q: Quota
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Valid Till</Label>
             <Input type="date" value={validity} onChange={(e) => setValidity(e.target.value)} className="mt-1" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Lead Time (days)</Label>
-            <Input
-              type="number"
-              min={0}
-              value={leadTimeDays}
-              onChange={(e) => setLeadTimeDays(e.target.value)}
-              className="mt-1 tabular-nums"
-            />
           </div>
           <div className="md:col-span-3">
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Payment Terms</Label>
@@ -341,6 +398,10 @@ function QuotationCreate({ nextId, onSave }: { nextId: string; onSave: (q: Quota
                       className={selectCls}
                     >
                       <option value="">Select item</option>
+                      {/* Loaded-from-RFQ items may not be in the master list — keep them selectable. */}
+                      {l.itemName && !itemOptions.some((it) => it.name === l.itemName) && (
+                        <option value={l.itemName}>{l.itemName}</option>
+                      )}
                       {itemOptions.map((it) => (
                         <option key={it.id} value={it.name}>{it.name}</option>
                       ))}
@@ -399,7 +460,15 @@ function QuotationCreate({ nextId, onSave }: { nextId: string; onSave: (q: Quota
             placeholder="Supplier remarks, delivery conditions, discount terms…"
           />
         </div>
-      </CardContent>
-    </Card>
+
+      {isEdit && (
+        <div className="flex justify-end gap-2 mt-6 pt-4 border-t border-border">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={() => save(initial?.status ?? "Draft")}>
+            <Save className="h-4 w-4 mr-1.5" /> Save Changes
+          </Button>
+        </div>
+      )}
+    </>
   );
 }

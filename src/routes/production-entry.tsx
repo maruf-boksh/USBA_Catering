@@ -28,6 +28,7 @@ import {
   isDomesticSector, itemsByType, allocateFefo, SPECIAL_MEAL_BY_CODE,
   type FlightOrderRow, type MealSlot, type ItemMaster,
 } from "@/lib/sample-data";
+import { getItemStock } from "@/lib/inventory-stock";
 import { useFlightOrders, updateFlightOrdersWhere } from "@/lib/flight-orders-store";
 import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-settings";
 import { Fragment } from "react";
@@ -2585,7 +2586,7 @@ function MealPlanningDetailsDialog({
                 <TableBody>
                   {availableItems.map((it, i) => {
                     const inv = stockFor(it.name);
-                    const stock = inv?.stock ?? 0;
+                    const stock = getItemStock(it.name);
                     const uom = inv?.uom ?? "";
                     const req = it.computedQty ?? 0;
                     const shortfall = Math.max(0, req - stock);
@@ -3038,12 +3039,10 @@ function resolveMrpSupplier(itemName: string): string {
   return MRP_SUPPLIER_BY_MATERIAL[itemName] ?? MRP_FALLBACK_SUPPLIER;
 }
 
-// Stock lookup by item name. We treat the entire `inventory.stock` value as
-// being held at WH-001 (Central Warehouse) — per-warehouse stock isn't modeled
-// yet, so this is the demo simplification.
+// Stock lookup by item name — actual on-hand stock summed across every
+// warehouse the item is held in (see lib/inventory-stock).
 function getMrpOnHand(itemName: string): number {
-  const inv = inventory.find((i) => i.name.toLowerCase() === itemName.toLowerCase());
-  return inv?.stock ?? 0;
+  return getItemStock(itemName);
 }
 
 const MRP_CENTRAL_WAREHOUSE_ID = "WH-001";

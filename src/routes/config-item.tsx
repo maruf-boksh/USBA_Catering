@@ -4,6 +4,7 @@ import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
+import { rowEditors } from "@/lib/row-editors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -40,7 +41,7 @@ import {
   clearAllocationOverride,
   setAllocationMethod,
   isBatchTrackedForMaster,
-  setBatchTracked,
+  setBatchTracked as persistBatchTracked,
   subscribeAllocationMethod,
   getAllocationVersion,
   type ItemMaster,
@@ -174,7 +175,7 @@ export default function ConfigItemPage() {
                 <KpiCard label="Active" value={activeCount} icon={CheckCircle} tone="success" />
                 <KpiCard label="Inactive" value={rows.length - activeCount} icon={XCircle} tone="warning" />
               </div>
-              <ItemList data={rows} onToggle={toggle} />
+              <ItemList data={rows} onToggle={toggle} editors={rowEditors(setRows)} />
             </>
           ) : (
             <ItemCreate nextId={`ITM-${String(rows.length + 1).padStart(3, "0")}`} onSave={add} />
@@ -478,7 +479,7 @@ function BatchToggle({ master }: { master: ItemRow }) {
   const current = isBatchTrackedForMaster(master.id);
   const toggle = (next: boolean) => {
     if (next === current) return;
-    setBatchTracked(master.id, next);
+    persistBatchTracked(master.id, next);
     toast.success(`${master.name} is now ${next ? "batch-tracked" : "a single item"}.`);
   };
   return (
@@ -517,7 +518,13 @@ function BatchToggle({ master }: { master: ItemRow }) {
   );
 }
 
-function ItemList({ data, onToggle }: { data: ItemRow[]; onToggle: (id: string) => void }) {
+function ItemList({
+  data, onToggle, editors,
+}: {
+  data: ItemRow[];
+  onToggle: (id: string) => void;
+  editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
+}) {
   // Re-render the table when any item's FIFO/FEFO override changes.
   useSyncExternalStore(subscribeAllocationMethod, getAllocationVersion, getAllocationVersion);
   const navigate = useNavigate();
@@ -640,7 +647,14 @@ function ItemList({ data, onToggle }: { data: ItemRow[]; onToggle: (id: string) 
       columns={cols}
       searchKeys={["id", "code", "name", "itemType", "category"]}
       selectable={false}
-      actions={(r) => <RowActions row={r} actions={["view", "edit", "print"]} editDetail={<ItemEditForm row={r} />} />}
+      actions={(r) => (
+        <RowActions
+          row={r}
+          actions={["view", "edit", "print"]}
+          onSave={editors.onSave}
+          editDetail={({ save, close }) => <ItemEditForm row={r} onSubmit={save} onClose={close} />}
+        />
+      )}
     />
   );
 }
@@ -648,7 +662,13 @@ function ItemList({ data, onToggle }: { data: ItemRow[]; onToggle: (id: string) 
 /** Edit form shown inside the row-actions modal — mirrors the Create Item
  *  layout (sectioned fields, inline "+ Add new" category/sub-category) but
  *  pre-filled from the selected row. */
-function ItemEditForm({ row }: { row: ItemRow }) {
+function ItemEditForm({
+  row, onSubmit, onClose,
+}: {
+  row: ItemRow;
+  onSubmit: (patch: Record<string, unknown>) => void;
+  onClose: () => void;
+}) {
   const [code, setCode] = useState(row.code ?? "");
   const [name, setName] = useState(row.name ?? "");
   const [itemType, setItemType] = useState<string>(row.itemType ?? ITEM_TYPES[0]);
@@ -686,6 +706,27 @@ function ItemEditForm({ row }: { row: ItemRow }) {
     if (!val) { toast.error("Enter a sub category name."); return; }
     if (!subCategoryOptions.some((s) => s.toLowerCase() === val.toLowerCase())) setSubCategoryOptions((p) => [...p, val]);
     setSubCategory(val); setNewSubCategory(""); setAddingSubCategory(false);
+  };
+
+  const submit = () => {
+    if (!code.trim()) { toast.error("Item code is required."); return; }
+    if (!name.trim()) { toast.error("Item name is required."); return; }
+    // Allocation + batch tracking live in their own override stores, keyed by
+    // master id — persist them there.
+    if (allocation === "Auto") clearAllocationOverride(row.id);
+    else setAllocationMethod(row.id, allocation);
+    persistBatchTracked(row.id, batchTracked);
+    // Persist the core item-master fields back into the list.
+    onSubmit({
+      code: code.trim(),
+      name: name.trim(),
+      itemType,
+      category,
+      subCategory,
+      uom,
+      status,
+      costPrice: Number(costPrice) || 0,
+    });
   };
 
   const lbl = "text-xs uppercase tracking-wider text-muted-foreground";
@@ -790,6 +831,11 @@ function ItemEditForm({ row }: { row: ItemRow }) {
           <Switch checked={batchTracked} onCheckedChange={setBatchTracked} />
           <span className="text-sm font-medium">{batchTracked ? "Batch-tracked" : "Single item"}</span>
         </div>
+      </div>
+
+      <div className="flex justify-end gap-2 pt-2 border-t border-border">
+        <Button variant="outline" onClick={onClose}>Cancel</Button>
+        <Button onClick={submit}>Save Changes</Button>
       </div>
     </div>
   );

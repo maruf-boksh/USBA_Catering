@@ -17,38 +17,19 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  FileText, ClipboardList, CheckCircle, Plus, Save, Send, Trash2, Pencil,
+  FileText, ClipboardList, CheckCircle, Plus, Save, Send, Trash2, Pencil, Eye,
 } from "lucide-react";
 import { toast } from "sonner";
 import { activeItems } from "@/lib/sample-data";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import { useWorkflow, type WfRequisition, type WfDemandItem } from "@/lib/workflow-store";
 import { useArrivalFlash } from "@/lib/arrival-flash";
-
-type PRLineItem = {
-  id: string;
-  itemName: string;
-  description: string;
-  qty: number;
-  uom: string;
-  rate: number;
-};
-
-type Priority = "Normal" | "Urgent";
-
-type PurchaseRequisition = {
-  id: string;
-  date: string;
-  officeId: string;
-  warehouseId: string;
-  requestedBy: string;
-  requiredBy: string;
-  priority: Priority;
-  justification: string;
-  lines: PRLineItem[];
-  status: string;
-  totalAmount: number;
-};
+import {
+  seedRequisitions,
+  type PRLineItem,
+  type Priority,
+  type PurchaseRequisition,
+} from "@/lib/purchase-requisitions";
 
 const PRIORITIES: Priority[] = ["Normal", "Urgent"];
 const UOMS = ["Kg", "Litre", "Pcs", "Box", "Pack", "Unit", "Bottle"];
@@ -74,63 +55,6 @@ const ITEM_MASTER = activeItems.map((i) => ({
   uom: i.uom,
   description: `${i.code} · ${i.category}${i.subCategory ? ` · ${i.subCategory}` : ""}`,
 }));
-
-const seedRequisitions: PurchaseRequisition[] = [
-  {
-    id: "PR-2026-005", date: "2026-05-18", officeId: "OFF-001", warehouseId: "WH-003",
-    requestedBy: "S. Ahmed",
-    requiredBy: "2026-05-22", priority: "Normal", justification: "Weekly stock replenishment for hot kitchen line.",
-    lines: [
-      { id: "L1", itemName: "Basmati Rice",   description: "Premium long grain", qty: 200, uom: "Kg",    rate: 120 },
-      { id: "L2", itemName: "Chicken",        description: "Whole, cleaned",     qty: 150, uom: "Kg",    rate: 280 },
-      { id: "L3", itemName: "Cooking Oil",    description: "Soyabean refined",   qty: 60,  uom: "Litre", rate: 175 },
-    ],
-    status: "Approved", totalAmount: 76500,
-  },
-  {
-    id: "PR-2026-004", date: "2026-05-17", officeId: "OFF-001", warehouseId: "WH-001",
-    requestedBy: "M. Hossain",
-    requiredBy: "2026-05-21", priority: "Normal", justification: "Production run for the next 4 days.",
-    lines: [
-      { id: "L1", itemName: "All-Purpose Flour", description: "10kg bag",    qty: 25, uom: "Box",   rate: 1200 },
-      { id: "L2", itemName: "Butter",            description: "Unsalted",    qty: 30, uom: "Kg",    rate: 950  },
-      { id: "L3", itemName: "Yeast",             description: "Active dry",  qty: 8,  uom: "Pack",  rate: 320  },
-    ],
-    status: "Pending Approval", totalAmount: 61060,
-  },
-  {
-    id: "PR-2026-003", date: "2026-05-15", officeId: "OFF-001", warehouseId: "WH-004",
-    requestedBy: "F. Begum",
-    requiredBy: "2026-05-19", priority: "Urgent", justification: "Salmon stock fell below reorder level after weekend rush.",
-    lines: [
-      { id: "L1", itemName: "Salmon Fillet", description: "Frozen, premium grade", qty: 40, uom: "Kg",  rate: 1400 },
-      { id: "L2", itemName: "Lemon",         description: "Fresh",                 qty: 20, uom: "Kg",  rate: 60   },
-      { id: "L3", itemName: "Olive Oil",     description: "Extra virgin",          qty: 10, uom: "Litre", rate: 850 },
-    ],
-    status: "Approved", totalAmount: 65700,
-  },
-  {
-    id: "PR-2026-002", date: "2026-05-12", officeId: "OFF-001", warehouseId: "WH-002",
-    requestedBy: "A. Khan",
-    requiredBy: "2026-05-18", priority: "Normal", justification: "Replenish beverage stock for international flights.",
-    lines: [
-      { id: "L1", itemName: "Mineral Water",      description: "500ml",     qty: 50,  uom: "Box",    rate: 480 },
-      { id: "L2", itemName: "Orange Juice",       description: "1L tetra",  qty: 30,  uom: "Box",    rate: 720 },
-      { id: "L3", itemName: "Disposable Cup",     description: "8oz paper", qty: 100, uom: "Pack",   rate: 95  },
-    ],
-    status: "Closed", totalAmount: 55100,
-  },
-  {
-    id: "PR-2026-001", date: "2026-05-10", officeId: "OFF-001", warehouseId: "WH-001",
-    requestedBy: "N. Hasan",
-    requiredBy: "2026-05-25", priority: "Normal", justification: "Quarterly maintenance consumables.",
-    lines: [
-      { id: "L1", itemName: "Industrial Detergent", description: "5L jar",      qty: 12, uom: "Bottle", rate: 650 },
-      { id: "L2", itemName: "Gas Cylinder",         description: "Commercial",  qty: 4,  uom: "Unit",   rate: 2400 },
-    ],
-    status: "Draft", totalAmount: 17400,
-  },
-];
 
 // ── Bridge: convert workflow-store WfRequisition (e.g. MRP-generated) into the
 // local PurchaseRequisition shape so they show up in this module's list. The
@@ -343,22 +267,25 @@ export default function PurchaseRequisitionPage() {
                 <div className="flex items-center gap-1.5">
                   {isEditable(r) && (
                     <Button
-                      size="sm"
+                      size="icon"
                       variant="outline"
-                      className="h-7 px-2.5 text-xs border-primary/40 text-primary hover:bg-primary/5"
+                      className="h-7 w-7 border-primary/40 text-primary hover:bg-primary/5"
                       onClick={() => setEditing(r)}
                       title={`Edit ${r.id}`}
+                      aria-label={`Edit ${r.id}`}
                     >
-                      <Pencil className="h-3 w-3 mr-1" /> Edit
+                      <Pencil className="h-3.5 w-3.5" />
                     </Button>
                   )}
                   <Button
-                    size="sm"
+                    size="icon"
                     variant="outline"
-                    className="h-7 px-2.5 text-xs"
+                    className="h-7 w-7"
                     onClick={() => setSelected(r)}
+                    title={`View ${r.id}`}
+                    aria-label={`View ${r.id}`}
                   >
-                    View
+                    <Eye className="h-3.5 w-3.5" />
                   </Button>
                 </div>
               )}

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { Dropdown, Button, Modal, Input } from "antd";
 import type { MenuProps } from "antd";
 import {
@@ -43,6 +43,89 @@ const META: Record<
 
 type ModalKind = null | "view" | "edit" | "delete" | "approve" | "reject";
 
+/** API handed to a render-prop `editDetail` so a custom form can persist + close. */
+export type EditApi = {
+  /** Persist a patch of changed fields (merged onto the row via onSave). */
+  save: (patch: Record<string, unknown>) => void;
+  /** Close the modal without saving. */
+  close: () => void;
+};
+
+// A handful of field keys read better as fixed acronyms than as naive
+// title-casing ("Iata" → "IATA", "id" → "ID").
+const ACRONYMS: Record<string, string> = {
+  id: "ID",
+  iata: "IATA",
+  icao: "ICAO",
+  poref: "PO Ref",
+  rfqref: "RFQ Ref",
+  prref: "PR Ref",
+  grnref: "GRN Ref",
+  uom: "UoM",
+  hsn: "HSN",
+  vat: "VAT",
+  gst: "GST",
+  sku: "SKU",
+};
+
+/** Turn a camelCase / snake_case key into a readable label. */
+function humanizeKey(key: string): string {
+  const lower = key.toLowerCase();
+  if (ACRONYMS[lower]) return ACRONYMS[lower];
+  const spaced = key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    // "officeId" → "office" (drop a trailing Id; it's an internal reference)
+    .replace(/\bId\b/g, "")
+    .trim();
+  return (spaced || key).replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/** Human-readable rendering of a field value for the View modal. */
+function formatValue(v: unknown): string {
+  if (v == null || v === "") return "—";
+  if (typeof v === "boolean") return v ? "Yes" : "No";
+  if (Array.isArray(v)) {
+    if (v.length === 0) return "—";
+    const allPrimitive = v.every((x) => typeof x !== "object" || x === null);
+    if (allPrimitive) return v.join(", ");
+    return `${v.length} item${v.length === 1 ? "" : "s"}`;
+  }
+  if (typeof v === "object") {
+    try { return JSON.stringify(v); } catch { return "—"; }
+  }
+  return String(v);
+}
+
+/** Only primitive scalars are safely editable in the generic edit form. */
+function isEditable(v: unknown): boolean {
+  return v == null || typeof v === "string" || typeof v === "number" || typeof v === "boolean";
+}
+
+/**
+ * Re-assemble an updated row from the edited draft, preserving the original
+ * value types (numbers stay numbers, booleans stay booleans). Non-editable
+ * fields (arrays / objects) pass through untouched.
+ */
+function buildUpdated(
+  original: Record<string, unknown>,
+  draft: Record<string, string>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...original };
+  for (const [k, orig] of Object.entries(original)) {
+    if (!(k in draft)) continue;
+    const d = draft[k];
+    if (typeof orig === "number") {
+      out[k] = d.trim() === "" ? orig : Number(d);
+    } else if (typeof orig === "boolean") {
+      out[k] = /^(true|yes|1|active)$/i.test(d.trim());
+    } else {
+      out[k] = d;
+    }
+  }
+  return out;
+}
+
 export function RowActions({
   row,
   actions = ["view", "edit", "approve", "delete"],
@@ -50,19 +133,47 @@ export function RowActions({
   editDetail,
   onView,
   onEdit,
+  onSave,
+  onDelete,
 }: {
   row: Record<string, unknown>;
   actions?: ActionKey[];
   detail?: ReactNode;
-  editDetail?: ReactNode;
+  /**
+   * Custom Edit body. Either a static node (no built-in persistence — relies on
+   * the footer "Save Changes" + onSave) OR a render-prop that receives a
+   * `{ save, close }` API so a rich form can own its own Save button and persist
+   * a patch. When a function is passed, the modal hides its default Save button.
+   */
+  editDetail?: ReactNode | ((api: EditApi) => ReactNode);
   /** When provided, View is handled by the page instead of the built-in modal. */
   onView?: (row: Record<string, unknown>) => void;
   /** When provided, Edit is handled by the page instead of the built-in modal. */
   onEdit?: (row: Record<string, unknown>) => void;
+  /**
+   * When provided, the generic Edit modal persists changes by calling this with
+   * the updated row (the page should write it back into its state). Without it,
+   * the modal falls back to a toast only (no persistence).
+   */
+  onSave?: (updatedRow: Record<string, unknown>) => void;
+  /** When provided, Delete removes the record by calling this with the row. */
+  onDelete?: (row: Record<string, unknown>) => void;
 }) {
   const [open, setOpen] = useState<ModalKind>(null);
   const [rejectionReason, setRejectionReason] = useState("");
+  const [draft, setDraft] = useState<Record<string, string>>({});
   const rowId = String(row.id ?? "record");
+
+  // Seed the edit draft (string values for inputs) whenever the edit modal opens.
+  useEffect(() => {
+    if (open === "edit") {
+      const seed: Record<string, string> = {};
+      for (const [k, v] of Object.entries(row)) {
+        if (isEditable(v)) seed[k] = v == null ? "" : String(v);
+      }
+      setDraft(seed);
+    }
+  }, [open, row]);
 
   const handle = (a: ActionKey) => {
     if (a === "view" && onView) { onView(row); return; }
@@ -107,8 +218,41 @@ export function RowActions({
     reject:  `Reject — ${rowId}`,
   };
 
-  const isDetailMode = (open === "view" && detail) || (open === "edit" && editDetail);
-  const modalWidth = isDetailMode ? 960 : 640;
+  const editIsRenderProp = typeof editDetail === "function";
+  const isDetailMode = (open === "view" && detail) || (open === "edit" && !!editDetail);
+  const modalWidth = isDetailMode ? 960 : 680;
+
+  // Render-prop editDetail owns its own Save; route its `save` through onSave.
+  const editApi: EditApi = {
+    save: (patch) => {
+      if (onSave) onSave({ ...row, ...patch });
+      toast.success(`Saved ${rowId}`);
+      close();
+    },
+    close,
+  };
+
+  const saveEdit = () => {
+    if (onSave) {
+      onSave(buildUpdated(row, draft));
+      toast.success(`Saved ${rowId}`);
+    } else {
+      toast.success(`Saved ${rowId}`);
+    }
+    close();
+  };
+
+  const confirmDelete = () => {
+    if (onDelete) {
+      onDelete(row);
+      toast.success(`Deleted ${rowId}`);
+    } else {
+      toast.success(`Deleted ${rowId}`);
+    }
+    close();
+  };
+
+  const entries = Object.entries(row);
 
   return (
     <>
@@ -132,16 +276,15 @@ export function RowActions({
         width={modalWidth}
         destroyOnHidden
         footer={
+          // A render-prop edit form supplies its own Cancel / Save buttons, so
+          // hide the modal's default footer entirely in that mode.
+          open === "edit" && editIsRenderProp ? null : (
           <>
             {open !== "view" && (
               <Button onClick={close}>Cancel</Button>
             )}
             {open === "delete" && (
-              <Button
-                type="primary"
-                danger
-                onClick={() => { toast.success(`Deleted ${rowId}`); close(); }}
-              >
+              <Button type="primary" danger onClick={confirmDelete}>
                 Delete
               </Button>
             )}
@@ -162,11 +305,8 @@ export function RowActions({
                 Reject
               </Button>
             )}
-            {open === "edit" && (
-              <Button
-                type="primary"
-                onClick={() => { toast.success(`Saved ${rowId}`); close(); }}
-              >
+            {open === "edit" && !editIsRenderProp && (
+              <Button type="primary" onClick={saveEdit}>
                 Save Changes
               </Button>
             )}
@@ -174,6 +314,7 @@ export function RowActions({
               <Button type="primary" onClick={close}>Close</Button>
             )}
           </>
+          )
         }
       >
         {open === "delete" && (
@@ -201,41 +342,88 @@ export function RowActions({
         )}
 
         {open === "view" && detail && <div>{detail}</div>}
-        {open === "edit" && editDetail && <div>{editDetail}</div>}
+        {open === "edit" && editDetail && (
+          <div>{editIsRenderProp ? (editDetail as (api: EditApi) => ReactNode)(editApi) : editDetail}</div>
+        )}
 
-        {(open === "view" || open === "edit") && !isDetailMode && (
+        {/* Generic read-only View — humanized labels, formatted values. */}
+        {open === "view" && !detail && (
           <div
             style={{
               display: "grid",
               gridTemplateColumns: "1fr 1fr",
               gap: 12,
-              maxHeight: 420,
+              maxHeight: 460,
               overflow: "auto",
             }}
           >
-            {Object.entries(row).map(([k, v]) => (
+            {entries.map(([k, v]) => (
               <div
                 key={k}
                 style={{
                   border: "1px solid var(--color-border)",
                   borderRadius: 8,
-                  padding: 8,
+                  padding: "8px 10px",
+                  background: "var(--color-muted, transparent)",
                 }}
               >
-                <div className="field-label">{k}</div>
-                {open === "edit" ? (
-                  <Input
-                    defaultValue={String(v)}
-                    variant="borderless"
-                    style={{ paddingInline: 0, marginTop: 2 }}
-                  />
-                ) : (
-                  <div style={{ fontSize: 13, fontWeight: 500, marginTop: 2 }}>
-                    {String(v)}
-                  </div>
-                )}
+                <div className="field-label">{humanizeKey(k)}</div>
+                <div style={{ fontSize: 13, fontWeight: 500, marginTop: 2, wordBreak: "break-word" }}>
+                  {formatValue(v)}
+                </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Generic Edit — editable scalar fields, non-editable shown read-only. */}
+        {open === "edit" && !editDetail && (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 12,
+              maxHeight: 460,
+              overflow: "auto",
+            }}
+          >
+            {entries.map(([k, v]) => {
+              const editable = isEditable(v);
+              const locked = k === "id"; // never edit the primary key
+              return (
+                <div
+                  key={k}
+                  style={{
+                    border: "1px solid var(--color-border)",
+                    borderRadius: 8,
+                    padding: "8px 10px",
+                  }}
+                >
+                  <div className="field-label">{humanizeKey(k)}</div>
+                  {editable && !locked ? (
+                    <Input
+                      value={draft[k] ?? ""}
+                      onChange={(e) => setDraft((prev) => ({ ...prev, [k]: e.target.value }))}
+                      variant="borderless"
+                      style={{ paddingInline: 0, marginTop: 2 }}
+                    />
+                  ) : (
+                    <div
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 500,
+                        marginTop: 2,
+                        color: "var(--color-muted-foreground)",
+                        wordBreak: "break-word",
+                      }}
+                      title={locked ? "Primary key — not editable" : "Not editable here"}
+                    >
+                      {formatValue(v)}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </Modal>

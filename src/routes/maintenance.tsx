@@ -6,10 +6,14 @@ import { Button } from "@/components/ui/button";
 import { Wrench, Plus } from "lucide-react";
 import { assets } from "@/lib/sample-data";
 import { KpiCard } from "@/components/common/KpiCard";
+import { usePersistedState } from "@/lib/use-persisted-state";
+import { rowEditors } from "@/lib/row-editors";
 
 type A = (typeof assets)[number];
 
 export default function Maintenance() {
+  const [rows, setRows] = usePersistedState<A[]>("maintenance-assets", assets);
+  const editors = rowEditors(setRows);
   const cols: Column<A>[] = [
     { key: "id", header: "Asset #" },
     { key: "name", header: "Name" },
@@ -34,10 +38,17 @@ export default function Maintenance() {
       </div>
       <DataTable
         title="assets"
-        data={assets}
+        data={rows}
         columns={cols}
         searchKeys={["id", "name", "type", "location", "status"]}
-        actions={(r) => <RowActions row={r} actions={["view", "edit", "assign", "track", "delete"]} />}
+        actions={(r) => (
+          <RowActions
+            row={r}
+            actions={["view", "edit", "assign", "track", "delete"]}
+            onSave={editors.onSave}
+            onDelete={editors.onDelete}
+          />
+        )}
         selectable={false}
       />
     </>

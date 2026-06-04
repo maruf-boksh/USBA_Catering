@@ -3,6 +3,7 @@ import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
+import { rowEditors } from "@/lib/row-editors";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -128,7 +129,7 @@ export default function TransferRequestPage() {
             <KpiCard label="Approved" value={approved} icon={CheckCircle} tone="success" />
             <KpiCard label="Completed" value={completed} icon={FileText} tone="navy" />
           </div>
-          <TRList data={rows} />
+          <TRList data={rows} editors={rowEditors(setRows)} />
         </>
       ) : (
         <TRCreate nextId={`TR-${String(7000 + rows.length + 1)}`} onSave={add} />
@@ -137,7 +138,12 @@ export default function TransferRequestPage() {
   );
 }
 
-function TRList({ data }: { data: TransferRequest[] }) {
+function TRList({
+  data, editors,
+}: {
+  data: TransferRequest[];
+  editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
+}) {
   const cols: Column<TransferRequest>[] = [
     { key: "id", header: "TR #" },
     { key: "date", header: "Date", render: (r) => <span className="tabular-nums text-xs">{r.date}</span> },
@@ -168,21 +174,47 @@ function TRList({ data }: { data: TransferRequest[] }) {
       columns={cols}
       searchKeys={["id", "from", "to", "requestedBy", "reason", "status"]}
       selectable={false}
-      actions={(r) => <RowActions row={r} actions={["view", "edit", "print"]} />}
+      actions={(r) => (
+        <RowActions
+          row={r}
+          actions={["view", "edit", "print"]}
+          onSave={editors.onSave}
+          editDetail={({ save, close }) => <TRFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
+        />
+      )}
     />
   );
 }
 
 function TRCreate({ nextId, onSave }: { nextId: string; onSave: (tr: TransferRequest) => void }) {
+  return <TRFields mode="create" nextId={nextId} onSave={onSave} />;
+}
+
+/**
+ * Shared Transfer Request form. Used by the Create page (mode="create") and the
+ * row Edit modal (mode="edit", pre-filled from `initial`) so both share an
+ * identical layout including the dynamic line table.
+ */
+function TRFields({
+  mode, nextId, initial, onSave, onSubmit, onClose,
+}: {
+  mode: "create" | "edit";
+  nextId?: string;
+  initial?: TransferRequest;
+  onSave?: (tr: TransferRequest) => void;
+  onSubmit?: (patch: Record<string, unknown>) => void;
+  onClose?: () => void;
+}) {
+  const isEdit = mode === "edit";
   const today = new Date().toISOString().slice(0, 16).replace("T", " ");
-  const [from, setFrom] = useState(LOCATIONS[0]);
-  const [to, setTo] = useState(LOCATIONS[1]);
-  const [requestedBy, setRequestedBy] = useState("");
-  const [reason, setReason] = useState("");
+  const [from, setFrom] = useState(initial?.from ?? LOCATIONS[0]);
+  const [to, setTo] = useState(initial?.to ?? LOCATIONS[1]);
+  const [requestedBy, setRequestedBy] = useState(initial?.requestedBy ?? "");
+  const [reason, setReason] = useState(initial?.reason ?? "");
 
   const [itemIdx, setItemIdx] = useState(0);
   const [qty, setQty] = useState("");
-  const [lines, setLines] = useState<TRLine[]>([]);
+  const [lines, setLines] = useState<TRLine[]>(initial?.lines ?? []);
 
   const addLine = () => {
     const it = ITEMS[itemIdx];
@@ -198,21 +230,35 @@ function TRCreate({ nextId, onSave }: { nextId: string; onSave: (tr: TransferReq
 
   const removeLine = (id: string) => setLines((p) => p.filter((l) => l.id !== id));
 
+  const buildPayload = () => ({
+    date: today, from, to, requestedBy: requestedBy.trim(),
+    reason: reason.trim(), lines,
+  });
+
+  const validate = () => {
+    if (from === to) { toast.error("Source and destination must be different."); return false; }
+    if (!requestedBy.trim()) { toast.error("Requested By is required."); return false; }
+    if (lines.length === 0) { toast.error("Add at least one item."); return false; }
+    return true;
+  };
+
   const save = (status: TRStatus) => {
-    if (from === to) { toast.error("Source and destination must be different."); return; }
-    if (!requestedBy.trim()) { toast.error("Requested By is required."); return; }
-    if (lines.length === 0) { toast.error("Add at least one item."); return; }
-    onSave({
-      id: nextId, date: today, from, to, requestedBy: requestedBy.trim(),
-      reason: reason.trim(), lines, status,
-    });
+    if (!validate()) return;
+    onSave?.({ id: nextId!, ...buildPayload(), status });
     toast.success(`Transfer Request ${nextId} ${status === "Draft" ? "saved as draft" : "submitted for approval"}.`);
+  };
+
+  const saveEdit = () => {
+    if (!validate()) return;
+    onSubmit?.(buildPayload());
+    onClose?.();
   };
 
   return (
     <div className="space-y-6">
       <Card>
         <CardContent className="pt-6">
+          {!isEdit && (
           <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
             <h3 className="text-sm font-semibold uppercase tracking-wider">Request Details</h3>
             <div className="flex items-center gap-2">
@@ -224,11 +270,12 @@ function TRCreate({ nextId, onSave }: { nextId: string; onSave: (tr: TransferReq
               </Button>
             </div>
           </div>
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">TR #</Label>
-              <Input value={nextId} disabled className="mt-1 font-mono" />
+              <Input value={initial?.id ?? nextId ?? ""} disabled className="mt-1 font-mono" />
             </div>
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Date</Label>
@@ -318,6 +365,13 @@ function TRCreate({ nextId, onSave }: { nextId: string; onSave: (tr: TransferReq
           </div>
         </CardContent>
       </Card>
+
+      {isEdit && (
+        <div className="flex justify-end gap-2 mt-6 pt-4 border-t border-border">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={saveEdit}><Save className="h-4 w-4 mr-1.5" /> Save Changes</Button>
+        </div>
+      )}
     </div>
   );
 }

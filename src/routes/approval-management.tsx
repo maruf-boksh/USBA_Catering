@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
@@ -19,7 +19,7 @@ import {
   BadgeCheck, Check, X as XIcon, Clock, ShieldCheck, Search,
   FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, Layers, UserCog,
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
-  PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane, PlaneLanding, PlaneTakeoff,
+  PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane, MailQuestion, PlaneLanding, PlaneTakeoff,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -28,12 +28,15 @@ import {
   type WfDemandRequest, type WfDemandStatus, type WfDispatchApproval,
 } from "@/lib/workflow-store";
 import { inventory, warehouses } from "@/lib/sample-data";
-import { useFlightOrders, updateFlightOrdersWhere } from "@/lib/flight-orders-store";
+import { getItemStock } from "@/lib/inventory-stock";
+import { useFlightOrders, updateFlightOrdersWhere, type FlightOrder } from "@/lib/flight-orders-store";
+import { getRfqs, setRfqStatus } from "@/lib/rfqs";
 import { useRole } from "@/lib/roles";
 
 type Category =
-  | "Flight Order"
+  | "Order Management"
   | "Demand Request"
+  | "Request for Quotation"
   | "Purchase Requisition"
   | "Purchase Order"
   | "Goods Receipt"
@@ -45,8 +48,9 @@ type Category =
   | "Dispatch";
 
 const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
-  { key: "Flight Order",         label: "Flight Orders",      icon: Plane           },
+  { key: "Order Management",         label: "Order Management",   icon: Plane           },
   { key: "Demand Request",       label: "Demand Req.",        icon: FileSearch      },
+  { key: "Request for Quotation", label: "RFQ",               icon: MailQuestion    },
   { key: "Purchase Requisition", label: "Purchase Req.",      icon: FileText        },
   { key: "Purchase Order",       label: "Purchase Orders",    icon: ShoppingCart    },
   { key: "Goods Receipt",        label: "Goods Receipts",     icon: Truck           },
@@ -59,6 +63,11 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
 ];
 
 type ApprovalStatus = "Pending" | "Approved" | "Rejected";
+
+// A line item shown in the detail dialog. `qty`/`uom` are optional so the same
+// shape works for materials (Qty + UoM), single-line adjustments, etc. `note`
+// carries per-line context (e.g. "On hold for QC").
+type ApprovalLine = { name: string; qty?: number; uom?: string; note?: string };
 
 type ApprovalItem = {
   id: string;
@@ -74,38 +83,113 @@ type ApprovalItem = {
   processedBy?: string;
   processedAt?: string;
   rejectionReason?: string;
+  /** Structured line items for the detail view (PR/PO/GRN/Transfer/etc.). */
+  lines?: ApprovalLine[];
+  /** Single-record field list for categories without line items (e.g. User). */
+  fields?: { label: string; value: string }[];
 };
 
 const SEED: ApprovalItem[] = [
   // Purchase Requisition
-  { id: "AP-1001", category: "Purchase Requisition", refId: "PR-2026-007", title: "Grains & rice for next week",            requestedBy: "S. Ahmed",   requestedAt: "2026-05-19 09:12", summary: "Basmati Rice 800 Kg, Cooking Oil 200 L",                 amount: 245000, itemsCount: 4, status: "Pending" },
-  { id: "AP-1002", category: "Purchase Requisition", refId: "PR-2026-008", title: "Packaging restock",                       requestedBy: "F. Begum",   requestedAt: "2026-05-19 11:30", summary: "Meal Box 5000 pcs, Aluminum Tray 3000 pcs",              amount: 168000, itemsCount: 2, status: "Pending" },
-  { id: "AP-1003", category: "Purchase Requisition", refId: "PR-2026-005", title: "Beverage & water",                        requestedBy: "T. Islam",   requestedAt: "2026-05-18 14:45", summary: "Mineral Water 250ml — 12000 bottles",                    amount:  98000, itemsCount: 1, status: "Approved",  processedBy: "R. Hossain", processedAt: "2026-05-18 16:00" },
+  { id: "AP-1001", category: "Purchase Requisition", refId: "PR-2026-007", title: "Grains & rice for next week",            requestedBy: "S. Ahmed",   requestedAt: "2026-05-19 09:12", summary: "Basmati Rice 800 Kg, Cooking Oil 200 L",                 amount: 245000, itemsCount: 4, status: "Pending",
+    lines: [
+      { name: "Basmati Rice", qty: 800, uom: "Kg" },
+      { name: "Cooking Oil", qty: 200, uom: "L" },
+      { name: "Lentils (Masoor)", qty: 150, uom: "Kg" },
+      { name: "Sugar", qty: 100, uom: "Kg" },
+    ] },
+  { id: "AP-1002", category: "Purchase Requisition", refId: "PR-2026-008", title: "Packaging restock",                       requestedBy: "F. Begum",   requestedAt: "2026-05-19 11:30", summary: "Meal Box 5000 pcs, Aluminum Tray 3000 pcs",              amount: 168000, itemsCount: 2, status: "Pending",
+    lines: [
+      { name: "Meal Box", qty: 5000, uom: "pcs" },
+      { name: "Aluminum Tray", qty: 3000, uom: "pcs" },
+    ] },
+  { id: "AP-1003", category: "Purchase Requisition", refId: "PR-2026-005", title: "Beverage & water",                        requestedBy: "T. Islam",   requestedAt: "2026-05-18 14:45", summary: "Mineral Water 250ml — 12000 bottles",                    amount:  98000, itemsCount: 1, status: "Approved",  processedBy: "R. Hossain", processedAt: "2026-05-18 16:00",
+    lines: [
+      { name: "Mineral Water 250ml", qty: 12000, uom: "Bottle" },
+    ] },
 
   // Purchase Order
-  { id: "AP-1101", category: "Purchase Order",       refId: "PO-2026-0451", title: "Agro Fresh — vegetables",                requestedBy: "Md. Karim",  requestedAt: "2026-05-19 10:50", summary: "Tomato 500 Kg, Onion 300 Kg, Spice Mix 50 Kg",           amount: 132000, itemsCount: 3, status: "Pending" },
-  { id: "AP-1102", category: "Purchase Order",       refId: "PO-2026-0452", title: "Meat & Co. — protein supply",            requestedBy: "Md. Karim",  requestedAt: "2026-05-19 08:20", summary: "Chicken Breast 600 Kg, Mutton 150 Kg",                   amount: 308000, itemsCount: 2, status: "Pending" },
+  { id: "AP-1101", category: "Purchase Order",       refId: "PO-2026-0451", title: "Agro Fresh — vegetables",                requestedBy: "Md. Karim",  requestedAt: "2026-05-19 10:50", summary: "Tomato 500 Kg, Onion 300 Kg, Spice Mix 50 Kg",           amount: 132000, itemsCount: 3, status: "Pending",
+    lines: [
+      { name: "Tomato", qty: 500, uom: "Kg", note: "৳ 60/Kg" },
+      { name: "Onion", qty: 300, uom: "Kg", note: "৳ 70/Kg" },
+      { name: "Spice Mix", qty: 50, uom: "Kg", note: "৳ 1,620/Kg" },
+    ] },
+  { id: "AP-1102", category: "Purchase Order",       refId: "PO-2026-0452", title: "Meat & Co. — protein supply",            requestedBy: "Md. Karim",  requestedAt: "2026-05-19 08:20", summary: "Chicken Breast 600 Kg, Mutton 150 Kg",                   amount: 308000, itemsCount: 2, status: "Pending",
+    lines: [
+      { name: "Chicken Breast", qty: 600, uom: "Kg", note: "৳ 320/Kg" },
+      { name: "Mutton", qty: 150, uom: "Kg", note: "৳ 770/Kg" },
+    ] },
 
   // Goods Receipt
-  { id: "AP-1201", category: "Goods Receipt",        refId: "GRN-2026-118", title: "Receipt of PO-2026-0445",                 requestedBy: "S. Ahmed",   requestedAt: "2026-05-19 12:05", summary: "9 of 10 lines accepted, 1 on hold for QC",               itemsCount: 10, status: "Pending" },
+  { id: "AP-1201", category: "Goods Receipt",        refId: "GRN-2026-118", title: "Receipt of PO-2026-0445",                 requestedBy: "S. Ahmed",   requestedAt: "2026-05-19 12:05", summary: "9 of 10 lines accepted, 1 on hold for QC",               itemsCount: 10, status: "Pending",
+    lines: [
+      { name: "Basmati Rice", qty: 800, uom: "Kg", note: "Accepted" },
+      { name: "Cooking Oil", qty: 200, uom: "L", note: "Accepted" },
+      { name: "Chicken Breast", qty: 600, uom: "Kg", note: "Accepted" },
+      { name: "Tomato", qty: 480, uom: "Kg", note: "Accepted (short 20 Kg)" },
+      { name: "Salmon Fillet", qty: 60, uom: "Kg", note: "On hold for QC" },
+    ] },
 
   // Transfer Request
-  { id: "AP-1301", category: "Transfer Request",     refId: "TR-7001",     title: "Central WH → Hot Kitchen",                requestedBy: "S. Ahmed",   requestedAt: "2026-05-19 10:25", summary: "Daily production replenishment — 2 items",               itemsCount: 2,  status: "Pending" },
-  { id: "AP-1302", category: "Transfer Request",     refId: "TR-7004",     title: "Regional CXB → Central WH",               requestedBy: "T. Islam",   requestedAt: "2026-05-18 11:32", summary: "Stock balancing — Meal Box 500 pcs",                     itemsCount: 1,  status: "Pending" },
+  { id: "AP-1301", category: "Transfer Request",     refId: "TR-7001",     title: "Central WH → Hot Kitchen",                requestedBy: "S. Ahmed",   requestedAt: "2026-05-19 10:25", summary: "Daily production replenishment — 2 items",               itemsCount: 2,  status: "Pending",
+    lines: [
+      { name: "Basmati Rice", qty: 200, uom: "Kg" },
+      { name: "Cooking Oil", qty: 50, uom: "L" },
+    ] },
+  { id: "AP-1302", category: "Transfer Request",     refId: "TR-7004",     title: "Regional CXB → Central WH",               requestedBy: "T. Islam",   requestedAt: "2026-05-18 11:32", summary: "Stock balancing — Meal Box 500 pcs",                     itemsCount: 1,  status: "Pending",
+    lines: [
+      { name: "Meal Box", qty: 500, uom: "pcs" },
+    ] },
 
   // Stock Adjustment
-  { id: "AP-1401", category: "Stock Adjustment",     refId: "SA-2026-019", title: "Spice Mix variance",                      requestedBy: "F. Begum",   requestedAt: "2026-05-19 07:55", summary: "Physical count -2.4 Kg vs system — wastage write-off",    status: "Pending" },
+  { id: "AP-1401", category: "Stock Adjustment",     refId: "SA-2026-019", title: "Spice Mix variance",                      requestedBy: "F. Begum",   requestedAt: "2026-05-19 07:55", summary: "Physical count -2.4 Kg vs system — wastage write-off",    status: "Pending",
+    lines: [
+      { name: "Spice Mix", qty: -2.4, uom: "Kg", note: "Counted 47.6 vs system 50.0 — wastage write-off" },
+    ] },
 
   // Production Order
-  { id: "AP-1501", category: "Production Order",     refId: "PRO-2026-000031", title: "Chicken Biryani batch",                 requestedBy: "N. Hossen",  requestedAt: "2026-05-19 13:15", summary: "280 portions — ready for QC sign-off",                    itemsCount: 1, status: "Pending" },
+  { id: "AP-1501", category: "Production Order",     refId: "PRO-2026-000031", title: "Chicken Biryani batch",                 requestedBy: "N. Hossen",  requestedAt: "2026-05-19 13:15", summary: "280 portions — ready for QC sign-off",                    itemsCount: 1, status: "Pending",
+    lines: [
+      { name: "Chicken Biryani", qty: 280, uom: "portions", note: "BOM-001 · ready for QC sign-off" },
+    ] },
 
   // Bill of Materials
-  { id: "AP-1601", category: "Bill of Materials",    refId: "BOM-007",     title: "New BOM — Vegetable Cutlet",              requestedBy: "S. Ahmed",   requestedAt: "2026-05-18 16:40", summary: "Draft v1.0 with 8 materials, ready to publish",          itemsCount: 8, status: "Pending" },
-  { id: "AP-1602", category: "Bill of Materials",    refId: "BOM-001",     title: "Chicken Biryani — v3.3 revision",         requestedBy: "S. Ahmed",   requestedAt: "2026-05-17 11:10", summary: "Updated chicken portion 120 → 130 g per portion",        itemsCount: 9, status: "Approved",  processedBy: "R. Hossain", processedAt: "2026-05-17 17:00" },
+  { id: "AP-1601", category: "Bill of Materials",    refId: "BOM-007",     title: "New BOM — Vegetable Cutlet",              requestedBy: "S. Ahmed",   requestedAt: "2026-05-18 16:40", summary: "Draft v1.0 with 8 materials, ready to publish",          itemsCount: 8, status: "Pending",
+    lines: [
+      { name: "Potato", qty: 60, uom: "g/portion" },
+      { name: "Mixed Vegetables", qty: 40, uom: "g/portion" },
+      { name: "Breadcrumbs", qty: 15, uom: "g/portion" },
+      { name: "Spice Mix", qty: 5, uom: "g/portion" },
+      { name: "Cooking Oil", qty: 10, uom: "ml/portion" },
+      { name: "Corn Flour", qty: 8, uom: "g/portion" },
+      { name: "Salt", qty: 2, uom: "g/portion" },
+      { name: "Green Chili", qty: 3, uom: "g/portion" },
+    ] },
+  { id: "AP-1602", category: "Bill of Materials",    refId: "BOM-001",     title: "Chicken Biryani — v3.3 revision",         requestedBy: "S. Ahmed",   requestedAt: "2026-05-17 11:10", summary: "Updated chicken portion 120 → 130 g per portion",        itemsCount: 9, status: "Approved",  processedBy: "R. Hossain", processedAt: "2026-05-17 17:00",
+    lines: [
+      { name: "Chicken", qty: 130, uom: "g/portion", note: "Revised from 120 g" },
+      { name: "Basmati Rice", qty: 110, uom: "g/portion" },
+      { name: "Onion", qty: 30, uom: "g/portion" },
+      { name: "Biryani Spice", qty: 8, uom: "g/portion" },
+      { name: "Ghee", qty: 12, uom: "ml/portion" },
+    ] },
 
   // User Account
-  { id: "AP-1701", category: "User Account",         refId: "USR-008",     title: "New user — R. Karim (Store)",             requestedBy: "HR Team",    requestedAt: "2026-05-19 09:00", summary: "Role: Store & Inventory · Location: Central WH",          status: "Pending" },
-  { id: "AP-1702", category: "User Account",         refId: "USR-006",     title: "Reactivate user — N. Hossen",             requestedBy: "Md. Karim",  requestedAt: "2026-05-18 14:20", summary: "Account inactive since 2026-04-15",                       status: "Rejected", processedBy: "R. Hossain", processedAt: "2026-05-18 18:00", rejectionReason: "Pending HR confirmation of return date" },
+  { id: "AP-1701", category: "User Account",         refId: "USR-008",     title: "New user — R. Karim (Store)",             requestedBy: "HR Team",    requestedAt: "2026-05-19 09:00", summary: "Role: Store & Inventory · Location: Central WH",          status: "Pending",
+    fields: [
+      { label: "Full Name", value: "R. Karim" },
+      { label: "Role", value: "Store & Inventory" },
+      { label: "Location", value: "Central Warehouse" },
+      { label: "Action", value: "Create account" },
+    ] },
+  { id: "AP-1702", category: "User Account",         refId: "USR-006",     title: "Reactivate user — N. Hossen",             requestedBy: "Md. Karim",  requestedAt: "2026-05-18 14:20", summary: "Account inactive since 2026-04-15",                       status: "Rejected", processedBy: "R. Hossain", processedAt: "2026-05-18 18:00", rejectionReason: "Pending HR confirmation of return date",
+    fields: [
+      { label: "Full Name", value: "N. Hossen" },
+      { label: "Role", value: "Packaging & Dispatch" },
+      { label: "Inactive Since", value: "2026-04-15" },
+      { label: "Action", value: "Reactivate account" },
+    ] },
 ];
 
 function categoryIcon(cat: Category) {
@@ -132,10 +216,18 @@ export default function ApprovalManagementPage() {
   const [foDecisions, setFoDecisions] = useState<
     Record<string, { status: ApprovalStatus; by: string; at: string; reason?: string }>
   >({});
+  // RFQ approve/reject decisions made here. Approve also flips the RFQ's status
+  // to "Approved" in the persisted RFQ table (reflected on the RFQ screen).
+  const [rfqDecisions, setRfqDecisions] = useState<
+    Record<string, { status: ApprovalStatus; by: string; at: string; reason?: string }>
+  >({});
   const [activeTab, setActiveTab] = useState<Category | "all">(
     searchParams.get("tab") === "dispatch" ? "Dispatch" : "all"
   );
   const [search, setSearch] = useState("");
+  // Bulk selection (ids of pending items ticked for a batch approve/reject).
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkReject, setBulkReject] = useState(false);
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectTarget, setRejectTarget] = useState<ApprovalItem | null>(null);
   const [rejectReason, setRejectReason] = useState("");
@@ -206,7 +298,7 @@ export default function ApprovalManagementPage() {
       const flightList = legs.map((l) => l.flight).slice(0, 4).join(", ");
       result.push({
         id: `FO-AP-${orderNo}`,
-        category: "Flight Order",
+        category: "Order Management",
         refId: orderNo,
         title: `Flight order — ${legs.length} flight${legs.length === 1 ? "" : "s"}`,
         requestedBy: "Operations",
@@ -222,9 +314,35 @@ export default function ApprovalManagementPage() {
     return result;
   }, [flightOrders, foDecisions]);
 
+  // Project RFQs into ApprovalItem shape. Only Pending RFQs — or ones decided
+  // here this session — surface, so the queue stays focused. Approving flips the
+  // RFQ to "Approved" in the persisted table; the decision drives the projection.
+  const rfqItems: ApprovalItem[] = useMemo(() => {
+    return getRfqs()
+      .filter((r) => r.status === "Pending" || rfqDecisions[r.id])
+      .map((r) => {
+        const decision = rfqDecisions[r.id];
+        return {
+          id: `RFQ-AP-${r.id}`,
+          category: "Request for Quotation" as Category,
+          refId: r.id,
+          title: `RFQ — ${r.lines.length} item${r.lines.length === 1 ? "" : "s"}`,
+          requestedBy: "Procurement",
+          requestedAt: r.date,
+          summary: `${r.invitedSuppliers.length} supplier${r.invitedSuppliers.length === 1 ? "" : "s"} invited · deadline ${r.deadline}${r.prRef ? ` · ${r.prRef}` : ""}`,
+          itemsCount: r.lines.length,
+          status: decision ? decision.status : "Pending",
+          processedBy: decision?.by,
+          processedAt: decision?.at,
+          rejectionReason: decision?.reason,
+          lines: r.lines.map((l) => ({ name: l.itemName, qty: l.qty, uom: l.uom, note: l.spec })),
+        };
+      });
+  }, [rfqDecisions]);
+
   const allItems = useMemo(
-    () => [...flightOrderItems, ...demandItems, ...items],
-    [flightOrderItems, demandItems, items],
+    () => [...flightOrderItems, ...demandItems, ...rfqItems, ...items],
+    [flightOrderItems, demandItems, rfqItems, items],
   );
 
   const counts = useMemo(() => {
@@ -264,17 +382,16 @@ export default function ApprovalManagementPage() {
   // Requisition (shortfalls), and pick the right next demand status. Mirrors
   // the prior behaviour from demand-orders.tsx which has been retired in
   // favour of this centralised approval queue.
-  const approveDemand = (dr: WfDemandRequest) => {
+  const approveDemand = (dr: WfDemandRequest, silent = false) => {
     const at = new Date().toLocaleString();
 
     if (!dr.autoFulfill) {
       updateDemandStatus(dr.id, "Pending Store Review", { approvedBy: role, approvedAt: at });
-      toast.success(`${dr.id} approved — ready for Store Review.`);
+      if (!silent) toast.success(`${dr.id} approved — ready for Store Review.`);
       return;
     }
 
-    const onHandFor = (name: string) =>
-      inventory.find((i) => i.name.toLowerCase() === name.toLowerCase())?.stock ?? 0;
+    const onHandFor = (name: string) => getItemStock(name);
     const tagged = dr.items.map((it) => {
       const onHand = onHandFor(it.name);
       const toIssue = Math.min(onHand, it.qty);
@@ -348,25 +465,28 @@ export default function ApprovalManagementPage() {
       : "Partially Available";
     updateDemandStatus(dr.id, nextStatus, { approvedBy: role, approvedAt: at });
 
-    toast.success(
-      created.length > 0
-        ? `${dr.id} approved · ${created.join(" + ")} created.`
-        : `${dr.id} approved.`,
-      { duration: 6000 },
-    );
+    if (!silent) {
+      toast.success(
+        created.length > 0
+          ? `${dr.id} approved · ${created.join(" + ")} created.`
+          : `${dr.id} approved.`,
+        { duration: 6000 },
+      );
+    }
   };
 
-  const approve = (it: ApprovalItem) => {
+  const approve = (it: ApprovalItem, opts: { silent?: boolean } = {}) => {
+    const { silent = false } = opts;
     if (it.category === "Demand Request") {
       const dr = demands.find((d) => d.id === it.refId);
       if (!dr) {
-        toast.error(`Demand ${it.refId} not found.`);
+        if (!silent) toast.error(`Demand ${it.refId} not found.`);
         return;
       }
-      approveDemand(dr);
+      approveDemand(dr, silent);
       return;
     }
-    if (it.category === "Flight Order") {
+    if (it.category === "Order Management") {
       const moved = updateFlightOrdersWhere(
         (o) => o.orderNo === it.refId && o.status === "Pending",
         { status: "Approved" },
@@ -375,7 +495,16 @@ export default function ApprovalManagementPage() {
         ...p,
         [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
       }));
-      toast.success(`${it.refId} approved — ${moved} flight${moved === 1 ? "" : "s"} moved to Approved.`);
+      if (!silent) toast.success(`${it.refId} approved — ${moved} flight${moved === 1 ? "" : "s"} moved to Approved.`);
+      return;
+    }
+    if (it.category === "Request for Quotation") {
+      setRfqStatus(it.refId, "Approved");
+      setRfqDecisions((p) => ({
+        ...p,
+        [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
+      }));
+      if (!silent) toast.success(`${it.refId} approved.`);
       return;
     }
     setItems((p) =>
@@ -385,63 +514,102 @@ export default function ApprovalManagementPage() {
           : x,
       ),
     );
-    toast.success(`${it.refId} approved.`);
+    if (!silent) toast.success(`${it.refId} approved.`);
   };
 
   const openReject = (it: ApprovalItem) => {
+    setBulkReject(false);
     setRejectTarget(it);
     setRejectReason("");
     setRejectOpen(true);
   };
 
+  // Core reject for a single item (category-aware). `silent` suppresses the
+  // per-item toast so bulk reject can show one summary instead.
+  const rejectItem = (it: ApprovalItem, reason: string, silent = false) => {
+    if (it.category === "Demand Request") {
+      updateDemandStatus(it.refId, "Rejected", {
+        rejectedBy: role,
+        rejectedAt: new Date().toLocaleString(),
+        rejectionReason: reason,
+      });
+    } else if (it.category === "Order Management") {
+      setFoDecisions((p) => ({
+        ...p,
+        [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+      }));
+    } else if (it.category === "Request for Quotation") {
+      setRfqStatus(it.refId, "Rejected");
+      setRfqDecisions((p) => ({
+        ...p,
+        [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+      }));
+    } else {
+      setItems((p) =>
+        p.map((x) =>
+          x.id === it.id
+            ? { ...x, status: "Rejected", processedBy: "R. Hossain (GM/Admin)", processedAt: stamp(), rejectionReason: reason }
+            : x,
+        ),
+      );
+    }
+    if (!silent) toast.success(`${it.refId} rejected.`);
+  };
+
   const confirmReject = () => {
-    if (!rejectTarget) return;
     if (!rejectReason.trim()) {
       toast.error("Provide a reason for rejection.");
       return;
     }
     const reason = rejectReason.trim();
 
-    if (rejectTarget.category === "Demand Request") {
-      updateDemandStatus(rejectTarget.refId, "Rejected", {
-        rejectedBy: role,
-        rejectedAt: new Date().toLocaleString(),
-        rejectionReason: reason,
-      });
-      toast.success(`${rejectTarget.refId} rejected.`);
+    if (bulkReject) {
+      const targets = pendingItems.filter((it) => selected.has(it.id));
+      targets.forEach((it) => rejectItem(it, reason, true));
+      toast.success(`${targets.length} request${targets.length === 1 ? "" : "s"} rejected.`);
+      setSelected(new Set());
+      setBulkReject(false);
       setRejectOpen(false);
-      setRejectTarget(null);
       return;
     }
 
-    if (rejectTarget.category === "Flight Order") {
-      setFoDecisions((p) => ({
-        ...p,
-        [rejectTarget.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
-      }));
-      toast.success(`${rejectTarget.refId} rejected.`);
-      setRejectOpen(false);
-      setRejectTarget(null);
-      return;
-    }
-
-    setItems((p) =>
-      p.map((x) =>
-        x.id === rejectTarget.id
-          ? {
-              ...x,
-              status: "Rejected",
-              processedBy: "R. Hossain (GM/Admin)",
-              processedAt: stamp(),
-              rejectionReason: reason,
-            }
-          : x,
-      ),
-    );
-    toast.success(`${rejectTarget.refId} rejected.`);
+    if (!rejectTarget) return;
+    rejectItem(rejectTarget, reason);
     setRejectOpen(false);
     setRejectTarget(null);
   };
+
+  // ── Bulk actions ────────────────────────────────────────────────────────────
+  const bulkApprove = () => {
+    const targets = pendingItems.filter((it) => selected.has(it.id));
+    if (targets.length === 0) return;
+    targets.forEach((it) => approve(it, { silent: true }));
+    toast.success(`${targets.length} request${targets.length === 1 ? "" : "s"} approved.`);
+    setSelected(new Set());
+  };
+
+  const openBulkReject = () => {
+    if (selected.size === 0) return;
+    setRejectTarget(null);
+    setBulkReject(true);
+    setRejectReason("");
+    setRejectOpen(true);
+  };
+
+  const toggleSelect = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+
+  const allSelected = pendingItems.length > 0 && pendingItems.every((it) => selected.has(it.id));
+  const toggleSelectAll = () =>
+    setSelected(allSelected ? new Set() : new Set(pendingItems.map((it) => it.id)));
+
+  // Clear selection when the visible set changes, so a batch action never hits
+  // items hidden by the current tab/search.
+  useEffect(() => { setSelected(new Set()); }, [activeTab, search]);
 
   const openDetail = (it: ApprovalItem) => {
     setDetailItem(it);
@@ -458,7 +626,7 @@ export default function ApprovalManagementPage() {
     const tagged = dr.items
       .map((it) => {
         const inv = inventory.find((i) => i.name.toLowerCase() === it.name.toLowerCase());
-        const onHand = inv?.stock ?? 0;
+        const onHand = getItemStock(it.name);
         const toIssue = Math.min(onHand, it.qty);
         return { ...it, toIssue };
       })
@@ -489,7 +657,7 @@ export default function ApprovalManagementPage() {
     const shortItems = dr.items
       .map((it) => {
         const inv = inventory.find((i) => i.name.toLowerCase() === it.name.toLowerCase());
-        const onHand = inv?.stock ?? 0;
+        const onHand = getItemStock(it.name);
         const shortfall = Math.max(0, it.qty - onHand);
         const raw = shortfallQtys[it.id];
         const parsed = raw !== undefined ? parseFloat(raw) : NaN;
@@ -527,8 +695,14 @@ export default function ApprovalManagementPage() {
         rejectedAt: new Date().toLocaleString(),
         rejectionReason: reason,
       });
-    } else if (detailItem.category === "Flight Order") {
+    } else if (detailItem.category === "Order Management") {
       setFoDecisions((p) => ({
+        ...p,
+        [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+      }));
+    } else if (detailItem.category === "Request for Quotation") {
+      setRfqStatus(detailItem.refId, "Rejected");
+      setRfqDecisions((p) => ({
         ...p,
         [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
@@ -688,6 +862,38 @@ export default function ApprovalManagementPage() {
                 <span className="text-xs text-muted-foreground">{pendingItems.length} item{pendingItems.length === 1 ? "" : "s"}</span>
               </div>
 
+              {/* Bulk action bar — appears once one or more items are ticked */}
+              {selected.size > 0 && (
+                <div className="flex items-center justify-between gap-3 mb-3 rounded-md border border-primary/30 bg-primary/[0.06] px-3 py-2">
+                  <span className="text-xs font-medium text-foreground">
+                    {selected.size} selected
+                    <button
+                      className="ml-2 text-muted-foreground hover:text-foreground underline underline-offset-2"
+                      onClick={() => setSelected(new Set())}
+                    >
+                      Clear
+                    </button>
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      className="h-7 px-2.5 text-[11px] bg-success text-success-foreground hover:bg-success/90"
+                      onClick={bulkApprove}
+                    >
+                      <Check className="h-3 w-3 mr-1" /> Approve {selected.size}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2.5 text-[11px] border-destructive/40 text-destructive hover:bg-destructive/10"
+                      onClick={openBulkReject}
+                    >
+                      <XIcon className="h-3 w-3 mr-1" /> Reject {selected.size}
+                    </Button>
+                  </div>
+                </div>
+              )}
+
               {pendingItems.length === 0 ? (
                 <div className="text-center text-sm text-muted-foreground py-10">
                   Nothing pending here. All caught up.
@@ -697,6 +903,16 @@ export default function ApprovalManagementPage() {
                   <Table>
                     <TableHeader className="bg-muted/40">
                       <TableRow>
+                        <TableHead className="w-9">
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 accent-primary cursor-pointer align-middle"
+                            checked={allSelected}
+                            onChange={toggleSelectAll}
+                            aria-label="Select all pending"
+                            title="Select all"
+                          />
+                        </TableHead>
                         <TableHead className="text-xs uppercase tracking-wider">Ref / Title</TableHead>
                         {activeTab === "all" && <TableHead className="text-xs uppercase tracking-wider">Category</TableHead>}
                         <TableHead className="text-xs uppercase tracking-wider">Requested By</TableHead>
@@ -709,7 +925,16 @@ export default function ApprovalManagementPage() {
                       {pendingItems.map((it) => {
                         const Icon = categoryIcon(it.category);
                         return (
-                          <TableRow key={it.id} className="hover:bg-muted/30">
+                          <TableRow key={it.id} className={cn("hover:bg-muted/30", selected.has(it.id) && "bg-primary/[0.04]")}>
+                            <TableCell className="w-9">
+                              <input
+                                type="checkbox"
+                                className="h-4 w-4 accent-primary cursor-pointer align-middle"
+                                checked={selected.has(it.id)}
+                                onChange={() => toggleSelect(it.id)}
+                                aria-label={`Select ${it.refId}`}
+                              />
+                            </TableCell>
                             <TableCell>
                               <button
                                 className="text-left hover:underline focus:outline-none focus:underline"
@@ -942,15 +1167,28 @@ export default function ApprovalManagementPage() {
       </Dialog>
 
       {/* Reject dialog */}
-      <Dialog open={rejectOpen} onOpenChange={setRejectOpen}>
+      <Dialog open={rejectOpen} onOpenChange={(o) => { setRejectOpen(o); if (!o) setBulkReject(false); }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Reject {rejectTarget?.refId}</DialogTitle>
+            <DialogTitle>
+              {bulkReject ? `Reject ${selected.size} request${selected.size === 1 ? "" : "s"}` : `Reject ${rejectTarget?.refId}`}
+            </DialogTitle>
             <DialogDescription>
-              Rejection notifies the requester. Provide a clear reason.
+              {bulkReject
+                ? "The same reason will be recorded on every selected request, and each requester is notified."
+                : "Rejection notifies the requester. Provide a clear reason."}
             </DialogDescription>
           </DialogHeader>
-          {rejectTarget && (
+          {bulkReject ? (
+            <div className="rounded-md border border-border bg-muted/30 p-3 text-xs max-h-40 overflow-y-auto space-y-1">
+              {pendingItems.filter((it) => selected.has(it.id)).map((it) => (
+                <div key={it.id} className="flex justify-between gap-2">
+                  <span className="font-mono text-foreground">{it.refId}</span>
+                  <span className="text-muted-foreground truncate">{it.title}</span>
+                </div>
+              ))}
+            </div>
+          ) : rejectTarget && (
             <div className="rounded-md border border-border bg-muted/30 p-3 text-xs">
               <div className="text-foreground font-medium">{rejectTarget.title}</div>
               <div className="text-muted-foreground mt-0.5">{rejectTarget.summary}</div>
@@ -1058,13 +1296,116 @@ export default function ApprovalManagementPage() {
                 <div className="text-sm leading-relaxed">{detailItem.summary}</div>
               </div>
 
+              {/* Order Management — flight legs in this order */}
+              {detailItem.category === "Order Management" && (() => {
+                const legs = flightOrders.filter((o) => o.orderNo === detailItem.refId);
+                if (legs.length === 0) return null;
+                return (
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">
+                      Flights ({legs.length})
+                    </div>
+                    <div className="rounded-md border border-border overflow-hidden">
+                      <table className="w-full text-sm">
+                        <thead className="bg-muted/40">
+                          <tr>
+                            <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Flight</th>
+                            <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Sector</th>
+                            <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Date / ETD</th>
+                            <th className="text-right px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Pax</th>
+                            <th className="text-right px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Crew</th>
+                            <th className="text-right px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Special</th>
+                            <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {legs.map((l, idx) => (
+                            <tr key={l.id} className={`border-t border-border ${idx % 2 === 0 ? "" : "bg-muted/20"}`}>
+                              <td className="px-3 py-2">
+                                <div className="font-medium text-foreground">{l.flight}</div>
+                                <div className="text-[10px] text-muted-foreground">{l.airline}</div>
+                              </td>
+                              <td className="px-3 py-2 text-muted-foreground">{l.sector}</td>
+                              <td className="px-3 py-2 tabular-nums">
+                                <div>{l.date}</div>
+                                <div className="text-[10px] text-muted-foreground">{l.etd}</div>
+                              </td>
+                              <td className="px-3 py-2 text-right tabular-nums">{l.pax}</td>
+                              <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{l.crew}</td>
+                              <td className="px-3 py-2 text-right tabular-nums">{l.specialMeals > 0 ? l.specialMeals : "—"}</td>
+                              <td className="px-3 py-2">
+                                <Badge variant="outline" className="font-normal text-[10px]">{l.status}</Badge>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Generic line items — PR / PO / GRN / Transfer / Stock Adj / Production / BOM */}
+              {detailItem.lines && detailItem.lines.length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">
+                    Line Items ({detailItem.lines.length})
+                  </div>
+                  <div className="rounded-md border border-border overflow-hidden">
+                    <table className="w-full text-sm">
+                      <thead className="bg-muted/40">
+                        <tr>
+                          <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Item</th>
+                          <th className="text-right px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-32">Quantity</th>
+                          {detailItem.lines.some((l) => l.note) && (
+                            <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Note</th>
+                          )}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detailItem.lines.map((l, idx) => (
+                          <tr key={`${l.name}-${idx}`} className={`border-t border-border ${idx % 2 === 0 ? "" : "bg-muted/20"}`}>
+                            <td className="px-3 py-2 font-medium text-foreground">{l.name}</td>
+                            <td className="px-3 py-2 text-right tabular-nums">
+                              {l.qty !== undefined ? (
+                                <span className={l.qty < 0 ? "text-destructive font-semibold" : "font-semibold"}>
+                                  {l.qty}
+                                </span>
+                              ) : "—"}
+                              {l.uom && <span className="text-[10px] text-muted-foreground ml-1">{l.uom}</span>}
+                            </td>
+                            {detailItem.lines!.some((x) => x.note) && (
+                              <td className="px-3 py-2 text-[11px] text-muted-foreground">{l.note ?? ""}</td>
+                            )}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Single-record fields — e.g. User Account */}
+              {detailItem.fields && detailItem.fields.length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">
+                    Details
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-3 rounded-md border border-border bg-muted/20 p-3">
+                    {detailItem.fields.map((f) => (
+                      <Detail key={f.label} label={f.label} value={f.value} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Item list — Demand Requests only, split by sufficient / shortfall */}
               {detailItem.category === "Demand Request" && (() => {
                 const dr = demands.find((d) => d.id === detailItem.refId);
                 if (!dr || dr.items.length === 0) return null;
                 const taggedItems = dr.items.map((item) => {
                   const inv = inventory.find((i) => i.id === item.id || i.name.toLowerCase() === item.name.toLowerCase());
-                  const inStock = inv?.stock ?? 0;
+                  const inStock = getItemStock(item.id || item.name);
                   const shortfall = item.qty - inStock;
                   return { ...item, inStock, shortfall, insufficient: shortfall > 0 };
                 });
@@ -1096,7 +1437,6 @@ export default function ApprovalManagementPage() {
                                 <tr key={item.id} className={`border-t border-border ${idx % 2 === 0 ? "" : "bg-muted/20"}`}>
                                   <td className="px-3 py-2">
                                     <div className="font-medium text-foreground">{item.name}</div>
-                                    <div className="text-[11px] text-muted-foreground">{item.type}</div>
                                   </td>
                                   <td className="px-3 py-2 text-center">
                                     <span className="font-semibold tabular-nums text-success">{item.inStock}</span>
@@ -1160,7 +1500,6 @@ export default function ApprovalManagementPage() {
                                 <tr key={item.id} className={`border-t border-border ${idx % 2 === 0 ? "" : "bg-muted/20"}`}>
                                   <td className="px-3 py-2">
                                     <div className="font-medium text-foreground">{item.name}</div>
-                                    <div className="text-[11px] text-muted-foreground">{item.type}</div>
                                   </td>
                                   <td className="px-3 py-2 text-center">
                                     <span className="font-semibold tabular-nums text-destructive">{item.inStock}</span>

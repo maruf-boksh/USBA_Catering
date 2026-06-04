@@ -20,6 +20,7 @@ import {
 import { KpiCard } from "@/components/common/KpiCard";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { rowEditors } from "@/lib/row-editors";
 
 type Supplier = {
   id: string;
@@ -88,7 +89,7 @@ export default function ConfigSupplierPage() {
             <KpiCard label="Active" value={active} icon={CheckCircle} tone="success" />
             <KpiCard label="Inactive" value={rows.length - active} icon={XCircle} tone="warning" />
           </div>
-          <SupplierList data={rows} onToggle={toggle} />
+          <SupplierList data={rows} onToggle={toggle} editors={rowEditors(setRows)} />
         </>
       )}
       {view === "create" && (
@@ -106,7 +107,7 @@ export default function ConfigSupplierPage() {
   );
 }
 
-function SupplierList({ data, onToggle }: { data: Supplier[]; onToggle: (id: string) => void }) {
+function SupplierList({ data, onToggle, editors }: { data: Supplier[]; onToggle: (id: string) => void; editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void } }) {
   const cols: Column<Supplier>[] = [
     { key: "id", header: "ID" },
     { key: "code", header: "Code", render: (r) => <span className="font-mono text-xs">{r.code}</span> },
@@ -135,81 +136,124 @@ function SupplierList({ data, onToggle }: { data: Supplier[]; onToggle: (id: str
       columns={cols}
       searchKeys={["id", "code", "name", "category", "contactPerson"]}
       selectable={false}
-      actions={(r) => <RowActions row={r} actions={["view", "edit", "print"]} />}
+      actions={(r) => (
+        <RowActions
+          row={r}
+          actions={["view", "edit", "print"]}
+          onSave={editors.onSave}
+          editDetail={({ save, close }) => <SupplierFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
+        />
+      )}
     />
   );
 }
 
 function SupplierCreate({ nextId, onSave }: { nextId: string; onSave: (s: Supplier) => void }) {
-  const [code, setCode] = useState("");
-  const [name, setName] = useState("");
-  const [category, setCategory] = useState(CATEGORIES[0]);
-  const [contactPerson, setContactPerson] = useState("");
-  const [phone, setPhone] = useState("");
-  const [email, setEmail] = useState("");
-  const [taxId, setTaxId] = useState("");
-  const [address, setAddress] = useState("");
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <SupplierFields mode="create" nextId={nextId} onSave={onSave} />
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Shared Supplier form fields. Used by the Create page (mode="create") and the
+ * row Edit modal (mode="edit", pre-filled from `initial`) so both share an
+ * identical layout.
+ */
+function SupplierFields({
+  mode, nextId, initial, onSave, onSubmit, onClose,
+}: {
+  mode: "create" | "edit";
+  nextId?: string;
+  initial?: Supplier;
+  onSave?: (s: Supplier) => void;
+  onSubmit?: (patch: Record<string, unknown>) => void;
+  onClose?: () => void;
+}) {
+  const isEdit = mode === "edit";
+  const [code, setCode] = useState(initial?.code ?? "");
+  const [name, setName] = useState(initial?.name ?? "");
+  const [category, setCategory] = useState(initial?.category ?? CATEGORIES[0]);
+  const [contactPerson, setContactPerson] = useState(initial?.contactPerson ?? "");
+  const [phone, setPhone] = useState(initial?.phone ?? "");
+  const [email, setEmail] = useState(initial?.email ?? "");
+  const [taxId, setTaxId] = useState(initial?.taxId ?? "");
+  const [address, setAddress] = useState(initial?.address ?? "");
 
   const save = () => {
     if (!name.trim()) { toast.error("Supplier name is required."); return; }
     if (!code.trim()) { toast.error("Supplier code is required."); return; }
-    onSave({
-      id: nextId, code: code.trim().toUpperCase(), name: name.trim(),
+    const payload = {
+      code: code.trim().toUpperCase(), name: name.trim(),
       contactPerson, phone, email, address, taxId, category,
-      status: "Active",
-    });
-    toast.success(`Supplier "${name.trim()}" created.`);
+    };
+    if (isEdit) {
+      onSubmit?.(payload);
+      onClose?.();
+    } else {
+      onSave?.({ id: nextId!, ...payload, status: "Active" });
+      toast.success(`Supplier "${name.trim()}" created.`);
+    }
   };
 
   return (
-    <Card>
-      <CardContent className="pt-6">
+    <>
+      {!isEdit && (
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-sm font-semibold uppercase tracking-wider">Create Supplier</h3>
           <Button onClick={save}><Save className="h-4 w-4 mr-1.5" /> Save</Button>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Supplier ID</Label>
-            <Input value={nextId} disabled className="mt-1 font-mono" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Supplier Code <span className="text-destructive">*</span></Label>
-            <Input value={code} onChange={(e) => setCode(e.target.value)} className="mt-1" placeholder="e.g. AGRO-FRESH" />
-          </div>
-          <div className="md:col-span-2">
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Supplier Name <span className="text-destructive">*</span></Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} className="mt-1" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Category</Label>
-            <select value={category} onChange={(e) => setCategory(e.target.value)} className={selectCls}>
-              {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
-            </select>
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Tax / TIN</Label>
-            <Input value={taxId} onChange={(e) => setTaxId(e.target.value)} className="mt-1" placeholder="TIN-XXXXXX" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Contact Person</Label>
-            <Input value={contactPerson} onChange={(e) => setContactPerson(e.target.value)} className="mt-1" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Phone</Label>
-            <Input value={phone} onChange={(e) => setPhone(e.target.value)} className="mt-1" placeholder="+880 1XXX-XXXXXX" />
-          </div>
-          <div className="md:col-span-2">
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Email</Label>
-            <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="mt-1" />
-          </div>
-          <div className="md:col-span-2">
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Address</Label>
-            <Textarea value={address} onChange={(e) => setAddress(e.target.value)} className="mt-1" rows={2} />
-          </div>
+      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Supplier ID</Label>
+          <Input value={initial?.id ?? nextId ?? ""} disabled className="mt-1 font-mono" />
         </div>
-      </CardContent>
-    </Card>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Supplier Code <span className="text-destructive">*</span></Label>
+          <Input value={code} onChange={(e) => setCode(e.target.value)} className="mt-1" placeholder="e.g. AGRO-FRESH" />
+        </div>
+        <div className="md:col-span-2">
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Supplier Name <span className="text-destructive">*</span></Label>
+          <Input value={name} onChange={(e) => setName(e.target.value)} className="mt-1" />
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Category</Label>
+          <select value={category} onChange={(e) => setCategory(e.target.value)} className={selectCls}>
+            {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+          </select>
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Tax / TIN</Label>
+          <Input value={taxId} onChange={(e) => setTaxId(e.target.value)} className="mt-1" placeholder="TIN-XXXXXX" />
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Contact Person</Label>
+          <Input value={contactPerson} onChange={(e) => setContactPerson(e.target.value)} className="mt-1" />
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Phone</Label>
+          <Input value={phone} onChange={(e) => setPhone(e.target.value)} className="mt-1" placeholder="+880 1XXX-XXXXXX" />
+        </div>
+        <div className="md:col-span-2">
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Email</Label>
+          <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="mt-1" />
+        </div>
+        <div className="md:col-span-2">
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Address</Label>
+          <Textarea value={address} onChange={(e) => setAddress(e.target.value)} className="mt-1" rows={2} />
+        </div>
+      </div>
+      {isEdit && (
+        <div className="flex justify-end gap-2 mt-6 pt-4 border-t border-border">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={save}><Save className="h-4 w-4 mr-1.5" /> Save Changes</Button>
+        </div>
+      )}
+    </>
   );
 }
 

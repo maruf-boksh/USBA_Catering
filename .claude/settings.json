@@ -8,7 +8,17 @@
       "Read(//d/d/tmp/design_x/catering-login/project/**)",
       "Read(//d/d/tmp/design_x/catering-login/**)",
       "Bash(cd /d/USBA_Catering/USBA_Catering && grep -nE \"orderAccent|DirectionBadge|function OrdersList|om-count|Showing|Flight Orders|All Dates|StatusBadge|grp-|flt-num|#1a0204|#2a2528|route-blue|2b5f8a|FlightOrderStatus =|Bulk Upload|btn-view|<TableHead\" src/routes/order-management.tsx | head -60)",
-      "Read(//d/d/USBA_Catering/USBA_Catering/src/routes/**)"
+      "Read(//d/d/USBA_Catering/USBA_Catering/src/routes/**)",
+      "Bash(node probe-storage.cjs)",
+      "Bash(node probe-nostorage.cjs)",
+      "Bash(rm -f probe-nostorage.cjs probe-nostorage.png)",
+      "Bash(node probe-multi.cjs)",
+      "Bash(node probe-bulk.cjs)",
+      "PowerShell(npx tsc --noEmit -p tsconfig.app.json)",
+      "Bash(node probe-issue2.cjs)",
+      "Bash(node probe-issued.cjs)",
+      "Bash(node probe-ve.cjs)",
+      "Bash(node probe-edit.cjs)"
     ],
     "additionalDirectories": [
       "C:\\Users\\TechnoNext\\.claude\\projects\\d--USBA-Catering-USBA-Catering"

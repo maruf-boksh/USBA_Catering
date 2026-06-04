@@ -4,6 +4,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
+import { rowEditors } from "@/lib/row-editors";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -127,12 +128,15 @@ export default function PurchaseReturnPage() {
         }
       />
 
-      {view === "list" ? <ReturnList rows={rows} /> : <ReturnCreate nextId={nextId} onSave={addReturn} />}
+      {view === "list" ? <ReturnList rows={rows} editors={rowEditors(setRows)} /> : <ReturnCreate nextId={nextId} onSave={addReturn} />}
     </>
   );
 }
 
-function ReturnList({ rows }: { rows: PurchaseReturn[] }) {
+function ReturnList({ rows, editors }: {
+  rows: PurchaseReturn[];
+  editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
+}) {
   const total = rows.length;
   const open = rows.filter((r) => r.status === "Submitted" || r.status === "Approved").length;
   const completed = rows.filter((r) => r.status === "Completed").length;
@@ -185,20 +189,52 @@ function ReturnList({ rows }: { rows: PurchaseReturn[] }) {
         columns={cols}
         searchKeys={["id", "poRef", "supplier", "status"]}
         selectable={false}
-        actions={(r) => <RowActions row={r} actions={["view", "edit", "print", "approve", "reject"]} />}
+        actions={(r) => (
+          <RowActions
+            row={r}
+            actions={["view", "edit", "print", "approve", "reject"]}
+            onSave={editors.onSave}
+            editDetail={({ save, close }) => <ReturnFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
+          />
+        )}
       />
     </>
   );
 }
 
 function ReturnCreate({ nextId, onSave }: { nextId: string; onSave: (r: PurchaseReturn) => void }) {
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <ReturnFields mode="create" nextId={nextId} onSave={onSave} />
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Shared Purchase Return form. Used by the Create page (mode="create") and the
+ * row Edit modal (mode="edit", pre-filled from `initial`) so both share an
+ * identical layout and line-table logic.
+ */
+function ReturnFields({
+  mode, nextId, initial, onSave, onSubmit, onClose,
+}: {
+  mode: "create" | "edit";
+  nextId?: string;
+  initial?: PurchaseReturn;
+  onSave?: (r: PurchaseReturn) => void;
+  onSubmit?: (patch: Record<string, unknown>) => void;
+  onClose?: () => void;
+}) {
+  const isEdit = mode === "edit";
   const today = new Date().toISOString().slice(0, 10);
 
-  const [date] = useState(today);
-  const [poRef, setPoRef] = useState("");
-  const [supplier, setSupplier] = useState(vendors[0]?.name ?? "");
-  const [remarks, setRemarks] = useState("");
-  const [lines, setLines] = useState<ReturnLine[]>([
+  const [date] = useState(initial?.date ?? today);
+  const [poRef, setPoRef] = useState(initial?.poRef ?? "");
+  const [supplier, setSupplier] = useState(initial?.supplier ?? vendors[0]?.name ?? "");
+  const [remarks, setRemarks] = useState(initial?.remarks ?? "");
+  const [lines, setLines] = useState<ReturnLine[]>(initial?.lines ?? [
     { id: `l-${Date.now()}`, itemName: "", uom: "Kg", qty: 0, unitPrice: 0, reason: "Defective" },
   ]);
 
@@ -228,8 +264,7 @@ function ReturnCreate({ nextId, onSave }: { nextId: string; onSave: (r: Purchase
     if (!supplier) { toast.error("Select a supplier."); return; }
     const cleanLines = lines.filter((l) => l.itemName.trim() && l.qty > 0);
     if (cleanLines.length === 0) { toast.error("Add at least one return line."); return; }
-    onSave({
-      id: nextId,
+    const payload = {
       date,
       poRef: poRef.trim(),
       supplier,
@@ -237,15 +272,21 @@ function ReturnCreate({ nextId, onSave }: { nextId: string; onSave: (r: Purchase
       totalValue,
       status,
       remarks: remarks.trim() || undefined,
-    });
+    };
+    if (isEdit) {
+      onSubmit?.({ ...payload, status: initial?.status ?? status });
+      onClose?.();
+      return;
+    }
+    onSave?.({ id: nextId!, ...payload });
     toast.success(status === "Draft"
       ? `${nextId} saved as draft.`
       : `${nextId} submitted to ${supplier}.`);
   };
 
   return (
-    <Card>
-      <CardContent className="pt-6">
+    <>
+      {!isEdit && (
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-sm font-semibold uppercase tracking-wider">New Purchase Return</h3>
           <div className="flex items-center gap-2">
@@ -257,11 +298,12 @@ function ReturnCreate({ nextId, onSave }: { nextId: string; onSave: (r: Purchase
             </Button>
           </div>
         </div>
+      )}
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-4 mb-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-4 mb-6">
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Return #</Label>
-            <Input value={nextId} disabled className="mt-1 font-mono" />
+            <Input value={initial?.id ?? nextId ?? ""} disabled className="mt-1 font-mono" />
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Date</Label>
@@ -389,7 +431,13 @@ function ReturnCreate({ nextId, onSave }: { nextId: string; onSave: (r: Purchase
             placeholder="Pickup arrangement, credit-note expectations, supplier communication notes…"
           />
         </div>
-      </CardContent>
-    </Card>
+
+      {isEdit && (
+        <div className="flex justify-end gap-2 mt-6 pt-4 border-t border-border">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={() => save("Submitted")}><Save className="h-4 w-4 mr-1.5" /> Save Changes</Button>
+        </div>
+      )}
+    </>
   );
 }
