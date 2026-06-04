@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/table";
 import { KpiCard } from "@/components/common/KpiCard";
 import { toast } from "sonner";
+import { rowEditors } from "@/lib/row-editors";
 
 type Price = {
   id: string;
@@ -97,7 +98,7 @@ export default function ConfigPricePage() {
             <KpiCard label="Active" value={active} icon={TrendingUp} tone="success" />
             <KpiCard label="Scheduled" value={scheduled} icon={Calendar} tone="warning" />
           </div>
-          <PriceList data={rows} />
+          <PriceList data={rows} editors={rowEditors(setRows)} />
         </>
       )}
       {view === "create" && (
@@ -110,7 +111,7 @@ export default function ConfigPricePage() {
   );
 }
 
-function PriceList({ data }: { data: Price[] }) {
+function PriceList({ data, editors }: { data: Price[]; editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void } }) {
   const cols: Column<Price>[] = [
     { key: "id", header: "Price #" },
     { key: "itemCode", header: "Item Code", render: (r) => <span className="font-mono text-xs">{r.itemCode}</span> },
@@ -150,25 +151,64 @@ function PriceList({ data }: { data: Price[] }) {
       columns={cols}
       searchKeys={["id", "itemCode", "item", "supplier"]}
       selectable={false}
-      actions={(r) => <RowActions row={r} actions={["view", "edit", "print"]} />}
+      actions={(r) => (
+        <RowActions
+          row={r}
+          actions={["view", "edit", "print"]}
+          onSave={editors.onSave}
+          editDetail={({ save, close }) => <PriceFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
+        />
+      )}
     />
   );
 }
 
 function PriceCreate({ nextId, onSave }: { nextId: string; onSave: (p: Price) => void }) {
-  const [itemIdx, setItemIdx] = useState(0);
-  const [supplier, setSupplier] = useState(SUPPLIERS[0]);
-  const [unitPrice, setUnitPrice] = useState("");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <PriceFields mode="create" nextId={nextId} onSave={onSave} />
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Shared Price form fields. Used by the Create page (mode="create") and the
+ * row Edit modal (mode="edit", pre-filled from `initial`) so both share an
+ * identical layout.
+ */
+function PriceFields({
+  mode, nextId, initial, onSave, onSubmit, onClose,
+}: {
+  mode: "create" | "edit";
+  nextId?: string;
+  initial?: Price;
+  onSave?: (p: Price) => void;
+  onSubmit?: (patch: Record<string, unknown>) => void;
+  onClose?: () => void;
+}) {
+  const isEdit = mode === "edit";
+  // Match the initial Price row back to its item index; default to 0 if unmatched.
+  const initialItemIdx = (() => {
+    if (!initial) return 0;
+    const found = ITEMS.findIndex(
+      (i) => i.code === initial.itemCode || i.name === initial.item,
+    );
+    return found >= 0 ? found : 0;
+  })();
+  const [itemIdx, setItemIdx] = useState(initialItemIdx);
+  const [supplier, setSupplier] = useState(initial?.supplier ?? SUPPLIERS[0]);
+  const [unitPrice, setUnitPrice] = useState(initial ? String(initial.unitPrice) : "");
+  const [from, setFrom] = useState(initial?.effectiveFrom ?? "");
+  const [to, setTo] = useState(initial?.effectiveTo ?? "");
 
   const save = () => {
     const price = Number(unitPrice);
     if (!price || price <= 0) { toast.error("Enter a valid unit price."); return; }
     if (!from || !to) { toast.error("Effective dates are required."); return; }
     const it = ITEMS[itemIdx];
-    onSave({
-      id: nextId,
+    const payload = {
       itemCode: it.code,
       item: it.name,
       uom: it.uom,
@@ -178,49 +218,61 @@ function PriceCreate({ nextId, onSave }: { nextId: string; onSave: (p: Price) =>
       effectiveFrom: from,
       effectiveTo: to,
       status: new Date(from) > new Date() ? "Scheduled" : "Active",
-    });
-    toast.success(`Price for ${it.name} saved.`);
+    };
+    if (isEdit) {
+      onSubmit?.(payload);
+      onClose?.();
+    } else {
+      onSave?.({ id: nextId!, ...payload } as Price);
+      toast.success(`Price for ${it.name} saved.`);
+    }
   };
 
   return (
-    <Card>
-      <CardContent className="pt-6">
+    <>
+      {!isEdit && (
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-sm font-semibold uppercase tracking-wider">Create Price</h3>
           <Button onClick={save}><Save className="h-4 w-4 mr-1.5" /> Save</Button>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Price #</Label>
-            <Input value={nextId} disabled className="mt-1 font-mono" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item <span className="text-destructive">*</span></Label>
-            <select value={itemIdx} onChange={(e) => setItemIdx(Number(e.target.value))} className={selectCls}>
-              {ITEMS.map((i, idx) => <option key={i.code} value={idx}>{i.code} — {i.name} ({i.uom})</option>)}
-            </select>
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Supplier <span className="text-destructive">*</span></Label>
-            <select value={supplier} onChange={(e) => setSupplier(e.target.value)} className={selectCls}>
-              {SUPPLIERS.map((s) => <option key={s}>{s}</option>)}
-            </select>
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Unit Price (BDT) <span className="text-destructive">*</span></Label>
-            <Input type="number" step="0.01" min={0} value={unitPrice} onChange={(e) => setUnitPrice(e.target.value)} className="mt-1" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Effective From <span className="text-destructive">*</span></Label>
-            <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="mt-1" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Effective To <span className="text-destructive">*</span></Label>
-            <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="mt-1" />
-          </div>
+      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Price #</Label>
+          <Input value={initial?.id ?? nextId ?? ""} disabled className="mt-1 font-mono" />
         </div>
-      </CardContent>
-    </Card>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item <span className="text-destructive">*</span></Label>
+          <select value={itemIdx} onChange={(e) => setItemIdx(Number(e.target.value))} className={selectCls}>
+            {ITEMS.map((i, idx) => <option key={i.code} value={idx}>{i.code} — {i.name} ({i.uom})</option>)}
+          </select>
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Supplier <span className="text-destructive">*</span></Label>
+          <select value={supplier} onChange={(e) => setSupplier(e.target.value)} className={selectCls}>
+            {SUPPLIERS.map((s) => <option key={s}>{s}</option>)}
+          </select>
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Unit Price (BDT) <span className="text-destructive">*</span></Label>
+          <Input type="number" step="0.01" min={0} value={unitPrice} onChange={(e) => setUnitPrice(e.target.value)} className="mt-1" />
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Effective From <span className="text-destructive">*</span></Label>
+          <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="mt-1" />
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Effective To <span className="text-destructive">*</span></Label>
+          <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="mt-1" />
+        </div>
+      </div>
+      {isEdit && (
+        <div className="flex justify-end gap-2 mt-6 pt-4 border-t border-border">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={save}><Save className="h-4 w-4 mr-1.5" /> Save Changes</Button>
+        </div>
+      )}
+    </>
   );
 }
 

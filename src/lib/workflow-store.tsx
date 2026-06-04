@@ -28,7 +28,7 @@ export type WfPOStatus =
 export type WfTransferStatus = "Pending" | "Issued";
 
 // ── Entity types ───────────────────────────────────────────────────────────────
-export type WfDemandItem = { id: string; name: string; qty: number; uom: string; type: string };
+export type WfDemandItem = { id: string; name: string; qty: number; uom: string; type?: string };
 
 export type WfDemandRequest = {
   id: string;
@@ -228,6 +228,8 @@ type WorkflowCtx = {
   wfPurchaseOrders: WfPurchaseOrder[];
   addPurchaseOrder: (po: WfPurchaseOrder) => void;
   updatePOStatus: (id: string, status: WfPOStatus, extra?: Partial<WfPurchaseOrder>) => void;
+  updatePurchaseOrder: (id: string, patch: Partial<WfPurchaseOrder>) => void;
+  deletePurchaseOrder: (id: string) => void;
 
   grns: WfGRN[];
   addGRN: (grn: WfGRN) => void;
@@ -271,7 +273,7 @@ type WorkflowCtx = {
 const WorkflowContext = createContext<WorkflowCtx>({
   demands: [], addDemands: () => {}, updateDemandStatus: () => {},
   wfRequisitions: [], addRequisition: () => {}, updateRequisitionStatus: () => {}, updateRequisition: () => {},
-  wfPurchaseOrders: [], addPurchaseOrder: () => {}, updatePOStatus: () => {},
+  wfPurchaseOrders: [], addPurchaseOrder: () => {}, updatePOStatus: () => {}, updatePurchaseOrder: () => {}, deletePurchaseOrder: () => {},
   grns: [], addGRN: () => {},
   transferNotes: [], addTransferNote: () => {}, acknowledgeTransfer: () => {},
   stockDeltas: [], applyStockDeltas: () => {},
@@ -348,7 +350,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         { id: "INV-1008", name: "Salmon Fillet", qty: 10, uom: "Kg" },
       ],
       from: "Store",
-      to: "Hot Kitchen",
+      to: "A. Khan",
       issuedBy: "S. Ahmed",
       date: "2025-11-05 11:45",
       status: "Issued",
@@ -363,7 +365,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         { id: "INV-1003", name: "Cooking Oil", qty: 25, uom: "Litre" },
       ],
       from: "Store",
-      to: "Bakery",
+      to: "N. Hossen",
       issuedBy: "F. Begum",
       date: "2026-05-19 11:40",
       status: "Issued",
@@ -451,6 +453,10 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       addPurchaseOrder: (po) => setWfPOs(prev => [po, ...prev]),
       updatePOStatus: (id, status, extra) =>
         setWfPOs(prev => prev.map(p => p.id === id ? { ...p, status, ...extra } : p)),
+      updatePurchaseOrder: (id, patch) =>
+        setWfPOs(prev => prev.map(p => p.id === id ? { ...p, ...patch } : p)),
+      deletePurchaseOrder: (id) =>
+        setWfPOs(prev => prev.filter(p => p.id !== id)),
 
       grns,
       addGRN: (grn) => setGRNs(prev => [grn, ...prev]),

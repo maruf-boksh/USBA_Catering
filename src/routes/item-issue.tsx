@@ -14,17 +14,17 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import {
-  Plus, PackageCheck, Clock, CheckCircle2, Send, Search, Trash2,
+  Plus, PackageCheck, Clock, CheckCircle2, Send, Search, Trash2, ChevronDown,
 } from "lucide-react";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { toast } from "sonner";
 import { inventory, allocateFefo, type FefoAllocation } from "@/lib/sample-data";
+import { getItemStockByWarehouse } from "@/lib/inventory-stock";
 import { useWorkflow, type WfTransferNote, type WfDemandRequest } from "@/lib/workflow-store";
 import { useRole } from "@/lib/roles";
-import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
-
-const KITCHEN_SECTIONS = [
-  "Hot Kitchen", "Cold Kitchen", "Veg Section", "Special Meal", "Bakery", "Packaging",
-];
+import { getAuthUser } from "@/lib/auth";
+import { getActiveStaff } from "@/lib/staff";
+import { LocationPicker, LocationFilter, LocationCell, officeName, warehouseName } from "@/components/common/LocationPicker";
 
 type IssueItem = {
   id: string;
@@ -38,6 +38,8 @@ type IssueItem = {
 export default function ItemIssuePage() {
   const { transferNotes, addTransferNote, acknowledgeTransfer, demands, updateDemandStatus } = useWorkflow();
   const { role } = useRole();
+  // "Issued By" should reflect the actual logged-in person, not just their role.
+  const issuerName = getAuthUser()?.name ?? role;
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const demandParam = searchParams.get("demand") ?? undefined;
@@ -99,10 +101,9 @@ export default function ItemIssuePage() {
       },
     },
     {
-      key: "officeId" as keyof WfTransferNote, header: "Office / Warehouse",
+      key: "from", header: "From (Office / Warehouse)",
       render: (t) => <LocationCell officeId={t.officeId} warehouseId={t.warehouseId} />,
     },
-    { key: "from", header: "From" },
     { key: "to",   header: "To" },
     {
       key: "items", header: "Items", className: "text-right",
@@ -126,7 +127,7 @@ export default function ItemIssuePage() {
   };
 
   const handleIssue = (data: {
-    toSection: string;
+    issuedTo: string;
     issuedBy: string;
     demandRef: string;
     officeId: string;
@@ -139,7 +140,7 @@ export default function ItemIssuePage() {
       grnRef: "Direct from Store",
       items: data.items,
       from: "Store",
-      to: data.toSection,
+      to: data.issuedTo.trim(),
       issuedBy: data.issuedBy.trim(),
       date: new Date().toLocaleString(),
       status: "Issued",
@@ -180,7 +181,7 @@ export default function ItemIssuePage() {
 
     setCreateOpen(false);
     toast.success(
-      `Item Issue ${tn.id} created — ${data.items.length} item${data.items.length > 1 ? "s" : ""} to ${data.toSection}${demandUpdate}.`,
+      `Item Issue ${tn.id} created — ${data.items.length} item${data.items.length > 1 ? "s" : ""} to ${data.issuedTo.trim()}${demandUpdate}.`,
     );
   };
 
@@ -263,7 +264,6 @@ export default function ItemIssuePage() {
                         <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider">Demand #</th>
                         <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider">Date</th>
                         <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider">Requested By</th>
-                        <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider">From</th>
                         <th className="text-right px-3 py-2 text-[10px] uppercase tracking-wider">Items</th>
                         <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider">Status</th>
                         <th className="px-3 py-2 w-32" />
@@ -275,7 +275,6 @@ export default function ItemIssuePage() {
                           <td className="px-3 py-2 font-medium font-mono text-xs">{d.id}</td>
                           <td className="px-3 py-2">{d.date}</td>
                           <td className="px-3 py-2">{d.requestedBy}</td>
-                          <td className="px-3 py-2 text-muted-foreground">{d.role}</td>
                           <td className="px-3 py-2 text-right tabular-nums">{d.items.length}</td>
                           <td className="px-3 py-2"><StatusBadge status={d.status} /></td>
                           <td className="px-3 py-2 text-right">
@@ -334,8 +333,9 @@ export default function ItemIssuePage() {
       <CreateIssueDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
-        defaultIssuedBy={role}
+        defaultIssuedBy={issuerName}
         defaultDemandId={preselectedDemand}
+        lockDemand={!!preselectedDemand}
         demands={demands}
         onCreate={handleIssue}
       />
@@ -363,7 +363,10 @@ function IssueDetailsDialog({
         {note && (
           <div className="space-y-4 mt-1">
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-3 text-sm">
-              <Field label="From" value={note.from} />
+              <Field
+                label="From"
+                value={`${officeName(note.officeId)} · ${warehouseName(note.warehouseId)}`}
+              />
               <Field label="To"   value={note.to} bold />
               <Field label="Issued By" value={note.issuedBy} />
               <div>
@@ -371,7 +374,6 @@ function IssueDetailsDialog({
                 <div className="mt-1"><StatusBadge status={note.status} /></div>
               </div>
               <Field label="Demand Ref" value={note.demandRef} />
-              <Field label="GRN Ref"    value={note.grnRef} />
               <Field label="Date"       value={note.date} />
               <Field label="Items"      value={note.items.length.toString()} />
             </div>
@@ -420,15 +422,16 @@ function IssueDetailsDialog({
 }
 
 function CreateIssueDialog({
-  open, onOpenChange, defaultIssuedBy, defaultDemandId, demands, onCreate,
+  open, onOpenChange, defaultIssuedBy, defaultDemandId, lockDemand = false, demands, onCreate,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   defaultIssuedBy: string;
   defaultDemandId: string;
+  lockDemand?: boolean;
   demands: WfDemandRequest[];
   onCreate: (data: {
-    toSection: string;
+    issuedTo: string;
     issuedBy: string;
     demandRef: string;
     officeId: string;
@@ -436,7 +439,7 @@ function CreateIssueDialog({
     items: IssueItem[];
   }) => void;
 }) {
-  const [toSection, setToSection] = useState<string>(KITCHEN_SECTIONS[0]);
+  const [issuedTo, setIssuedTo] = useState<string>("");
   const [issuedBy, setIssuedBy] = useState<string>(defaultIssuedBy);
   const [demandId, setDemandId] = useState(defaultDemandId);
   const [officeId, setOfficeId] = useState("OFF-001");
@@ -458,7 +461,7 @@ function CreateIssueDialog({
 
   useEffect(() => {
     if (!open) {
-      setToSection(KITCHEN_SECTIONS[0]);
+      setIssuedTo("");
       setIssuedBy(defaultIssuedBy);
       setDemandId("");
       setSearch("");
@@ -469,14 +472,22 @@ function CreateIssueDialog({
     }
   }, [open, defaultIssuedBy]);
 
-  // Reset entered amounts when the mode/demand changes
+  // Active staff are the candidates a direct issue can be handed to. Read when
+  // the dialog opens so users created at runtime show up.
+  const staff = useMemo(() => getActiveStaff(), [open]);
+
+  // Reset entered amounts when the mode/demand changes. Also drive the
+  // recipient: when issuing against a demand it's the person who raised it
+  // (auto-loaded, read-only); for a direct issue the user picks from the list.
   useEffect(() => {
+    const d = demands.find((x) => x.id === demandId);
+    setIssuedTo(d ? d.requestedBy : "");
     setIssuedMap({});
     setManualIds([]);
     setAddItemId("");
     setAddItemQty("");
     setSearch("");
-  }, [demandId]);
+  }, [demandId, demands]);
 
   const selectedDemand = useMemo(
     () => demands.find((d) => d.id === demandId) ?? null,
@@ -485,6 +496,11 @@ function CreateIssueDialog({
 
   const requestedFor = (itemId: string): number =>
     selectedDemand?.items.find((i) => i.id === itemId)?.qty ?? 0;
+
+  // Stock available for an item in the currently-selected source warehouse.
+  // Issuing draws from this warehouse, so the table reflects its on-hand only.
+  const availableIn = (itemName: string): number =>
+    getItemStockByWarehouse(itemName).find((w) => w.warehouseId === warehouseId)?.stock ?? 0;
 
   const setIssued = (id: string, value: string) => {
     setIssuedMap((prev) => ({ ...prev, [id]: value }));
@@ -546,13 +562,41 @@ function CreateIssueDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [issuedMap, selectedDemand, manualIds]);
 
+  // Every line whose entered qty exceeds what the selected warehouse holds.
+  // Computed across ALL rows so the UI can flag them together (not one-by-one).
+  const stockErrors = useMemo(() => {
+    const ids = selectedDemand ? selectedDemand.items.map((i) => i.id) : manualIds;
+    const errs: { id: string; name: string; avail: number; uom: string; issued: number }[] = [];
+    for (const id of ids) {
+      const iss = Number(issuedMap[id] ?? 0);
+      if (iss <= 0) continue;
+      const invItem = inventory.find((i) => i.id === id);
+      const avail = invItem ? availableIn(invItem.name) : 0;
+      if (iss > avail) errs.push({ id, name: invItem?.name ?? id, avail, uom: invItem?.uom ?? "", issued: iss });
+    }
+    return errs;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [issuedMap, selectedDemand, manualIds, warehouseId]);
+
   const handleSubmit = () => {
     if (!issuedBy.trim()) { toast.error("Issued By is required."); return; }
+    if (!issuedTo.trim()) { toast.error("Issued To (recipient) is required."); return; }
     if (!officeId) { toast.error("Office is required."); return; }
     if (!warehouseId) { toast.error("Warehouse is required."); return; }
     const idsInScope = selectedDemand
       ? selectedDemand.items.map((i) => i.id)
       : manualIds;
+    // Can't issue more than what's on hand in the selected source warehouse.
+    // Report ALL offending rows at once so the user fixes them in one pass.
+    if (stockErrors.length > 0) {
+      const first = stockErrors[0];
+      toast.error(
+        stockErrors.length === 1
+          ? `${first.name}: only ${first.avail} ${first.uom} in stock at the selected warehouse — cannot issue ${first.issued}.`
+          : `${stockErrors.length} items exceed available stock at the selected warehouse — reduce the highlighted quantities.`,
+      );
+      return;
+    }
     const items: IssueItem[] = idsInScope
       .filter((id) => Number(issuedMap[id] ?? 0) > 0)
       .map((id) => {
@@ -575,7 +619,7 @@ function CreateIssueDialog({
       );
       return;
     }
-    onCreate({ toSection, issuedBy, demandRef: demandId, officeId, warehouseId, items });
+    onCreate({ issuedTo, issuedBy, demandRef: demandId, officeId, warehouseId, items });
   };
 
   return (
@@ -586,18 +630,7 @@ function CreateIssueDialog({
         </DialogHeader>
 
         <div className="px-6 pt-5 pb-3 space-y-4 border-b border-border bg-muted/20">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div>
-              <Label>To (Kitchen Section) <span className="text-destructive">*</span></Label>
-              <select
-                value={toSection}
-                onChange={(e) => setToSection(e.target.value)}
-                className="w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                {KITCHEN_SECTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-            </div>
-
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <Label>Issued By <span className="text-destructive">*</span></Label>
               <Input
@@ -605,17 +638,46 @@ function CreateIssueDialog({
                 readOnly
                 tabIndex={-1}
                 aria-readonly
-                title="Auto-filled from your logged-in role"
+                title="Auto-filled from the logged-in user"
                 className="mt-1 bg-muted/60 cursor-not-allowed text-muted-foreground"
               />
             </div>
 
             <div>
+              <Label>Issued To <span className="text-destructive">*</span></Label>
+              {isDirect ? (
+                <select
+                  value={issuedTo}
+                  onChange={(e) => setIssuedTo(e.target.value)}
+                  className="w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  <option value="">Select recipient...</option>
+                  {staff.map((s) => (
+                    <option key={s.id} value={s.fullName}>
+                      {s.fullName} — {s.role}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <Input
+                  value={issuedTo}
+                  readOnly
+                  tabIndex={-1}
+                  aria-readonly
+                  title="Auto-loaded from the selected demand's requester"
+                  className="mt-1 bg-muted/60 cursor-not-allowed text-muted-foreground"
+                />
+              )}
+            </div>
+
+            <div className="md:col-span-2">
               <Label>Demand Reference</Label>
               <select
                 value={demandId}
                 onChange={(e) => setDemandId(e.target.value)}
-                className="w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                disabled={lockDemand}
+                title={lockDemand ? "Locked to the demand this issue was opened from" : undefined}
+                className="w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-70"
               >
                 <option value="">Direct Issue (no demand)</option>
                 {demands
@@ -690,6 +752,11 @@ function CreateIssueDialog({
 
           <div className="text-xs text-muted-foreground">
             {summary.issuedItems} item{summary.issuedItems !== 1 ? "s" : ""} ready · Issued total <span className="font-semibold text-foreground tabular-nums">{summary.totalIssued}</span> · Remaining <span className="font-semibold text-foreground tabular-nums">{summary.totalRemaining}</span>
+            {stockErrors.length > 0 && (
+              <span className="text-destructive font-medium">
+                {" "}· {stockErrors.length} over stock
+              </span>
+            )}
           </div>
         </div>
 
@@ -725,9 +792,11 @@ function CreateIssueDialog({
                   const issN = Number(issuedMap[inv.id]) || 0;
                   const remaining = Math.max(0, reqN - issN);
                   const over = issN > reqN && reqN > 0;
-                  const lowStock = issN > 0 && issN > inv.stock;
+                  const avail = availableIn(inv.name);
+                  const lowStock = issN > 0 && issN > avail;
                   const inDemand = reqN > 0;
-                  const fefo = issN > 0 ? allocateFefo(inv.id, issN) : null;
+                  // Only allocate when the selected warehouse actually holds stock.
+                  const fefo = issN > 0 && avail > 0 ? allocateFefo(inv.id, Math.min(issN, avail)) : null;
                   return (
                     <tr key={inv.id} className={"border-t border-border hover:bg-muted/20" + (inDemand ? " bg-primary/[0.03]" : "")}>
                       <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
@@ -738,7 +807,7 @@ function CreateIssueDialog({
                       <td className="px-3 py-2 text-muted-foreground">{inv.uom}</td>
                       <td className="px-3 py-2 text-right tabular-nums">
                         <span className={lowStock ? "text-destructive font-semibold" : ""}>
-                          {inv.stock}
+                          {avail}
                         </span>
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums">
@@ -746,15 +815,21 @@ function CreateIssueDialog({
                           {inDemand ? reqN : "—"}
                         </span>
                       </td>
-                      <td className="px-3 py-2 text-right">
+                      <td className="px-3 py-2 text-right align-top">
                         <Input
                           type="number"
                           min={0}
+                          max={avail}
                           value={issuedMap[inv.id] ?? ""}
                           onChange={(e) => setIssued(inv.id, e.target.value)}
                           placeholder="0"
-                          className={"h-8 text-right tabular-nums" + (over ? " border-destructive" : "")}
+                          className={"h-8 text-right tabular-nums" + ((over || lowStock) ? " border-destructive" : "")}
                         />
+                        {lowStock && (
+                          <div className="text-[10px] text-destructive mt-0.5">
+                            Only {avail} {inv.uom} in stock
+                          </div>
+                        )}
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums">
                         <span className={over ? "text-destructive font-semibold" : remaining > 0 ? "text-warning" : "text-muted-foreground"}>
@@ -765,23 +840,44 @@ function CreateIssueDialog({
                         {fefo === null ? (
                           <span className="text-muted-foreground">—</span>
                         ) : (
-                          <div className="space-y-0.5">
-                            <div className="inline-flex items-center gap-1 text-[9px] uppercase tracking-wider font-bold text-primary mb-0.5">
-                              <span className="px-1.5 py-0.5 rounded bg-primary/10 border border-primary/30">{fefo.method}</span>
-                            </div>
-                            {fefo.allocations.map((a) => (
-                              <div key={a.batchNo} className="font-mono">
-                                <span className="text-foreground">{a.batchNo}</span>
-                                <span className="text-muted-foreground"> · {a.expiry} · </span>
-                                <span className="font-semibold">{a.qty} {inv.uom}</span>
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <button
+                                type="button"
+                                className="inline-flex items-center gap-1 text-[9px] uppercase tracking-wider font-bold text-primary px-1.5 py-0.5 rounded bg-primary/10 border border-primary/30 hover:bg-primary/20 transition-colors cursor-pointer"
+                                title={`View ${fefo.method} allocation breakdown`}
+                              >
+                                {fefo.method}
+                                <ChevronDown className="h-2.5 w-2.5" />
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent align="end" className="w-64 p-3 text-[11px]">
+                              <div className="flex items-center justify-between mb-2">
+                                <span className="text-[10px] uppercase tracking-wider font-bold text-primary">
+                                  {fefo.method} allocation
+                                </span>
+                                <span className="text-muted-foreground truncate ml-2">{inv.name}</span>
                               </div>
-                            ))}
-                            {fefo.shortfall > 0 && (
-                              <div className="text-destructive font-semibold">
-                                Shortfall: {fefo.shortfall} {inv.uom}
-                              </div>
-                            )}
-                          </div>
+                              {fefo.allocations.length === 0 ? (
+                                <div className="text-muted-foreground">No batches allocated.</div>
+                              ) : (
+                                <div className="space-y-1">
+                                  {fefo.allocations.map((a) => (
+                                    <div key={a.batchNo} className="font-mono flex items-center justify-between gap-2">
+                                      <span className="text-foreground">{a.batchNo}</span>
+                                      <span className="text-muted-foreground">{a.expiry}</span>
+                                      <span className="font-semibold whitespace-nowrap">{a.qty} {inv.uom}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {fefo.shortfall > 0 && (
+                                <div className="text-destructive font-semibold mt-2 pt-2 border-t border-border">
+                                  Shortfall: {fefo.shortfall} {inv.uom}
+                                </div>
+                              )}
+                            </PopoverContent>
+                          </Popover>
                         )}
                       </td>
                       {isDirect && (
@@ -807,7 +903,11 @@ function CreateIssueDialog({
 
         <DialogFooter className="px-6 py-4 border-t border-border">
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button onClick={handleSubmit}>
+          <Button
+            onClick={handleSubmit}
+            disabled={stockErrors.length > 0}
+            title={stockErrors.length > 0 ? "Some quantities exceed available stock" : undefined}
+          >
             <Send className="h-4 w-4 mr-1.5" /> Issue Items
           </Button>
         </DialogFooter>

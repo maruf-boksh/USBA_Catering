@@ -3,6 +3,7 @@ import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
+import { rowEditors } from "@/lib/row-editors";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -317,6 +318,7 @@ export default function TransferPage() {
             data={filtered}
             onReceive={(id) => openAction(id, "receive")}
             onReturn={(id) => openAction(id, "return")}
+            editors={rowEditors(setRows)}
           />
         </>
       ) : (
@@ -533,11 +535,12 @@ function TabCount({ n, tone }: { n: number; tone: "warning" | "navy" | "success"
 }
 
 function TransferTabs({
-  data, onReceive, onReturn,
+  data, onReceive, onReturn, editors,
 }: {
   data: Transfer[];
   onReceive: (id: string) => void;
   onReturn: (id: string) => void;
+  editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
 }) {
   const transferOut    = data.filter((r) => r.kind === "Outbound" && r.status === "Pending");
   const inTransit      = data.filter((r) => r.status === "In Transit");
@@ -565,28 +568,30 @@ function TransferTabs({
         </TabsTrigger>
       </TabsList>
 
-      <TabsContent value="out"      className="mt-0"><TransferList data={transferOut} emptyHint="No outgoing transfers waiting to dispatch." /></TabsContent>
+      <TabsContent value="out"      className="mt-0"><TransferList data={transferOut} emptyHint="No outgoing transfers waiting to dispatch." editors={editors} /></TabsContent>
       <TabsContent value="transit"  className="mt-0">
         <TransferList
           data={inTransit}
           emptyHint="No transfers currently in transit."
           onReceive={onReceive}
           onReturn={onReturn}
+          editors={editors}
         />
       </TabsContent>
-      <TabsContent value="return"   className="mt-0"><TransferList data={returns}     emptyHint="No return transfers recorded." /></TabsContent>
-      <TabsContent value="received" className="mt-0"><TransferList data={received}    emptyHint="No received transfers yet." /></TabsContent>
+      <TabsContent value="return"   className="mt-0"><TransferList data={returns}     emptyHint="No return transfers recorded." editors={editors} /></TabsContent>
+      <TabsContent value="received" className="mt-0"><TransferList data={received}    emptyHint="No received transfers yet." editors={editors} /></TabsContent>
     </Tabs>
   );
 }
 
 function TransferList({
-  data, emptyHint, onReceive, onReturn,
+  data, emptyHint, onReceive, onReturn, editors,
 }: {
   data: Transfer[];
   emptyHint?: string;
   onReceive?: (id: string) => void;
   onReturn?: (id: string) => void;
+  editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
 }) {
   const cols: Column<Transfer>[] = [
     {
@@ -687,25 +692,51 @@ function TransferList({
             </div>
           );
         }
-        return <RowActions row={r} actions={["view", "edit", "print"]} />;
+        return (
+          <RowActions
+            row={r}
+            actions={["view", "edit", "print"]}
+            onSave={editors.onSave}
+            editDetail={({ save, close }) => <TransferFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
+          />
+        );
       }}
     />
   );
 }
 
 function TransferCreate({ nextId, onSave }: { nextId: string; onSave: (t: Transfer) => void }) {
+  return <TransferFields mode="create" nextId={nextId} onSave={onSave} />;
+}
+
+/**
+ * Shared Transfer form. Used by the Create page (mode="create") and the row
+ * Edit modal (mode="edit", pre-filled from `initial`) so both share an
+ * identical layout including the dynamic line table.
+ */
+function TransferFields({
+  mode, nextId, initial, onSave, onSubmit, onClose,
+}: {
+  mode: "create" | "edit";
+  nextId?: string;
+  initial?: Transfer;
+  onSave?: (t: Transfer) => void;
+  onSubmit?: (patch: Record<string, unknown>) => void;
+  onClose?: () => void;
+}) {
+  const isEdit = mode === "edit";
   const today = new Date().toISOString().slice(0, 16).replace("T", " ");
-  const [kind, setKind] = useState<TransferKind>("Outbound");
-  const [trRef, setTrRef] = useState(APPROVED_TR_REFS[0]);
-  const [from, setFrom] = useState(LOCATIONS[0]);
-  const [to, setTo] = useState(LOCATIONS[1]);
-  const [issuedBy, setIssuedBy] = useState("");
-  const [receivedBy, setReceivedBy] = useState("");
+  const [kind, setKind] = useState<TransferKind>(initial?.kind ?? "Outbound");
+  const [trRef, setTrRef] = useState(initial?.trRef ?? APPROVED_TR_REFS[0]);
+  const [from, setFrom] = useState(initial?.from ?? LOCATIONS[0]);
+  const [to, setTo] = useState(initial?.to ?? LOCATIONS[1]);
+  const [issuedBy, setIssuedBy] = useState(initial?.issuedBy ?? "");
+  const [receivedBy, setReceivedBy] = useState(initial?.receivedBy ?? "");
 
   const [itemIdx, setItemIdx] = useState(0);
   const [reqQty, setReqQty] = useState("");
   const [trfQty, setTrfQty] = useState("");
-  const [lines, setLines] = useState<TransferLine[]>([]);
+  const [lines, setLines] = useState<TransferLine[]>(initial?.lines ?? []);
 
   const addLine = () => {
     const it = ITEMS[itemIdx];
@@ -724,32 +755,47 @@ function TransferCreate({ nextId, onSave }: { nextId: string; onSave: (t: Transf
 
   const removeLine = (id: string) => setLines((p) => p.filter((l) => l.id !== id));
 
-  const save = (status: TransferStatus) => {
-    if (from === to) { toast.error("Source and destination must be different."); return; }
-    if (!issuedBy.trim()) { toast.error("Issued By is required."); return; }
-    if (lines.length === 0) { toast.error("Add at least one item."); return; }
+  const validate = (status?: TransferStatus) => {
+    if (from === to) { toast.error("Source and destination must be different."); return false; }
+    if (!issuedBy.trim()) { toast.error("Issued By is required."); return false; }
+    if (lines.length === 0) { toast.error("Add at least one item."); return false; }
 
     const fullyTransferred = lines.every((l) => l.transferredQty === l.requestedQty);
     if (status === "Completed" && !fullyTransferred) {
       toast.error("Cannot mark Completed — some lines are short-transferred.");
-      return;
+      return false;
     }
+    return true;
+  };
 
+  const buildPayload = () => {
     const tags = tagsForLocation(from);
-    onSave({
-      id: nextId, date: today, trRef: kind === "Return" ? "Return" : trRef,
+    return {
+      date: today, trRef: kind === "Return" ? "Return" : trRef,
       from, to,
       issuedBy: issuedBy.trim(), receivedBy: receivedBy.trim() || "—",
-      lines, status, kind,
+      lines, kind,
       ...tags,
-    });
+    };
+  };
+
+  const save = (status: TransferStatus) => {
+    if (!validate(status)) return;
+    onSave?.({ id: nextId!, ...buildPayload(), status });
     toast.success(`Transfer ${nextId} saved as "${status}".`);
+  };
+
+  const saveEdit = () => {
+    if (!validate(initial?.status)) return;
+    onSubmit?.(buildPayload());
+    onClose?.();
   };
 
   return (
     <div className="space-y-6">
       <Card>
         <CardContent className="pt-6">
+          {!isEdit && (
           <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
             <h3 className="text-sm font-semibold uppercase tracking-wider">Transfer Details</h3>
             <div className="flex items-center gap-2">
@@ -764,11 +810,12 @@ function TransferCreate({ nextId, onSave }: { nextId: string; onSave: (t: Transf
               </Button>
             </div>
           </div>
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">TRF #</Label>
-              <Input value={nextId} disabled className="mt-1 font-mono" />
+              <Input value={initial?.id ?? nextId ?? ""} disabled className="mt-1 font-mono" />
             </div>
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Date</Label>
@@ -940,6 +987,13 @@ function TransferCreate({ nextId, onSave }: { nextId: string; onSave: (t: Transf
           </div>
         </CardContent>
       </Card>
+
+      {isEdit && (
+        <div className="flex justify-end gap-2 mt-6 pt-4 border-t border-border">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={saveEdit}><Save className="h-4 w-4 mr-1.5" /> Save Changes</Button>
+        </div>
+      )}
     </div>
   );
 }

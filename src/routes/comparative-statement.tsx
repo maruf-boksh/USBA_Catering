@@ -4,6 +4,7 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
+import { rowEditors } from "@/lib/row-editors";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -139,12 +140,15 @@ export default function ComparativeStatementPage() {
         }
       />
 
-      {view === "list" ? <CsList rows={rows} /> : <CsCreate nextId={nextId} onSave={addCs} />}
+      {view === "list" ? <CsList rows={rows} editors={rowEditors(setRows)} /> : <CsCreate nextId={nextId} onSave={addCs} />}
     </>
   );
 }
 
-function CsList({ rows }: { rows: ComparativeStatement[] }) {
+function CsList({ rows, editors }: {
+  rows: ComparativeStatement[];
+  editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
+}) {
   const total = rows.length;
   const pending = rows.filter((r) => r.status === "Pending Approval").length;
   const approved = rows.filter((r) => r.status === "Approved").length;
@@ -183,32 +187,69 @@ function CsList({ rows }: { rows: ComparativeStatement[] }) {
         columns={cols}
         searchKeys={["id", "rfqRef", "preparedBy", "status"]}
         selectable={false}
-        actions={(r) => <RowActions row={r} actions={["view", "edit", "print", "approve"]} />}
+        actions={(r) => (
+          <RowActions
+            row={r}
+            actions={["view", "edit", "print", "approve"]}
+            onSave={editors.onSave}
+            editDetail={({ save, close }) => <CsFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
+          />
+        )}
       />
     </>
   );
 }
 
 function CsCreate({ nextId, onSave }: { nextId: string; onSave: (cs: ComparativeStatement) => void }) {
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <CsFields mode="create" nextId={nextId} onSave={onSave} />
+      </CardContent>
+    </Card>
+  );
+}
+
+const DEFAULT_SUPPLIERS = ["Fresh Farms Ltd", "Halal Meats Co.", "Spice World"];
+
+/**
+ * Shared Comparative Statement form. Used by the Create page (mode="create")
+ * and the row Edit modal (mode="edit", pre-filled from `initial`) so both share
+ * an identical layout, supplier matrix and line-table logic.
+ */
+function CsFields({
+  mode, nextId, initial, onSave, onSubmit, onClose,
+}: {
+  mode: "create" | "edit";
+  nextId?: string;
+  initial?: ComparativeStatement;
+  onSave?: (cs: ComparativeStatement) => void;
+  onSubmit?: (patch: Record<string, unknown>) => void;
+  onClose?: () => void;
+}) {
+  const isEdit = mode === "edit";
   const today = new Date().toISOString().slice(0, 10);
 
-  const [date] = useState(today);
-  const [rfqRef, setRfqRef] = useState("");
-  const [preparedBy, setPreparedBy] = useState("");
-  const [remarks, setRemarks] = useState("");
+  const [date] = useState(initial?.date ?? today);
+  const [rfqRef, setRfqRef] = useState(initial?.rfqRef ?? "");
+  const [preparedBy, setPreparedBy] = useState(initial?.preparedBy ?? "");
+  const [remarks, setRemarks] = useState(initial?.remarks ?? "");
 
-  // Suppliers being compared (columns in the matrix).
-  const [suppliers, setSuppliers] = useState<string[]>(["Fresh Farms Ltd", "Halal Meats Co.", "Spice World"]);
+  // Suppliers being compared (columns in the matrix). When editing, derive the
+  // compared set from the row's first line's quotes.
+  const [suppliers, setSuppliers] = useState<string[]>(
+    initial?.lines?.[0]?.quotes.map((q) => q.supplier) ?? DEFAULT_SUPPLIERS,
+  );
   const [newSupplier, setNewSupplier] = useState("");
 
   // Lines (rows). Each line has one quote per supplier; quotes stay in sync as suppliers add/remove.
-  const [lines, setLines] = useState<CsLine[]>([
+  const [lines, setLines] = useState<CsLine[]>(initial?.lines ?? [
     {
       id: `c-${Date.now()}`,
       itemName: "",
       uom: "Kg",
       qty: 0,
-      quotes: ["Fresh Farms Ltd", "Halal Meats Co.", "Spice World"].map((s) => ({ supplier: s, unitPrice: 0 })),
+      quotes: DEFAULT_SUPPLIERS.map((s) => ({ supplier: s, unitPrice: 0 })),
     },
   ]);
 
@@ -288,8 +329,7 @@ function CsCreate({ nextId, onSave }: { nextId: string; onSave: (cs: Comparative
       toast.error("Award every line to a supplier before submitting.");
       return;
     }
-    onSave({
-      id: nextId,
+    const payload = {
       date,
       rfqRef: rfqRef.trim(),
       preparedBy: preparedBy.trim(),
@@ -298,15 +338,21 @@ function CsCreate({ nextId, onSave }: { nextId: string; onSave: (cs: Comparative
       lowestTotal,
       status,
       remarks: remarks.trim() || undefined,
-    });
+    };
+    if (isEdit) {
+      onSubmit?.({ ...payload, status: initial?.status ?? status });
+      onClose?.();
+      return;
+    }
+    onSave?.({ id: nextId!, ...payload });
     toast.success(status === "Draft"
       ? `${nextId} saved as draft.`
       : `${nextId} submitted for approval.`);
   };
 
   return (
-    <Card>
-      <CardContent className="pt-6">
+    <>
+      {!isEdit && (
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-sm font-semibold uppercase tracking-wider">New Comparative Statement</h3>
           <div className="flex items-center gap-2">
@@ -318,11 +364,12 @@ function CsCreate({ nextId, onSave }: { nextId: string; onSave: (cs: Comparative
             </Button>
           </div>
         </div>
+      )}
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-4 mb-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-4 mb-6">
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">CS #</Label>
-            <Input value={nextId} disabled className="mt-1 font-mono" />
+            <Input value={initial?.id ?? nextId ?? ""} disabled className="mt-1 font-mono" />
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Date</Label>
@@ -530,7 +577,15 @@ function CsCreate({ nextId, onSave }: { nextId: string; onSave: (cs: Comparative
             Lowest price per line is highlighted in green for quick scanning.
           </Badge>
         </div>
-      </CardContent>
-    </Card>
+
+      {isEdit && (
+        <div className="flex justify-end gap-2 mt-6 pt-4 border-t border-border">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={() => save(initial?.status ?? "Pending Approval")}>
+            <Save className="h-4 w-4 mr-1.5" /> Save Changes
+          </Button>
+        </div>
+      )}
+    </>
   );
 }

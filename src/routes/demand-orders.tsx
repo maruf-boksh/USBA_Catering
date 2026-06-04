@@ -11,6 +11,7 @@ import {
   ShieldCheck, Eye,
 } from "lucide-react";
 import { inventory } from "@/lib/sample-data";
+import { getItemStock } from "@/lib/inventory-stock";
 import { KpiCard } from "@/components/common/KpiCard";
 import { toast } from "sonner";
 import {
@@ -128,7 +129,7 @@ export default function DemandOrders() {
     if (!qty || qty <= 0) { toast.error("Quantity must be greater than zero."); return; }
     setNewItems(prev => [
       ...prev,
-      { id: inv.id, name: inv.name, type: inv.category, qty, uom: inv.uom },
+      { id: inv.id, name: inv.name, qty, uom: inv.uom },
     ]);
     setNewItemId("");
     setNewItemQty("");
@@ -276,8 +277,9 @@ export default function DemandOrders() {
                       <p className="text-sm text-muted-foreground py-3">No items attached to this request.</p>
                     ) : (() => {
                       const taggedItems = activeDemand.items.map((item) => {
-                        const inv = inventory.find((x) => x.id === item.id || x.name.toLowerCase() === item.name.toLowerCase());
-                        const currentStock = inv?.stock ?? 0;
+                        // Actual on-hand stock summed across every warehouse the
+                        // item is held in (not just its primary warehouse).
+                        const currentStock = getItemStock(item.id || item.name);
                         const shortfall = item.qty - currentStock;
                         return { ...item, currentStock, shortfall, insufficient: shortfall > 0 };
                       });
@@ -293,13 +295,18 @@ export default function DemandOrders() {
                                   Sufficient Items ({sufficientItems.length})
                                 </span>
                               </div>
+                              <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 px-3 mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                                <div>Item</div>
+                                <div className="text-center">In Stock</div>
+                                <div className="text-center">Required</div>
+                                <div className="text-center">Status</div>
+                              </div>
                               <div className="space-y-2">
                                 {sufficientItems.map((item) => (
                                   <div key={item.id} className="rounded-lg border border-green-200 bg-green-50/50 p-3">
                                     <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 items-center">
                                       <div>
                                         <div className="font-semibold text-sm">{item.name}</div>
-                                        <div className="text-[11px] text-muted-foreground">{item.type}</div>
                                       </div>
                                       <div className="text-center">
                                         <span className="text-sm font-semibold text-green-700">{item.currentStock}</span>
@@ -327,13 +334,18 @@ export default function DemandOrders() {
                                   Shortfall Items ({shortfallItems.length})
                                 </span>
                               </div>
+                              <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 px-3 mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                                <div>Item</div>
+                                <div className="text-center">In Stock</div>
+                                <div className="text-center">Required</div>
+                                <div className="text-center">Status</div>
+                              </div>
                               <div className="space-y-2">
                                 {shortfallItems.map((item) => (
                                   <div key={item.id} className="rounded-lg border border-red-200 bg-red-50/50 p-3">
                                     <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 items-center">
                                       <div>
                                         <div className="font-semibold text-sm">{item.name}</div>
-                                        <div className="text-[11px] text-muted-foreground">{item.type}</div>
                                       </div>
                                       <div className="text-center">
                                         <span className="text-sm font-semibold text-red-600">{item.currentStock}</span>
@@ -512,7 +524,6 @@ export default function DemandOrders() {
                           <td className="px-3 py-2">{i + 1}</td>
                           <td className="px-3 py-2">
                             <div className="font-medium">{it.name}</div>
-                            <div className="text-[11px] text-muted-foreground">{it.type}</div>
                           </td>
                           <td className="px-3 py-2 text-right tabular-nums">
                             {it.qty} <span className="text-[11px] text-muted-foreground">{it.uom}</span>

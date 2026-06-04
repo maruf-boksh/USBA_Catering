@@ -20,6 +20,7 @@ import {
   type BatchLot, type AllocationMethod,
 } from "@/lib/sample-data";
 import { KpiCard } from "@/components/common/KpiCard";
+import { getItemStockByWarehouse } from "@/lib/inventory-stock";
 import { useRole } from "@/lib/roles";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import {
@@ -596,12 +597,6 @@ export default function Inventory() {
               <Label>Expiry Date</Label>
               <Input type="date" value={form.expiry} onChange={(e) => f("expiry", e.target.value)} className="mt-1" />
             </div>
-            <div>
-              <Label>Storage</Label>
-              <select value={form.storage} onChange={(e) => f("storage", e.target.value)} className={SELECT_CLS}>
-                {STORAGE_OPTIONS.map((s) => <option key={s}>{s}</option>)}
-              </select>
-            </div>
             <LocationPicker
               officeId={form.officeId}
               warehouseId={form.warehouseId}
@@ -751,7 +746,13 @@ export default function Inventory() {
 function StockCell({ item, onClick }: { item: Item; onClick: () => void }) {
   const batched = isBatchTrackedForInventory(item.id);
   const lots = batched ? item.batches.filter((b) => b.qty > 0).length : 0;
-  const low = item.stock < item.reorder;
+
+  // Actual stock = this item summed across every warehouse it's held in. The
+  // primary-warehouse figure is the live `item.stock`; any other warehouses'
+  // holdings come from the aggregation helper.
+  const others = getItemStockByWarehouse(item.name).slice(1); // beyond primary
+  const total = item.stock + others.reduce((s, w) => s + w.stock, 0);
+  const low = total < item.reorder;
 
   return (
     <button
@@ -766,7 +767,7 @@ function StockCell({ item, onClick }: { item: Item; onClick: () => void }) {
         "tabular-nums font-semibold underline decoration-dotted decoration-muted-foreground/40 underline-offset-2 group-hover:decoration-primary",
         low && "text-destructive",
       )}>
-        {item.stock.toLocaleString()}
+        {total.toLocaleString()}
       </span>
       <span className="text-[10px] text-muted-foreground -mt-0.5">
         {batched ? `${lots} lot${lots === 1 ? "" : "s"}` : "single"}

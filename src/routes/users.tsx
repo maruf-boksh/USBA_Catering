@@ -15,21 +15,15 @@ import {
 } from "lucide-react";
 import { KpiCard } from "@/components/common/KpiCard";
 import { ROLES, type Role } from "@/lib/roles";
+import { STAFF_SEED, type StaffMember } from "@/lib/staff";
+import { rowEditors } from "@/lib/row-editors";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
 
-type UserRow = {
-  id: string;
-  username: string;
-  fullName: string;
-  email: string;
-  phone: string;
-  role: Role;
-  location: string;
-  lastLogin: string;
-  status: "Active" | "Inactive";
-};
+// The staff/user shape and seed live in @/lib/staff so other modules (e.g. the
+// Item Issue recipient picker) share a single source of truth.
+type UserRow = StaffMember;
 
 const LOCATIONS = [
   "Head Office Dhaka",
@@ -43,15 +37,7 @@ const LOCATIONS = [
 const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
-const SEED: UserRow[] = [
-  { id: "USR-001", username: "r.hossain",  fullName: "R. Hossain",   email: "r.hossain@us-bangla.com",  phone: "+880 1711-100001", role: "GM/Admin",                  location: "Head Office Dhaka",     lastLogin: "2026-05-20 09:14", status: "Active"   },
-  { id: "USR-002", username: "s.ahmed",    fullName: "S. Ahmed",     email: "s.ahmed@us-bangla.com",    phone: "+880 1711-100002", role: "Meal Planner",              location: "Head Office Dhaka",     lastLogin: "2026-05-20 08:22", status: "Active"   },
-  { id: "USR-003", username: "f.begum",    fullName: "F. Begum",     email: "f.begum@us-bangla.com",    phone: "+880 1711-100003", role: "Store & Inventory",         location: "Central Warehouse",     lastLogin: "2026-05-19 18:45", status: "Active"   },
-  { id: "USR-004", username: "m.karim",    fullName: "Md. Karim",    email: "m.karim@us-bangla.com",    phone: "+880 1711-100004", role: "Procurement & Supply Chain", location: "Head Office Dhaka",    lastLogin: "2026-05-19 16:20", status: "Active"   },
-  { id: "USR-005", username: "t.islam",    fullName: "T. Islam",     email: "t.islam@us-bangla.com",    phone: "+880 1711-100005", role: "Food Safety & QC",          location: "Hot Kitchen",           lastLogin: "2026-05-20 07:55", status: "Active"   },
-  { id: "USR-006", username: "n.hossen",   fullName: "N. Hossen",    email: "n.hossen@us-bangla.com",   phone: "+880 1711-100006", role: "Packaging & Dispatch",      location: "Cold Kitchen",          lastLogin: "2026-05-15 10:11", status: "Active"   },
-  { id: "USR-007", username: "a.rahman",   fullName: "A. Rahman",    email: "a.rahman@us-bangla.com",   phone: "+880 1711-100007", role: "Reports & Analytics",       location: "Head Office Dhaka",     lastLogin: "2026-04-28 12:30", status: "Inactive" },
-];
+const SEED: UserRow[] = STAFF_SEED;
 
 function initials(name: string) {
   const parts = name.replace(/\./g, "").split(/\s+/).filter(Boolean);
@@ -96,7 +82,7 @@ export default function UserManagementPage() {
             <KpiCard label="Active" value={active} icon={CheckCircle} tone="success" />
             <KpiCard label="Admins" value={admins} icon={ShieldCheck} tone="warning" />
           </div>
-          <UserList data={rows} onToggle={toggle} />
+          <UserList data={rows} onToggle={toggle} editors={rowEditors(setRows)} />
         </>
       ) : (
         <UserCreate nextId={`USR-${String(rows.length + 1).padStart(3, "0")}`} onSave={add} />
@@ -105,7 +91,13 @@ export default function UserManagementPage() {
   );
 }
 
-function UserList({ data, onToggle }: { data: UserRow[]; onToggle: (id: string) => void }) {
+function UserList({
+  data, onToggle, editors,
+}: {
+  data: UserRow[];
+  onToggle: (id: string) => void;
+  editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
+}) {
   const cols: Column<UserRow>[] = [
     { key: "id", header: "ID" },
     {
@@ -179,6 +171,8 @@ function UserList({ data, onToggle }: { data: UserRow[]; onToggle: (id: string) 
           row={r}
           actions={["view", "edit", "print"]}
           detail={<UserDetail row={r} />}
+          onSave={editors.onSave}
+          editDetail={({ save, close }) => <UserFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
         />
       )}
     />
@@ -241,36 +235,61 @@ function Detail({ label, value }: { label: string; value: ReactNode }) {
 }
 
 function UserCreate({ nextId, onSave }: { nextId: string; onSave: (u: UserRow) => void }) {
-  const [username, setUsername] = useState("");
-  const [fullName, setFullName] = useState("");
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
-  const [role, setRole] = useState<Role>(ROLES[0]);
-  const [location, setLocation] = useState(LOCATIONS[0]);
+  return <UserFields mode="create" nextId={nextId} onSave={onSave} />;
+}
+
+/**
+ * Shared User form fields. Used by the Create page (mode="create") and the
+ * row Edit modal (mode="edit", pre-filled from `initial`) so both share an
+ * identical layout. The Password card is create-only.
+ */
+function UserFields({
+  mode, nextId, initial, onSave, onSubmit, onClose,
+}: {
+  mode: "create" | "edit";
+  nextId?: string;
+  initial?: UserRow;
+  onSave?: (u: UserRow) => void;
+  onSubmit?: (patch: Record<string, unknown>) => void;
+  onClose?: () => void;
+}) {
+  const isEdit = mode === "edit";
+  const [username, setUsername] = useState(initial?.username ?? "");
+  const [fullName, setFullName] = useState(initial?.fullName ?? "");
+  const [email, setEmail] = useState(initial?.email ?? "");
+  const [phone, setPhone] = useState(initial?.phone ?? "");
+  const [role, setRole] = useState<Role>(initial?.role ?? ROLES[0]);
+  const [location, setLocation] = useState(initial?.location ?? LOCATIONS[0]);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
-  const [active, setActive] = useState(true);
+  const [active, setActive] = useState(initial ? initial.status === "Active" : true);
 
   const save = () => {
     if (!fullName.trim()) { toast.error("Full name is required."); return; }
     if (!username.trim()) { toast.error("Username is required."); return; }
     if (!email.trim()) { toast.error("Email is required."); return; }
-    if (!password) { toast.error("Password is required."); return; }
-    if (password.length < 6) { toast.error("Password must be at least 6 characters."); return; }
-    if (password !== confirm) { toast.error("Passwords do not match."); return; }
+    if (!isEdit) {
+      if (!password) { toast.error("Password is required."); return; }
+      if (password.length < 6) { toast.error("Password must be at least 6 characters."); return; }
+      if (password !== confirm) { toast.error("Passwords do not match."); return; }
+    }
 
-    onSave({
-      id: nextId,
+    const payload = {
       username: username.trim().toLowerCase(),
       fullName: fullName.trim(),
       email: email.trim(),
       phone: phone.trim(),
       role,
       location,
-      lastLogin: "—",
-      status: active ? "Active" : "Inactive",
-    });
-    toast.success(`User "${fullName.trim()}" created.`);
+      status: (active ? "Active" : "Inactive") as "Active" | "Inactive",
+    };
+    if (isEdit) {
+      onSubmit?.(payload);
+      onClose?.();
+    } else {
+      onSave?.({ ...payload, id: nextId!, lastLogin: "—" });
+      toast.success(`User "${fullName.trim()}" created.`);
+    }
   };
 
   return (
@@ -279,13 +298,13 @@ function UserCreate({ nextId, onSave }: { nextId: string; onSave: (u: UserRow) =
         <CardContent className="pt-6">
           <div className="flex items-center justify-between mb-6">
             <h3 className="text-sm font-semibold uppercase tracking-wider">Profile</h3>
-            <Button onClick={save}><Save className="h-4 w-4 mr-1.5" /> Save</Button>
+            {!isEdit && <Button onClick={save}><Save className="h-4 w-4 mr-1.5" /> Save</Button>}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">User ID</Label>
-              <Input value={nextId} disabled className="mt-1 font-mono" />
+              <Input value={initial?.id ?? nextId ?? ""} disabled className="mt-1 font-mono" />
             </div>
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Username <span className="text-destructive">*</span></Label>
@@ -339,28 +358,36 @@ function UserCreate({ nextId, onSave }: { nextId: string; onSave: (u: UserRow) =
         </CardContent>
       </Card>
 
-      <Card>
-        <CardContent className="pt-6">
-          <div className="flex items-center gap-2 mb-6">
-            <KeyRound className="h-4 w-4 text-primary" />
-            <h3 className="text-sm font-semibold uppercase tracking-wider">Password</h3>
-          </div>
+      {!isEdit && (
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2 mb-6">
+              <KeyRound className="h-4 w-4 text-primary" />
+              <h3 className="text-sm font-semibold uppercase tracking-wider">Password</h3>
+            </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
-            <div>
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Password <span className="text-destructive">*</span></Label>
-              <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="mt-1" placeholder="At least 6 characters" />
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+              <div>
+                <Label className="text-xs uppercase tracking-wider text-muted-foreground">Password <span className="text-destructive">*</span></Label>
+                <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="mt-1" placeholder="At least 6 characters" />
+              </div>
+              <div>
+                <Label className="text-xs uppercase tracking-wider text-muted-foreground">Confirm Password <span className="text-destructive">*</span></Label>
+                <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} className="mt-1" />
+              </div>
             </div>
-            <div>
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Confirm Password <span className="text-destructive">*</span></Label>
-              <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} className="mt-1" />
+            <div className="mt-3 text-[11px] text-muted-foreground">
+              User will be prompted to change this password on first sign-in.
             </div>
-          </div>
-          <div className="mt-3 text-[11px] text-muted-foreground">
-            User will be prompted to change this password on first sign-in.
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
+      {isEdit && (
+        <div className="flex justify-end gap-2 mt-6 pt-4 border-t border-border">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={save}><Save className="h-4 w-4 mr-1.5" /> Save Changes</Button>
+        </div>
+      )}
     </div>
   );
 }

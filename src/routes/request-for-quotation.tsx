@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
+import { rowEditors } from "@/lib/row-editors";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -13,84 +14,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import {
   Plus, ArrowLeft, Save, Send, Trash2, MailQuestion, FileText,
-  CheckCircle2, Clock,
+  CheckCircle2, Clock, XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
+import { Select } from "antd";
 import { activeItems, vendors } from "@/lib/sample-data";
+import { getPurchaseRequisitions } from "@/lib/purchase-requisitions";
+import { SEED_RFQS, normalizeRfqStatus, type Rfq, type RfqLine, type RfqStatus } from "@/lib/rfqs";
 import { cn } from "@/lib/utils";
-
-type RfqStatus = "Draft" | "Sent" | "Responses In" | "Closed" | "Cancelled";
-
-type RfqLine = {
-  id: string;
-  itemName: string;
-  uom: string;
-  qty: number;
-  spec?: string;
-};
-
-type Rfq = {
-  id: string;
-  date: string;
-  prRef?: string;
-  deadline: string;
-  status: RfqStatus;
-  invitedSuppliers: string[];
-  lines: RfqLine[];
-  notes?: string;
-};
-
-const SEED_RFQS: Rfq[] = [
-  {
-    id: "RFQ-2026-0042",
-    date: "2026-05-18",
-    prRef: "PR-2026-0118",
-    deadline: "2026-05-25",
-    status: "Responses In",
-    invitedSuppliers: ["Fresh Farms Ltd", "Halal Meats Co.", "Spice World"],
-    lines: [
-      { id: "l1", itemName: "Chicken Breast", uom: "Kg",  qty: 220 },
-      { id: "l2", itemName: "Basmati Rice",   uom: "Kg",  qty: 600 },
-      { id: "l3", itemName: "Tomato",         uom: "Kg",  qty: 180 },
-    ],
-    notes: "Required for next week's wide-body rotation.",
-  },
-  {
-    id: "RFQ-2026-0041",
-    date: "2026-05-16",
-    prRef: "PR-2026-0115",
-    deadline: "2026-05-23",
-    status: "Sent",
-    invitedSuppliers: ["Aqua Pure BD", "Royal Bakery Supplies"],
-    lines: [
-      { id: "l1", itemName: "Mineral Water 250ml", uom: "Bottle", qty: 4800 },
-      { id: "l2", itemName: "Croissant",           uom: "Piece",  qty: 1200 },
-    ],
-  },
-  {
-    id: "RFQ-2026-0040",
-    date: "2026-05-12",
-    prRef: "PR-2026-0112",
-    deadline: "2026-05-19",
-    status: "Closed",
-    invitedSuppliers: ["Fresh Farms Ltd", "Halal Meats Co."],
-    lines: [
-      { id: "l1", itemName: "Onion",  uom: "Kg", qty: 320 },
-      { id: "l2", itemName: "Potato", uom: "Kg", qty: 280 },
-    ],
-    notes: "Awarded to Fresh Farms Ltd on 2026-05-19.",
-  },
-  {
-    id: "RFQ-2026-0039",
-    date: "2026-05-10",
-    deadline: "2026-05-17",
-    status: "Draft",
-    invitedSuppliers: [],
-    lines: [
-      { id: "l1", itemName: "Olive Oil", uom: "Litre", qty: 60 },
-    ],
-  },
-];
 
 const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
@@ -98,6 +29,20 @@ const selectCls =
 export default function RfqPage() {
   const [view, setView] = useState<"list" | "create">("list");
   const [rows, setRows] = usePersistedState<Rfq[]>("request-for-quotation-rows", SEED_RFQS);
+
+  // Migrate any legacy statuses (Draft/Sent/Responses In/Closed/Cancelled) left
+  // in persisted storage onto the current Pending/Approved/Rejected model.
+  useEffect(() => {
+    setRows((prev) => {
+      let changed = false;
+      const next = prev.map((r) => {
+        const ns = normalizeRfqStatus(r.status);
+        if (ns !== r.status) { changed = true; return { ...r, status: ns }; }
+        return r;
+      });
+      return changed ? next : prev;
+    });
+  }, [setRows]);
 
   const nextId = `RFQ-${new Date().getFullYear()}-${String(rows.length + 43).padStart(4, "0")}`;
 
@@ -123,16 +68,19 @@ export default function RfqPage() {
         }
       />
 
-      {view === "list" ? <RfqList rows={rows} /> : <RfqCreate nextId={nextId} onSave={addRfq} />}
+      {view === "list" ? <RfqList rows={rows} editors={rowEditors(setRows)} /> : <RfqCreate nextId={nextId} onSave={addRfq} />}
     </>
   );
 }
 
-function RfqList({ rows }: { rows: Rfq[] }) {
+function RfqList({ rows, editors }: {
+  rows: Rfq[];
+  editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
+}) {
   const total = rows.length;
-  const open = rows.filter((r) => r.status === "Sent" || r.status === "Responses In").length;
-  const drafts = rows.filter((r) => r.status === "Draft").length;
-  const closed = rows.filter((r) => r.status === "Closed").length;
+  const pending = rows.filter((r) => r.status === "Pending").length;
+  const approved = rows.filter((r) => r.status === "Approved").length;
+  const rejected = rows.filter((r) => r.status === "Rejected").length;
 
   const cols: Column<Rfq>[] = [
     { key: "id", header: "RFQ #", render: (r) => <span className="font-mono text-xs">{r.id}</span> },
@@ -153,10 +101,10 @@ function RfqList({ rows }: { rows: Rfq[] }) {
   return (
     <>
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
-        <KpiCard label="Total RFQs"     value={total}  icon={MailQuestion} tone="navy" />
-        <KpiCard label="Open"           value={open}   icon={Clock}        tone="warning" />
-        <KpiCard label="Drafts"         value={drafts} icon={FileText}     tone="navy" />
-        <KpiCard label="Closed"         value={closed} icon={CheckCircle2} tone="success" />
+        <KpiCard label="Total RFQs" value={total}    icon={MailQuestion} tone="navy" />
+        <KpiCard label="Pending"    value={pending}  icon={Clock}        tone="warning" />
+        <KpiCard label="Approved"   value={approved} icon={CheckCircle2} tone="success" />
+        <KpiCard label="Rejected"   value={rejected} icon={XCircle}      tone="red" />
       </div>
 
       <DataTable
@@ -165,29 +113,81 @@ function RfqList({ rows }: { rows: Rfq[] }) {
         columns={cols}
         searchKeys={["id", "prRef", "status"]}
         selectable={false}
-        actions={(r) => <RowActions row={r} actions={["view", "edit", "print", "delete"]} />}
+        actions={(r) => (
+          <RowActions
+            row={r}
+            actions={["view", "edit", "print", "delete"]}
+            onSave={editors.onSave}
+            onDelete={editors.onDelete}
+            editDetail={({ save, close }) => <RfqFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
+          />
+        )}
       />
     </>
   );
 }
 
 function RfqCreate({ nextId, onSave }: { nextId: string; onSave: (r: Rfq) => void }) {
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <RfqFields mode="create" nextId={nextId} onSave={onSave} />
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Shared RFQ form fields. Used by the Create page (mode="create") and the
+ * row Edit modal (mode="edit", pre-filled from `initial`) so both share an
+ * identical layout including the dynamic item-line table.
+ */
+function RfqFields({
+  mode, nextId, initial, onSave, onSubmit, onClose,
+}: {
+  mode: "create" | "edit";
+  nextId?: string;
+  initial?: Rfq;
+  onSave?: (r: Rfq) => void;
+  onSubmit?: (patch: Record<string, unknown>) => void;
+  onClose?: () => void;
+}) {
+  const isEdit = mode === "edit";
   const today = new Date().toISOString().slice(0, 10);
   const oneWeekOut = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
 
-  const [date] = useState(today);
-  const [prRef, setPrRef] = useState("");
-  const [deadline, setDeadline] = useState(oneWeekOut);
-  const [invited, setInvited] = useState<string[]>([]);
-  const [notes, setNotes] = useState("");
-  const [lines, setLines] = useState<RfqLine[]>([
+  const [date] = useState(initial?.date ?? today);
+  const [prRef, setPrRef] = useState(initial?.prRef ?? "");
+  const [deadline, setDeadline] = useState(initial?.deadline ?? oneWeekOut);
+  const [invited, setInvited] = useState<string[]>(initial?.invitedSuppliers ?? []);
+  const [notes, setNotes] = useState(initial?.notes ?? "");
+  const [lines, setLines] = useState<RfqLine[]>(initial?.lines ?? [
     { id: `l-${Date.now()}`, itemName: "", uom: "Kg", qty: 0 },
   ]);
 
   const itemOptions = useMemo(() => activeItems.slice(0, 80), []);
+  // PR Reference choices come from the Purchase Requisition table (single
+  // source) — only Approved PRs can be quoted against.
+  const prOptions = useMemo(
+    () => getPurchaseRequisitions().filter((pr) => pr.status === "Approved"),
+    [],
+  );
 
-  const toggleSupplier = (name: string) => {
-    setInvited((prev) => prev.includes(name) ? prev.filter((s) => s !== name) : [...prev, name]);
+  // Selecting a PR loads its line items into the RFQ (item, qty, uom, spec).
+  const handlePrChange = (id: string) => {
+    setPrRef(id);
+    const pr = prOptions.find((p) => p.id === id);
+    if (pr) {
+      setLines(
+        pr.lines.map((l, i) => ({
+          id: `pr-${i}-${l.id}`,
+          itemName: l.itemName,
+          uom: l.uom,
+          qty: l.qty,
+          spec: l.description || undefined,
+        })),
+      );
+    }
   };
 
   const addLine = () => {
@@ -207,17 +207,16 @@ function RfqCreate({ nextId, onSave }: { nextId: string; onSave: (r: Rfq) => voi
       toast.error("Add at least one item line.");
       return;
     }
-    if (status === "Sent" && invited.length === 0) {
-      toast.error("Select at least one supplier before sending.");
+    if (invited.length === 0) {
+      toast.error("Select at least one supplier.");
       return;
     }
-    if (status === "Sent" && !deadline) {
-      toast.error("Set a response deadline before sending.");
+    if (!deadline) {
+      toast.error("Set a response deadline.");
       return;
     }
     const cleanLines = lines.filter((l) => l.itemName.trim());
-    onSave({
-      id: nextId,
+    const payload = {
       date,
       prRef: prRef.trim() || undefined,
       deadline,
@@ -225,31 +224,33 @@ function RfqCreate({ nextId, onSave }: { nextId: string; onSave: (r: Rfq) => voi
       invitedSuppliers: invited,
       lines: cleanLines,
       notes: notes.trim() || undefined,
-    });
-    toast.success(status === "Draft"
-      ? `${nextId} saved as draft.`
-      : `${nextId} sent to ${invited.length} supplier${invited.length === 1 ? "" : "s"}.`);
+    };
+    if (isEdit) {
+      onSubmit?.(payload);
+      onClose?.();
+    } else {
+      onSave?.({ id: nextId!, ...payload });
+      toast.success(`${nextId} submitted for approval.`);
+    }
   };
 
   return (
-    <Card>
-      <CardContent className="pt-6">
+    <>
+      {!isEdit && (
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-sm font-semibold uppercase tracking-wider">New Request for Quotation</h3>
           <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={() => save("Draft")}>
-              <Save className="h-4 w-4 mr-1.5" /> Save Draft
-            </Button>
-            <Button onClick={() => save("Sent")}>
-              <Send className="h-4 w-4 mr-1.5" /> Send to Suppliers
+            <Button onClick={() => save("Pending")}>
+              <Send className="h-4 w-4 mr-1.5" /> Submit for Approval
             </Button>
           </div>
         </div>
+      )}
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-4 mb-6">
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">RFQ #</Label>
-            <Input value={nextId} disabled className="mt-1 font-mono" />
+            <Input value={initial?.id ?? nextId ?? ""} disabled className="mt-1 font-mono" />
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Date</Label>
@@ -257,12 +258,18 @@ function RfqCreate({ nextId, onSave }: { nextId: string; onSave: (r: Rfq) => voi
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">PR Reference</Label>
-            <Input
+            <select
               value={prRef}
-              onChange={(e) => setPrRef(e.target.value)}
-              placeholder="e.g. PR-2026-0118"
-              className="mt-1 font-mono"
-            />
+              onChange={(e) => handlePrChange(e.target.value)}
+              className={cn(selectCls, "font-mono")}
+            >
+              <option value="">— None —</option>
+              {prOptions.map((pr) => (
+                <option key={pr.id} value={pr.id}>
+                  {pr.id} — {pr.requestedBy} · {pr.status}
+                </option>
+              ))}
+            </select>
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Response Deadline *</Label>
@@ -274,28 +281,18 @@ function RfqCreate({ nextId, onSave }: { nextId: string; onSave: (r: Rfq) => voi
           <Label className="text-xs uppercase tracking-wider text-muted-foreground mb-2 block">
             Invite Suppliers {invited.length > 0 && <span className="text-foreground">({invited.length} selected)</span>}
           </Label>
-          <div className="flex flex-wrap gap-2">
-            {vendors.map((v) => {
-              const active = invited.includes(v.name);
-              return (
-                <button
-                  key={v.id}
-                  type="button"
-                  onClick={() => toggleSupplier(v.name)}
-                  className={cn(
-                    "inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs transition-colors",
-                    active
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-input bg-background text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  <span className="font-medium">{v.name}</span>
-                  <Badge variant="outline" className="text-[10px]">{v.category}</Badge>
-                  {active && <CheckCircle2 className="h-3.5 w-3.5" />}
-                </button>
-              );
-            })}
-          </div>
+          <Select
+            mode="multiple"
+            value={invited}
+            onChange={(vals) => setInvited(vals as string[])}
+            placeholder="Select one or more suppliers"
+            style={{ width: "100%" }}
+            allowClear
+            showSearch
+            optionFilterProp="label"
+            getPopupContainer={(trigger) => trigger.parentElement as HTMLElement}
+            options={vendors.map((v) => ({ value: v.name, label: `${v.name} — ${v.category}` }))}
+          />
         </div>
 
         <div className="mb-2 flex items-center justify-between">
@@ -325,6 +322,10 @@ function RfqCreate({ nextId, onSave }: { nextId: string; onSave: (r: Rfq) => voi
                       className={selectCls}
                     >
                       <option value="">Select item</option>
+                      {/* Loaded-from-PR items may not be in the master list — keep them selectable. */}
+                      {l.itemName && !itemOptions.some((it) => it.name === l.itemName) && (
+                        <option value={l.itemName}>{l.itemName}</option>
+                      )}
                       {itemOptions.map((it) => (
                         <option key={it.id} value={it.name}>{it.name}</option>
                       ))}
@@ -374,7 +375,15 @@ function RfqCreate({ nextId, onSave }: { nextId: string; onSave: (r: Rfq) => voi
             placeholder="Special delivery instructions, packaging requirements, etc."
           />
         </div>
-      </CardContent>
-    </Card>
+
+      {isEdit && (
+        <div className="flex justify-end gap-2 mt-6 pt-4 border-t border-border">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={() => save(initial?.status ?? "Pending")}>
+            <Save className="h-4 w-4 mr-1.5" /> Save Changes
+          </Button>
+        </div>
+      )}
+    </>
   );
 }

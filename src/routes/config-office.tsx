@@ -14,6 +14,7 @@ import { KpiCard } from "@/components/common/KpiCard";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { companies, offices as SEED, type Office } from "@/lib/sample-data";
+import { rowEditors } from "@/lib/row-editors";
 
 const CITIES = ["Dhaka", "Chittagong", "Sylhet", "Cox's Bazar", "Jessore"];
 
@@ -62,7 +63,7 @@ export default function ConfigOfficePage() {
             <KpiCard label="Active"        value={active}           icon={CheckCircle} tone="success" />
             <KpiCard label="Inactive"      value={total - active}   icon={XCircle}    tone="warning" />
           </div>
-          <OfficeList data={rows} onToggle={toggle} />
+          <OfficeList data={rows} onToggle={toggle} editors={rowEditors(setRows)} />
         </>
       ) : (
         <OfficeCreate
@@ -76,7 +77,7 @@ export default function ConfigOfficePage() {
 
 const GROUP_NAME = "US-Bangla Group";
 
-function OfficeList({ data, onToggle }: { data: Office[]; onToggle: (id: string) => void }) {
+function OfficeList({ data, onToggle, editors }: { data: Office[]; onToggle: (id: string) => void; editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void } }) {
   const cols: Column<Office>[] = [
     { key: "id", header: "ID" },
     {
@@ -112,82 +113,124 @@ function OfficeList({ data, onToggle }: { data: Office[]; onToggle: (id: string)
       columns={cols}
       searchKeys={["id", "code", "name", "city", "manager"]}
       selectable={false}
-      actions={(r) => <RowActions row={r} actions={["view", "edit", "print"]} />}
+      actions={(r) => (
+        <RowActions
+          row={r}
+          actions={["view", "edit", "print"]}
+          onSave={editors.onSave}
+          editDetail={({ save, close }) => <OfficeFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
+        />
+      )}
     />
   );
 }
 
 function OfficeCreate({ nextId, onSave }: { nextId: string; onSave: (o: Office) => void }) {
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <OfficeFields mode="create" nextId={nextId} onSave={onSave} />
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Shared Office form fields. Used by the Create page (mode="create") and the
+ * row Edit modal (mode="edit", pre-filled from `initial`) so both share an
+ * identical layout.
+ */
+function OfficeFields({
+  mode, nextId, initial, onSave, onSubmit, onClose,
+}: {
+  mode: "create" | "edit";
+  nextId?: string;
+  initial?: Office;
+  onSave?: (o: Office) => void;
+  onSubmit?: (patch: Record<string, unknown>) => void;
+  onClose?: () => void;
+}) {
+  const isEdit = mode === "edit";
   const groupCompanyId = companies[0]?.id ?? "";
-  const [code, setCode] = useState("");
-  const [name, setName] = useState("");
-  const [city, setCity] = useState(CITIES[0]);
-  const [address, setAddress] = useState("");
-  const [manager, setManager] = useState("");
-  const [phone, setPhone] = useState("");
+  const [code, setCode] = useState(initial?.code ?? "");
+  const [name, setName] = useState(initial?.name ?? "");
+  const [city, setCity] = useState(initial?.city ?? CITIES[0]);
+  const [address, setAddress] = useState(initial?.address ?? "");
+  const [manager, setManager] = useState(initial?.manager ?? "");
+  const [phone, setPhone] = useState(initial?.phone ?? "");
 
   const save = () => {
     if (!name.trim()) { toast.error("Office name is required."); return; }
     if (!code.trim()) { toast.error("Office code is required."); return; }
-    onSave({
-      id: nextId,
+    const payload = {
       code: code.trim().toUpperCase(),
       name: name.trim(),
       companyId: groupCompanyId,
       city, address, manager, phone,
-      status: "Active",
-    });
-    toast.success(`Office "${name.trim()}" created.`);
+    };
+    if (isEdit) {
+      onSubmit?.(payload);
+      onClose?.();
+    } else {
+      onSave?.({ id: nextId!, ...payload, status: "Active" });
+      toast.success(`Office "${name.trim()}" created.`);
+    }
   };
 
   return (
-    <Card>
-      <CardContent className="pt-6">
+    <>
+      {!isEdit && (
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-sm font-semibold uppercase tracking-wider">Create Office</h3>
           <Button onClick={save}><Save className="h-4 w-4 mr-1.5" /> Save</Button>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Office ID</Label>
-            <Input value={nextId} disabled className="mt-1 font-mono" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              Code <span className="text-destructive">*</span>
-            </Label>
-            <Input value={code} onChange={(e) => setCode(e.target.value)} className="mt-1" placeholder="e.g. HQ-DAC" />
-          </div>
-          <div className="md:col-span-2">
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              Office Name <span className="text-destructive">*</span>
-            </Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} className="mt-1" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Company</Label>
-            <Input value={GROUP_NAME} disabled className="mt-1" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">City</Label>
-            <select value={city} onChange={(e) => setCity(e.target.value)} className={selectCls}>
-              {CITIES.map((c) => <option key={c}>{c}</option>)}
-            </select>
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Manager</Label>
-            <Input value={manager} onChange={(e) => setManager(e.target.value)} className="mt-1" placeholder="Office manager" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Phone</Label>
-            <Input value={phone} onChange={(e) => setPhone(e.target.value)} className="mt-1" placeholder="+880 1XXX-XXXXXX" />
-          </div>
-          <div className="md:col-span-2">
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Address</Label>
-            <Textarea value={address} onChange={(e) => setAddress(e.target.value)} className="mt-1" rows={2} />
-          </div>
+      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Office ID</Label>
+          <Input value={initial?.id ?? nextId ?? ""} disabled className="mt-1 font-mono" />
         </div>
-      </CardContent>
-    </Card>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+            Code <span className="text-destructive">*</span>
+          </Label>
+          <Input value={code} onChange={(e) => setCode(e.target.value)} className="mt-1" placeholder="e.g. HQ-DAC" />
+        </div>
+        <div className="md:col-span-2">
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+            Office Name <span className="text-destructive">*</span>
+          </Label>
+          <Input value={name} onChange={(e) => setName(e.target.value)} className="mt-1" />
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Company</Label>
+          <Input value={GROUP_NAME} disabled className="mt-1" />
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">City</Label>
+          <select value={city} onChange={(e) => setCity(e.target.value)} className={selectCls}>
+            {CITIES.map((c) => <option key={c}>{c}</option>)}
+          </select>
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Manager</Label>
+          <Input value={manager} onChange={(e) => setManager(e.target.value)} className="mt-1" placeholder="Office manager" />
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Phone</Label>
+          <Input value={phone} onChange={(e) => setPhone(e.target.value)} className="mt-1" placeholder="+880 1XXX-XXXXXX" />
+        </div>
+        <div className="md:col-span-2">
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Address</Label>
+          <Textarea value={address} onChange={(e) => setAddress(e.target.value)} className="mt-1" rows={2} />
+        </div>
+      </div>
+      {isEdit && (
+        <div className="flex justify-end gap-2 mt-6 pt-4 border-t border-border">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={save}><Save className="h-4 w-4 mr-1.5" /> Save Changes</Button>
+        </div>
+      )}
+    </>
   );
 }

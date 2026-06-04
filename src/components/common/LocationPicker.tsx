@@ -59,6 +59,9 @@ export function LocationPicker({
           style={{ width: "100%" }}
           showSearch
           optionFilterProp="label"
+          // Render the dropdown inside the dialog so a modal overlay (Radix
+          // Dialog) doesn't block the options from being clicked.
+          getPopupContainer={(trigger) => trigger.parentElement as HTMLElement}
           options={officeChoices.map((o) => ({
             value: o.id,
             label: `${o.code} — ${o.name}`,
@@ -86,6 +89,7 @@ export function LocationPicker({
           disabled={!officeId}
           showSearch
           optionFilterProp="label"
+          getPopupContainer={(trigger) => trigger.parentElement as HTMLElement}
           options={warehouseChoices.map((w) => ({
             value: w.id,
             label: `${w.code} — ${w.name}`,

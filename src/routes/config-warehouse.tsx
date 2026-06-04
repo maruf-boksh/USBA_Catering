@@ -18,6 +18,7 @@ import {
   offices, warehouses as SEED,
   type Warehouse, type WarehouseType,
 } from "@/lib/sample-data";
+import { rowEditors } from "@/lib/row-editors";
 
 const TYPES: WarehouseType[] = ["Warehouse", "Cold Store", "Kitchen"];
 const CITIES = ["Dhaka", "Chittagong", "Sylhet", "Cox's Bazar", "Jessore"];
@@ -68,7 +69,7 @@ export default function ConfigWarehousePage() {
             <KpiCard label="Cold Stores" value={coldStoreCount} icon={Snowflake}     tone="success" />
             <KpiCard label="Kitchens"    value={kitchenCount}   icon={ChefHat}       tone="warning" />
           </div>
-          <WarehouseList data={rows} onToggle={toggle} />
+          <WarehouseList data={rows} onToggle={toggle} editors={rowEditors(setRows)} />
         </>
       ) : (
         <WarehouseCreate
@@ -80,7 +81,7 @@ export default function ConfigWarehousePage() {
   );
 }
 
-function WarehouseList({ data, onToggle }: { data: Warehouse[]; onToggle: (id: string) => void }) {
+function WarehouseList({ data, onToggle, editors }: { data: Warehouse[]; onToggle: (id: string) => void; editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void } }) {
   const officeName = (id: string) => offices.find((o) => o.id === id)?.name || "—";
   const cols: Column<Warehouse>[] = [
     { key: "id", header: "ID" },
@@ -121,101 +122,143 @@ function WarehouseList({ data, onToggle }: { data: Warehouse[]; onToggle: (id: s
       columns={cols}
       searchKeys={["id", "code", "name", "type", "city", "manager"]}
       selectable={false}
-      actions={(r) => <RowActions row={r} actions={["view", "edit", "print"]} />}
+      actions={(r) => (
+        <RowActions
+          row={r}
+          actions={["view", "edit", "print"]}
+          onSave={editors.onSave}
+          editDetail={({ save, close }) => <WarehouseFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
+        />
+      )}
     />
   );
 }
 
 function WarehouseCreate({ nextId, onSave }: { nextId: string; onSave: (w: Warehouse) => void }) {
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <WarehouseFields mode="create" nextId={nextId} onSave={onSave} />
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Shared Warehouse form fields. Used by the Create page (mode="create") and the
+ * row Edit modal (mode="edit", pre-filled from `initial`) so both share an
+ * identical layout.
+ */
+function WarehouseFields({
+  mode, nextId, initial, onSave, onSubmit, onClose,
+}: {
+  mode: "create" | "edit";
+  nextId?: string;
+  initial?: Warehouse;
+  onSave?: (w: Warehouse) => void;
+  onSubmit?: (patch: Record<string, unknown>) => void;
+  onClose?: () => void;
+}) {
+  const isEdit = mode === "edit";
   const activeOffices = offices.filter((o) => o.status === "Active");
-  const [code, setCode] = useState("");
-  const [name, setName] = useState("");
-  const [officeId, setOfficeId] = useState(activeOffices[0]?.id ?? "");
-  const [type, setType] = useState<WarehouseType>(TYPES[0]);
-  const [city, setCity] = useState(CITIES[0]);
-  const [address, setAddress] = useState("");
-  const [manager, setManager] = useState("");
-  const [phone, setPhone] = useState("");
+  const [code, setCode] = useState(initial?.code ?? "");
+  const [name, setName] = useState(initial?.name ?? "");
+  const [officeId, setOfficeId] = useState(initial?.officeId ?? activeOffices[0]?.id ?? "");
+  const [type, setType] = useState<WarehouseType>(initial?.type ?? TYPES[0]);
+  const [city, setCity] = useState(initial?.city ?? CITIES[0]);
+  const [address, setAddress] = useState(initial?.address ?? "");
+  const [manager, setManager] = useState(initial?.manager ?? "");
+  const [phone, setPhone] = useState(initial?.phone ?? "");
 
   const save = () => {
     if (!name.trim()) { toast.error("Warehouse name is required."); return; }
     if (!code.trim()) { toast.error("Warehouse code is required."); return; }
     if (!officeId)    { toast.error("Select an office."); return; }
-    onSave({
-      id: nextId,
+    const payload = {
       code: code.trim().toUpperCase(),
       name: name.trim(),
       officeId,
       type, city, address, manager, phone,
-      status: "Active",
-    });
-    toast.success(`Warehouse "${name.trim()}" created.`);
+    };
+    if (isEdit) {
+      onSubmit?.(payload);
+      onClose?.();
+    } else {
+      onSave?.({ id: nextId!, ...payload, status: "Active" });
+      toast.success(`Warehouse "${name.trim()}" created.`);
+    }
   };
 
   return (
-    <Card>
-      <CardContent className="pt-6">
+    <>
+      {!isEdit && (
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-sm font-semibold uppercase tracking-wider">Create Warehouse</h3>
           <Button onClick={save}><Save className="h-4 w-4 mr-1.5" /> Save</Button>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Warehouse ID</Label>
-            <Input value={nextId} disabled className="mt-1 font-mono" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              Code <span className="text-destructive">*</span>
-            </Label>
-            <Input value={code} onChange={(e) => setCode(e.target.value)} className="mt-1" placeholder="e.g. WH-DAC-02" />
-          </div>
-          <div className="md:col-span-2">
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              Warehouse Name <span className="text-destructive">*</span>
-            </Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} className="mt-1" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              Office <span className="text-destructive">*</span>
-            </Label>
-            <select
-              value={officeId}
-              onChange={(e) => setOfficeId(e.target.value)}
-              className={selectCls}
-            >
-              {activeOffices.map((o) => (
-                <option key={o.id} value={o.id}>{o.name}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Type</Label>
-            <select value={type} onChange={(e) => setType(e.target.value as WarehouseType)} className={selectCls}>
-              {TYPES.map((t) => <option key={t}>{t}</option>)}
-            </select>
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">City</Label>
-            <select value={city} onChange={(e) => setCity(e.target.value)} className={selectCls}>
-              {CITIES.map((c) => <option key={c}>{c}</option>)}
-            </select>
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Manager</Label>
-            <Input value={manager} onChange={(e) => setManager(e.target.value)} className="mt-1" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Phone</Label>
-            <Input value={phone} onChange={(e) => setPhone(e.target.value)} className="mt-1" placeholder="+880 1XXX-XXXXXX" />
-          </div>
-          <div className="md:col-span-2">
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Address</Label>
-            <Textarea value={address} onChange={(e) => setAddress(e.target.value)} className="mt-1" rows={2} />
-          </div>
+      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Warehouse ID</Label>
+          <Input value={initial?.id ?? nextId ?? ""} disabled className="mt-1 font-mono" />
         </div>
-      </CardContent>
-    </Card>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+            Code <span className="text-destructive">*</span>
+          </Label>
+          <Input value={code} onChange={(e) => setCode(e.target.value)} className="mt-1" placeholder="e.g. WH-DAC-02" />
+        </div>
+        <div className="md:col-span-2">
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+            Warehouse Name <span className="text-destructive">*</span>
+          </Label>
+          <Input value={name} onChange={(e) => setName(e.target.value)} className="mt-1" />
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+            Office <span className="text-destructive">*</span>
+          </Label>
+          <select
+            value={officeId}
+            onChange={(e) => setOfficeId(e.target.value)}
+            className={selectCls}
+          >
+            {activeOffices.map((o) => (
+              <option key={o.id} value={o.id}>{o.name}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Type</Label>
+          <select value={type} onChange={(e) => setType(e.target.value as WarehouseType)} className={selectCls}>
+            {TYPES.map((t) => <option key={t}>{t}</option>)}
+          </select>
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">City</Label>
+          <select value={city} onChange={(e) => setCity(e.target.value)} className={selectCls}>
+            {CITIES.map((c) => <option key={c}>{c}</option>)}
+          </select>
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Manager</Label>
+          <Input value={manager} onChange={(e) => setManager(e.target.value)} className="mt-1" />
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Phone</Label>
+          <Input value={phone} onChange={(e) => setPhone(e.target.value)} className="mt-1" placeholder="+880 1XXX-XXXXXX" />
+        </div>
+        <div className="md:col-span-2">
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Address</Label>
+          <Textarea value={address} onChange={(e) => setAddress(e.target.value)} className="mt-1" rows={2} />
+        </div>
+      </div>
+      {isEdit && (
+        <div className="flex justify-end gap-2 mt-6 pt-4 border-t border-border">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={save}><Save className="h-4 w-4 mr-1.5" /> Save Changes</Button>
+        </div>
+      )}
+    </>
   );
 }

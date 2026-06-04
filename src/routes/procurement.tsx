@@ -24,7 +24,7 @@ type POLineRow = { id: string; name: string; qty: number; uom: string; unitPrice
 export default function ProcurementPage() {
   useArrivalFlash();
   const wf = useWorkflow();
-  const { wfPurchaseOrders, wfRequisitions, addPurchaseOrder } = wf;
+  const { wfPurchaseOrders, wfRequisitions, addPurchaseOrder, updatePurchaseOrder, deletePurchaseOrder } = wf;
 
   // PO creation dialog state
   const [poDialogOpen, setPoDialogOpen] = useState(false);
@@ -255,7 +255,14 @@ export default function ProcurementPage() {
           columns={poCols}
           searchKeys={["id", "vendor", "status", "requisitionRef"]}
           selectable={false}
-          actions={(r) => <RowActions row={r} actions={["view", "edit", "print", "delete"]} />}
+          actions={(r) => (
+            <RowActions
+              row={r}
+              actions={["view", "edit", "print", "delete"]}
+              onSave={(u) => updatePurchaseOrder(u.id as string, u as Partial<WfPurchaseOrder>)}
+              onDelete={(u) => deletePurchaseOrder(u.id as string)}
+            />
+          )}
         />
       </div>
 
