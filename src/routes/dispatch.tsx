@@ -74,7 +74,8 @@ type PackagingStatus =
   | "Ready for Packaging"
   | "Packaging In Progress"
   | "Packaging Done"
-  | "Ready for Dispatch";
+  | "Ready for Dispatch"
+  | "Dispatched";
 
 type QCState = "not-started" | "in-progress" | "done";
 
@@ -181,14 +182,16 @@ const MEAL_TYPE_BADGE: Record<string, string> = {
 };
 
 const FLIGHT_STATUS_BADGE: Record<string, string> = {
-  "Packaging Pending":     "bg-amber-100 text-amber-700",
-  "Packaging In Progress": "bg-blue-100 text-blue-700",
-  "Packaging Done":        "bg-teal-100 text-teal-700",
-  "QC In Progress":        "bg-violet-100 text-violet-700",
-  "Ready for Dispatch":    "bg-emerald-100 text-emerald-700",
+  "Packaging Pending":                  "bg-amber-100 text-amber-700",
+  "Packaging In Progress":              "bg-blue-100 text-blue-700",
+  "Packaging Done":                     "bg-teal-100 text-teal-700",
+  "QC In Progress":                     "bg-violet-100 text-violet-700",
+  "Ready for Dispatch":                 "bg-emerald-100 text-emerald-700",
+  "Forwarded to Airport":"bg-sky-100 text-sky-700",
 };
 
 function getFlightStatus(rows: PackagingRow[], qcState: QCState): string {
+  if (rows.every((r) => r.packagingStatus === "Dispatched")) return "Forwarded to Airport";
   if (qcState === "done") return "Ready for Dispatch";
   if (qcState === "in-progress") return "QC In Progress";
   if (rows.every((r) => r.packagingStatus === "Packaging Done" || r.packagingStatus === "Ready for Dispatch")) return "Packaging Done";
@@ -310,7 +313,7 @@ const INITIAL_RECORDS: DispatchRecord[] = [
 export default function Dispatch() {
   useArrivalFlash();
   const navigate = useNavigate();
-  const { applyStockDeltas, productionEntries, qcClearedFlights } = useWorkflow();
+  const { applyStockDeltas, productionEntries, qcClearedFlights, dispatchApprovals } = useWorkflow();
   const flightOrders = useFlightOrders();
   // ── Dispatch records state ──────────────────────────────────────────────────
   const [records, setRecords] = usePersistedState<DispatchRecord[]>("dispatch-records", INITIAL_RECORDS);
@@ -319,7 +322,7 @@ export default function Dispatch() {
   );
 
   // ── Packaging pipeline state ────────────────────────────────────────────────
-  const [packagingRows, setPackagingRows] = usePersistedState<PackagingRow[]>("dispatch-packaging-rows", INITIAL_PACKAGING_ROWS);
+  const [packagingRows, setPackagingRows] = useState<PackagingRow[]>(INITIAL_PACKAGING_ROWS);
   const [flightQCStates, setFlightQCStates] = useState<Map<string, FlightQCData>>(
     new Map([["BS-101", { qcState: "done", qcCheckedAt: "08:00 AM" }]])
   );
@@ -850,12 +853,14 @@ export default function Dispatch() {
         .map((r) => ({ itemId: r.mealName, delta: -r.qty }));
       if (outDeltas.length > 0) applyStockDeltas(outDeltas);
 
-      setPackagingRows((prev) => prev.filter((r) => !dispatchedFlightSet.has(r.flight)));
+      const updatedRows = packagingRows.map((r) => dispatchedFlightSet.has(r.flight) ? { ...r, packagingStatus: "Dispatched" as PackagingStatus } : r);
+      setPackagingRows(updatedRows);
     }
     setDispatched(true);
     toast.success("Dispatch initiated — awaiting airport receipt.");
     setFormOpen(false);
     setWarningOpen(false);
+    navigate("/dispatch-monitoring");
   };
 
   const handleNotify = () => {
@@ -968,8 +973,12 @@ export default function Dispatch() {
                       // clears the flight for dispatch, overriding local QC state.
                       const monitoredAt = qcClearedFlights[flightGroup.flight];
                       const localQCData = flightQCStates.get(flightGroup.flight);
+                      const hasHocApproval = dispatchApprovals.some(
+                        (da) => da.flightId === flightGroup.flight && (da.stage === "hoc_approved" || da.stage === "forwarded_to_airport")
+                      );
                       const flightQCData = monitoredAt
                         ? { qcState: "done" as QCState, qcCheckedAt: monitoredAt }
+                        : hasHocApproval ? { qcState: "done" as QCState, qcCheckedAt: "" }
                         : localQCData;
                       const flightQCState = flightQCData?.qcState ?? "not-started";
                       const allPackagingDone = flightGroup.rows.every(
@@ -1063,7 +1072,7 @@ export default function Dispatch() {
                             {isFirstInFlight && (
                               <td rowSpan={flightRowSpan} className="p-3 align-middle border-l border-border/20">
                                 {flightQCState === "done" ? (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border border-emerald-500 text-emerald-700 cursor-default"
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold cursor-default" style={{ backgroundColor: "#42F527", color: "#166534" }}
                                     title={`QC checked at ${flightQCData?.qcCheckedAt ?? ""}`}>
                                     <ShieldCheck className="h-3 w-3" /> QC Done
                                   </span>
@@ -1104,7 +1113,7 @@ export default function Dispatch() {
                                       <Package className="h-3 w-3 mr-1" /> Initiate Packaging
                                     </Button>
                                   )}
-                                  {flightQCState === "done" && (
+                                  {flightQCState === "done" && flightStatus !== "Forwarded to Airport" && (
                                     <Button
                                       size="sm"
                                       className="h-7 px-3 text-xs shrink-0 bg-gradient-to-r from-teal-500 to-cyan-600 text-white hover:from-teal-600 hover:to-cyan-700 border-0 shadow-sm"

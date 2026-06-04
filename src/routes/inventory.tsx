@@ -114,10 +114,17 @@ export default function Inventory() {
   const [batchOpen, setBatchOpen] = useState(false);
   const [selected, setSelected] = useState<Item | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm);
+  const [outQtyOpen, setOutQtyOpen] = useState(false);
+  const [outQtyItem, setOutQtyItem] = useState<Item | null>(null);
 
   const openBatches = (item: Item) => {
     setSelected(item);
     setBatchOpen(true);
+  };
+
+  const openOutQty = (item: Item) => {
+    setOutQtyItem(item);
+    setOutQtyOpen(true);
   };
 
   // Stash a pre-filled line for the Purchase Requisition page, then navigate.
@@ -330,10 +337,18 @@ export default function Inventory() {
       key: "id" as keyof Item, header: "Out Qty",
       render: (r) => {
         const { outQty } = movementFor(r);
+        if (outQty === 0) return <span className="text-muted-foreground tabular-nums">—</span>;
         return (
-          <span className="tabular-nums font-medium text-rose-700">
-            {outQty > 0 ? `−${outQty.toLocaleString()}` : "—"}
-          </span>
+          <button
+            type="button"
+            onClick={() => openOutQty(r)}
+            className="group inline-flex items-center text-left rounded-sm px-1 py-0.5 -mx-1 hover:bg-rose-50 transition-colors"
+            title="Click to see outbound movements"
+          >
+            <span className="tabular-nums font-medium text-rose-700 underline decoration-dotted decoration-rose-300 underline-offset-2 group-hover:decoration-rose-500">
+              −{outQty.toLocaleString()}
+            </span>
+          </button>
         );
       },
     },
@@ -681,6 +696,71 @@ export default function Inventory() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setViewOpen(false)}>Close</Button>
             <Button onClick={() => { setViewOpen(false); if (selected) openEdit(selected); }}>Edit</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Out Qty Dialog — opens when an Out Qty cell is clicked */}
+      <Dialog open={outQtyOpen} onOpenChange={setOutQtyOpen}>
+        <DialogContent className="max-w-lg max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              Out Qty — {outQtyItem?.name}
+              <span className="ml-2 font-mono text-xs text-muted-foreground font-normal">{outQtyItem?.id}</span>
+            </DialogTitle>
+          </DialogHeader>
+          {outQtyItem && (() => {
+            const movements = stockDeltas.filter(
+              (d) => d.delta < 0 && (d.itemId === outQtyItem.id || d.itemId === outQtyItem.name)
+            );
+            const total = movements.reduce((s, d) => s + (-d.delta), 0);
+            return (
+              <div className="space-y-3">
+                <div className="flex items-center gap-6 text-sm pb-3 border-b border-border">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Out Qty</div>
+                    <div className="text-lg font-bold tabular-nums mt-0.5 text-rose-700">
+                      −{total.toLocaleString()} {outQtyItem.uom}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Movements</div>
+                    <div className="text-sm mt-0.5 tabular-nums font-semibold">{movements.length}</div>
+                  </div>
+                </div>
+                {movements.length > 0 ? (
+                  <div className="rounded-md border border-border overflow-hidden">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="bg-slate-100 text-slate-600 border-b border-border">
+                          <th className="px-3 py-2 text-left font-semibold">#</th>
+                          <th className="px-3 py-2 text-left font-semibold">Item</th>
+                          <th className="px-3 py-2 text-right font-semibold">Out Qty</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {movements.map((m, i) => (
+                          <tr key={i} className="border-b border-border/50 hover:bg-muted/20">
+                            <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
+                            <td className="px-3 py-2 font-medium">{m.itemId}</td>
+                            <td className="px-3 py-2 text-right font-semibold text-rose-700">
+                              −{(-m.delta).toLocaleString()}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="rounded-md border border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">
+                    No outbound movements recorded for this item.
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOutQtyOpen(false)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

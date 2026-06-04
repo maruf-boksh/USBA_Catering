@@ -80,6 +80,14 @@ const frozenOOR  = (v: string) => { const n = parseFloat(v); return v !== "" && 
 const vehOOR     = (v: string) => { const n = parseFloat(v); return v !== "" && !isNaN(n) && n > 8; };
 const totalQty   = (lines: MealLine[]) => lines.reduce((s, l) => s + (parseInt(l.qty) || 0), 0);
 const flightLabel = (id: string) => { const f = flights.find((x) => x.id === id); return f ? `${f.flight} — ${f.sector}` : id; };
+const flightNo    = (id: string) => { const f = flights.find((x) => x.id === id); return f ? f.flight : id; };
+const flightDest  = (id: string) => { const f = flights.find((x) => x.id === id); return f ? f.sector.split("-").pop() ?? "—" : "—"; };
+function dispatchStatusBadge(entry: DispatchEntry) {
+  if (entry.receivedAt) return { label: "Received by Airport", cls: "bg-emerald-100 text-emerald-700" };
+  if (entry.approvalStage >= 3) return { label: "Forwarded to Airport", cls: "bg-blue-100 text-blue-700" };
+  if (entry.approvalStage >= 2) return { label: "Verified", cls: "bg-amber-100 text-amber-700" };
+  return { label: "Pending", cls: "bg-slate-100 text-slate-500" };
+}
 
 // ── UI Primitives ────────────────────────────────────────────────────────────
 function TempHint({ note }: { note: string }) {
@@ -160,7 +168,9 @@ function Divider({ label, color = "blue" }: { label: string; color?: "blue" | "e
 export default function DispatchMonitoring() {
   useRole();
 
-  const [entries, setEntries] = useState<DispatchEntry[]>([]);
+  const [entries, setEntries] = useState<DispatchEntry[]>(() => {
+    try { const s = sessionStorage.getItem("dm_entries"); return s ? JSON.parse(s) : []; } catch { return []; }
+  });
   const [showForm, setShowForm] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -178,7 +188,7 @@ export default function DispatchMonitoring() {
   const [hocRemarksInput, setHocRemarksInput] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
   const deepLinkHandled = useRef(false);
-  const { markFlightQcCleared } = useWorkflow();
+  const { markFlightQcCleared, addDispatchApproval, dispatchApprovals } = useWorkflow();
   const navigate = useNavigate();
   const qcOnlyMode = searchParams.get("mode") === "qc-only";
 
@@ -216,6 +226,34 @@ export default function DispatchMonitoring() {
     document.body.style.overflow = mobileOpen ? "hidden" : "";
     return () => { document.body.style.overflow = ""; };
   }, [mobileOpen]);
+
+  useEffect(() => {
+    sessionStorage.setItem("dm_entries", JSON.stringify(entries));
+  }, [entries]);
+
+  useEffect(() => {
+    dispatchApprovals.forEach(da => {
+      if (da.stage === "hoc_approved" || da.stage === "forwarded_to_airport") {
+        setEntries(prev => prev.map(e => {
+          if (e.id !== da.id) return e;
+          if (da.stage === "hoc_approved" && e.approvalStage < 3) {
+            const parts = (da.approvedAt ?? " ").split(" ");
+            return { ...e, approvalStage: 3 as const, approvedBy: { name: da.approvedBy ?? "", date: parts[0] ?? "", time: parts[1] ?? "", remarks: "" } };
+          }
+          if (da.stage === "forwarded_to_airport" && e.approvalStage < 4) {
+            const parts = (da.approvedAt ?? " ").split(" ");
+            return {
+              ...e,
+              approvalStage: 4 as const,
+              forwardedToAirportAt: da.forwardedAt ?? "",
+              approvedBy: e.approvedBy ?? (da.approvedBy ? { name: da.approvedBy, date: parts[0] ?? "", time: parts[1] ?? "", remarks: "" } : undefined),
+            };
+          }
+          return e;
+        }));
+      }
+    });
+  }, [dispatchApprovals]);
 
   const sf = <K extends keyof FormState>(k: K, v: FormState[K]) =>
     setForm((prev) => ({ ...prev, [k]: v }));
@@ -325,9 +363,13 @@ export default function DispatchMonitoring() {
     const flightNo = flights.find((f) => f.id === form.flightId)?.flight;
     if (flightNo) markFlightQcCleared(flightNo, at);
     const existing = editId ? entries.find((e) => e.id === editId) : null;
+    const now = new Date();
+    const dateStr = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+    const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
+    const mealLines = form.mealLines.filter((l) => l.qty);
     const base: Omit<DispatchEntry, "id"> = {
       flightId: form.flightId, packagingDate: form.packagingDate,
-      mealLines: form.mealLines.filter((l) => l.qty),
+      mealLines,
       vehicleNo: form.vehicleNo, vehicleClean: form.vehicleClean as "Yes" | "No",
       chilledTemp: form.chilledTemp, frozenTemp: form.frozenTemp,
       loadStartTime: form.loadStartTime, loadEndTime: form.loadEndTime,
@@ -348,11 +390,40 @@ export default function DispatchMonitoring() {
     if (editId) {
       setEntries((prev) => prev.map((e) => e.id === editId ? { ...e, ...base } : e));
       toast.success(`Entry updated — ${label}`);
+      resetForm();
     } else {
-      setEntries((prev) => [{ id: `DSP-${Date.now()}`, ...base }, ...prev]);
-      toast.success(`Dispatch entry saved — ${label}`);
+      const newId = `DSP-${Date.now()}`;
+      const newEntry: DispatchEntry = { id: newId, ...base, approvalStage: 2, verifiedBy: { name: "", date: dateStr, time: timeStr, remarks: fsRemarksInput } };
+      const updatedEntries = [newEntry, ...entries];
+      setEntries(updatedEntries);
+      // Write synchronously so the entry survives navigation before useEffect fires
+      try { sessionStorage.setItem("dm_entries", JSON.stringify(updatedEntries)); } catch { /* ignore */ }
+      addDispatchApproval({
+        id: newId,
+        flightId: form.flightId,
+        flightLabel: label,
+        packagingDate: form.packagingDate,
+        vehicleNo: form.vehicleNo,
+        vehicleClean: form.vehicleClean,
+        totalQty: totalQty(mealLines),
+        resultSatisfy: form.resultSatisfy,
+        chilledTemp: form.chilledTemp,
+        frozenTemp: form.frozenTemp,
+        vehicleTempBegin: form.vehicleTempBegin,
+        vehicleTempEnd: form.vehicleTempEnd,
+        loadStartTime: form.loadStartTime,
+        loadEndTime: form.loadEndTime,
+        gateTempGate08: form.gateTempGate08,
+        unloadingTime: form.unloadingTime,
+        verifiedByRemarks: fsRemarksInput,
+        verifiedByDate: dateStr,
+        verifiedByTime: timeStr,
+        stage: "pending_hoc",
+      });
+      toast.success(`Forwarded to Head of Catering — ${label}`);
+      resetForm();
+      navigate("/approval-management?tab=dispatch");
     }
-    resetForm();
   };
 
   const saveEntryInPlace = () => {
@@ -452,6 +523,34 @@ export default function DispatchMonitoring() {
     );
     const msgs = ["Forwarded to Food Safety & Hygiene", "Forwarded to Head of Catering", "Dispatch Approved!"];
     toast.success(msgs[stage]);
+    if (stage === 1) {
+      const entry = entries.find((e) => e.id === editId);
+      if (entry) {
+        addDispatchApproval({
+          id: entry.id,
+          flightId: entry.flightId,
+          flightLabel: flightLabel(entry.flightId),
+          packagingDate: entry.packagingDate,
+          vehicleNo: entry.vehicleNo,
+          vehicleClean: entry.vehicleClean,
+          totalQty: totalQty(entry.mealLines),
+          resultSatisfy: entry.resultSatisfy,
+          chilledTemp: entry.chilledTemp,
+          frozenTemp: entry.frozenTemp,
+          vehicleTempBegin: entry.vehicleTempBegin,
+          vehicleTempEnd: entry.vehicleTempEnd,
+          loadStartTime: entry.loadStartTime,
+          loadEndTime: entry.loadEndTime,
+          gateTempGate08: entry.gateTempGate08,
+          unloadingTime: entry.unloadingTime,
+          verifiedByRemarks: fsRemarksInput,
+          verifiedByDate: dateStr,
+          verifiedByTime: timeStr,
+          stage: "pending_hoc",
+        });
+        navigate("/approval-management?tab=dispatch");
+      }
+    }
     if (stage === 2) {
       const entry = entries.find((e) => e.id === editId);
       if (entry) {
@@ -570,18 +669,16 @@ export default function DispatchMonitoring() {
       {/* Entries Table */}
       {entries.length > 0 && (
         <div className="rounded-xl border border-border bg-card overflow-x-auto mb-6 shadow-sm">
-          <table className="w-full text-xs border-collapse" style={{ minWidth: 1640 }}>
+          <table className="w-full text-xs border-collapse" style={{ minWidth: 820 }}>
             <thead>
               <tr className="bg-slate-100 text-slate-600 border-b border-border">
                 {([
-                  ["Flight", true, false], ["Pkg. Date", false, false], ["Qty", false, false],
-                  ["Vehicle", false, false], ["Clean", false, false],
-                  ["Chilled (1–4°C)", false, false], ["Frozen (-10±2°C)", false, false],
-                  ["Load Start", false, false], ["Load End", false, false],
-                  ["Veh. Begin", false, false], ["Veh. End", false, false],
-                  ["Result", false, false],
-                  ["Gate 08 Temp", false, false], ["Unloading", false, false],
-                  ["APT Exec.", false, false], ["Remarks", false, false],
+                  ["Flt No.", true, false],
+                  ["Pkg. Date", false, false],
+                  ["Dispatch Date & Time", false, false],
+                  ["From", false, false],
+                  ["To", false, false],
+                  ["Status", false, false],
                   ["Actions", false, true],
                 ] as [string, boolean, boolean][]).map(([h, sl, sr]) => (
                   <th key={h || "act"}
@@ -595,123 +692,32 @@ export default function DispatchMonitoring() {
               {entries.map((entry, idx) => (
                 <Fragment key={entry.id}>
                   <tr className={`border-b border-border/40 hover:bg-blue-50/40 transition-colors ${idx % 2 === 1 ? "bg-slate-50/60" : "bg-white"}`}>
-                    <td className="px-3 py-2 sticky left-0 z-10 bg-inherit font-semibold whitespace-nowrap text-blue-700">{flightLabel(entry.flightId)}</td>
+                    <td className="px-3 py-2 sticky left-0 z-10 bg-inherit font-semibold whitespace-nowrap text-blue-700">{flightNo(entry.flightId)}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{entry.packagingDate}</td>
-                    <td className="px-3 py-2 font-medium">{totalQty(entry.mealLines)}</td>
-                    <td className="px-3 py-2 whitespace-nowrap">{entry.vehicleNo}</td>
-                    <td className="px-3 py-2"><YesNoBadge value={entry.vehicleClean} /></td>
-                    <td className="px-3 py-2"><span className={chilledOOR(entry.chilledTemp) ? "text-red-600 font-semibold" : ""}>{entry.chilledTemp ? `${entry.chilledTemp}°C` : "—"}</span></td>
-                    <td className="px-3 py-2"><span className={frozenOOR(entry.frozenTemp) ? "text-red-600 font-semibold" : ""}>{entry.frozenTemp ? `${entry.frozenTemp}°C` : "—"}</span></td>
-                    <td className="px-3 py-2">{entry.loadStartTime || "—"}</td>
-                    <td className="px-3 py-2">{entry.loadEndTime || "—"}</td>
-                    <td className="px-3 py-2"><TempCell value={entry.vehicleTempBegin} /></td>
-                    <td className="px-3 py-2"><TempCell value={entry.vehicleTempEnd} /></td>
-                    <td className="px-3 py-2"><YesNoBadge value={entry.resultSatisfy} /></td>
-                    <td className="px-3 py-2"><TempCell value={entry.gateTempGate08} /></td>
-                    <td className="px-3 py-2">{entry.unloadingTime || "—"}</td>
-                    <td className="px-3 py-2 whitespace-nowrap">{entry.checkedByApt || "—"}</td>
-                    <td className="px-3 py-2 max-w-[90px] truncate" title={entry.monitoredByRemarks}>{entry.monitoredByRemarks || "—"}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">{entry.packagingDate}{entry.loadStartTime ? ` ${entry.loadStartTime}` : ""}</td>
+                    <td className="px-3 py-2 whitespace-nowrap text-slate-600">Baunia Catering Point</td>
+                    <td className="px-3 py-2 whitespace-nowrap font-medium">{flightDest(entry.flightId)} Airport</td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      {(() => { const s = dispatchStatusBadge(entry); return <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${s.cls}`}>{s.label}</span>; })()}
+                    </td>
                     <td className="px-3 py-2 sticky right-0 z-10 bg-inherit">
                       <div className="flex items-center gap-1">
                         <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-slate-500 hover:text-slate-700 hover:bg-slate-50" onClick={() => setViewEntryId(entry.id)}>
                           <Eye className="h-3.5 w-3.5" />
                         </Button>
-                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-blue-600 hover:text-blue-800 hover:bg-blue-50" onClick={() => openEdit(entry)}>
-                          <Pencil className="h-3.5 w-3.5" />
-                        </Button>
+
                         <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50"
                           onClick={() => { setDeleteId(entry.id); setDeleteOpen(true); }}>
                           <Trash2 className="h-3.5 w-3.5" />
                         </Button>
-                      </div>
-                    </td>
-                  </tr>
-                  {/* Log sub-row */}
-                  <tr className={idx % 2 === 1 ? "bg-slate-50/60" : "bg-white"}>
-                    <td colSpan={17} className="px-3 pb-3 pt-1 border-b border-border/30">
-                      <div className="flex flex-col gap-2">
-                        {/* Horizontal approval trail */}
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-600">
-                          {/* Monitored */}
-                          <span className="flex items-center gap-1.5">
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 font-semibold text-[10px]">
-                              <PlaneTakeoff className="h-2.5 w-2.5" /> Monitored
-                            </span>
-                            <Clock className="h-3 w-3 text-slate-400" /> {entry.monitoredAt}
-                            {entry.monitoredByRemarks && (
-                              <span className="text-slate-400 italic ml-1 max-w-[160px] truncate" title={entry.monitoredByRemarks}>
-                                — "{entry.monitoredByRemarks}"
-                              </span>
-                            )}
-                          </span>
-                          <span className="text-slate-300 font-bold">›</span>
-                          {/* Verified */}
-                          <span className={`flex items-center gap-1.5 ${!entry.verifiedBy ? "opacity-40" : ""}`}>
-                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${entry.verifiedBy ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
-                              <ShieldCheck className="h-2.5 w-2.5" /> Verified
-                            </span>
-                            {entry.verifiedBy ? (
-                              <>
-                                <User className="h-3 w-3 text-slate-400" />
-                                <strong>{entry.verifiedBy.name}</strong> ·
-                                <Clock className="h-3 w-3 text-slate-400 ml-0.5" /> {entry.verifiedBy.date}, {entry.verifiedBy.time}
-                                {entry.verifiedBy.remarks && (
-                                  <span className="text-slate-400 italic ml-1 max-w-[160px] truncate" title={entry.verifiedBy.remarks}>
-                                    — "{entry.verifiedBy.remarks}"
-                                  </span>
-                                )}
-                              </>
-                            ) : <span className="text-slate-400">Pending</span>}
-                          </span>
-                          <span className="text-slate-300 font-bold">›</span>
-                          {/* Approved */}
-                          <span className={`flex items-center gap-1.5 ${!entry.approvedBy ? "opacity-40" : ""}`}>
-                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${entry.approvedBy ? "bg-violet-100 text-violet-700" : "bg-slate-100 text-slate-500"}`}>
-                              <CheckCircle2 className="h-2.5 w-2.5" /> Approved
-                            </span>
-                            {entry.approvedBy ? (
-                              <>
-                                <User className="h-3 w-3 text-slate-400" />
-                                <strong>{entry.approvedBy.name}</strong> ·
-                                <Clock className="h-3 w-3 text-slate-400 ml-0.5" /> {entry.approvedBy.date}, {entry.approvedBy.time}
-                                {entry.approvedBy.remarks && (
-                                  <span className="text-slate-400 italic ml-1 max-w-[160px] truncate" title={entry.approvedBy.remarks}>
-                                    — "{entry.approvedBy.remarks}"
-                                  </span>
-                                )}
-                              </>
-                            ) : <span className="text-slate-400">Pending</span>}
-                          </span>
-                        </div>
-
-                        {/* Airport receipt info */}
-                        {entry.receivedAt ? (
-                          <span className="flex items-center gap-1.5 text-[11px] text-slate-600">
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-semibold text-[10px]">
-                              <CheckCircle2 className="h-2.5 w-2.5" /> Received
-                            </span>
-                            <Clock className="h-3 w-3 text-slate-400" /> {entry.receivedAt}
-                            {entry.receivedRemarks && (
-                              <span className="text-slate-400 italic ml-1 max-w-[160px] truncate" title={entry.receivedRemarks}>
-                                — "{entry.receivedRemarks}"
-                              </span>
-                            )}
-                          </span>
-                        ) : (
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px]">
-                              <Clock className="h-2.5 w-2.5" /> Awaiting Airport Receipt
-                            </span>
-                            {entry.approvalStage >= 3 && (
-                              <Button
-                                size="sm"
-                                className="h-6 px-2.5 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white border-0"
-                                onClick={() => openAirportReceive(entry)}
-                              >
-                                <PlaneLanding className="h-3 w-3 mr-1" /> Airport Receive
-                              </Button>
-                            )}
-                          </div>
+                        {entry.approvalStage >= 3 && !entry.receivedAt && (
+                          <Button
+                            size="sm"
+                            className="h-6 px-2.5 text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white border-0"
+                            onClick={() => openAirportReceive(entry)}
+                          >
+                            <PlaneLanding className="h-3 w-3 mr-1" /> Airport Receive
+                          </Button>
                         )}
                       </div>
                     </td>
@@ -949,50 +955,11 @@ export default function DispatchMonitoring() {
                     const curEntry = editId ? entries.find((e) => e.id === editId) : null;
                     const curStage = curEntry?.approvalStage ?? 0;
                     return (
-                      <div className="grid grid-cols-3 border border-blue-200 rounded-lg overflow-hidden divide-x divide-blue-200">
-                        {/* ① Monitored By */}
-                        <div className="p-3 bg-blue-50/40 flex flex-col">
-                          <p className="text-[10px] font-bold uppercase tracking-widest text-blue-600 mb-1.5 flex items-center gap-1">
-                            <span className="inline-flex items-center justify-center h-4 w-4 rounded-full bg-blue-600 text-white text-[9px] font-bold">1</span>
-                            Monitored By
-                          </p>
-                          <p className="text-[10px] text-slate-400 italic flex items-center gap-1">
-                            <Clock className="h-2.5 w-2.5" /> Time auto-recorded on save
-                          </p>
-                          <div className="mt-2 flex-1">
-                            <p className="text-[10px] text-muted-foreground mb-0.5">Remarks</p>
-                            <Textarea
-                              value={form.monitoredByRemarks}
-                              onChange={(e) => sf("monitoredByRemarks", e.target.value)}
-                              placeholder="Remarks by monitored person..."
-                              className="min-h-[56px] text-xs resize-none"
-                              disabled={curStage > 0}
-                            />
-                          </div>
-                          <div className="mt-2 flex flex-col gap-1.5">
-                            {curStage > 0 ? (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-[10px] font-semibold w-fit">
-                                <PlaneTakeoff className="h-2.5 w-2.5" /> Forwarded to Food Safety
-                              </span>
-                            ) : (
-                              <>
-                                <Button type="button" size="sm" className="h-7 text-xs bg-indigo-600 hover:bg-indigo-700 text-white border-0" onClick={saveEntryInPlace}>
-                                  Save
-                                </Button>
-                                {editId && (
-                                  <Button type="button" size="sm" className="h-7 text-xs bg-blue-600 hover:bg-blue-700 text-white border-0" onClick={() => approveInline(0)}>
-                                    Forward To Food Safety And Hygiene
-                                  </Button>
-                                )}
-                              </>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* ② Verified By */}
-                        <div className={`p-3 flex flex-col ${curStage >= 1 ? "bg-emerald-50/30" : "opacity-50 bg-slate-50/30"}`}>
+                      <div className="grid grid-cols-1 border border-blue-200 rounded-lg overflow-hidden">
+                        {/* ① Verified By */}
+                        <div className={`p-3 flex flex-col bg-emerald-50/30`}>
                           <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-600 mb-1.5 flex items-center gap-1">
-                            <span className={`inline-flex items-center justify-center h-4 w-4 rounded-full text-white text-[9px] font-bold ${curStage >= 1 ? "bg-emerald-500" : "bg-slate-300"}`}>2</span>
+                            <span className="inline-flex items-center justify-center h-4 w-4 rounded-full text-white text-[9px] font-bold bg-emerald-500">1</span>
                             Verified By
                           </p>
                           <p className="text-xs text-slate-500">Food Safety &amp; Hygiene Executive</p>
@@ -1024,80 +991,36 @@ export default function DispatchMonitoring() {
                                 />
                               </div>
                               <div className="mt-2 flex flex-col gap-1.5">
-                                <Button type="button" size="sm" className="h-7 text-xs bg-indigo-600 hover:bg-indigo-700 text-white border-0" onClick={saveEntryInPlace}>
-                                  Save
-                                </Button>
                                 <Button type="button" size="sm" className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700 text-white border-0" onClick={() => approveInline(1)}>
-                                  Forward To Head Of Catering
+                                  Verify and Forward to Head Of Catering
                                 </Button>
                               </div>
                             </>
                           ) : (
                             <>
-                              <p className="text-[10px] text-slate-400 mt-0.5">Pending FS forwarding</p>
+                              <p className="text-[10px] text-slate-400 italic flex items-center gap-1 mt-0.5">
+                                <Clock className="h-2.5 w-2.5" /> Time auto-recorded on forward
+                              </p>
                               <div className="mt-2 flex-1">
                                 <p className="text-[10px] text-muted-foreground mb-0.5">Remarks</p>
-                                <Textarea disabled placeholder="Pending verification..." className="min-h-[56px] text-xs resize-none" />
+                                <Textarea
+                                  value={fsRemarksInput}
+                                  onChange={(e) => setFsRemarksInput(e.target.value)}
+                                  placeholder="Remarks by FS executive..."
+                                  className="min-h-[56px] text-xs resize-none"
+                                />
+                              </div>
+                              <div className="mt-2 flex flex-col gap-1.5">
+                                {editId && (
+                                  <Button type="button" size="sm" className="h-7 text-xs bg-blue-600 hover:bg-blue-700 text-white border-0" onClick={() => approveInline(0)}>
+                                    Forward To Food Safety And Hygiene
+                                  </Button>
+                                )}
                               </div>
                             </>
                           )}
                         </div>
 
-                        {/* ③ Approved By */}
-                        <div className={`p-3 flex flex-col ${curStage >= 2 ? "bg-violet-50/30" : "opacity-50 bg-slate-50/30"}`}>
-                          <p className="text-[10px] font-bold uppercase tracking-widest text-violet-600 mb-1.5 flex items-center gap-1">
-                            <span className={`inline-flex items-center justify-center h-4 w-4 rounded-full text-white text-[9px] font-bold ${curStage >= 2 ? "bg-violet-500" : "bg-slate-300"}`}>3</span>
-                            Approved By
-                          </p>
-                          <p className="text-xs text-slate-500">Head of Catering</p>
-                          {curStage >= 3 && curEntry?.approvedBy ? (
-                            <>
-                              <p className="text-[10px] text-slate-400 italic flex items-center gap-1 mt-0.5">
-                                <Clock className="h-2.5 w-2.5" /> {curEntry.approvedBy.date}, {curEntry.approvedBy.time}
-                              </p>
-                              <div className="mt-2 flex-1">
-                                <p className="text-[10px] text-muted-foreground mb-0.5">Remarks</p>
-                                <p className="text-xs text-slate-600 italic min-h-[56px] bg-slate-50 rounded p-1.5">{curEntry.approvedBy.remarks || "—"}</p>
-                              </div>
-                              <div className="mt-2 flex flex-col gap-1.5">
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-violet-100 text-violet-700 text-[10px] font-semibold w-fit">
-                                  <CheckCircle2 className="h-2.5 w-2.5" /> Dispatch Done
-                                </span>
-                              </div>
-                            </>
-                          ) : curStage === 2 ? (
-                            <>
-                              <p className="text-[10px] text-slate-400 italic flex items-center gap-1 mt-0.5">
-                                <Clock className="h-2.5 w-2.5" /> Time auto-recorded on approval
-                              </p>
-                              <div className="mt-2 flex-1">
-                                <p className="text-[10px] text-muted-foreground mb-0.5">Remarks</p>
-                                <Textarea
-                                  value={hocRemarksInput}
-                                  onChange={(e) => setHocRemarksInput(e.target.value)}
-                                  placeholder="Remarks by Head of Catering..."
-                                  className="min-h-[56px] text-xs resize-none"
-                                />
-                              </div>
-                              <div className="mt-2 flex flex-col gap-1.5">
-                                <Button type="button" size="sm" variant="outline" className="h-7 text-xs" onClick={() => editId && setViewEntryId(editId)}>
-                                  <Eye className="h-3 w-3 mr-1" /> View
-                                </Button>
-                                <Button type="button" size="sm" className="h-7 text-xs bg-violet-600 hover:bg-violet-700 text-white border-0" onClick={() => approveInline(2)}>
-                                  Approve Dispatch
-                                </Button>
-                              </div>
-                            </>
-                          ) : (
-                            <>
-                              <p className="text-[10px] text-slate-400 mt-0.5">Pending HoC approval</p>
-                              <div className="mt-2 flex-1">
-                                <p className="text-[10px] text-muted-foreground mb-0.5">Remarks</p>
-                                <Textarea disabled placeholder="Pending approval..." className="min-h-[56px] text-xs resize-none" />
-                              </div>
-                            </>
-                          )}
-                        </div>
                       </div>
                     );
                   })()}
@@ -1208,7 +1131,7 @@ export default function DispatchMonitoring() {
               {!isAirportReceiveMode && (
                 <Button className="bg-indigo-600 hover:bg-indigo-700 text-white px-8 shadow-md" onClick={saveEntry}>
                   <ShieldCheck className="h-4 w-4 mr-2" />
-                  {editId ? "Save Changes" : "Save Dispatch Entry"}
+                  {editId ? "Save Changes" : "Verify and Forward to Head Of Catering"}
                 </Button>
               )}
             </div>
@@ -1315,11 +1238,18 @@ export default function DispatchMonitoring() {
                     {/* Basic info grid */}
                     <div className="grid grid-cols-2 gap-3 text-sm">
                       <div><span className="text-xs text-muted-foreground">Flight</span><div className="font-semibold text-blue-700">{flightLabel(entry.flightId)}</div></div>
-                      <div><span className="text-xs text-muted-foreground">Date</span><div>{entry.packagingDate}</div></div>
-                      <div><span className="text-xs text-muted-foreground">Total Qty</span><div className="font-semibold">{totalQty(entry.mealLines)} pax</div></div>
                       <div><span className="text-xs text-muted-foreground">Vehicle No.</span><div>{entry.vehicleNo}</div></div>
+                      <div><span className="text-xs text-muted-foreground">Total Qty</span><div className="font-semibold">{totalQty(entry.mealLines)} pax</div></div>
+                      <div><span className="text-xs text-muted-foreground">Pkg. Date</span><div>{entry.packagingDate}</div></div>
                       <div><span className="text-xs text-muted-foreground">Vehicle Clean</span><div><YesNoBadge value={entry.vehicleClean} /></div></div>
                       <div><span className="text-xs text-muted-foreground">Result Satisfy</span><div><YesNoBadge value={entry.resultSatisfy} /></div></div>
+                      <div><span className="text-xs text-muted-foreground">Chilled Temp</span><div className={chilledOOR(entry.chilledTemp) ? "font-semibold text-red-600" : ""}>{entry.chilledTemp ? `${entry.chilledTemp}°C` : "—"}</div></div>
+                      <div><span className="text-xs text-muted-foreground">Frozen Temp</span><div className={frozenOOR(entry.frozenTemp) ? "font-semibold text-red-600" : ""}>{entry.frozenTemp ? `${entry.frozenTemp}°C` : "—"}</div></div>
+                      <div><span className="text-xs text-muted-foreground">Veh. Temp Begin</span><div className={vehOOR(entry.vehicleTempBegin) ? "font-semibold text-red-600" : ""}>{entry.vehicleTempBegin ? `${entry.vehicleTempBegin}°C` : "—"}</div></div>
+                      <div><span className="text-xs text-muted-foreground">Veh. Temp End</span><div className={vehOOR(entry.vehicleTempEnd) ? "font-semibold text-red-600" : ""}>{entry.vehicleTempEnd ? `${entry.vehicleTempEnd}°C` : "—"}</div></div>
+                      <div><span className="text-xs text-muted-foreground">Load Start</span><div>{entry.loadStartTime || "—"}</div></div>
+                      <div><span className="text-xs text-muted-foreground">Load End</span><div>{entry.loadEndTime || "—"}</div></div>
+                      <div><span className="text-xs text-muted-foreground">Gate 08 Temp</span><div className={vehOOR(entry.gateTempGate08) ? "font-semibold text-red-600" : ""}>{entry.gateTempGate08 ? `${entry.gateTempGate08}°C` : "—"}</div></div>
                     </div>
 
                     {/* Approval log trail */}
@@ -1327,22 +1257,11 @@ export default function DispatchMonitoring() {
                       <p className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-3">Approval Log</p>
                       <div className="space-y-2.5">
 
-                        {/* ① Monitored By */}
-                        <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-3">
-                          <div className="flex items-center gap-1.5 mb-1">
-                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700">① Monitored By</span>
-                            <span className="flex items-center gap-1 text-xs text-muted-foreground"><Clock className="h-3 w-3" />{entry.monitoredAt}</span>
-                          </div>
-                          {entry.monitoredByRemarks && (
-                            <p className="text-xs text-slate-600 mt-1.5 italic">"{entry.monitoredByRemarks}"</p>
-                          )}
-                        </div>
-
-                        {/* ② Verified By */}
+                        {/* ① Verified By */}
                         <div className={`rounded-lg border p-3 ${entry.verifiedBy ? "border-emerald-200 bg-emerald-50/40" : "border-slate-200 bg-slate-50/40 opacity-50"}`}>
                           <div className="flex items-center gap-1.5 mb-1">
                             <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${entry.verifiedBy ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
-                              ② Verified By
+                              ① Verified By
                             </span>
                             <span className="text-xs font-semibold">{entry.verifiedBy?.name ?? "Pending"}</span>
                           </div>
@@ -1361,19 +1280,21 @@ export default function DispatchMonitoring() {
                           )}
                         </div>
 
-                        {/* ③ Approved By */}
+                        {/* ② Approved By */}
                         <div className={`rounded-lg border p-3 ${entry.approvedBy ? "border-violet-200 bg-violet-50/40" : "border-slate-200 bg-slate-50/40 opacity-50"}`}>
                           <div className="flex items-center gap-1.5 mb-1">
                             <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${entry.approvedBy ? "bg-violet-100 text-violet-700" : "bg-slate-100 text-slate-500"}`}>
-                              ③ Approved By
+                              ② Approved By
                             </span>
-                            <span className="text-xs font-semibold">{entry.approvedBy?.name ?? "Pending"}</span>
+                            <span className={`text-xs font-semibold ${entry.approvedBy ? "text-violet-700" : "text-slate-400"}`}>
+                              {entry.approvedBy ? "Head of Catering" : "Pending"}
+                            </span>
                           </div>
                           {entry.approvedBy ? (
                             <>
-                              <div className="flex flex-wrap gap-x-4 text-xs text-muted-foreground">
-                                <span>Head of Catering</span>
-                                <span className="flex items-center gap-1"><Clock className="h-3 w-3" />{entry.approvedBy.date}, {entry.approvedBy.time}</span>
+                              <div className="flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground mt-1">
+                                <span className="font-medium text-slate-700">{entry.approvedBy.name}</span>
+                                <span className="flex items-center gap-1"><Clock className="h-3 w-3" />{entry.approvedBy.date} {entry.approvedBy.time}</span>
                               </div>
                               {entry.approvedBy.remarks && (
                                 <p className="text-xs text-slate-600 mt-1.5 italic">"{entry.approvedBy.remarks}"</p>
@@ -1384,18 +1305,31 @@ export default function DispatchMonitoring() {
                           )}
                         </div>
 
-                        {/* ④ Received By */}
+                        {/* ③ Received By */}
                         <div className={`rounded-lg border p-3 ${entry.receivedAt ? "border-emerald-200 bg-emerald-50/40" : "border-slate-200 bg-slate-50/40 opacity-50"}`}>
                           <div className="flex items-center gap-1.5 mb-1">
                             <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${entry.receivedAt ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
-                              ④ Received By (Airport Catering)
+                              ③ Received By (Airport Catering)
                             </span>
                           </div>
                           {entry.receivedAt ? (
                             <>
-                              <div className="flex flex-wrap gap-x-4 text-xs text-muted-foreground">
+                              <div className="flex flex-wrap items-center gap-x-3 text-xs text-muted-foreground mt-1">
                                 <span className="flex items-center gap-1"><Clock className="h-3 w-3" />{entry.receivedAt}</span>
+                                {entry.checkedByApt && (
+                                  <span className="font-medium text-slate-700">{entry.checkedByApt}</span>
+                                )}
                               </div>
+                              {(entry.gateTempGate08 || entry.unloadingTime) && (
+                                <div className="flex flex-wrap gap-x-4 text-xs text-muted-foreground mt-1.5">
+                                  {entry.gateTempGate08 && (
+                                    <span>Gate 08 Temp: <span className={`font-medium ${vehOOR(entry.gateTempGate08) ? "text-red-600" : "text-slate-700"}`}>{entry.gateTempGate08}°C</span></span>
+                                  )}
+                                  {entry.unloadingTime && (
+                                    <span>Unloading: <span className="font-medium text-slate-700">{entry.unloadingTime}</span></span>
+                                  )}
+                                </div>
+                              )}
                               {entry.receivedRemarks && (
                                 <p className="text-xs text-slate-600 mt-1.5 italic">"{entry.receivedRemarks}"</p>
                               )}

@@ -133,6 +133,33 @@ export type WfGRN = {
 
 export type StockDelta = { itemId: string; delta: number };
 
+export type WfDispatchApproval = {
+  id: string;
+  flightId: string;
+  flightLabel: string;
+  packagingDate: string;
+  vehicleNo: string;
+  vehicleClean: "Yes" | "No";
+  totalQty: number;
+  resultSatisfy: "Yes" | "No";
+  chilledTemp: string;
+  frozenTemp: string;
+  vehicleTempBegin: string;
+  vehicleTempEnd: string;
+  loadStartTime: string;
+  loadEndTime: string;
+  gateTempGate08: string;
+  unloadingTime: string;
+  verifiedByRemarks: string;
+  verifiedByDate: string;
+  verifiedByTime: string;
+  stage: "pending_hoc" | "hoc_approved" | "forwarded_to_airport";
+  approvedBy?: string;
+  approvedDesignation?: string;
+  approvedAt?: string;
+  forwardedAt?: string;
+};
+
 // ── Production Entry workflow ─────────────────────────────────────────────────
 export type WfProductionEntryStatus =
   | "Pending"
@@ -266,6 +293,10 @@ type WorkflowCtx = {
   // Dispatch" for the flight. Keyed by flight number → completion timestamp.
   qcClearedFlights: Record<string, string>;
   markFlightQcCleared: (flight: string, at: string) => void;
+
+  dispatchApprovals: WfDispatchApproval[];
+  addDispatchApproval: (entry: WfDispatchApproval) => void;
+  updateDispatchApproval: (id: string, patch: Partial<WfDispatchApproval>) => void;
 };
 
 const WorkflowContext = createContext<WorkflowCtx>({
@@ -280,6 +311,7 @@ const WorkflowContext = createContext<WorkflowCtx>({
   productionEntryRecords: [], addProductionEntryRecord: () => {},
   mrpRuns: [], addMrpRun: () => {}, updateMrpRun: () => {},
   qcClearedFlights: {}, markFlightQcCleared: () => {},
+  dispatchApprovals: [], addDispatchApproval: () => {}, updateDispatchApproval: () => {},
 });
 
 // ── Provider ───────────────────────────────────────────────────────────────────
@@ -432,6 +464,30 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   const [mrpRuns, setMrpRuns] = useState<WfMrpRun[]>([]);
   const [qcClearedFlights, setQcClearedFlights] = useState<Record<string, string>>({});
+  const [dispatchApprovals, setDispatchApprovals] = useState<WfDispatchApproval[]>([
+    {
+      id: "DSP-SEED-001",
+      flightId: "FLT-SEED-01",
+      flightLabel: "BS-211 — DAC-CGP",
+      packagingDate: "2026-06-04",
+      vehicleNo: "HiLoader-01",
+      vehicleClean: "Yes",
+      totalQty: 145,
+      resultSatisfy: "Yes",
+      chilledTemp: "3.2",
+      frozenTemp: "-10.5",
+      vehicleTempBegin: "4.5",
+      vehicleTempEnd: "5.0",
+      loadStartTime: "08:00",
+      loadEndTime: "08:45",
+      gateTempGate08: "5.5",
+      unloadingTime: "09:30",
+      verifiedByRemarks: "All parameters within acceptable limits.",
+      verifiedByDate: "04 Jun 2026",
+      verifiedByTime: "08:45 AM",
+      stage: "pending_hoc",
+    },
+  ]);
 
   return (
     <WorkflowContext.Provider value={{
@@ -476,6 +532,11 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       qcClearedFlights,
       markFlightQcCleared: (flight, at) =>
         setQcClearedFlights((prev) => ({ ...prev, [flight]: at })),
+
+      dispatchApprovals,
+      addDispatchApproval: (entry) => setDispatchApprovals(prev => [entry, ...prev]),
+      updateDispatchApproval: (id, patch) =>
+        setDispatchApprovals(prev => prev.map(e => e.id === id ? { ...e, ...patch } : e)),
 
       productionEntryRecords,
       addProductionEntryRecord: (record) => {

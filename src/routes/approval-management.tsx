@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Button } from "@/components/ui/button";
@@ -18,13 +19,13 @@ import {
   BadgeCheck, Check, X as XIcon, Clock, ShieldCheck, Search,
   FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, Layers, UserCog,
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
-  PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane,
+  PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane, PlaneLanding, PlaneTakeoff,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
   useWorkflow,
-  type WfDemandRequest, type WfDemandStatus,
+  type WfDemandRequest, type WfDemandStatus, type WfDispatchApproval,
 } from "@/lib/workflow-store";
 import { inventory, warehouses } from "@/lib/sample-data";
 import { useFlightOrders, updateFlightOrdersWhere } from "@/lib/flight-orders-store";
@@ -40,7 +41,8 @@ type Category =
   | "Stock Adjustment"
   | "Production Order"
   | "Bill of Materials"
-  | "User Account";
+  | "User Account"
+  | "Dispatch";
 
 const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Flight Order",         label: "Flight Orders",      icon: Plane           },
@@ -53,6 +55,7 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Production Order",     label: "Production",         icon: ClipboardCheck  },
   { key: "Bill of Materials",    label: "BOM",                icon: Layers          },
   { key: "User Account",         label: "Users",              icon: UserCog         },
+  { key: "Dispatch",             label: "Dispatch",           icon: Truck           },
 ];
 
 type ApprovalStatus = "Pending" | "Approved" | "Rejected";
@@ -111,10 +114,13 @@ function categoryIcon(cat: Category) {
 
 export default function ApprovalManagementPage() {
   const { role } = useRole();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const {
     demands, updateDemandStatus,
     addTransferNote, addRequisition,
     mrpRuns, updateMrpRun,
+    dispatchApprovals, updateDispatchApproval,
   } = useWorkflow();
   const flightOrders = useFlightOrders();
 
@@ -126,7 +132,9 @@ export default function ApprovalManagementPage() {
   const [foDecisions, setFoDecisions] = useState<
     Record<string, { status: ApprovalStatus; by: string; at: string; reason?: string }>
   >({});
-  const [activeTab, setActiveTab] = useState<Category | "all">("all");
+  const [activeTab, setActiveTab] = useState<Category | "all">(
+    searchParams.get("tab") === "dispatch" ? "Dispatch" : "all"
+  );
   const [search, setSearch] = useState("");
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectTarget, setRejectTarget] = useState<ApprovalItem | null>(null);
@@ -139,8 +147,15 @@ export default function ApprovalManagementPage() {
   const [detailRejectOpen, setDetailRejectOpen] = useState(false);
   const [detailRejectReason, setDetailRejectReason] = useState("");
 
+  // ── Dispatch approval modal ──────────────────────────────────────────────────
+  const [dispatchViewOpen, setDispatchViewOpen] = useState(false);
+  const [dispatchViewEntry, setDispatchViewEntry] = useState<WfDispatchApproval | null>(null);
+  const [dispatchApproveStep, setDispatchApproveStep] = useState<"approve" | "forward">("approve");
+  const [dispatchApproveLog, setDispatchApproveLog] = useState<{ by: string; at: string } | null>(null);
+
   const today = new Date().toISOString().slice(0, 10);
   const stamp = () => new Date().toISOString().slice(0, 16).replace("T", " ");
+  const dispatchPendingCount = dispatchApprovals.filter(d => d.stage === "pending_hoc").length;
 
   // Project workflow-store demands into ApprovalItem shape so the same list,
   // counts, filtering, and dialogs work uniformly across categories. The id
@@ -567,7 +582,7 @@ export default function ApprovalManagementPage() {
             </TabsTrigger>
             {CATEGORIES.map((c) => {
               const Icon = c.icon;
-              const n = counts.pendingByCat.get(c.key) ?? 0;
+              const n = c.key === "Dispatch" ? dispatchPendingCount : (counts.pendingByCat.get(c.key) ?? 0);
               return (
                 <TabsTrigger
                   key={c.key}
@@ -605,7 +620,66 @@ export default function ApprovalManagementPage() {
 
         {/* Pending list */}
         <TabsContent value={activeTab} className="mt-0 space-y-4">
-          <Card className="brand-accent-border-left">
+
+          {/* ── Dispatch subtab ─────────────────────────────────────────────── */}
+          {activeTab === "Dispatch" && (
+            <Card className="brand-accent-border-left">
+              <CardContent className="pt-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold uppercase tracking-wider flex items-center gap-2">
+                    <Truck className="h-4 w-4 text-muted-foreground" /> Dispatch — Pending Head of Catering Approval
+                  </h3>
+                  <span className="text-xs text-muted-foreground">{dispatchPendingCount} item{dispatchPendingCount === 1 ? "" : "s"}</span>
+                </div>
+                {dispatchApprovals.filter(d => d.stage === "pending_hoc").length === 0 ? (
+                  <div className="text-center text-sm text-muted-foreground py-10">No dispatch entries pending approval.</div>
+                ) : (
+                  <div className="border border-border rounded-md overflow-hidden">
+                    <Table>
+                      <TableHeader className="bg-muted/40">
+                        <TableRow>
+                          <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Vehicle</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Total Qty</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Result</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider text-right">Actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {dispatchApprovals.filter(d => d.stage === "pending_hoc").map(da => (
+                          <TableRow key={da.id} className="hover:bg-muted/30">
+                            <TableCell className="font-semibold text-blue-700 text-xs">{da.flightLabel}</TableCell>
+                            <TableCell className="text-xs">{da.packagingDate}</TableCell>
+                            <TableCell className="text-xs">{da.vehicleNo}</TableCell>
+                            <TableCell className="text-xs font-medium">{da.totalQty} pax</TableCell>
+                            <TableCell>
+                              <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${da.resultSatisfy === "Yes" ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}>
+                                {da.resultSatisfy}
+                              </span>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                className="h-7 w-7 text-muted-foreground hover:text-primary hover:border-primary/40"
+                                onClick={() => { setDispatchViewEntry(da); setDispatchApproveStep("approve"); setDispatchApproveLog(null); setDispatchViewOpen(true); }}
+                                title="View dispatch details"
+                              >
+                                <Eye className="h-3.5 w-3.5" />
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {activeTab !== "Dispatch" && (<><Card className="brand-accent-border-left">
             <CardContent className="pt-5">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold uppercase tracking-wider">
@@ -765,9 +839,107 @@ export default function ApprovalManagementPage() {
                 </div>
               )}
             </CardContent>
-          </Card>
+          </Card></>)}
         </TabsContent>
       </Tabs>
+
+      {/* ── Dispatch detail modal ──────────────────────────────────────────── */}
+      <Dialog open={dispatchViewOpen} onOpenChange={(v) => { if (!v) setDispatchViewOpen(false); }}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
+          <DialogHeader className="px-5 py-4 border-b border-border">
+            <DialogTitle className="flex items-center gap-2">
+              <Truck className="h-4 w-4 text-primary" />
+              <span className="font-mono text-sm text-muted-foreground">{dispatchViewEntry?.id}</span>
+              <span>— {dispatchViewEntry?.flightLabel}</span>
+            </DialogTitle>
+            <DialogDescription>Dispatch approval detail — Head of Catering</DialogDescription>
+          </DialogHeader>
+
+          {dispatchViewEntry && (
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+              {/* Status strip */}
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-muted/20 px-3 py-2">
+                <Badge variant="outline" className="font-medium text-[11px] h-6 px-2 bg-warning/15 text-warning-foreground border-warning/40">
+                  <Clock className="h-3 w-3 mr-1" />
+                  {dispatchApproveStep === "approve" && dispatchApproveLog === null ? "Pending HoC Approval" : dispatchApproveStep === "forward" ? "Approved — Awaiting Forward to Airport" : "Awaiting HoC Approval"}
+                </Badge>
+                <div className="text-[11px] text-muted-foreground tabular-nums">Date: {dispatchViewEntry.packagingDate}</div>
+              </div>
+
+              {/* Details grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-6 gap-y-3 text-sm">
+                <Detail label="Flight" icon={PlaneTakeoff} value={<span className="font-semibold text-blue-700">{dispatchViewEntry.flightLabel}</span>} />
+                <Detail label="Vehicle No." value={dispatchViewEntry.vehicleNo} />
+                <Detail label="Total Qty" value={`${dispatchViewEntry.totalQty} pax`} />
+                <Detail label="Vehicle Clean" value={
+                  <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${dispatchViewEntry.vehicleClean === "Yes" ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}>
+                    {dispatchViewEntry.vehicleClean}
+                  </span>
+                } />
+                <Detail label="Result Satisfy" value={
+                  <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${dispatchViewEntry.resultSatisfy === "Yes" ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"}`}>
+                    {dispatchViewEntry.resultSatisfy}
+                  </span>
+                } />
+                <Detail label="Chilled Temp" value={dispatchViewEntry.chilledTemp ? `${dispatchViewEntry.chilledTemp}°C` : "—"} />
+                <Detail label="Frozen Temp" value={dispatchViewEntry.frozenTemp ? `${dispatchViewEntry.frozenTemp}°C` : "—"} />
+                <Detail label="Veh. Temp Begin" value={dispatchViewEntry.vehicleTempBegin ? `${dispatchViewEntry.vehicleTempBegin}°C` : "—"} />
+                <Detail label="Veh. Temp End" value={dispatchViewEntry.vehicleTempEnd ? `${dispatchViewEntry.vehicleTempEnd}°C` : "—"} />
+                <Detail label="Load Start" value={dispatchViewEntry.loadStartTime || "—"} />
+                <Detail label="Load End" value={dispatchViewEntry.loadEndTime || "—"} />
+                <Detail label="Gate 08 Temp" value={dispatchViewEntry.gateTempGate08 ? `${dispatchViewEntry.gateTempGate08}°C` : "—"} />
+              </div>
+
+              {/* FS Verified info */}
+              <div className="rounded-md border border-emerald-200 bg-emerald-50/40 p-3">
+                <div className="text-[10px] uppercase tracking-wider text-emerald-700 font-medium mb-1 flex items-center gap-1">
+                  <ShieldCheck className="h-3 w-3" /> Verified By — Food Safety &amp; Hygiene
+                </div>
+                <div className="flex flex-wrap gap-x-4 text-xs text-muted-foreground">
+                  <span className="flex items-center gap-1"><Clock className="h-3 w-3" />{dispatchViewEntry.verifiedByDate}, {dispatchViewEntry.verifiedByTime}</span>
+                </div>
+                {dispatchViewEntry.verifiedByRemarks && (
+                  <p className="text-xs text-slate-600 mt-1.5 italic">"{dispatchViewEntry.verifiedByRemarks}"</p>
+                )}
+              </div>
+
+              {/* HoC approval log — shown after approving */}
+              {dispatchApproveLog && (
+                <div className="rounded-md border border-violet-200 bg-violet-50/40 p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-violet-700 font-medium mb-1 flex items-center gap-1">
+                    <CheckCircle2 className="h-3 w-3" /> Approved By — Head of Catering
+                  </div>
+                  <div className="flex items-center gap-1.5 text-xs text-foreground">
+                    <UserIcon className="h-3 w-3 text-muted-foreground" />
+                    <span className="font-medium">{dispatchApproveLog.by}</span>
+                    <span className="text-muted-foreground">·</span>
+                    <span className="tabular-nums text-muted-foreground">{dispatchApproveLog.at}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <DialogFooter className="px-5 py-3 border-t border-border bg-muted/20 flex gap-2 justify-end">
+            {dispatchViewEntry && dispatchApproveStep === "approve" && (
+              <Button
+                className="bg-violet-600 hover:bg-violet-700 text-white"
+                onClick={() => {
+                  const at = stamp();
+                  const log = { by: `${role} (Head of Catering)`, at };
+                  setDispatchApproveLog(log);
+                  updateDispatchApproval(dispatchViewEntry.id, { stage: "forwarded_to_airport", approvedBy: log.by, approvedAt: at, forwardedAt: at });
+                  setDispatchViewOpen(false);
+                  navigate("/dispatch");
+                }}
+              >
+                <CheckCircle2 className="h-4 w-4 mr-1.5" /> Approve Dispatch
+              </Button>
+            )}
+            <Button variant="outline" onClick={() => setDispatchViewOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Reject dialog */}
       <Dialog open={rejectOpen} onOpenChange={setRejectOpen}>
