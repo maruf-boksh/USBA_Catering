@@ -946,6 +946,17 @@ function OrdersList({
   const pageSize = 3;
   const totalPages = Math.max(1, Math.ceil(groupedOrders.length / pageSize));
 
+  // Large orders (30–40 legs) are capped to keep the table scannable; the rest
+  // expand in place per order. `LEG_CAP` is the collapsed leg count.
+  const LEG_CAP = 8;
+  const [expandedOrders, setExpandedOrders] = useState<Set<string>>(new Set());
+  const toggleExpand = (orderNo: string) =>
+    setExpandedOrders((prev) => {
+      const next = new Set(prev);
+      next.has(orderNo) ? next.delete(orderNo) : next.add(orderNo);
+      return next;
+    });
+
   // Whenever the filter/sort inputs change the result set, jump back to page 1.
   useEffect(() => { setPage(1); }, [from, to, airline, scope, status]);
   // Defensive: if `page` is now past the last page (e.g. after a filter
@@ -1192,7 +1203,12 @@ function OrdersList({
                       </TableCell>
                     </TableRow>,
                   );
-                  legs.forEach((o) => {
+                  // Cap legs per order; "show all" expands in place. Always
+                  // render every leg when this order is the deep-link target so
+                  // its row exists in the DOM to scroll to.
+                  const isExpanded = expandedOrders.has(orderNo) || pendingScrollId != null && legs.some((l) => l.id === pendingScrollId);
+                  const shownLegs = isExpanded ? legs : legs.slice(0, LEG_CAP);
+                  shownLegs.forEach((o) => {
                     const isReturn = o.direction === "Return";
                     rows.push(
                       <TableRow key={o.id} data-arrival-row-id={o.id} className="hover:bg-muted/30">
@@ -1216,17 +1232,37 @@ function OrdersList({
                         {showSpecMeals && <TableCell className={"text-right tabular-nums" + (o.specialMeals === 0 ? " text-muted-foreground/60" : "")}>{o.specialMeals}</TableCell>}
                         <TableCell>
                           <Button
-                            size="sm"
+                            size="icon"
                             variant="outline"
-                            className="h-7 px-2.5 text-xs"
+                            className="h-7 w-7"
                             onClick={() => onView(o)}
+                            aria-label={`View ${o.orderNo}`}
+                            title="View"
                           >
-                            <Eye className="h-3 w-3 mr-1" /> View
+                            <Eye className="h-3.5 w-3.5" />
                           </Button>
                         </TableCell>
                       </TableRow>,
                     );
                   });
+                  // Per-order expand / collapse control when legs exceed the cap.
+                  if (legs.length > LEG_CAP) {
+                    rows.push(
+                      <TableRow key={`more-${orderNo}`} className="border-0 hover:bg-transparent">
+                        <TableCell colSpan={colCount} className="py-2 pl-6">
+                          <button
+                            type="button"
+                            onClick={() => toggleExpand(orderNo)}
+                            className="text-xs font-semibold text-primary hover:underline"
+                          >
+                            {isExpanded
+                              ? "Show less"
+                              : `+ ${legs.length - LEG_CAP} more flight${legs.length - LEG_CAP === 1 ? "" : "s"} — show all ${legs.length}`}
+                          </button>
+                        </TableCell>
+                      </TableRow>,
+                    );
+                  }
                 });
                 return rows;
               })()}

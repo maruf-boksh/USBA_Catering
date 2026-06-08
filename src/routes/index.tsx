@@ -24,6 +24,7 @@ import {
   seedFlightOrders, inventory, inventoryValue,
 } from "@/lib/sample-data";
 import { useWorkflow } from "@/lib/workflow-store";
+import { useFlightOrders } from "@/lib/flight-orders-store";
 import { flagArrival } from "@/lib/arrival-flash";
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Legend,
@@ -70,6 +71,9 @@ type ActivityEntry = {
 
 function useDashboardKpis(period: Period, range?: DateRange) {
   const { wfRequisitions, wfPurchaseOrders, productionEntries, productionEntryRecords, transferNotes } = useWorkflow();
+  // Live flight orders — same source as the Order Management table (seed +
+  // runtime-created orders), so Active Orders shows real Order Nos from there.
+  const liveFlightOrders = useFlightOrders();
 
   const allDates = Array.from(new Set(seedFlightOrders.map((o) => o.date))).sort();
   const today = allDates[allDates.length - 1] ?? "";
@@ -203,14 +207,14 @@ function useDashboardKpis(period: Period, range?: DateRange) {
       pendingPOs:{ value: pendingPOCount, sub: pendingPOAmount > 0 ? `${formatLakh(pendingPOAmount)} pending` : "no value pending", ids: pendingPORowIds },
       invAlerts:{ value: invAlerts, sub: `${criticalItems.length} critical`, ids: invAlertRowIds },
       dispatch: { value: dispatchActive, sub: `${dispatchEnRoute} en route`, ids: dispatchRowIds },
-      dailyCost:{ value: formatLakh(stockValue), sub: "FEFO stock value", ids: [] as string[] },
+      dailyCost:{ value: formatLakh(stockValue), sub: "on-hand valuation", ids: [] as string[] },
     },
     trend: isCustom ? buildCustomTrend(range!, producedTotal, targetTotal) : (isWeek || isWindow) ? trendWeek : trendToday,
     trendTitle: isCustom
       ? `Meal Production Trend (${range!.from || "…"} → ${range!.to || "…"})`
       : (isWeek || isWindow) ? "Meal Production Trend (Last 7 Days)" : "Meal Production Trend (Today)",
     sectionMix: computeSectionMix(producedTotal),
-    activeFlights: pickActiveFlights(),
+    activeFlights: pickActiveFlights(liveFlightOrders),
     activityFeed: buildActivityFeed({
       wfRequisitions, productionEntryRecords, transferNotes,
     }),
@@ -238,7 +242,7 @@ function buildCustomTrend(range: DateRange, producedTotal: number, targetTotal: 
   });
 }
 
-function pickActiveFlights() {
+function pickActiveFlights(rows: typeof seedFlightOrders = seedFlightOrders) {
   const priority: Record<string, number> = {
     Production: 0,
     Approved: 1,
@@ -246,14 +250,17 @@ function pickActiveFlights() {
     Pending: 3,
     Completed: 4,
   };
-  return [...seedFlightOrders]
+  // Sort active-first; keep a generous slice so a single large order's legs
+  // aren't truncated before grouping (the panel caps to 5 orders, and each
+  // card caps its visible legs separately).
+  return [...rows]
     .sort((a, b) => {
       const pa = priority[a.status] ?? 99;
       const pb = priority[b.status] ?? 99;
       if (pa !== pb) return pa - pb;
       return a.etd.localeCompare(b.etd);
     })
-    .slice(0, 24);
+    .slice(0, 500);
 }
 
 function groupActiveByOrder(rows: ReturnType<typeof pickActiveFlights>, maxOrders = 5) {
@@ -729,7 +736,7 @@ export default function Dashboard() {
         )}
         {showKpi("kpi-cost") && (
         <KpiLink to="/inventory" highlight="inv-value">
-          <KpiCard label="Daily Cost"       value={data.kpis.dailyCost.value}  sub={data.kpis.dailyCost.sub}  icon={DollarOutlined}       tone="ink"     />
+          <KpiCard label="Stock Value"      value={data.kpis.dailyCost.value}  sub={data.kpis.dailyCost.sub}  icon={DollarOutlined}       tone="ink"     />
         </KpiLink>
         )}
       </div>
@@ -848,13 +855,13 @@ export default function Dashboard() {
             </BarChart>
           </ResponsiveContainer>
         </PanelCard>
-        <PanelCard title="Procurement Pipeline" link="/procurement" linkLabel="View all →" highlight="po-list">
+        <PanelCard title="Dispatch Tracker" link="/dispatch" linkLabel="View all →" highlight="dispatch-list">
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {purchaseOrders.slice(0, 5).map((p) => (
+            {dispatch.slice(0, 5).map((d) => (
               <Link
-                key={p.id}
-                to="/procurement"
-                onClick={() => flagArrival("po-list")}
+                key={d.id}
+                to="/dispatch"
+                onClick={() => flagArrival("dispatch-list")}
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -877,12 +884,12 @@ export default function Dashboard() {
                 }}
               >
                 <div>
-                  <div style={{ fontWeight: 500 }}>{p.id} — {p.vendor}</div>
+                  <div style={{ fontWeight: 500 }}>{d.id} — {d.flight}</div>
                   <div style={{ fontSize: 12, color: "var(--color-muted-foreground)" }}>
-                    {p.items} items • ৳ {p.amount.toLocaleString()}
+                    {d.trays} trays • {d.carts} carts • {d.vehicle}
                   </div>
                 </div>
-                <StatusBadge status={p.status} />
+                <StatusBadge status={d.status} />
               </Link>
             ))}
           </div>
@@ -962,6 +969,11 @@ function OrderGroupCard({
   const totalPax = legs.reduce((s, l) => s + l.pax, 0);
   const totalCrew = legs.reduce((s, l) => s + l.crew, 0);
   const pill = status ? aoStatusPill(status) : null;
+  // Big orders (many flights) would otherwise make one card swallow the panel.
+  // Cap the visible legs and link the rest into Order Management (?ord=).
+  const MAX_LEGS = 4;
+  const shownLegs = legs.slice(0, MAX_LEGS);
+  const hiddenCount = legs.length - shownLegs.length;
 
   return (
     <div style={{
@@ -970,7 +982,7 @@ function OrderGroupCard({
     }}>
       {/* group header */}
       <Link
-        to="/order-management"
+        to={`/order-management?ord=${encodeURIComponent(orderNo)}`}
         onClick={() => flagArrival({ target: "active-orders", ids: legIds })}
         style={{
           display: "flex", alignItems: "center", gap: 10, padding: "12px 15px",
@@ -1005,11 +1017,11 @@ function OrderGroupCard({
         )}
       </Link>
 
-      {/* legs */}
-      {legs.map((l, idx) => (
+      {/* legs (capped — the rest open in Order Management) */}
+      {shownLegs.map((l, idx) => (
         <Link
           key={l.id}
-          to="/order-management"
+          to={`/order-management?ord=${encodeURIComponent(orderNo)}`}
           onClick={() => flagArrival({ target: "active-orders", ids: [l.id] })}
           style={{
             display: "flex", alignItems: "center", gap: 12, padding: "11px 15px",
@@ -1043,6 +1055,24 @@ function OrderGroupCard({
           </span>
         </Link>
       ))}
+
+      {hiddenCount > 0 && (
+        <Link
+          to={`/order-management?ord=${encodeURIComponent(orderNo)}`}
+          onClick={() => flagArrival({ target: "active-orders", ids: legIds })}
+          style={{
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+            padding: "10px 15px", borderTop: "1px solid #f0ebe8",
+            fontSize: 12.5, fontWeight: 600, color: "#E10101",
+            textDecoration: "none", background: "#fbf8f6",
+            transition: "background-color 150ms ease",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = "#fff5f5")}
+          onMouseLeave={(e) => (e.currentTarget.style.background = "#fbf8f6")}
+        >
+          + {hiddenCount} more flight{hiddenCount === 1 ? "" : "s"} →
+        </Link>
+      )}
     </div>
   );
 }

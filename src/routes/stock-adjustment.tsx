@@ -14,64 +14,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-
-type AdjType = "Increase" | "Decrease";
-type AdjReason = "Wastage" | "Expiry Writeoff" | "Damage" | "Quantity Correction" | "Production Transfer" | "Other";
-type AdjStatus = "Pending Approval" | "Approved" | "Rejected";
-
-type Adjustment = {
-  id: string;
-  date: string;
-  itemCode: string;
-  item: string;
-  category: string;
-  uom: string;
-  currentStock: number;
-  adjustQty: number;
-  adjustType: AdjType;
-  reason: string;
-  reference: string;
-  remarks: string;
-  adjustedBy: string;
-  status: AdjStatus;
-};
-
-const INITIAL_ADJUSTMENTS: Adjustment[] = [
-  {
-    id: "ADJ-0001", date: "2026-05-15", itemCode: "INV-1002", item: "Chicken Breast",
-    category: "Protein", uom: "Kg", currentStock: 64, adjustQty: 12, adjustType: "Decrease",
-    reason: "Wastage", reference: "WO-2026-0012",
-    remarks: "Over-portioning during lunch production run", adjustedBy: "M. Karim", status: "Approved",
-  },
-  {
-    id: "ADJ-0002", date: "2026-05-15", itemCode: "INV-1005", item: "Tomato",
-    category: "Vegetable", uom: "Kg", currentStock: 22, adjustQty: 8, adjustType: "Decrease",
-    reason: "Expiry Writeoff", reference: "EW-2026-0003",
-    remarks: "Batch expired before use — batch TM-2511", adjustedBy: "S. Ahmed", status: "Approved",
-  },
-  {
-    id: "ADJ-0003", date: "2026-05-16", itemCode: "INV-1008", item: "Salmon Fillet",
-    category: "Protein", uom: "Kg", currentStock: 12, adjustQty: 4, adjustType: "Decrease",
-    reason: "Damage", reference: "DMG-2026-0002",
-    remarks: "Cold chain break — blast freezer malfunction (AS-105)", adjustedBy: "F. Begum", status: "Pending Approval",
-  },
-  {
-    id: "ADJ-0004", date: "2026-05-17", itemCode: "INV-1006", item: "Wheat Flour",
-    category: "Grains", uom: "Kg", currentStock: 320, adjustQty: 50, adjustType: "Increase",
-    reason: "Quantity Correction", reference: "GRN-5507",
-    remarks: "GRN quantity was under-recorded at receiving point", adjustedBy: "S. Ahmed", status: "Approved",
-  },
-  {
-    id: "ADJ-0005", date: "2026-05-17", itemCode: "INV-1003", item: "Mineral Water 250ml",
-    category: "Beverage", uom: "Bottle", currentStock: 4200, adjustQty: 120, adjustType: "Decrease",
-    reason: "Production Transfer", reference: "TRF-2026-0005",
-    remarks: "Transferred to crew catering section for BS-307", adjustedBy: "M. Karim", status: "Pending Approval",
-  },
-];
-
-const REASONS: AdjReason[] = [
-  "Wastage", "Expiry Writeoff", "Damage", "Quantity Correction", "Production Transfer", "Other",
-];
+import { getActiveStaff } from "@/lib/staff";
+import {
+  INITIAL_ADJUSTMENTS, REASONS,
+  type Adjustment, type AdjType,
+} from "@/lib/stock-adjustments";
 
 export default function StockAdjustment() {
   const [adjustments, setAdjustments] = usePersistedState<Adjustment[]>("stock-adjustments", INITIAL_ADJUSTMENTS);
@@ -80,9 +27,12 @@ export default function StockAdjustment() {
   const [newQty, setNewQty] = useState("");
   const [newType, setNewType] = useState<AdjType>("Decrease");
   const [newReason, setNewReason] = useState<string>("Wastage");
+  const [newOtherReason, setNewOtherReason] = useState("");
   const [newReference, setNewReference] = useState("");
   const [newRemarks, setNewRemarks] = useState("");
   const [newBy, setNewBy] = useState("");
+
+  const staff = useMemo(() => getActiveStaff(), []);
 
   const selectedInvItem = useMemo(
     () => inventory.find((i) => i.id === newItem),
@@ -115,6 +65,11 @@ export default function StockAdjustment() {
       toast.error("Item, Quantity and Adjusted By are required.");
       return;
     }
+    // When "Other" is picked the typed reason becomes the stored reason.
+    if (newReason === "Other" && !newOtherReason.trim()) {
+      toast.error("Please specify the reason.");
+      return;
+    }
     const inv = inventory.find((i) => i.id === newItem);
     const adj: Adjustment = {
       id: `ADJ-${String(adjustments.length + 1).padStart(4, "0")}`,
@@ -126,7 +81,7 @@ export default function StockAdjustment() {
       currentStock: inv?.stock ?? 0,
       adjustQty: Number(newQty),
       adjustType: newType,
-      reason: newReason,
+      reason: newReason === "Other" ? newOtherReason.trim() : newReason,
       reference: newReference,
       remarks: newRemarks,
       adjustedBy: newBy,
@@ -135,7 +90,7 @@ export default function StockAdjustment() {
     setAdjustments((prev) => [adj, ...prev]);
     setNewOpen(false);
     setNewItem(""); setNewQty(""); setNewReference(""); setNewRemarks(""); setNewBy("");
-    setNewType("Decrease"); setNewReason("Wastage");
+    setNewType("Decrease"); setNewReason("Wastage"); setNewOtherReason("");
     toast.success("Adjustment submitted for approval.");
   };
 
@@ -194,7 +149,7 @@ export default function StockAdjustment() {
               {selectedInvItem && (
                 <p className="text-xs text-muted-foreground mt-1">
                   Current stock: <strong>{selectedInvItem.stock} {selectedInvItem.uom}</strong>
-                  {" · "}Category: {selectedInvItem.category} · Storage: {selectedInvItem.storage}
+                  {" · "}Category: {selectedInvItem.category}
                 </p>
               )}
             </div>
@@ -245,14 +200,31 @@ export default function StockAdjustment() {
               </div>
             </div>
 
+            {/* When "Other" is chosen the user types the actual reason here. */}
+            {newReason === "Other" && (
+              <div>
+                <Label>Specify Reason</Label>
+                <Input
+                  value={newOtherReason}
+                  onChange={(e) => setNewOtherReason(e.target.value)}
+                  placeholder="Describe the reason for this adjustment"
+                  className="mt-1"
+                />
+              </div>
+            )}
+
             <div>
               <Label>Adjusted By</Label>
-              <Input
+              <select
+                className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm mt-1"
                 value={newBy}
                 onChange={(e) => setNewBy(e.target.value)}
-                placeholder="Staff name"
-                className="mt-1"
-              />
+              >
+                <option value="">Select staff</option>
+                {staff.map((s) => (
+                  <option key={s.id} value={s.fullName}>{s.fullName} — {s.role}</option>
+                ))}
+              </select>
             </div>
 
             <div>

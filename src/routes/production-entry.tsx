@@ -206,14 +206,22 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
     : entry.status === "Ready for QC"   ? "QC sign-off in Cooking Temp & Sensory"
     : null;
 
-  const recipe = PRODUCTION_ITEMS.find(
-    (p) => p.name === entry.outputItemName || p.name === entry.bom || p.code === entry.outputItemCode,
-  );
+  const recipe = resolveProductionItem({
+    name: entry.outputItemName ?? entry.bom,
+    code: entry.outputItemCode,
+  });
   const orderQty = entry.orderQty ?? entry.producedQty;
   const remaining = Math.max(0, orderQty - entry.producedQty);
-  const materials = recipe && orderQty > 0
+  const materials = orderQty > 0
     ? aggregateMaterials([{ id: entry.id, itemCode: recipe.code, itemName: recipe.name, qty: orderQty }])
     : null;
+  // Material COGS = Σ (required qty × rate) across every material line. Cost per
+  // unit divides by the order qty (the basis the requirements are shown for).
+  const cogs = materials
+    ? [...materials.raw, ...materials.pkg, ...materials.other].reduce((s, m) => s + m.reqQty * m.rate, 0)
+    : 0;
+  const cogsPerUnit = orderQty > 0 ? cogs / orderQty : 0;
+  const money = (n: number) => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   return (
     <>
@@ -342,6 +350,8 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
                               <TableHead className="text-xs uppercase tracking-wider">Item Name</TableHead>
                               <TableHead className="text-xs uppercase tracking-wider">UoM</TableHead>
                               <TableHead className="text-xs uppercase tracking-wider text-right">Req. Qty</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider text-right">Rate (৳)</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider text-right">Line Cost (৳)</TableHead>
                             </TableRow>
                           </TableHeader>
                           <TableBody>
@@ -351,6 +361,8 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
                                 <TableCell className="font-medium">{m.itemName}</TableCell>
                                 <TableCell>{m.uom}</TableCell>
                                 <TableCell className="text-right tabular-nums">{m.reqQty.toFixed(3)}</TableCell>
+                                <TableCell className="text-right tabular-nums text-muted-foreground">{money(m.rate)}</TableCell>
+                                <TableCell className="text-right tabular-nums font-medium">{money(m.reqQty * m.rate)}</TableCell>
                               </TableRow>
                             ))}
                           </TableBody>
@@ -363,6 +375,25 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
             ) : (
               <div className="text-sm text-muted-foreground py-2">
                 No material recipe found for this production item.
+              </div>
+            )}
+
+            {/* Material Cost (COGS) roll-up */}
+            {materials && (
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+                  Material Cost (COGS)
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="rounded-md border border-primary/30 bg-primary/5 px-4 py-3">
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total COGS — {orderQty.toLocaleString()} unit{orderQty === 1 ? "" : "s"}</div>
+                    <div className="mt-1 text-lg font-semibold tabular-nums text-primary">৳ {money(cogs)}</div>
+                  </div>
+                  <div className="rounded-md border border-border bg-muted/20 px-4 py-3">
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Cost per Unit</div>
+                    <div className="mt-1 text-lg font-semibold tabular-nums">৳ {money(cogsPerUnit)}</div>
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -545,10 +576,10 @@ export default function ProductionEntryPage() {
     for (const o of orders) {
       const target = o.orderQty ?? 0;
       if (target <= 0) continue;
-      const recipe = PRODUCTION_ITEMS.find(
-        (p) => p.name === o.outputItemName || p.name === o.bom || p.code === o.outputItemCode,
-      );
-      if (!recipe) { skipped++; continue; }
+      // Every order resolves to a recipe (curated, BOM master, or synthesized
+      // fallback), so no order is skipped and the Demand Request is never empty.
+      if (!hasMasterRecipe({ name: o.outputItemName, code: o.outputItemCode, bom: o.bom })) skipped++;
+      const recipe = resolveProductionItem({ name: o.outputItemName ?? o.bom, code: o.outputItemCode });
       lines.push({
         id: o.id, itemCode: recipe.code, itemName: recipe.name,
         qty: target, source: "bom",
@@ -1086,178 +1117,13 @@ export default function ProductionEntryPage() {
   );
 }
 
-export type RecipeItem = {
-  itemCode: string;
-  itemName: string;
-  uom: string;
-  qtyPerUnit: number;
-  rate: number;
-};
+// Recipe catalog + types moved to `@/lib/production-items` to break an import
+// cycle with the meal-plan recipe resolver. Imported locally for internal use
+// and re-exported for backwards compatibility with existing importers.
+import { PRODUCTION_ITEMS, type RecipeItem, type ProductionItem } from "@/lib/production-items";
+export { PRODUCTION_ITEMS, type RecipeItem, type ProductionItem };
 
-export type ProductionItem = {
-  code: string;
-  name: string;
-  rawMaterials: RecipeItem[];
-  packagingMaterials: RecipeItem[];
-  otherConsumption: RecipeItem[];
-};
-
-export const PRODUCTION_ITEMS: ProductionItem[] = [
-  {
-    code: "FG-001",
-    name: "Chicken Biryani",
-    rawMaterials: [
-      { itemCode: "RM-001", itemName: "Basmati Rice",    uom: "Kg",    qtyPerUnit: 0.180, rate: 120 },
-      { itemCode: "RM-002", itemName: "Chicken",         uom: "Kg",    qtyPerUnit: 0.120, rate: 280 },
-      { itemCode: "RM-003", itemName: "Onion",           uom: "Kg",    qtyPerUnit: 0.040, rate: 60  },
-      { itemCode: "RM-004", itemName: "Spice Mix",       uom: "Kg",    qtyPerUnit: 0.010, rate: 850 },
-      { itemCode: "RM-005", itemName: "Cooking Oil",     uom: "Litre", qtyPerUnit: 0.020, rate: 175 },
-    ],
-    packagingMaterials: [
-      { itemCode: "PKG-001", itemName: "Aluminum Tray",  uom: "Pcs", qtyPerUnit: 1, rate: 12 },
-      { itemCode: "PKG-002", itemName: "Lid Foil",       uom: "Pcs", qtyPerUnit: 1, rate: 3  },
-    ],
-    otherConsumption: [
-      { itemCode: "OC-001", itemName: "Cooking Gas",     uom: "Kg",  qtyPerUnit: 0.050, rate: 85 },
-      { itemCode: "OC-002", itemName: "Disposable Glove", uom: "Pair", qtyPerUnit: 0.10, rate: 4  },
-    ],
-  },
-  {
-    code: "FG-002",
-    name: "Veg Pulao",
-    rawMaterials: [
-      { itemCode: "RM-001", itemName: "Basmati Rice",    uom: "Kg",    qtyPerUnit: 0.180, rate: 120 },
-      { itemCode: "RM-006", itemName: "Mixed Vegetable", uom: "Kg",    qtyPerUnit: 0.100, rate: 70  },
-      { itemCode: "RM-005", itemName: "Cooking Oil",     uom: "Litre", qtyPerUnit: 0.020, rate: 175 },
-      { itemCode: "RM-004", itemName: "Spice Mix",       uom: "Kg",    qtyPerUnit: 0.008, rate: 850 },
-    ],
-    packagingMaterials: [
-      { itemCode: "PKG-001", itemName: "Aluminum Tray",  uom: "Pcs", qtyPerUnit: 1, rate: 12 },
-      { itemCode: "PKG-002", itemName: "Lid Foil",       uom: "Pcs", qtyPerUnit: 1, rate: 3  },
-    ],
-    otherConsumption: [
-      { itemCode: "OC-001", itemName: "Cooking Gas",     uom: "Kg",  qtyPerUnit: 0.040, rate: 85 },
-    ],
-  },
-  {
-    code: "FG-003",
-    name: "Continental Breakfast",
-    rawMaterials: [
-      { itemCode: "RM-007", itemName: "Bread Loaf",      uom: "Pcs", qtyPerUnit: 0.25, rate: 30  },
-      { itemCode: "RM-008", itemName: "Egg",             uom: "Pcs", qtyPerUnit: 1.0,  rate: 11  },
-      { itemCode: "RM-009", itemName: "Butter",          uom: "Kg",  qtyPerUnit: 0.015, rate: 950 },
-      { itemCode: "RM-010", itemName: "Sausage",         uom: "Pcs", qtyPerUnit: 2.0,  rate: 22  },
-    ],
-    packagingMaterials: [
-      { itemCode: "PKG-003", itemName: "Breakfast Box",  uom: "Pcs", qtyPerUnit: 1, rate: 18 },
-    ],
-    otherConsumption: [
-      { itemCode: "OC-001", itemName: "Cooking Gas",     uom: "Kg",  qtyPerUnit: 0.025, rate: 85 },
-    ],
-  },
-  {
-    code: "FG-004",
-    name: "Grilled Salmon",
-    rawMaterials: [
-      { itemCode: "RM-011", itemName: "Salmon Fillet",   uom: "Kg",    qtyPerUnit: 0.140, rate: 1400 },
-      { itemCode: "RM-012", itemName: "Lemon",           uom: "Pcs",   qtyPerUnit: 0.25,  rate: 8    },
-      { itemCode: "RM-005", itemName: "Cooking Oil",     uom: "Litre", qtyPerUnit: 0.015, rate: 175  },
-      { itemCode: "RM-004", itemName: "Spice Mix",       uom: "Kg",    qtyPerUnit: 0.008, rate: 850  },
-    ],
-    packagingMaterials: [
-      { itemCode: "PKG-001", itemName: "Aluminum Tray",  uom: "Pcs", qtyPerUnit: 1, rate: 12 },
-      { itemCode: "PKG-002", itemName: "Lid Foil",       uom: "Pcs", qtyPerUnit: 1, rate: 3  },
-    ],
-    otherConsumption: [
-      { itemCode: "OC-001", itemName: "Cooking Gas",     uom: "Kg",  qtyPerUnit: 0.035, rate: 85 },
-    ],
-  },
-
-  // ── Meal-plan items (Wednesday Breakfast menu) ───────────────────────────
-  // Recipes for the menu items raised by the bulk "Create All Orders" flow on
-  // the Meal Planning Details dialog, so MRP can compute on-hand vs shortfall
-  // and the resulting Demand Request actually carries materials.
-  {
-    code: "FG-PRT",
-    name: "Paratha",
-    rawMaterials: [
-      { itemCode: "RM-013", itemName: "Wheat Flour",     uom: "Kg",    qtyPerUnit: 0.060, rate: 88  },
-      { itemCode: "RM-005", itemName: "Cooking Oil",     uom: "Litre", qtyPerUnit: 0.012, rate: 175 },
-      { itemCode: "RM-017", itemName: "Salt",            uom: "Kg",    qtyPerUnit: 0.001, rate: 35  },
-    ],
-    packagingMaterials: [
-      { itemCode: "PKG-001", itemName: "Aluminum Tray",  uom: "Pcs", qtyPerUnit: 1, rate: 12 },
-      { itemCode: "PKG-002", itemName: "Lid Foil",       uom: "Pcs", qtyPerUnit: 1, rate: 3  },
-    ],
-    otherConsumption: [
-      { itemCode: "OC-001", itemName: "Cooking Gas",     uom: "Kg",  qtyPerUnit: 0.015, rate: 85 },
-    ],
-  },
-  {
-    code: "FG-CHM",
-    name: "Channa Masala",
-    rawMaterials: [
-      { itemCode: "RM-014", itemName: "Chickpeas",       uom: "Kg",    qtyPerUnit: 0.060, rate: 110 },
-      { itemCode: "RM-003", itemName: "Onion",           uom: "Kg",    qtyPerUnit: 0.025, rate: 60  },
-      { itemCode: "RM-015", itemName: "Tomato",          uom: "Kg",    qtyPerUnit: 0.030, rate: 58  },
-      { itemCode: "RM-005", itemName: "Cooking Oil",     uom: "Litre", qtyPerUnit: 0.012, rate: 175 },
-      { itemCode: "RM-004", itemName: "Spice Mix",       uom: "Kg",    qtyPerUnit: 0.004, rate: 850 },
-      { itemCode: "RM-017", itemName: "Salt",            uom: "Kg",    qtyPerUnit: 0.001, rate: 35  },
-    ],
-    packagingMaterials: [
-      { itemCode: "PKG-001", itemName: "Aluminum Tray",  uom: "Pcs", qtyPerUnit: 1, rate: 12 },
-      { itemCode: "PKG-002", itemName: "Lid Foil",       uom: "Pcs", qtyPerUnit: 1, rate: 3  },
-    ],
-    otherConsumption: [
-      { itemCode: "OC-001", itemName: "Cooking Gas",     uom: "Kg",  qtyPerUnit: 0.020, rate: 85 },
-    ],
-  },
-  {
-    code: "FG-BEG",
-    name: "Boiled Egg",
-    rawMaterials: [
-      { itemCode: "RM-008", itemName: "Egg",             uom: "Pcs", qtyPerUnit: 1,     rate: 11 },
-      { itemCode: "RM-017", itemName: "Salt",            uom: "Kg",  qtyPerUnit: 0.001, rate: 35 },
-    ],
-    packagingMaterials: [
-      { itemCode: "PKG-001", itemName: "Aluminum Tray",  uom: "Pcs", qtyPerUnit: 1, rate: 12 },
-      { itemCode: "PKG-002", itemName: "Lid Foil",       uom: "Pcs", qtyPerUnit: 1, rate: 3  },
-    ],
-    otherConsumption: [
-      { itemCode: "OC-001", itemName: "Cooking Gas",     uom: "Kg",  qtyPerUnit: 0.010, rate: 85 },
-    ],
-  },
-  {
-    code: "FG-VSW",
-    name: "Vegetable Sandwich",
-    rawMaterials: [
-      { itemCode: "RM-007", itemName: "Bread Loaf",      uom: "Pcs", qtyPerUnit: 0.40,  rate: 30  },
-      { itemCode: "RM-006", itemName: "Mixed Vegetable", uom: "Kg",  qtyPerUnit: 0.045, rate: 70  },
-      { itemCode: "RM-009", itemName: "Butter",          uom: "Kg",  qtyPerUnit: 0.010, rate: 950 },
-      { itemCode: "RM-017", itemName: "Salt",            uom: "Kg",  qtyPerUnit: 0.0005,rate: 35  },
-    ],
-    packagingMaterials: [
-      { itemCode: "PKG-003", itemName: "Breakfast Box",  uom: "Pcs", qtyPerUnit: 1, rate: 18 },
-    ],
-    otherConsumption: [
-      { itemCode: "OC-001", itemName: "Cooking Gas",     uom: "Kg",  qtyPerUnit: 0.005, rate: 85 },
-    ],
-  },
-  {
-    code: "FG-FRS",
-    name: "Fruit Salad",
-    rawMaterials: [
-      { itemCode: "RM-016", itemName: "Mixed Fruits",    uom: "Kg",  qtyPerUnit: 0.080, rate: 120 },
-    ],
-    packagingMaterials: [
-      { itemCode: "PKG-001", itemName: "Aluminum Tray",  uom: "Pcs", qtyPerUnit: 1, rate: 12 },
-      { itemCode: "PKG-002", itemName: "Lid Foil",       uom: "Pcs", qtyPerUnit: 1, rate: 3  },
-    ],
-    otherConsumption: [
-      { itemCode: "OC-002", itemName: "Disposable Glove",uom: "Pair", qtyPerUnit: 0.05, rate: 4 },
-    ],
-  },
-];
+import { resolveProductionItem, hasMasterRecipe } from "@/lib/meal-recipe";
 
 type OutputLine = {
   id: string;
@@ -1374,8 +1240,7 @@ function aggregateMaterials(lines: OutputLine[]) {
   };
 
   for (const line of lines) {
-    const item = PRODUCTION_ITEMS.find((p) => p.code === line.itemCode);
-    if (!item) continue;
+    const item = resolveProductionItem({ name: line.itemName, code: line.itemCode });
     item.rawMaterials.forEach((r) => addTo(raw, r, line.qty));
     item.packagingMaterials.forEach((r) => addTo(pkg, r, line.qty));
     item.otherConsumption.forEach((r) => addTo(other, r, line.qty));
@@ -1700,8 +1565,7 @@ function ProductionEntryCreate({
   const bomMaterials = useMemo(() => {
     const qty = Number(itemQty);
     if (!bomName || !qty || qty <= 0) return { raw: [], pkg: [], other: [] };
-    const recipe = PRODUCTION_ITEMS.find((p) => p.name === bomName);
-    if (!recipe) return { raw: [], pkg: [], other: [] };
+    const recipe = resolveProductionItem({ name: bomName });
     return aggregateMaterials([
       { id: "current", itemCode: recipe.code, itemName: recipe.name, qty },
     ]);
@@ -3193,11 +3057,9 @@ function MaterialRequirementPlanningDialog({
       const target = o.orderQty ?? o.producedQty;
       const qty = basis === "remaining" ? Math.max(0, target - o.producedQty) : target;
       if (qty <= 0) continue;
-      // Find the production item by name (BOM name = output item name typically)
-      const item = PRODUCTION_ITEMS.find(
-        (p) => p.name === o.outputItemName || p.name === o.bom || p.code === o.outputItemCode,
-      );
-      if (!item) continue;
+      // Resolve the recipe (curated, BOM master, or synthesized) so every
+      // selected order contributes materials to the requirement plan.
+      const item = resolveProductionItem({ name: o.outputItemName ?? o.bom, code: o.outputItemCode });
       lines.push({
         id: o.id,
         itemCode: item.code,
@@ -3220,9 +3082,12 @@ function MaterialRequirementPlanningDialog({
     materials.pkg.reduce((s, m) => s + m.reqQty * m.rate, 0) +
     materials.other.reduce((s, m) => s + m.reqQty * m.rate, 0);
 
-  const unmatched = selectedOrders.filter((o) => !PRODUCTION_ITEMS.find(
-    (p) => p.name === o.outputItemName || p.name === o.bom || p.code === o.outputItemCode,
-  ));
+  // Orders that fall back to a synthesized generic recipe (no curated/BOM-master
+  // entry). They still contribute materials — this is an accuracy heads-up, not a
+  // skip.
+  const unmatched = selectedOrders.filter(
+    (o) => !hasMasterRecipe({ name: o.outputItemName, code: o.outputItemCode, bom: o.bom }),
+  );
 
   // Flatten + enrich every material with stock + shortfall + supplier
   const enrichMaterial = (m: AggregatedMaterial, bucket: "Raw" | "Packaging" | "Other"): WfMrpMaterial => {
@@ -3514,9 +3379,7 @@ function MaterialRequirementPlanningDialog({
                       const target = o.orderQty ?? o.producedQty;
                       const rem = Math.max(0, target - o.producedQty);
                       const isSelected = selected.has(o.id);
-                      const hasRecipe = !!PRODUCTION_ITEMS.find(
-                        (p) => p.name === o.outputItemName || p.name === o.bom || p.code === o.outputItemCode,
-                      );
+                      const hasRecipe = hasMasterRecipe({ name: o.outputItemName, code: o.outputItemCode, bom: o.bom });
                       return (
                         <TableRow
                           key={o.id}
@@ -3542,7 +3405,7 @@ function MaterialRequirementPlanningDialog({
                               {o.outputItemName ?? "—"}
                               {!hasRecipe && (
                                 <Badge variant="outline" className="text-[9px] border-warning/40 bg-warning/10 text-warning">
-                                  No recipe
+                                  Generic recipe
                                 </Badge>
                               )}
                             </div>
@@ -3570,7 +3433,7 @@ function MaterialRequirementPlanningDialog({
                 <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0 text-warning" />
                 <div>
                   <strong>{unmatched.length}</strong> selected order{unmatched.length === 1 ? "" : "s"} have no recipe in the BOM master:
-                  {" "}{unmatched.map((o) => o.id).join(", ")}. These will be skipped from the requirement calculation.
+                  {" "}{unmatched.map((o) => o.id).join(", ")}. A generic recipe is used for these in the requirement calculation.
                 </div>
               </div>
             )}

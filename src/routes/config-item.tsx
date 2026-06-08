@@ -677,6 +677,8 @@ function ItemEditForm({
   const [uom, setUom] = useState<string>(row.uom ?? UOMS[0]);
   const [status, setStatus] = useState<string>(row.status ?? "Active");
   const [costPrice, setCostPrice] = useState(String(row.costPrice ?? ""));
+  const [weightG, setWeightG] = useState(String(row.weightG ?? ""));
+  const [kcal, setKcal] = useState(String(row.kcal ?? ""));
   const [allocation, setAllocation] = useState<"Auto" | AllocationMethod>(getAllocationChoiceForMaster(row.id));
   const [batchTracked, setBatchTracked] = useState(isBatchTrackedForMaster(row.id));
 
@@ -726,6 +728,8 @@ function ItemEditForm({
       uom,
       status,
       costPrice: Number(costPrice) || 0,
+      weightG: Number(weightG) || 0,
+      kcal: Number(kcal) || 0,
     });
   };
 
@@ -804,11 +808,22 @@ function ItemEditForm({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div>
           <Label className={lbl}>Cost Price (৳)</Label>
           <Input type="number" min={0} value={costPrice} onChange={(e) => setCostPrice(e.target.value)} className="mt-1" />
         </div>
+        <div>
+          <Label className={lbl}>Weight (g)</Label>
+          <Input type="number" min={0} value={weightG} onChange={(e) => setWeightG(e.target.value)} placeholder="0" className="mt-1" />
+        </div>
+        <div>
+          <Label className={lbl}>Kcal</Label>
+          <Input type="number" min={0} value={kcal} onChange={(e) => setKcal(e.target.value)} placeholder="0" className="mt-1" />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div>
           <Label className={lbl}>Allocation Method</Label>
           <select value={allocation} onChange={(e) => setAllocation(e.target.value as "Auto" | AllocationMethod)} className={selectCls}>
@@ -887,6 +902,10 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
     () => (code.trim() ? bomForItemCode(code.trim().toUpperCase()) : undefined),
     [code],
   );
+
+  // Serving info — flows to Meal Planning meal items.
+  const [weightG, setWeightG] = useState("");
+  const [kcal, setKcal] = useState("");
 
   // Stock & storage
   const [reorderLevel, setReorderLevel] = useState("0");
@@ -968,6 +987,8 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
       itemType: itemTypeTyped,
       category, subCategory, uom,
       status: fgWithoutBom ? "Inactive" : "Active",
+      weightG: Number(weightG) || undefined,
+      kcal: Number(kcal) || undefined,
       reorderLevel: reorder,
       thresholdPct: threshold,
       expiryDate: expiryDate || undefined,
@@ -1103,6 +1124,16 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
             <div className="mt-1 text-[11px] text-muted-foreground">
               Stock is always kept in this unit. Add ALT UOMs below for transactions in other units.
             </div>
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Weight (g)</Label>
+            <Input type="number" min={0} value={weightG} onChange={(e) => setWeightG(e.target.value)} placeholder="0" className="mt-1" />
+            <div className="mt-1 text-[11px] text-muted-foreground">Default serving weight used in Meal Planning.</div>
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Kcal</Label>
+            <Input type="number" min={0} value={kcal} onChange={(e) => setKcal(e.target.value)} placeholder="0" className="mt-1" />
+            <div className="mt-1 text-[11px] text-muted-foreground">Default energy per serving used in Meal Planning.</div>
           </div>
 
           {/* ── ALT UOMs ───────────────────────────────────────────────── */}

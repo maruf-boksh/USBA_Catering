@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
@@ -13,101 +13,17 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Plus, ArrowLeft, Save, Send, Trash2, ClipboardList,
-  Clock, Award, BadgeDollarSign,
+  Clock, BadgeCheck, XCircle, BadgeDollarSign,
 } from "lucide-react";
 import { toast } from "sonner";
 import { activeItems, vendors } from "@/lib/sample-data";
 import { getApprovedRfqs } from "@/lib/rfqs";
-
-type QuoteStatus = "Draft" | "Submitted" | "Selected" | "Rejected" | "Expired";
-
-type QuoteLine = {
-  id: string;
-  itemName: string;
-  uom: string;
-  qty: number;
-  unitPrice: number;
-};
-
-type Quotation = {
-  id: string;
-  date: string;
-  rfqRef: string;
-  supplier: string;
-  validity: string;
-  leadTimeDays?: number;
-  paymentTerms: string;
-  lines: QuoteLine[];
-  total: number;
-  status: QuoteStatus;
-  notes?: string;
-};
+import {
+  SEED_QUOTATIONS, normalizeQuoteStatus,
+  type Quotation, type QuoteLine, type QuoteStatus,
+} from "@/lib/quotations";
 
 const PAYMENT_TERMS = ["Net 15", "Net 30", "Net 45", "Net 60", "Advance", "Cash on Delivery"];
-
-const SEED_QUOTATIONS: Quotation[] = [
-  {
-    id: "QT-2026-0091",
-    date: "2026-05-20",
-    rfqRef: "RFQ-2026-0042",
-    supplier: "Fresh Farms Ltd",
-    validity: "2026-06-20",
-    leadTimeDays: 3,
-    paymentTerms: "Net 30",
-    lines: [
-      { id: "l1", itemName: "Chicken Breast", uom: "Kg", qty: 220, unitPrice: 372 },
-      { id: "l2", itemName: "Basmati Rice",   uom: "Kg", qty: 600, unitPrice: 88 },
-      { id: "l3", itemName: "Tomato",         uom: "Kg", qty: 180, unitPrice: 58 },
-    ],
-    total: 220 * 372 + 600 * 88 + 180 * 58,
-    status: "Submitted",
-  },
-  {
-    id: "QT-2026-0090",
-    date: "2026-05-20",
-    rfqRef: "RFQ-2026-0042",
-    supplier: "Halal Meats Co.",
-    validity: "2026-06-15",
-    leadTimeDays: 2,
-    paymentTerms: "Net 30",
-    lines: [
-      { id: "l1", itemName: "Chicken Breast", uom: "Kg", qty: 220, unitPrice: 380 },
-    ],
-    total: 220 * 380,
-    status: "Submitted",
-    notes: "Quote for protein items only.",
-  },
-  {
-    id: "QT-2026-0089",
-    date: "2026-05-19",
-    rfqRef: "RFQ-2026-0042",
-    supplier: "Spice World",
-    validity: "2026-06-10",
-    leadTimeDays: 4,
-    paymentTerms: "Net 45",
-    lines: [
-      { id: "l1", itemName: "Basmati Rice", uom: "Kg", qty: 600, unitPrice: 92 },
-      { id: "l2", itemName: "Tomato",       uom: "Kg", qty: 180, unitPrice: 55 },
-    ],
-    total: 600 * 92 + 180 * 55,
-    status: "Submitted",
-  },
-  {
-    id: "QT-2026-0088",
-    date: "2026-05-15",
-    rfqRef: "RFQ-2026-0040",
-    supplier: "Fresh Farms Ltd",
-    validity: "2026-05-30",
-    leadTimeDays: 3,
-    paymentTerms: "Net 30",
-    lines: [
-      { id: "l1", itemName: "Onion",  uom: "Kg", qty: 320, unitPrice: 48 },
-      { id: "l2", itemName: "Potato", uom: "Kg", qty: 280, unitPrice: 38 },
-    ],
-    total: 320 * 48 + 280 * 38,
-    status: "Selected",
-  },
-];
 
 const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
@@ -115,6 +31,21 @@ const selectCls =
 export default function QuotationEntryPage() {
   const [view, setView] = useState<"list" | "create">("list");
   const [rows, setRows] = usePersistedState<Quotation[]>("quotation-entry-rows", SEED_QUOTATIONS);
+
+  // One-time migration: rewrite any legacy statuses (Draft/Submitted/Selected/
+  // Expired) onto the current Pending/Approved/Rejected model so older persisted
+  // quotations show correct badges + KPI counts.
+  useEffect(() => {
+    setRows((prev) => {
+      let changed = false;
+      const next = prev.map((r) => {
+        const ns = normalizeQuoteStatus(r.status);
+        if (ns !== r.status) { changed = true; return { ...r, status: ns }; }
+        return r;
+      });
+      return changed ? next : prev;
+    });
+  }, [setRows]);
 
   const nextId = `QT-${new Date().getFullYear()}-${String(rows.length + 92).padStart(4, "0")}`;
 
@@ -152,8 +83,9 @@ function QuotationList({ rows, editors }: {
   editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
 }) {
   const total = rows.length;
-  const submitted = rows.filter((r) => r.status === "Submitted").length;
-  const selected = rows.filter((r) => r.status === "Selected").length;
+  const pending = rows.filter((r) => r.status === "Pending").length;
+  const approved = rows.filter((r) => r.status === "Approved").length;
+  const rejected = rows.filter((r) => r.status === "Rejected").length;
   const totalValue = rows.reduce((s, r) => s + r.total, 0);
 
   const cols: Column<Quotation>[] = [
@@ -172,10 +104,11 @@ function QuotationList({ rows, editors }: {
 
   return (
     <>
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-5 gap-4 mb-6">
         <KpiCard label="Total Quotations" value={total} icon={ClipboardList} tone="navy" />
-        <KpiCard label="Submitted" value={submitted} icon={Clock} tone="warning" />
-        <KpiCard label="Selected"  value={selected}  icon={Award} tone="success" />
+        <KpiCard label="Pending"  value={pending}  icon={Clock} tone="warning" />
+        <KpiCard label="Approved" value={approved} icon={BadgeCheck} tone="success" />
+        <KpiCard label="Rejected" value={rejected} icon={XCircle} tone="red" />
         <KpiCard
           label="Aggregate Value"
           value={`৳ ${Math.round(totalValue).toLocaleString()}`}
@@ -306,9 +239,7 @@ function QuotationFields({
       onClose?.();
     } else {
       onSave?.({ id: nextId!, ...payload });
-      toast.success(status === "Draft"
-        ? `${nextId} saved as draft.`
-        : `${nextId} submitted from ${supplier}.`);
+      toast.success(`${nextId} submitted for approval.`);
     }
   };
 
@@ -317,14 +248,9 @@ function QuotationFields({
       {!isEdit && (
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-sm font-semibold uppercase tracking-wider">New Quotation</h3>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={() => save("Draft")}>
-              <Save className="h-4 w-4 mr-1.5" /> Save Draft
-            </Button>
-            <Button onClick={() => save("Submitted")}>
-              <Send className="h-4 w-4 mr-1.5" /> Submit
-            </Button>
-          </div>
+          <Button onClick={() => save("Pending")}>
+            <Send className="h-4 w-4 mr-1.5" /> Submit for Approval
+          </Button>
         </div>
       )}
 
@@ -464,7 +390,7 @@ function QuotationFields({
       {isEdit && (
         <div className="flex justify-end gap-2 mt-6 pt-4 border-t border-border">
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={() => save(initial?.status ?? "Draft")}>
+          <Button onClick={() => save(initial?.status ?? "Pending")}>
             <Save className="h-4 w-4 mr-1.5" /> Save Changes
           </Button>
         </div>

@@ -208,8 +208,8 @@ const INITIAL_PACKAGING_ROWS: PackagingRow[] = [
   { id: "PRD-9001", date: TODAY, depTime: "7:00 AM", flight: "BS-225", mealType: "Lunch",     mealName: "Chicken Biryani",         qty: 168, section: "Hot Kitchen",    packagingStatus: "Ready for Packaging",   dspRef: "DSP-7704", orderNo: "ORD-3420", productionOrderId: "PRO-2026-100602" },
   { id: "PRD-9002", date: TODAY, depTime: "7:00 AM", flight: "BS-225", mealType: "Snack",     mealName: "Veg Pulao",               qty: 24,  section: "Veg Section",    packagingStatus: "Packaging In Progress", dspRef: "DSP-7704", orderNo: "ORD-3420", productionOrderId: "PRO-2026-100603" },
   { id: "PRD-9002B",date: TODAY, depTime: "7:00 AM", flight: "BS-203", mealType: "Snack",     mealName: "Veg Pulao",               qty: 24,  section: "Veg Section",    packagingStatus: "Packaging In Progress", dspRef: "DSP-7702", orderNo: "ORD-3414", productionOrderId: "PRO-2026-100603" },
-  { id: "PRD-9003", date: TODAY, depTime: "8:30 AM", flight: "BS-307", mealType: "Dinner",    mealName: "Grilled Salmon",          qty: 282, section: "Hot Kitchen",    packagingStatus: "Packaging In Progress",                     orderNo: "ORD-3415", productionOrderId: "PRO-2026-100604" },
-  { id: "PRD-9004", date: TODAY, depTime: "8:30 AM", flight: "BS-307", mealType: "Breakfast", mealName: "Continental Breakfast",   qty: 282, section: "Cold Kitchen",   packagingStatus: "Packaging Done",                            orderNo: "ORD-3415", productionOrderId: "PRO-2026-100605" },
+  { id: "PRD-9003", date: TODAY, depTime: "8:30 AM", flight: "BS-307", mealType: "Dinner",    mealName: "Grilled Salmon",          qty: 282, section: "Hot Kitchen",    packagingStatus: "Packaging In Progress", dspRef: "DSP-7705", orderNo: "ORD-3415", productionOrderId: "PRO-2026-100604" },
+  { id: "PRD-9004", date: TODAY, depTime: "8:30 AM", flight: "BS-307", mealType: "Breakfast", mealName: "Continental Breakfast",   qty: 282, section: "Cold Kitchen",   packagingStatus: "Packaging Done",        dspRef: "DSP-7705", orderNo: "ORD-3415", productionOrderId: "PRO-2026-100605" },
   { id: "PRD-9005", date: TODAY, depTime: "9:00 AM", flight: "BS-101", mealType: "Special",   mealName: "Hindu Meal Special",      qty: 8,   section: "Special Meal",   packagingStatus: "Packaging Done",        dspRef: "DSP-7701", orderNo: "ORD-3422", productionOrderId: "PRO-2026-100606" },
 ];
 
@@ -317,12 +317,16 @@ export default function Dispatch() {
   const flightOrders = useFlightOrders();
   // ── Dispatch records state ──────────────────────────────────────────────────
   const [records, setRecords] = usePersistedState<DispatchRecord[]>("dispatch-records", INITIAL_RECORDS);
+  // Seed from the persisted records (not just INITIAL_RECORDS) so flights added
+  // via "+ New Dispatch" stay flagged as configured across reloads.
   const [configuredFlights, setConfiguredFlights] = useState<Set<string>>(
-    new Set(INITIAL_RECORDS.flatMap((r) => r.flightNos))
+    () => new Set(records.flatMap((r) => r.flightNos))
   );
 
   // ── Packaging pipeline state ────────────────────────────────────────────────
-  const [packagingRows, setPackagingRows] = useState<PackagingRow[]>(INITIAL_PACKAGING_ROWS);
+  // Persisted so dispatches created via "+ New Dispatch" (and packaging/QC
+  // progress) survive a page reload, matching the persisted `records`.
+  const [packagingRows, setPackagingRows] = usePersistedState<PackagingRow[]>("dispatch-packaging-rows", INITIAL_PACKAGING_ROWS);
   const [flightQCStates, setFlightQCStates] = useState<Map<string, FlightQCData>>(
     new Map([["BS-101", { qcState: "done", qcCheckedAt: "08:00 AM" }]])
   );
@@ -941,6 +945,7 @@ export default function Dispatch() {
               <tr>
                 <th className="p-3 text-left font-semibold">Dep Time</th>
                 <th className="p-3 text-left font-semibold">Flight</th>
+                <th className="p-3 text-left font-semibold">Dispatch ID</th>
                 <th className="p-3 text-left font-semibold">Order</th>
                 <th className="p-3 text-left font-semibold">Production</th>
                 <th className="p-3 text-left font-semibold">Meal Type</th>
@@ -956,7 +961,7 @@ export default function Dispatch() {
             {groupedPRDs.length === 0 ? (
               <tbody>
                 <tr>
-                  <td colSpan={11} className="p-10 text-center text-muted-foreground text-sm">
+                  <td colSpan={12} className="p-10 text-center text-muted-foreground text-sm">
                     No packaging orders match the selected filters.
                   </td>
                 </tr>
@@ -1022,6 +1027,27 @@ export default function Dispatch() {
                             {isFirstInFlight && (
                               <td rowSpan={flightRowSpan} className="p-3 font-semibold text-sm align-middle border-r border-border/20 whitespace-nowrap">
                                 {flightGroup.flight}
+                              </td>
+                            )}
+                            {isFirstInFlight && (
+                              <td rowSpan={flightRowSpan} className="p-3 align-middle border-r border-border/20">
+                                {(() => {
+                                  const dspId = flightGroup.rows.find((r) => r.dspRef)?.dspRef;
+                                  if (!dspId) return <span className="text-xs text-muted-foreground">—</span>;
+                                  const hasRecord = records.some((rec) => rec.id === dspId);
+                                  return hasRecord ? (
+                                    <button
+                                      type="button"
+                                      className="text-xs font-mono font-semibold text-primary hover:underline whitespace-nowrap"
+                                      title="View dispatch details"
+                                      onClick={() => setViewRecord(records.find((rec) => rec.id === dspId)!)}
+                                    >
+                                      {dspId}
+                                    </button>
+                                  ) : (
+                                    <span className="text-xs font-mono font-semibold text-foreground whitespace-nowrap">{dspId}</span>
+                                  );
+                                })()}
                               </td>
                             )}
                             {isFirstInOrder && (
@@ -1097,11 +1123,13 @@ export default function Dispatch() {
                               <td rowSpan={flightRowSpan} className="p-3 align-middle border-l border-border/20">
                                 <div className="flex items-center gap-2 flex-wrap">
                                   <Button
-                                    size="sm"
-                                    className="h-7 px-3 text-xs bg-navy text-navy-foreground hover:opacity-90 shrink-0"
+                                    size="icon"
+                                    title="View"
+                                    aria-label="View"
+                                    className="h-7 w-7 bg-navy text-navy-foreground hover:opacity-90 shrink-0"
                                     onClick={() => setViewPackagingRow(flightGroup.rows[0])}
                                   >
-                                    <Eye className="h-3 w-3 mr-1" /> View
+                                    <Eye className="h-3.5 w-3.5" />
                                   </Button>
                                   {flightQCState !== "done" && flightGroup.rows.some((r) => r.packagingStatus === "Ready for Packaging") && (
                                     <Button
@@ -1756,8 +1784,12 @@ export default function Dispatch() {
               const { detail, trail, notifiedAirport } = viewRecord;
               const bakeryTotal    = detail.bakery.reduce((s, b) => s + b.qty, 0);
               const amenitiesTotal = detail.amenities.reduce((s, a) => s + a.qty, 0);
-              const fk = detail.flightKitchen;
               const fs = detail.foodSafety;
+              // Flight Kitchen meals are derived from the packaging rows linked to
+              // this dispatch (dspRef) — the same dataset shown in the table — rather
+              // than a standalone figure stored on the record.
+              const linkedRows = packagingRows.filter((r) => r.dspRef === viewRecord.id);
+              const mealsTotal = linkedRows.reduce((s, r) => s + r.qty, 0);
               return (
                 <>
                   <div>
@@ -1788,15 +1820,22 @@ export default function Dispatch() {
                   <div>
                     <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-slate-500 mb-2">
                       <ChefHat className="h-3.5 w-3.5" /> Flight Kitchen
-                      <span className="ml-auto font-semibold text-slate-700 normal-case tracking-normal">{fk.totalMeals.toLocaleString()} total meals</span>
+                      <span className="ml-auto font-semibold text-slate-700 normal-case tracking-normal">{mealsTotal.toLocaleString()} total meals</span>
                     </div>
                     <div className="rounded-lg border border-border overflow-hidden">
-                      <div className="flex items-center justify-between px-3 py-2 text-sm">
-                        <span className="text-slate-700">Lunch</span><span className="font-semibold">{fk.lunch.toLocaleString()}</span>
-                      </div>
-                      <div className="flex items-center justify-between px-3 py-2 text-sm border-t border-border">
-                        <span className="text-slate-700">Breakfast</span><span className="font-semibold">{fk.breakfast.toLocaleString()}</span>
-                      </div>
+                      {linkedRows.length === 0 ? (
+                        <div className="px-3 py-2 text-sm text-muted-foreground">No linked packaging rows.</div>
+                      ) : (
+                        linkedRows.map((r, i) => (
+                          <div key={r.id} className={`flex items-center justify-between gap-3 px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
+                            <div className="min-w-0">
+                              <div className="text-slate-700 truncate">{r.mealName}</div>
+                              <div className="text-xs text-slate-400">{r.mealType} · {r.section}</div>
+                            </div>
+                            <span className="font-semibold shrink-0">{r.qty.toLocaleString()}</span>
+                          </div>
+                        ))
+                      )}
                     </div>
                   </div>
 

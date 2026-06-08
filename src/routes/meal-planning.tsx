@@ -12,6 +12,20 @@ import { Plus, Info, ChevronRight, ArrowLeft } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useMealSlots } from "@/lib/meal-slot-settings";
+import { resolveItemProfile } from "@/lib/item-profiles";
+
+// Resolve a meal item's serving weight/kcal. The Item Profile (config-item) is
+// the source of truth when configured; the static FOOD_ITEMS/DESSERT_ITEMS entry
+// is the fallback for dishes not yet in the profile master.
+function withProfile(found?: { name: string; weight: number; calories: number }) {
+  if (!found) return { name: "", weight: 0, calories: 0 };
+  const p = resolveItemProfile(found.name);
+  return {
+    name: found.name,
+    weight: p?.weightG ?? found.weight,
+    calories: p?.kcal ?? found.calories,
+  };
+}
 
 interface MealItem {
   name: string;
@@ -932,7 +946,7 @@ export default function MealPlanning() {
                                   const found = (FOOD_ITEMS[type] || []).find((fi) => fi.name === e.target.value);
                                   const copy = { ...createData };
                                   const updated = copy.choiceItems[activeChoiceForItems][type].map((it, i) =>
-                                    i === itemIdx ? (found ? { name: found.name, weight: found.weight, calories: found.calories } : { name: "", weight: 0, calories: 0 }) : it
+                                    i === itemIdx ? (withProfile(found)) : it
                                   );
                                   copy.choiceItems = [
                                     activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
@@ -1133,7 +1147,7 @@ export default function MealPlanning() {
                                         const found = (FOOD_ITEMS[type] || []).find((fi) => fi.name === e.target.value);
                                         const copy = { ...createData };
                                         const updatedSMs = (copy.specialMealsByType[type] || []).map((sm, si) =>
-                                          si === smIdx ? { ...sm, items: (sm.items || []).map((it, ii) => ii === itemIdx ? (found ? { name: found.name, weight: found.weight, calories: found.calories } : { name: "", weight: 0, calories: 0 }) : it) } : sm
+                                          si === smIdx ? { ...sm, items: (sm.items || []).map((it, ii) => ii === itemIdx ? (withProfile(found)) : it) } : sm
                                         );
                                         copy.specialMealsByType = { ...copy.specialMealsByType, [type]: updatedSMs };
                                         setCreateData(copy);
@@ -1264,7 +1278,7 @@ export default function MealPlanning() {
                                               setPendingSpecialMeal({
                                                 ...pendingSpecialMeal,
                                                 items: (pendingSpecialMeal.items || []).map((it, ii) =>
-                                                  ii === itemIdx ? (found ? { name: found.name, weight: found.weight, calories: found.calories } : { name: "", weight: 0, calories: 0 }) : it
+                                                  ii === itemIdx ? (withProfile(found)) : it
                                                 ),
                                               });
                                             }}
@@ -1353,7 +1367,7 @@ export default function MealPlanning() {
                                       copy.dessertByType = {
                                         ...copy.dessertByType,
                                         [type]: copy.dessertByType[type].map((it, i) =>
-                                          i === idx ? (found ? { name: found.name, weight: found.weight, calories: found.calories } : { name: "", weight: 0, calories: 0 }) : it
+                                          i === idx ? (withProfile(found)) : it
                                         ),
                                       };
                                       setCreateData(copy);

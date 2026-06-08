@@ -57,7 +57,7 @@ const SEED_ELEMENTS: Record<string, RbacElement[]> = {
     { id: "kpi-pos", label: "Pending POs (KPI)", kind: "kpi" },
     { id: "kpi-inv", label: "Inventory Alerts (KPI)", kind: "kpi" },
     { id: "kpi-dispatch", label: "Dispatch Active (KPI)", kind: "kpi" },
-    { id: "kpi-cost", label: "Daily Cost (KPI)", kind: "kpi" },
+    { id: "kpi-cost", label: "Stock Value (KPI)", kind: "kpi" },
   ],
   "/order-management": [
     { id: "action-create", label: "Create Order (button)", kind: "action" },
