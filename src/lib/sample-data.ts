@@ -1640,6 +1640,10 @@ export type ItemMaster = {
   storage?: "Dry" | "Cold" | "Frozen";
   /** Cost price per UoM in BDT. Used to prefill rate fields across modules. */
   costPrice?: number;
+  /** Default serving weight in grams. Flows to Meal Planning meal items. */
+  weightG?: number;
+  /** Default energy per serving in kcal. Flows to Meal Planning meal items. */
+  kcal?: number;
   /** Per-item allocation method. Perishables → FEFO, shelf-stable → FIFO. */
   allocationMethod?: AllocationMethod;
   /** Office that owns the default warehouse (id from `offices`). */

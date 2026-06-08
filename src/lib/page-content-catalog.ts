@@ -31,7 +31,7 @@ const SRC: Record<string, Group> = {
       ["kpi-flights", "Flights Today"], ["kpi-meals", "Meals Prepared"],
       ["kpi-delayed", "Delayed Flights"], ["kpi-qc", "QC Issues"],
       ["kpi-pos", "Pending POs"], ["kpi-inv", "Inventory Alerts"],
-      ["kpi-dispatch", "Dispatch Active"], ["kpi-cost", "Daily Cost"],
+      ["kpi-dispatch", "Dispatch Active"], ["kpi-cost", "Stock Value"],
     ],
     actions: [["action-export-report", "Export Report"]],
     sections: [

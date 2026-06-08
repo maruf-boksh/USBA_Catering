@@ -279,7 +279,7 @@ function RfqFields({
 
         <div className="mb-6">
           <Label className="text-xs uppercase tracking-wider text-muted-foreground mb-2 block">
-            Invite Suppliers {invited.length > 0 && <span className="text-foreground">({invited.length} selected)</span>}
+            Select Suppliers {invited.length > 0 && <span className="text-foreground">({invited.length} selected)</span>}
           </Label>
           <Select
             mode="multiple"

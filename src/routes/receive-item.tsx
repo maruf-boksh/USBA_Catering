@@ -72,7 +72,7 @@ function wfGRNToRows(grn: WfGRN): GRNRow[] {
 
 export default function ReceiveItem() {
   const wf = useWorkflow();
-  const { wfPurchaseOrders, wfRequisitions, demands, addGRN, updateDemandStatus, applyStockDeltas, grns } = wf;
+  const { wfPurchaseOrders, wfRequisitions, demands, addGRN, updateDemandStatus, grns } = wf;
 
   const [grnOpen, setGrnOpen] = useState(false);
   const [selectedPORef, setSelectedPORef] = useState("");
@@ -171,18 +171,18 @@ export default function ReceiveItem() {
 
     addGRN(grn);
 
-    // Apply stock deltas for accepted lines
-    const acceptedDeltas = lines
-      .filter(l => l.qcStatus === "Accepted")
-      .map(l => ({ itemId: l.itemId, delta: l.qty }));
-    if (acceptedDeltas.length > 0) applyStockDeltas(acceptedDeltas);
+    // The GRN itself is the purchase's stock-IN source — the Stock Overview
+    // ledger reads accepted GRN lines directly (see lib/stock-ledger.ts), so we
+    // no longer push a separate stockDelta here (that would double-count the
+    // receipt as both a GRN line and a loose delta).
+    const acceptedCount = lines.filter(l => l.qcStatus === "Accepted").length;
 
     // Fulfill the linked demand
     if (linkedDemand) {
       updateDemandStatus(linkedDemand.id, "Fulfilled", { grnRef: grnId });
       toast.success(`GRN ${grnId} saved. Demand ${linkedDemand.id} fulfilled. Stock updated. Kitchen notified.`);
     } else {
-      toast.success(`GRN ${grnId} saved. Stock updated for ${acceptedDeltas.length} accepted item(s).`);
+      toast.success(`GRN ${grnId} saved. Stock updated for ${acceptedCount} accepted item(s).`);
     }
 
     // Reset form

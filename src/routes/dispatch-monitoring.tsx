@@ -18,10 +18,46 @@ import {
   AlertOctagon, AlertTriangle, PlaneTakeoff, PlaneLanding,
   Clock, User, CheckCircle2, Eye, Smartphone, ChevronRight, QrCode, X as CloseIcon,
 } from "lucide-react";
-import { flights } from "@/lib/sample-data";
+import { flights as FLIGHT_BOARD, seedFlightOrders } from "@/lib/sample-data";
 import { useRole } from "@/lib/roles";
 import { useWorkflow } from "@/lib/workflow-store";
 import { KpiCard } from "@/components/common/KpiCard";
+
+// Flight options for the dispatch-monitoring form. The operational flight board
+// (`FLIGHT_BOARD`) only carries a handful of flights, so we merge in every
+// distinct flight number from the order book (`seedFlightOrders`) — deduped by
+// flight code — so the Flight Number dropdown has them all pre-loaded.
+type FlightOption = {
+  id: string; flight: string; sector: string; aircraft: string; dep: string; arr: string;
+  pax: number; adult: number; child: number; infant: number; crew: number;
+  type: string; window: string; duration: string; status: string;
+};
+const flights: FlightOption[] = (() => {
+  const merged: FlightOption[] = FLIGHT_BOARD.map((f) => ({ ...f }));
+  const seen = new Set(merged.map((f) => f.flight));
+  for (const o of seedFlightOrders) {
+    if (!o.flight || seen.has(o.flight)) continue;
+    seen.add(o.flight);
+    merged.push({
+      id: `MFL-${o.flight}`,
+      flight: o.flight,
+      sector: o.sector ?? "—",
+      aircraft: o.airline ?? "—",
+      dep: o.etd ?? "—",
+      arr: "—",
+      pax: o.pax ?? 0,
+      adult: o.pax ?? 0,
+      child: 0,
+      infant: 0,
+      crew: o.crew ?? 0,
+      type: "—",
+      window: o.direction ?? "—",
+      duration: "—",
+      status: o.status ?? "Scheduled",
+    });
+  }
+  return merged.sort((a, b) => a.flight.localeCompare(b.flight));
+})();
 
 // ── Constants ───────────────────────────────────────────────────────────────
 const MEAL_TYPES = ["Regular", "Vegetarian (VGML)", "Child Meal (CHML)", "Diabetic (DBML)", "Kosher (KSML)", "Crew Meal", "Special"];

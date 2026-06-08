@@ -7,14 +7,14 @@ import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Boxes, AlertTriangle, Eye, Pencil, FileText } from "lucide-react";
+import { Boxes, AlertTriangle, Eye, FileText } from "lucide-react";
 import { Select as AntSelect, Button as AntButton } from "antd";
 import { AppstoreOutlined, TagsOutlined, CloseOutlined, ProfileOutlined } from "@ant-design/icons";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
   inventory, inventoryValue, nearExpiryCount,
-  getAllocationMethod, setAllocationMethod, resolveMasterForInventory,
+  getAllocationMethod,
   isBatchTrackedForInventory, findItemProfileFor,
   subscribeAllocationMethod, getAllocationVersion,
   type BatchLot, type AllocationMethod,
@@ -22,12 +22,18 @@ import {
 import { KpiCard } from "@/components/common/KpiCard";
 import { getItemStockByWarehouse } from "@/lib/inventory-stock";
 import { useRole } from "@/lib/roles";
-import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
+import {
+  LocationPicker, LocationFilter, LocationCell, officeName, warehouseName,
+} from "@/components/common/LocationPicker";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import { useArrivalFlash } from "@/lib/arrival-flash";
 import { useWorkflow } from "@/lib/workflow-store";
+import { getStockAdjustments } from "@/lib/stock-adjustments";
+import { getItemProfiles } from "@/lib/item-profiles";
+import { buildItemLedger, itemMovementTotals, type LedgerSources, type RawMovement } from "@/lib/stock-ledger";
+import { weightedAvg, poUnitPrice, blendedOutCost, movingAverage } from "@/lib/item-cost";
 
 type BaseItem = (typeof inventory)[number];
 type Item = BaseItem & {
@@ -40,6 +46,19 @@ type Item = BaseItem & {
   itemType?: string;
   subCategory?: string;
 };
+
+// Display item-code prefixes by item type. The internal `id` (INV-####) stays
+// the join key for transfers/adjustments/GRNs/allocation; this only changes the
+// human-facing Code shown in the report.
+const CODE_PREFIX: Record<string, string> = {
+  "Finished Good": "FG",
+  "Semi-Finished Good": "SFG",
+  "Raw Material": "RM",
+  "Packaging": "PKG",
+  "Consumable": "CON",
+};
+// Unprofiled kitchen-store items are raw materials in practice, so default to RM.
+const codePrefixFor = (itemType?: string) => CODE_PREFIX[itemType ?? ""] ?? "RM";
 
 const CATEGORIES = ["Grains", "Protein", "Beverage", "Dairy", "Vegetable", "Oil", "Misc"];
 const UOM_OPTIONS = ["Kg", "Litre", "Bottle", "Unit", "Pcs", "Box", "Pack"];
@@ -115,17 +134,10 @@ export default function Inventory() {
   const [batchOpen, setBatchOpen] = useState(false);
   const [selected, setSelected] = useState<Item | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm);
-  const [outQtyOpen, setOutQtyOpen] = useState(false);
-  const [outQtyItem, setOutQtyItem] = useState<Item | null>(null);
 
   const openBatches = (item: Item) => {
     setSelected(item);
     setBatchOpen(true);
-  };
-
-  const openOutQty = (item: Item) => {
-    setOutQtyItem(item);
-    setOutQtyOpen(true);
   };
 
   // Stash a pre-filled line for the Purchase Requisition page, then navigate.
@@ -160,22 +172,39 @@ export default function Inventory() {
     navigate("/purchase-requisition");
     toast.success(`Pre-filling Purchase Requisition for ${item.name}.`);
   };
+  // Live link to the Item Profile master (config-item). Each Stock Overview row
+  // takes its configured taxonomy (type / category / sub-category), UoM, storage
+  // and cost from its profile, so editing the Item Profile flows through here.
+  const profileByName = useMemo(() => {
+    const m = new Map<string, ReturnType<typeof getItemProfiles>[number]>();
+    for (const p of getItemProfiles()) m.set(p.name.toLowerCase(), p);
+    return m;
+  }, []);
+  const profileFor = (i: Item) => profileByName.get(i.name.toLowerCase());
+  const effType = (i: Item) => profileFor(i)?.itemType ?? i.itemType ?? "";
+  const effCategory = (i: Item) => profileFor(i)?.category ?? i.category;
+  const effSubCategory = (i: Item) => profileFor(i)?.subCategory ?? i.subCategory ?? "";
+  const effUom = (i: Item) => profileFor(i)?.uom ?? i.uom;
+  const effStorage = (i: Item) => profileFor(i)?.storage ?? i.storage;
+
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
   const [filterType, setFilterType] = useState("");
   const [filterCategory, setFilterCategory] = useState("");
   const [filterSubCategory, setFilterSubCategory] = useState("");
+  const [filterStatus, setFilterStatus] = useState("");
 
-  // Cascading filter options, all derived from the live items. Item Type comes
-  // first; Category is scoped to the chosen type; Sub-category to type + category.
-  const typeOptions = Array.from(new Set(items.map((i) => i.itemType).filter(Boolean) as string[])).sort(sortStr);
+  // Cascading filter options, derived from each item's live Item Profile. Item
+  // Type comes first; Category is scoped to the chosen type; Sub-category to
+  // type + category.
+  const typeOptions = Array.from(new Set(items.map(effType).filter(Boolean) as string[])).sort(sortStr);
   const categoryOptions = Array.from(new Set(
-    items.filter((i) => !filterType || i.itemType === filterType).map((i) => i.category).filter(Boolean),
+    items.filter((i) => !filterType || effType(i) === filterType).map(effCategory).filter(Boolean),
   )).sort(sortStr);
   const subCategoryOptions = Array.from(new Set(
     items
-      .filter((i) => (!filterType || i.itemType === filterType) && (!filterCategory || i.category === filterCategory))
-      .map((i) => i.subCategory).filter(Boolean) as string[],
+      .filter((i) => (!filterType || effType(i) === filterType) && (!filterCategory || effCategory(i) === filterCategory))
+      .map(effSubCategory).filter(Boolean) as string[],
   )).sort(sortStr);
 
   const f = (field: keyof FormState, value: string) =>
@@ -285,40 +314,89 @@ export default function Inventory() {
 
   const lowStockCount = items.filter((i) => i.status === "Low").length;
   const criticalCount = items.filter((i) => i.status === "Critical").length;
+  const okCount = items.filter((i) => i.status === "OK").length;
 
-  // Stock movements ledger (workflow-store). Positive deltas = goods IN
-  // (received via GRN, or finished meals added on QC pass); negative deltas =
-  // goods OUT (finished meals dispatched). Aggregated per ledger key, then
-  // matched to each row by its id or name.
-  const { stockDeltas } = useWorkflow();
-  const movementByKey = useMemo(() => {
-    const m = new Map<string, { inQty: number; outQty: number }>();
-    for (const d of stockDeltas) {
-      const cur = m.get(d.itemId) ?? { inQty: 0, outQty: 0 };
-      if (d.delta >= 0) cur.inQty += d.delta;
-      else cur.outQty += -d.delta;
-      m.set(d.itemId, cur);
+  // Unified stock-movement ledger. Every flow that touches an item feeds the
+  // In/Out columns and the per-item "Item Details" drill-down:
+  //   • Purchases   → accepted GRN lines        (workflow-store grns)
+  //   • Transfers   → issues out of the store   (workflow-store transferNotes)
+  //   • Adjustments → approved stock corrections (persisted stock-adjustments)
+  //   • Production / Dispatch → finished meals   (workflow-store stockDeltas)
+  const { stockDeltas, grns, transferNotes, wfPurchaseOrders } = useWorkflow();
+  const ledgerSources: LedgerSources = useMemo(
+    () => ({ grns, transferNotes, stockDeltas, adjustments: getStockAdjustments() }),
+    [grns, transferNotes, stockDeltas],
+  );
+  const movementFor = (r: Item) => itemMovementTotals(r.id, r.name, ledgerSources);
+
+  // Type-based display codes (FG-001, SFG-001, RM-001…). Numbered per type over
+  // the full item set (sorted by id) so the sequence is stable regardless of the
+  // active filter/search. Internal `id` is unchanged.
+  const codeByItemId = useMemo(() => {
+    const counters: Record<string, number> = {};
+    const map = new Map<string, string>();
+    for (const it of [...items].sort((a, b) => a.id.localeCompare(b.id))) {
+      const prefix = codePrefixFor(effType(it));
+      counters[prefix] = (counters[prefix] ?? 0) + 1;
+      map.set(it.id, `${prefix}-${String(counters[prefix]).padStart(3, "0")}`);
     }
-    return m;
-  }, [stockDeltas]);
-  const movementFor = (r: Item) => {
-    const byId = movementByKey.get(r.id);
-    const byName = movementByKey.get(r.name);
-    return {
-      inQty: (byId?.inQty ?? 0) + (byName?.inQty ?? 0),
-      outQty: (byId?.outQty ?? 0) + (byName?.outQty ?? 0),
+    return map;
+  }, [items]);
+  const displayCode = (it: Item) => codeByItemId.get(it.id) ?? it.id;
+
+  // Item Details ledger modal.
+  const [ledgerOpen, setLedgerOpen] = useState(false);
+  const [ledgerItem, setLedgerItem] = useState<Item | null>(null);
+  const openLedger = (item: Item) => { setLedgerItem(item); setLedgerOpen(true); };
+
+  // Most recent batch cost (fallback when an item has no weighted-average basis).
+  const recentBatchCost = (item: Item) =>
+    [...item.batches].sort((a, b) => b.receivedOn.localeCompare(a.receivedOn))[0]?.costPrice ?? 0;
+  // Item's current total stock across warehouses (mirrors the Stock cell).
+  const totalStockFor = (item: Item) =>
+    item.stock + getItemStockByWarehouse(item.name).slice(1).reduce((s, w) => s + w.stock, 0);
+
+  /**
+   * Per-item costing context for the ledger. Batch items cost issues by FIFO/
+   * FEFO drawdown (`blendedOutCost`); single items by moving weighted-average
+   * (`wac`). Purchases price at their PO line rate. Returns the opening-row cost,
+   * a per-movement cost resolver, and the closing valuation.
+   */
+  const costContextFor = (item: Item) => {
+    const isBatch = isBatchTrackedForInventory(item.id);
+    const avg = weightedAvg(item.batches.map((b) => ({ qty: b.qty, costPrice: b.costPrice })));
+    const baseCost = avg > 0 ? avg : recentBatchCost(item);
+    const closing = totalStockFor(item);
+
+    const purchases = grns.flatMap((g) =>
+      g.lines
+        .filter((l) => l.qcStatus === "Accepted" &&
+          (l.itemId === item.id || l.name.toLowerCase() === item.name.toLowerCase()))
+        .map((l) => ({ qty: l.qty, rate: poUnitPrice(g.poRef, item.id, item.name, wfPurchaseOrders) ?? baseCost })),
+    );
+    const totals = itemMovementTotals(item.id, item.name, ledgerSources);
+    const openingQty = closing - totals.inQty + totals.outQty;
+    const wac = movingAverage(openingQty, baseCost, purchases);
+
+    const unitCostFor = (m: RawMovement): number => {
+      if (m.type === "Purchase (GRN)") return poUnitPrice(m.reference, item.id, item.name, wfPurchaseOrders) ?? baseCost;
+      if (m.outQty > 0) return isBatch ? blendedOutCost(item.id, m.outQty, baseCost) : wac;
+      return isBatch ? baseCost : wac; // production / adjustment-increase IN
     };
+    const openingCost = isBatch ? baseCost : wac;
+    const closingCost = isBatch ? baseCost : wac;
+    return { unitCostFor, openingCost, closing, closingValue: closing * closingCost };
   };
 
   const cols: Column<Item>[] = [
-    { key: "id", header: "Code" },
+    { key: "id", header: "Code", render: (r) => <span className="font-mono text-xs">{displayCode(r)}</span> },
     { key: "name", header: "Item" },
     {
       key: "officeId" as keyof Item, header: "Office / Warehouse",
       render: (r) => <LocationCell officeId={r.officeId} warehouseId={r.warehouseId} />,
     },
-    { key: "category", header: "Category" },
-    { key: "uom", header: "UOM" },
+    { key: "category", header: "Category", render: (r) => effCategory(r) },
+    { key: "uom", header: "UOM", render: (r) => effUom(r) },
     {
       key: "stock", header: "Stock",
       render: (r) => <StockCell item={r} onClick={() => openBatches(r)} />,
@@ -327,10 +405,18 @@ export default function Inventory() {
       key: "id" as keyof Item, header: "In Qty",
       render: (r) => {
         const { inQty } = movementFor(r);
+        if (inQty === 0) return <span className="text-muted-foreground tabular-nums">—</span>;
         return (
-          <span className="tabular-nums font-medium text-emerald-700">
-            {inQty > 0 ? `+${inQty.toLocaleString()}` : "—"}
-          </span>
+          <button
+            type="button"
+            onClick={() => openLedger(r)}
+            className="group inline-flex items-center text-left rounded-sm px-1 py-0.5 -mx-1 hover:bg-emerald-50 transition-colors"
+            title="Click to see the transaction ledger"
+          >
+            <span className="tabular-nums font-medium text-emerald-700 underline decoration-dotted decoration-emerald-300 underline-offset-2 group-hover:decoration-emerald-500">
+              +{inQty.toLocaleString()}
+            </span>
+          </button>
         );
       },
     },
@@ -342,9 +428,9 @@ export default function Inventory() {
         return (
           <button
             type="button"
-            onClick={() => openOutQty(r)}
+            onClick={() => openLedger(r)}
             className="group inline-flex items-center text-left rounded-sm px-1 py-0.5 -mx-1 hover:bg-rose-50 transition-colors"
-            title="Click to see outbound movements"
+            title="Click to see the transaction ledger"
           >
             <span className="tabular-nums font-medium text-rose-700 underline decoration-dotted decoration-rose-300 underline-offset-2 group-hover:decoration-rose-500">
               −{outQty.toLocaleString()}
@@ -357,7 +443,7 @@ export default function Inventory() {
     {
       key: "id" as keyof Item,
       header: "Method",
-      render: (r) => <MethodToggle inventoryId={r.id} />,
+      render: (r) => <MethodBadge inventoryId={r.id} />,
     },
     { key: "status", header: "Status", render: (r) => <StatusBadge status={r.status} /> },
   ];
@@ -365,9 +451,10 @@ export default function Inventory() {
   const filteredItems = items.filter((i) => {
     if (filterOffice && i.officeId !== filterOffice) return false;
     if (filterWarehouse && i.warehouseId !== filterWarehouse) return false;
-    if (filterType && i.itemType !== filterType) return false;
-    if (filterCategory && i.category !== filterCategory) return false;
-    if (filterSubCategory && i.subCategory !== filterSubCategory) return false;
+    if (filterType && effType(i) !== filterType) return false;
+    if (filterCategory && effCategory(i) !== filterCategory) return false;
+    if (filterSubCategory && effSubCategory(i) !== filterSubCategory) return false;
+    if (filterStatus && i.status !== filterStatus) return false;
     return true;
   });
 
@@ -390,8 +477,9 @@ export default function Inventory() {
         />
         <div data-arrival-id="inv-value">
           <KpiCard
-            label="Stock Value (FEFO)"
+            label="Stock Value"
             value={`৳ ${Math.round(inventoryValue(items)).toLocaleString()}`}
+            sub="on-hand valuation"
             icon={Boxes}
             tone="success"
           />
@@ -445,6 +533,24 @@ export default function Inventory() {
             ]}
           />
         </div>
+        {/* Status filter — All / OK / Low / Critical. */}
+        <div className="inline-flex items-center gap-1.5 bg-card border border-border rounded-lg px-2 py-1 shadow-sm">
+          <AlertTriangle className="h-3 w-3 text-muted-foreground" />
+          <span className="field-label">Status</span>
+          <AntSelect
+            value={filterStatus || ""}
+            onChange={(next: string) => setFilterStatus(next)}
+            size="small"
+            variant="borderless"
+            style={{ minWidth: 110 }}
+            options={[
+              { value: "", label: "All" },
+              { value: "OK", label: `OK (${okCount})` },
+              { value: "Low", label: `Low (${lowStockCount})` },
+              { value: "Critical", label: `Critical (${criticalCount})` },
+            ]}
+          />
+        </div>
         {(filterType || filterCategory || filterSubCategory) && (
           <AntButton
             size="small"
@@ -476,16 +582,6 @@ export default function Inventory() {
               title="View"
             >
               <Eye className="h-4 w-4" />
-            </Button>
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-8 w-8 text-muted-foreground hover:text-primary"
-              onClick={() => openEdit(row)}
-              aria-label={`Edit ${row.name}`}
-              title="Edit"
-            >
-              <Pencil className="h-4 w-4" />
             </Button>
             {(row.status === "Low" || row.status === "Critical") && (
               <Button
@@ -646,12 +742,14 @@ export default function Inventory() {
               <div>
                 {(
                   [
-                    ["Code", selected.id],
-                    ["Category", selected.category],
-                    ["UOM", selected.uom],
+                    ["Code", displayCode(selected)],
+                    ["Item Type", effType(selected) || "—"],
+                    ["Category", effCategory(selected)],
+                    ["Sub-category", effSubCategory(selected) || "—"],
+                    ["UOM", effUom(selected)],
                     ["Current Stock", String(selected.stock)],
                     ["Reorder Level", String(selected.reorder)],
-                    ["Storage", selected.storage],
+                    ["Storage", effStorage(selected)],
                     ["Status", selected.status],
                   ] as [string, string][]
                 ).map(([label, value]) => (
@@ -695,67 +793,100 @@ export default function Inventory() {
         </DialogContent>
       </Dialog>
 
-      {/* Out Qty Dialog — opens when an Out Qty cell is clicked */}
-      <Dialog open={outQtyOpen} onOpenChange={setOutQtyOpen}>
-        <DialogContent className="max-w-lg max-h-[80vh] overflow-y-auto">
+      {/* Item Details — full transaction ledger, opens from In/Out Qty cells */}
+      <Dialog open={ledgerOpen} onOpenChange={setLedgerOpen}>
+        <DialogContent className="max-w-5xl max-h-[88vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>
-              Out Qty — {outQtyItem?.name}
-              <span className="ml-2 font-mono text-xs text-muted-foreground font-normal">{outQtyItem?.id}</span>
-            </DialogTitle>
+            <DialogTitle>Item Details</DialogTitle>
           </DialogHeader>
-          {outQtyItem && (() => {
-            const movements = stockDeltas.filter(
-              (d) => d.delta < 0 && (d.itemId === outQtyItem.id || d.itemId === outQtyItem.name)
+          {ledgerItem && (() => {
+            const cost = costContextFor(ledgerItem);
+            const ledger = buildItemLedger(
+              ledgerItem.id, ledgerItem.name,
+              cost.closing, cost.openingCost, cost.unitCostFor,
+              ledgerSources,
             );
-            const total = movements.reduce((s, d) => s + (-d.delta), 0);
+            // Column totals INCLUDE the opening-balance row so they foot to the
+            // closing balance: (Total In) − (Total Out) = Closing Balance.
+            const colIn = ledger.rows.reduce((s, r) => s + r.inQty, 0);
+            const colOut = ledger.rows.reduce((s, r) => s + r.outQty, 0);
+            const fmtMoney = (n: number) =>
+              n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
             return (
-              <div className="space-y-3">
-                <div className="flex items-center gap-6 text-sm pb-3 border-b border-border">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Out Qty</div>
-                    <div className="text-lg font-bold tabular-nums mt-0.5 text-rose-700">
-                      −{total.toLocaleString()} {outQtyItem.uom}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Movements</div>
-                    <div className="text-sm mt-0.5 tabular-nums font-semibold">{movements.length}</div>
-                  </div>
+              <div className="text-sm space-y-4">
+                <div className="flex flex-wrap items-center gap-x-8 gap-y-1">
+                  <span><span className="font-semibold">Item Code :</span> <span className="font-mono">{displayCode(ledgerItem)}</span></span>
+                  <span><span className="font-semibold">Item Name :</span> {ledgerItem.name}</span>
+                  <span><span className="font-semibold">Uom :</span> {ledgerItem.uom}</span>
                 </div>
-                {movements.length > 0 ? (
-                  <div className="rounded-md border border-border overflow-hidden">
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="bg-slate-100 text-slate-600 border-b border-border">
-                          <th className="px-3 py-2 text-left font-semibold">#</th>
-                          <th className="px-3 py-2 text-left font-semibold">Item</th>
-                          <th className="px-3 py-2 text-right font-semibold">Out Qty</th>
+
+                <div className="border border-border rounded-md overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-sky-50 text-slate-700 border-b border-border">
+                      <tr>
+                        <th className="px-2.5 py-2 text-left font-semibold">Date</th>
+                        <th className="px-2.5 py-2 text-left font-semibold">Reference</th>
+                        <th className="px-2.5 py-2 text-left font-semibold">Office</th>
+                        <th className="px-2.5 py-2 text-left font-semibold">Warehouse</th>
+                        <th className="px-2.5 py-2 text-left font-semibold">Transaction Type</th>
+                        <th className="px-2.5 py-2 text-right font-semibold">In Quantity</th>
+                        <th className="px-2.5 py-2 text-right font-semibold">Out Quantity</th>
+                        <th className="px-2.5 py-2 text-right font-semibold">Unit Cost</th>
+                        <th className="px-2.5 py-2 text-right font-semibold whitespace-nowrap">Balance ( QTY )</th>
+                        <th className="px-2.5 py-2 text-right font-semibold whitespace-nowrap">Value ( ৳ )</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ledger.rows.map((row, i) => (
+                        <tr key={i} className="border-b border-border/50 hover:bg-muted/20">
+                          <td className="px-2.5 py-2 tabular-nums whitespace-nowrap">{row.date}</td>
+                          <td className="px-2.5 py-2 whitespace-nowrap">{row.reference}</td>
+                          <td className="px-2.5 py-2 whitespace-nowrap text-muted-foreground">
+                            {row.officeId ? officeName(row.officeId) : ""}
+                          </td>
+                          <td className="px-2.5 py-2 whitespace-nowrap text-muted-foreground">
+                            {row.warehouseId ? warehouseName(row.warehouseId) : ""}
+                          </td>
+                          <td className="px-2.5 py-2 whitespace-nowrap">{row.type}</td>
+                          <td className="px-2.5 py-2 text-right tabular-nums text-emerald-700">
+                            {row.inQty ? row.inQty.toLocaleString() : "0.00"}
+                          </td>
+                          <td className="px-2.5 py-2 text-right tabular-nums text-rose-700">
+                            {row.outQty ? `-${row.outQty.toLocaleString()}` : "0.00"}
+                          </td>
+                          <td className="px-2.5 py-2 text-right tabular-nums text-muted-foreground">
+                            {fmtMoney(row.unitCost)}
+                          </td>
+                          <td className="px-2.5 py-2 text-right tabular-nums font-medium whitespace-nowrap">
+                            {row.balance.toLocaleString()}
+                          </td>
+                          <td className="px-2.5 py-2 text-right tabular-nums whitespace-nowrap">
+                            {fmtMoney(row.value)}
+                          </td>
                         </tr>
-                      </thead>
-                      <tbody>
-                        {movements.map((m, i) => (
-                          <tr key={i} className="border-b border-border/50 hover:bg-muted/20">
-                            <td className="px-3 py-2 text-muted-foreground">{i + 1}</td>
-                            <td className="px-3 py-2 font-medium">{m.itemId}</td>
-                            <td className="px-3 py-2 text-right font-semibold text-rose-700">
-                              −{(-m.delta).toLocaleString()}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div className="rounded-md border border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">
-                    No outbound movements recorded for this item.
-                  </div>
-                )}
+                      ))}
+                      <tr className="bg-muted/40 font-semibold border-t border-border">
+                        <td className="px-2.5 py-2 text-right" colSpan={5}>
+                          <span className="uppercase text-[10px] tracking-wider">Total</span>
+                        </td>
+                        <td className="px-2.5 py-2 text-right tabular-nums text-emerald-700">
+                          {colIn.toLocaleString()}
+                        </td>
+                        <td className="px-2.5 py-2 text-right tabular-nums text-rose-700">
+                          {colOut ? `-${colOut.toLocaleString()}` : "0.00"}
+                        </td>
+                        <td className="px-2.5 py-2 text-right uppercase text-[10px] tracking-wider whitespace-nowrap">Closing Balance</td>
+                        <td className="px-2.5 py-2 text-right tabular-nums whitespace-nowrap">{ledger.closing.toLocaleString()}</td>
+                        <td className="px-2.5 py-2 text-right tabular-nums whitespace-nowrap">{fmtMoney(cost.closingValue)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
               </div>
             );
           })()}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOutQtyOpen(false)}>Close</Button>
+            <Button variant="outline" onClick={() => setLedgerOpen(false)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -856,11 +987,10 @@ function StockCell({ item, onClick }: { item: Item; onClick: () => void }) {
   );
 }
 
-function MethodToggle({ inventoryId }: { inventoryId: string }) {
-  const master = resolveMasterForInventory(inventoryId);
-  const current = getAllocationMethod(inventoryId);
+// Read-only allocation method (configured on the Item Profile). Shows the
+// active FEFO/FIFO, or N/A for single (non-batch) items.
+function MethodBadge({ inventoryId }: { inventoryId: string }) {
   const batched = isBatchTrackedForInventory(inventoryId);
-
   if (!batched) {
     return (
       <span
@@ -871,50 +1001,14 @@ function MethodToggle({ inventoryId }: { inventoryId: string }) {
       </span>
     );
   }
-
-  if (!master) {
-    return (
-      <span
-        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold border border-border bg-muted/40 text-muted-foreground"
-        title="No linked Item Profile — method cannot be customized."
-      >
-        {current}
-      </span>
-    );
-  }
-
-  const setMethod = (m: AllocationMethod) => {
-    if (m === current) return;
-    setAllocationMethod(master.id, m);
-    toast.success(`${master.name} switched to ${m}.`);
-  };
-
+  const method = getAllocationMethod(inventoryId);
   return (
-    <div
-      className="inline-flex items-center rounded-md border border-input bg-background p-0.5 shadow-sm"
-      role="group"
-      aria-label={`Allocation method for ${master.name}`}
+    <span
+      className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold border border-primary/30 bg-primary/10 text-primary"
+      title={method === "FEFO" ? "First-Expiry-First-Out" : "First-In-First-Out"}
     >
-      {(["FEFO", "FIFO"] as const).map((m) => {
-        const active = current === m;
-        return (
-          <button
-            key={m}
-            type="button"
-            onClick={() => setMethod(m)}
-            className={cn(
-              "px-2 py-0.5 text-[10px] font-semibold rounded-sm transition-colors",
-              active
-                ? "bg-primary/10 text-primary"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-            title={m === "FEFO" ? "First-Expiry-First-Out" : "First-In-First-Out"}
-          >
-            {m}
-          </button>
-        );
-      })}
-    </div>
+      {method}
+    </span>
   );
 }
 

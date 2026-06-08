@@ -20,6 +20,7 @@ import {
   FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, Layers, UserCog,
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
   PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane, MailQuestion, PlaneLanding, PlaneTakeoff,
+  BadgeDollarSign,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -31,12 +32,15 @@ import { inventory, warehouses } from "@/lib/sample-data";
 import { getItemStock } from "@/lib/inventory-stock";
 import { useFlightOrders, updateFlightOrdersWhere, type FlightOrder } from "@/lib/flight-orders-store";
 import { getRfqs, setRfqStatus } from "@/lib/rfqs";
+import { getQuotations, setQuotationStatus } from "@/lib/quotations";
+import { getStockAdjustments, setStockAdjustmentStatus } from "@/lib/stock-adjustments";
 import { useRole } from "@/lib/roles";
 
 type Category =
   | "Order Management"
   | "Demand Request"
   | "Request for Quotation"
+  | "Quotation"
   | "Purchase Requisition"
   | "Purchase Order"
   | "Goods Receipt"
@@ -51,6 +55,7 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Order Management",         label: "Order Management",   icon: Plane           },
   { key: "Demand Request",       label: "Demand Req.",        icon: FileSearch      },
   { key: "Request for Quotation", label: "RFQ",               icon: MailQuestion    },
+  { key: "Quotation",            label: "Quotations",         icon: BadgeDollarSign },
   { key: "Purchase Requisition", label: "Purchase Req.",      icon: FileText        },
   { key: "Purchase Order",       label: "Purchase Orders",    icon: ShoppingCart    },
   { key: "Goods Receipt",        label: "Goods Receipts",     icon: Truck           },
@@ -142,12 +147,6 @@ const SEED: ApprovalItem[] = [
       { name: "Meal Box", qty: 500, uom: "pcs" },
     ] },
 
-  // Stock Adjustment
-  { id: "AP-1401", category: "Stock Adjustment",     refId: "SA-2026-019", title: "Spice Mix variance",                      requestedBy: "F. Begum",   requestedAt: "2026-05-19 07:55", summary: "Physical count -2.4 Kg vs system — wastage write-off",    status: "Pending",
-    lines: [
-      { name: "Spice Mix", qty: -2.4, uom: "Kg", note: "Counted 47.6 vs system 50.0 — wastage write-off" },
-    ] },
-
   // Production Order
   { id: "AP-1501", category: "Production Order",     refId: "PRO-2026-000031", title: "Chicken Biryani batch",                 requestedBy: "N. Hossen",  requestedAt: "2026-05-19 13:15", summary: "280 portions — ready for QC sign-off",                    itemsCount: 1, status: "Pending",
     lines: [
@@ -219,6 +218,16 @@ export default function ApprovalManagementPage() {
   // RFQ approve/reject decisions made here. Approve also flips the RFQ's status
   // to "Approved" in the persisted RFQ table (reflected on the RFQ screen).
   const [rfqDecisions, setRfqDecisions] = useState<
+    Record<string, { status: ApprovalStatus; by: string; at: string; reason?: string }>
+  >({});
+  // Quotation approve/reject decisions made here. Approve also flips the
+  // quotation's status to "Approved" in the persisted Quotation table.
+  const [quotationDecisions, setQuotationDecisions] = useState<
+    Record<string, { status: ApprovalStatus; by: string; at: string; reason?: string }>
+  >({});
+  // Stock Adjustment approve/reject decisions made here. Approve also flips the
+  // adjustment's status to "Approved" in the persisted Stock Adjustment table.
+  const [stockAdjDecisions, setStockAdjDecisions] = useState<
     Record<string, { status: ApprovalStatus; by: string; at: string; reason?: string }>
   >({});
   const [activeTab, setActiveTab] = useState<Category | "all">(
@@ -340,9 +349,63 @@ export default function ApprovalManagementPage() {
       });
   }, [rfqDecisions]);
 
+  // Project Quotations into ApprovalItem shape. Only Pending quotations — or
+  // ones decided here this session — surface. Approving flips the quotation to
+  // "Approved" in the persisted table; the decision drives the projection.
+  const quotationItems: ApprovalItem[] = useMemo(() => {
+    return getQuotations()
+      .filter((q) => q.status === "Pending" || quotationDecisions[q.id])
+      .map((q) => {
+        const decision = quotationDecisions[q.id];
+        return {
+          id: `QT-AP-${q.id}`,
+          category: "Quotation" as Category,
+          refId: q.id,
+          title: `Quotation — ${q.supplier}`,
+          requestedBy: "Procurement",
+          requestedAt: q.date,
+          summary: `${q.lines.length} item${q.lines.length === 1 ? "" : "s"} · ${q.rfqRef} · valid till ${q.validity}`,
+          amount: q.total,
+          itemsCount: q.lines.length,
+          status: decision ? decision.status : "Pending",
+          processedBy: decision?.by,
+          processedAt: decision?.at,
+          rejectionReason: decision?.reason,
+          lines: q.lines.map((l) => ({ name: l.itemName, qty: l.qty, uom: l.uom, note: `৳ ${l.unitPrice.toLocaleString()}/${l.uom}` })),
+        };
+      });
+  }, [quotationDecisions]);
+
+  // Project Stock Adjustments into ApprovalItem shape. Only ones still
+  // "Pending Approval" — or decided here this session — surface. Approving
+  // flips the adjustment to "Approved" in the persisted table.
+  const stockAdjItems: ApprovalItem[] = useMemo(() => {
+    return getStockAdjustments()
+      .filter((a) => a.status === "Pending Approval" || stockAdjDecisions[a.id])
+      .map((a) => {
+        const decision = stockAdjDecisions[a.id];
+        const sign = a.adjustType === "Increase" ? "+" : "−";
+        return {
+          id: `SA-AP-${a.id}`,
+          category: "Stock Adjustment" as Category,
+          refId: a.id,
+          title: `${a.reason} — ${a.item}`,
+          requestedBy: a.adjustedBy,
+          requestedAt: a.date,
+          summary: `${sign}${a.adjustQty} ${a.uom} · ${a.item}${a.reference ? ` · ${a.reference}` : ""}${a.remarks ? ` — ${a.remarks}` : ""}`,
+          itemsCount: 1,
+          status: decision ? decision.status : "Pending",
+          processedBy: decision?.by,
+          processedAt: decision?.at,
+          rejectionReason: decision?.reason,
+          lines: [{ name: a.item, qty: a.adjustQty, uom: a.uom, note: `${a.adjustType} · ${a.reason}` }],
+        };
+      });
+  }, [stockAdjDecisions]);
+
   const allItems = useMemo(
-    () => [...flightOrderItems, ...demandItems, ...rfqItems, ...items],
-    [flightOrderItems, demandItems, rfqItems, items],
+    () => [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...items],
+    [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, items],
   );
 
   const counts = useMemo(() => {
@@ -507,6 +570,24 @@ export default function ApprovalManagementPage() {
       if (!silent) toast.success(`${it.refId} approved.`);
       return;
     }
+    if (it.category === "Quotation") {
+      setQuotationStatus(it.refId, "Approved");
+      setQuotationDecisions((p) => ({
+        ...p,
+        [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
+      }));
+      if (!silent) toast.success(`${it.refId} approved.`);
+      return;
+    }
+    if (it.category === "Stock Adjustment") {
+      setStockAdjustmentStatus(it.refId, "Approved");
+      setStockAdjDecisions((p) => ({
+        ...p,
+        [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
+      }));
+      if (!silent) toast.success(`${it.refId} approved.`);
+      return;
+    }
     setItems((p) =>
       p.map((x) =>
         x.id === it.id
@@ -541,6 +622,18 @@ export default function ApprovalManagementPage() {
     } else if (it.category === "Request for Quotation") {
       setRfqStatus(it.refId, "Rejected");
       setRfqDecisions((p) => ({
+        ...p,
+        [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+      }));
+    } else if (it.category === "Quotation") {
+      setQuotationStatus(it.refId, "Rejected");
+      setQuotationDecisions((p) => ({
+        ...p,
+        [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+      }));
+    } else if (it.category === "Stock Adjustment") {
+      setStockAdjustmentStatus(it.refId, "Rejected");
+      setStockAdjDecisions((p) => ({
         ...p,
         [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
@@ -703,6 +796,18 @@ export default function ApprovalManagementPage() {
     } else if (detailItem.category === "Request for Quotation") {
       setRfqStatus(detailItem.refId, "Rejected");
       setRfqDecisions((p) => ({
+        ...p,
+        [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+      }));
+    } else if (detailItem.category === "Quotation") {
+      setQuotationStatus(detailItem.refId, "Rejected");
+      setQuotationDecisions((p) => ({
+        ...p,
+        [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+      }));
+    } else if (detailItem.category === "Stock Adjustment") {
+      setStockAdjustmentStatus(detailItem.refId, "Rejected");
+      setStockAdjDecisions((p) => ({
         ...p,
         [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
@@ -1539,24 +1644,6 @@ export default function ApprovalManagementPage() {
                             </tbody>
                           </table>
                         </div>
-                        {detailItem.status === "Pending" && (
-                          <div className="flex justify-end mt-2">
-                            {escalateDone ? (
-                              <Button size="sm" variant="outline" disabled className="h-7 px-3 text-[11px] border-warning/40 text-warning-foreground">
-                                <CheckCircle2 className="h-3 w-3 mr-1.5" /> Escalated to Supply Chain ✓
-                              </Button>
-                            ) : (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-7 px-3 text-[11px] border-warning/40 text-warning-foreground hover:bg-warning/10"
-                                onClick={() => handleEscalateToSupplyChain(dr)}
-                              >
-                                <Share2 className="h-3 w-3 mr-1.5" /> Escalate To Supply Chain
-                              </Button>
-                            )}
-                          </div>
-                        )}
                       </div>
                     )}
                   </>
