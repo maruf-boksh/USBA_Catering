@@ -854,7 +854,13 @@ export default function Dispatch() {
       // these into its In/Out columns.
       const outDeltas = dispatchedRows
         .filter((r) => r.qty > 0)
-        .map((r) => ({ itemId: r.mealName, delta: -r.qty }));
+        .map((r) => ({
+          itemId: r.mealName,
+          delta: -r.qty,
+          date: r.date,
+          reference: r.dspRef ?? r.orderNo ?? dispatchingRecord.id,
+          label: "Dispatch",
+        }));
       if (outDeltas.length > 0) applyStockDeltas(outDeltas);
 
       const updatedRows = packagingRows.map((r) => dispatchedFlightSet.has(r.flight) ? { ...r, packagingStatus: "Dispatched" as PackagingStatus } : r);

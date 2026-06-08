@@ -169,6 +169,11 @@ export default function CookingTemp() {
       applyStockDeltas([{
         itemId: qcTarget.outputItemCode ?? qcTarget.outputItemName ?? qcTarget.id,
         delta: qcTarget.producedQty,
+        date: qcTarget.date,
+        reference: qcTarget.id,
+        officeId: qcTarget.officeId,
+        warehouseId: qcTarget.warehouseId,
+        label: "Production",
       }]);
       toast.success(`${qcTarget.id} passed QC — ${qcTarget.producedQty.toLocaleString()} units added to inventory.`);
     } else {
@@ -236,7 +241,15 @@ export default function CookingTemp() {
         qcCheckedBy: `${CURRENT_USER} (${role})`,
         completedAt: stamp, inventoryAdded: true,
       });
-      applyStockDeltas([{ itemId: qcTarget.outputItemCode ?? qcTarget.outputItemName ?? qcTarget.id, delta: qcTarget.producedQty }]);
+      applyStockDeltas([{
+        itemId: qcTarget.outputItemCode ?? qcTarget.outputItemName ?? qcTarget.id,
+        delta: qcTarget.producedQty,
+        date: qcTarget.date,
+        reference: qcTarget.id,
+        officeId: qcTarget.officeId,
+        warehouseId: qcTarget.warehouseId,
+        label: "Production",
+      }]);
       toast.success(`${qcTarget.id} passed QC — added to inventory.`);
     } else {
       updateProductionEntryStatus(qcTarget.id, "In Preparation");
