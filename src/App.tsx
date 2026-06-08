@@ -35,6 +35,7 @@ import DispatchPage from "@/routes/dispatch";
 import AirlineConsumablesPage from "@/routes/airline-consumables";
 import ConsumableUsagePage from "@/routes/consumable-usage";
 import ConsumableAllocationPage from "@/routes/consumable-allocation";
+import ConsumableReturnsPage from "@/routes/consumable-returns";
 import AirlineEquipmentsPage from "@/routes/airline-equipments";
 import EquipmentMaintenancePage from "@/routes/equipment-maintenance";
 import EquipmentReturnsPage from "@/routes/equipment-returns";
@@ -110,6 +111,7 @@ export function App() {
             <Route path="/airline-consumables" element={<AirlineConsumablesPage />} />
             <Route path="/consumable-usage" element={<ConsumableUsagePage />} />
             <Route path="/consumable-allocation" element={<ConsumableAllocationPage />} />
+            <Route path="/consumable-returns" element={<ConsumableReturnsPage />} />
             <Route path="/airline-equipments" element={<AirlineEquipmentsPage />} />
             <Route path="/equipment-maintenance" element={<EquipmentMaintenancePage />} />
             <Route path="/equipment-returns" element={<EquipmentReturnsPage />} />

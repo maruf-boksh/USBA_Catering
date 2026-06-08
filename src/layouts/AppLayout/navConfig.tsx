@@ -190,8 +190,8 @@ export const NAV_MODULES: NavModule[] = [
     children: [
       { key: '/airline-consumables-overview', label: 'Consumables Dashboard', icon: I(LayoutDashboard) },
       { key: '/airline-consumables',   label: 'Inventory',         icon: I(Boxes) },
-      { key: '/consumable-usage',      label: 'Usage Tracking',    icon: I(Send) },
       { key: '/consumable-allocation', label: 'Flight Allocation', icon: I(Plane) },
+      { key: '/consumable-returns',    label: 'Returns',           icon: I(Undo2) },
     ],
   },
 
@@ -204,7 +204,6 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/airline-equipments-overview', label: 'Equipments Dashboard', icon: I(LayoutDashboard) },
       { key: '/airline-equipments',     label: 'Assets',         icon: I(Boxes) },
       { key: '/equipment-maintenance',  label: 'Maintenance',    icon: I(Wrench) },
-      { key: '/equipment-returns',      label: 'Returns',        icon: I(Undo2) },
       { key: '/equipment-damage',       label: 'Damage Reports', icon: I(ShieldAlert) },
     ],
   },

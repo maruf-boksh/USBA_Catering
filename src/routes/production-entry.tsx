@@ -395,6 +395,14 @@ export default function ProductionEntryPage() {
   useArrivalFlash();
   const location = useLocation();
   const mealOrderConfirmation = (location.state as { mealOrderConfirmation?: MealOrderConfirmation } | null)?.mealOrderConfirmation ?? null;
+  const forwardedMeals = (location.state as { forwardedMeals?: MealCard[]; forwardedDay?: string } | null)?.forwardedMeals ?? null;
+  const forwardedDay = (location.state as { forwardedDay?: string } | null)?.forwardedDay ?? null;
+  useEffect(() => {
+    if (mealOrderConfirmation) {
+      const shell = document.querySelector(".app-content-shell") as HTMLElement | null;
+      if (shell) shell.scrollTop = 0; else window.scrollTo(0, 0);
+    }
+  }, []);
   const {
     productionEntries, addProductionEntry, mrpRuns,
     demands, addDemands, addMrpRun,
@@ -906,6 +914,62 @@ export default function ProductionEntryPage() {
                     </div>
                   </div>
                 </div>
+                {forwardedMeals && (
+                  <div className="mt-4 border-t border-amber-200 pt-4">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-amber-900 mb-3">
+                      Configured Meal Plan — {forwardedDay}
+                    </div>
+                    {forwardedMeals.length === 0 ? (
+                      <div className="text-xs text-amber-700 italic">No meals configured for this day</div>
+                    ) : (
+                      <div className="space-y-3">
+                        {["Breakfast","Lunch","Snacks","Heavy Snacks","Dinner"].map((mealType) => {
+                          const mealsForType = forwardedMeals.filter((m) => m.mealType === mealType);
+                          if (mealsForType.length === 0) return null;
+                          return (
+                            <div key={mealType} className="rounded border border-amber-200 bg-amber-50/60 overflow-hidden">
+                              <div className="px-3 py-1.5 bg-amber-100 text-xs font-semibold text-amber-900 flex gap-3">
+                                <span>{mealType}</span>
+                                <span className="font-normal text-amber-700">{mealsForType[0].servingTime.start} – {mealsForType[0].servingTime.end}</span>
+                              </div>
+                              {mealsForType.map((meal) => (
+                                <div key={meal.id} className="px-3 py-2 border-t border-amber-100 first:border-t-0">
+                                  <div className="flex gap-2 items-center flex-wrap mb-1.5">
+                                    <span className="text-xs font-medium text-amber-900">{meal.forType}</span>
+                                    {meal.flightType.map((ft) => (
+                                      <span key={ft} className="px-1.5 py-0.5 text-[10px] rounded bg-amber-200 text-amber-800">{ft}</span>
+                                    ))}
+                                  </div>
+                                  <div className="flex gap-2 flex-wrap">
+                                    {meal.choices.map((c, ci) => (
+                                      <div key={ci} className="text-[10px] bg-white border border-amber-200 rounded px-2 py-1 min-w-[120px]">
+                                        <div className="font-semibold text-blue-700 mb-0.5">Choice {ci + 1} — {c.percentage}%</div>
+                                        {c.items.slice(0, 3).map((it, ii) => <div key={ii} className="text-muted-foreground">{it.name}{it.weight > 0 ? ` – ${it.weight}g` : ""}</div>)}
+                                        {c.items.length > 3 && <div className="text-muted-foreground">+{c.items.length - 3} more</div>}
+                                      </div>
+                                    ))}
+                                    {meal.specialMeals.filter((sm) => sm.enabled).map((sm) => (
+                                      <div key={sm.type} className="text-[10px] bg-white border border-purple-200 rounded px-2 py-1 min-w-[120px]">
+                                        <div className="font-semibold text-purple-700 mb-0.5">{sm.type}</div>
+                                        {sm.items.slice(0, 2).map((it, ii) => <div key={ii} className="text-muted-foreground">{it.name}</div>)}
+                                      </div>
+                                    ))}
+                                    {meal.dessert.name && (
+                                      <div className="text-[10px] bg-white border border-pink-200 rounded px-2 py-1 min-w-[100px]">
+                                        <div className="font-semibold text-pink-700 mb-0.5">Dessert</div>
+                                        <div className="text-muted-foreground">{meal.dessert.name}</div>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div className="mt-4 text-[11px] text-amber-700 bg-amber-100/60 rounded px-3 py-2">
                   Tag &amp; Forward to Production for {mealOrderConfirmation.dayAfterDayName} will become available once the current 24-hour window closes.
                 </div>

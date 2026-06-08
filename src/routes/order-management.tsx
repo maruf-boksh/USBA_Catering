@@ -2381,7 +2381,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
     ]);
   };
 
-  const bothDone = domDone && intlDone;
+  const anyDone = domDone || intlDone;
 
   const startDomUpload = (f: File) => {
     setDomFile(f);
@@ -2430,7 +2430,10 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
   };
 
   const confirmImport = () => {
-    const allParsed = [...domParsed, ...intlParsed];
+    const allParsed = [
+      ...(domDone ? domParsed : []),
+      ...(intlDone ? intlParsed : []),
+    ];
     const valid = allParsed.filter((r) => r.valid);
     const today = new Date().toISOString().slice(0, 10);
     const orders: FlightOrder[] = valid.map((r, i) => ({
@@ -2454,8 +2457,8 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
   };
 
   // Summary values derived from parsed data
-  const validDom = domParsed.filter((r) => r.valid);
-  const validIntl = intlParsed.filter((r) => r.valid);
+  const validDom = domDone ? domParsed.filter((r) => r.valid) : [];
+  const validIntl = intlDone ? intlParsed.filter((r) => r.valid) : [];
   const usbaDom = validDom.filter((r) => r.airline === "US-Bangla");
   const aaaDom = validDom.filter((r) => r.airline === "Air Astra");
   const usbaZenith = usbaDom.reduce((s, r) => s + (r.zenLoad ?? 0), 0);
@@ -2502,7 +2505,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
   const domInvalidCount = domParsed.length - domValidCount;
   const intlValidCount = intlParsed.filter((r) => r.valid).length;
   const intlInvalidCount = intlParsed.length - intlValidCount;
-  const allInvalidCount = domInvalidCount + intlInvalidCount;
+  const allInvalidCount = (domDone ? domInvalidCount : 0) + (intlDone ? intlInvalidCount : 0);
 
   const uploadCols: Column<RecentUploadRow>[] = [
     { key: "id", header: "Upload ID" },
@@ -2637,9 +2640,14 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
             </div>
           </div>
 
-          {!bothDone && (domDone || intlDone) && (
+          {domDone && !intlDone && (
             <p className="mt-3 text-center text-xs text-muted-foreground">
-              Upload both Domestic and International files to continue
+              International file not uploaded — only Domestic flights will be included. You can upload it above to include International flights.
+            </p>
+          )}
+          {intlDone && !domDone && (
+            <p className="mt-3 text-center text-xs text-muted-foreground">
+              Domestic file not uploaded — only International flights will be included. You can upload it above to include Domestic flights.
             </p>
           )}
         </CardContent>
@@ -2843,13 +2851,22 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
         </Card>
       )}
 
-      {/* Confirm Import — available when both files are done */}
-      {bothDone && !importConfirmed && !showFinalReview && (
+      {/* Confirm Import — available when at least one file is done */}
+      {anyDone && !importConfirmed && !showFinalReview && (
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={() => toast.success("Error report downloaded.")}>
             <Download className="h-3.5 w-3.5 mr-1.5" /> Error Report
           </Button>
-          <Button onClick={() => setShowFinalReview(true)}>Confirm Import</Button>
+          <Button onClick={() => {
+            const invalidCount = allInvalidCount;
+            if (invalidCount > 0) {
+              toast.error(
+                `Import blocked — ${invalidCount} invalid row${invalidCount !== 1 ? "s" : ""} must be fixed before proceeding. Use the Edit button on highlighted rows.`,
+              );
+              return;
+            }
+            setShowFinalReview(true);
+          }}>Confirm Import</Button>
         </div>
       )}
 
@@ -2898,54 +2915,62 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  <TableRow className="bg-primary/5 border-t-2 border-t-primary/40 hover:bg-primary/10">
-                    <TableCell colSpan={15} className="py-2">
-                      <span className="font-semibold text-primary uppercase tracking-wider text-xs">Domestic</span>
-                    </TableCell>
-                  </TableRow>
-                  {domParsed.map((r) => (
-                    <TableRow key={`final-dom-${r.row}`} className={!r.valid ? "bg-destructive/10" : ""}>
-                      <TableCell className="text-xs">{r.airline}</TableCell>
-                      <TableCell className="text-sm font-medium">{r.flight}</TableCell>
-                      <TableCell className="text-xs">{r.sector}</TableCell>
-                      <TableCell className="text-xs tabular-nums">{r.etd}</TableCell>
-                      <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                      <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                      <TableCell className="text-right tabular-nums text-xs border-r border-border">{r.totalMeal ?? "—"}</TableCell>
-                      <TableCell className="text-xs tabular-nums">{r.returnFlight ?? "—"}</TableCell>
-                      <TableCell className="text-xs">{r.returnSector ?? "—"}</TableCell>
-                      <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                      <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                      <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                      <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                      <TableCell className="text-right tabular-nums text-xs">{r.crewMeal ?? "—"}</TableCell>
-                      <TableCell><StatusBadge status={r.valid ? "OK" : "Failed"} /></TableCell>
-                    </TableRow>
-                  ))}
-                  <TableRow className="bg-navy/5 border-t-2 border-t-navy/40 hover:bg-navy/10">
-                    <TableCell colSpan={15} className="py-2">
-                      <span className="font-semibold text-navy uppercase tracking-wider text-xs">International</span>
-                    </TableCell>
-                  </TableRow>
-                  {intlParsed.map((r) => (
-                    <TableRow key={`final-intl-${r.row}`} className={!r.valid ? "bg-destructive/10" : ""}>
-                      <TableCell className="text-xs">{r.airline}</TableCell>
-                      <TableCell className="text-sm font-medium">{r.flight}</TableCell>
-                      <TableCell className="text-xs">{r.sector}</TableCell>
-                      <TableCell className="text-xs tabular-nums">{r.etd}</TableCell>
-                      <TableCell className="text-right tabular-nums text-xs">{r.bcLoad ?? "—"}</TableCell>
-                      <TableCell className="text-right tabular-nums text-xs">{r.ecLoad ?? "—"}</TableCell>
-                      <TableCell className="text-right text-xs text-muted-foreground border-r border-border">—</TableCell>
-                      <TableCell className="text-xs text-muted-foreground">—</TableCell>
-                      <TableCell className="text-xs text-muted-foreground">—</TableCell>
-                      <TableCell className="text-right tabular-nums text-xs">{r.bcMeal ?? "—"}</TableCell>
-                      <TableCell className="text-right tabular-nums text-xs">{r.ecMeal ?? "—"}</TableCell>
-                      <TableCell className="text-right tabular-nums text-xs">{r.chml ?? "—"}</TableCell>
-                      <TableCell className="text-right tabular-nums text-xs">{r.vgml ?? "—"}</TableCell>
-                      <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                      <TableCell><StatusBadge status={r.valid ? "OK" : "Failed"} /></TableCell>
-                    </TableRow>
-                  ))}
+                  {domDone && (
+                    <>
+                      <TableRow className="bg-primary/5 border-t-2 border-t-primary/40 hover:bg-primary/10">
+                        <TableCell colSpan={15} className="py-2">
+                          <span className="font-semibold text-primary uppercase tracking-wider text-xs">Domestic</span>
+                        </TableCell>
+                      </TableRow>
+                      {domParsed.map((r) => (
+                        <TableRow key={`final-dom-${r.row}`} className={!r.valid ? "bg-destructive/10" : ""}>
+                          <TableCell className="text-xs">{r.airline}</TableCell>
+                          <TableCell className="text-sm font-medium">{r.flight}</TableCell>
+                          <TableCell className="text-xs">{r.sector}</TableCell>
+                          <TableCell className="text-xs tabular-nums">{r.etd}</TableCell>
+                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
+                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
+                          <TableCell className="text-right tabular-nums text-xs border-r border-border">{r.totalMeal ?? "—"}</TableCell>
+                          <TableCell className="text-xs tabular-nums">{r.returnFlight ?? "—"}</TableCell>
+                          <TableCell className="text-xs">{r.returnSector ?? "—"}</TableCell>
+                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
+                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
+                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
+                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
+                          <TableCell className="text-right tabular-nums text-xs">{r.crewMeal ?? "—"}</TableCell>
+                          <TableCell><StatusBadge status={r.valid ? "OK" : "Failed"} /></TableCell>
+                        </TableRow>
+                      ))}
+                    </>
+                  )}
+                  {intlDone && (
+                    <>
+                      <TableRow className="bg-navy/5 border-t-2 border-t-navy/40 hover:bg-navy/10">
+                        <TableCell colSpan={15} className="py-2">
+                          <span className="font-semibold text-navy uppercase tracking-wider text-xs">International</span>
+                        </TableCell>
+                      </TableRow>
+                      {intlParsed.map((r) => (
+                        <TableRow key={`final-intl-${r.row}`} className={!r.valid ? "bg-destructive/10" : ""}>
+                          <TableCell className="text-xs">{r.airline}</TableCell>
+                          <TableCell className="text-sm font-medium">{r.flight}</TableCell>
+                          <TableCell className="text-xs">{r.sector}</TableCell>
+                          <TableCell className="text-xs tabular-nums">{r.etd}</TableCell>
+                          <TableCell className="text-right tabular-nums text-xs">{r.bcLoad ?? "—"}</TableCell>
+                          <TableCell className="text-right tabular-nums text-xs">{r.ecLoad ?? "—"}</TableCell>
+                          <TableCell className="text-right text-xs text-muted-foreground border-r border-border">—</TableCell>
+                          <TableCell className="text-xs text-muted-foreground">—</TableCell>
+                          <TableCell className="text-xs text-muted-foreground">—</TableCell>
+                          <TableCell className="text-right tabular-nums text-xs">{r.bcMeal ?? "—"}</TableCell>
+                          <TableCell className="text-right tabular-nums text-xs">{r.ecMeal ?? "—"}</TableCell>
+                          <TableCell className="text-right tabular-nums text-xs">{r.chml ?? "—"}</TableCell>
+                          <TableCell className="text-right tabular-nums text-xs">{r.vgml ?? "—"}</TableCell>
+                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
+                          <TableCell><StatusBadge status={r.valid ? "OK" : "Failed"} /></TableCell>
+                        </TableRow>
+                      ))}
+                    </>
+                  )}
                 </TableBody>
               </Table>
             </div>
@@ -3340,7 +3365,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                 Import confirmed — {importedOrders.length} orders
               </p>
               <p className="text-xs text-muted-foreground mt-0.5">
-                {importDate} · {domParsed.filter((r) => r.valid).length} domestic · {intlParsed.filter((r) => r.valid).length} international
+                {importDate}{domDone ? ` · ${validDom.length} domestic` : ""}{intlDone ? ` · ${validIntl.length} international` : ""}
               </p>
             </div>
           </div>
@@ -3878,7 +3903,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
       )}
 
       {/* Recent Activity */}
-      {(bothDone || importConfirmed) && (
+      {(anyDone || importConfirmed) && (
         <Card>
           <CardContent className="pt-6">
             <h3 className="text-sm font-semibold tracking-wider uppercase text-foreground mb-4">

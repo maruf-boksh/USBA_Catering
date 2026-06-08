@@ -197,6 +197,24 @@ const gmMealSummary = {
   },
 };
 
+const DUMMY_TAG_MEALS: Record<string, { forType: string; servingTime: { start: string; end: string }; flightType: string[] }[]> = {
+  Breakfast: [
+    { forType: "Passengers", servingTime: { start: "07:00", end: "10:00" }, flightType: ["Domestic", "International"] },
+  ],
+  Lunch: [
+    { forType: "Passengers", servingTime: { start: "11:00", end: "14:00" }, flightType: ["Domestic", "International"] },
+  ],
+  Snacks: [
+    { forType: "Passengers", servingTime: { start: "14:00", end: "16:00" }, flightType: ["Domestic"] },
+  ],
+  "Heavy Snacks": [
+    { forType: "Crew", servingTime: { start: "16:00", end: "19:00" }, flightType: ["Domestic", "International"] },
+  ],
+  Dinner: [
+    { forType: "Passengers", servingTime: { start: "19:00", end: "22:00" }, flightType: ["International"] },
+  ],
+};
+
 // Sample data for current day
 function getSampleMeals(): MealCard[] {
   const today = DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1];
@@ -437,6 +455,7 @@ export default function MealPlanning() {
   const backUrl = (location.state as { backUrl?: string } | null)?.backUrl ?? null;
   const [meals, setMeals] = useState<MealCard[]>(getSampleMeals());
   const [selectedDay, setSelectedDay] = useState(DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]);
+  const today = DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1];
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [viewMenuOpen, setViewMenuOpen] = useState(false);
@@ -459,6 +478,8 @@ export default function MealPlanning() {
   const [choiceEditOpen, setChoiceEditOpen] = useState(false);
   const [editingChoice, setEditingChoice] = useState<{ mealId: string; kind: "choice" | "specialMeal" | "dessert"; choiceIdx?: number; smType?: string; items: MealItem[]; label: string } | null>(null);
   const [choiceEditNotes, setChoiceEditNotes] = useState<Record<string, string[]>>({});
+  const [removeModeType, setRemoveModeType] = useState<string | null>(null);
+  const [removeConfirmCard, setRemoveConfirmCard] = useState<{ mealId: string; kind: "choice" | "specialMeal" | "dessert"; choiceIdx?: number; smType?: string } | null>(null);
 
   const getInitialCreateData = (day: string) => ({
     day,
@@ -644,6 +665,28 @@ export default function MealPlanning() {
     setViewMenuOpen(true);
   };
 
+  const buildProductionNavState = (now: Date) => {
+    const tomorrow = new Date(now); tomorrow.setDate(tomorrow.getDate() + 1);
+    const dayAfter = new Date(now);  dayAfter.setDate(dayAfter.getDate() + 2);
+    const dayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const dayAfterDateStr = `${dayAfter.getFullYear()}-${pad(dayAfter.getMonth()+1)}-${pad(dayAfter.getDate())}`;
+    return {
+      mealOrderConfirmation: {
+        timestamp: now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) + ", " + now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: true }),
+        totalFlights: 8,
+        totalMeals: gmOrderData.totalMealsToday,
+        tomorrowDayName: dayNames[tomorrow.getDay()],
+        dayAfterDayName: dayNames[dayAfter.getDay()],
+        dayAfterDateStr,
+        validIntl: [],
+        validDom: [],
+      },
+      forwardedMeals: meals.filter((m) => m.day === selectedDay),
+      forwardedDay: selectedDay,
+    };
+  };
+
   const handleForward = () => {
     const now = new Date();
     const timestamp = now.toLocaleString();
@@ -651,7 +694,7 @@ export default function MealPlanning() {
     setIsForwarded(true);
     setForwardConfirmOpen(false);
     toast.success("Meal plan forwarded to Production — opening Production Order");
-    navigate("/production-entry");
+    navigate("/production-entry", { state: buildProductionNavState(now) });
   };
 
   const formatDateDDMMMYYYY = (dateStr: string) => {
@@ -1908,7 +1951,7 @@ export default function MealPlanning() {
                   key={d}
                   type="button"
                   className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                    pendingDay === d
+                    pendingDay === d || today === d
                       ? "bg-slate-800 text-white"
                       : "bg-slate-100 text-slate-600 hover:bg-slate-200"
                   }`}
@@ -1988,12 +2031,22 @@ export default function MealPlanning() {
                     {/* Row body */}
                     <div className={`${pal.body} px-4 py-3`}>
                       {mealsForType.length === 0 ? (
-                        <div className="flex items-center gap-4 py-1">
-                          <span className="text-sm text-slate-400 italic">No meals configured for this day</span>
+                        <div className="flex gap-3 flex-wrap items-start">
+                          {(DUMMY_TAG_MEALS[mealType] ?? []).map((dummy, idx) => (
+                            <div key={idx} className={`border-l-4 ${pal.cardAccent} bg-slate-50 rounded-lg px-4 py-3 min-w-[180px] shadow-sm`}>
+                              <div className="font-semibold text-sm text-slate-700">{mealType} — {dummy.forType}</div>
+                              <div className="text-xs text-slate-500 mt-1">Serving: {dummy.servingTime.start} – {dummy.servingTime.end}</div>
+                              <div className="flex gap-1 mt-1.5 flex-wrap">
+                                {dummy.flightType.map((ft) => (
+                                  <span key={ft} className="px-1.5 py-0.5 text-xs rounded bg-slate-200 text-slate-600">{ft}</span>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
                           <Button
                             size="sm"
                             variant="outline"
-                            className="h-7 text-xs"
+                            className="h-8 text-xs self-center"
                             onClick={() => { setSelectedDay(pendingDay); setDaySelectionOpen(false); setCreateModalOpen(true); }}
                           >
                             + Add New
@@ -2048,7 +2101,7 @@ export default function MealPlanning() {
                 setOrderHistory((prev) => [...prev, { mealsOrdered: gmOrderData.totalMealsToday, orderedBy: "Current User", designation: "Meal Planner", date: todayFormatted, time: timeFormatted, period: "24-hour cycle" }]);
                 setDaySelectionOpen(false);
                 toast.success("Meal plan tagged and forwarded to Production — opening Production Order");
-                navigate("/production-entry");
+                navigate("/production-entry", { state: buildProductionNavState(now) });
               }}
             >
               Forward to Production
@@ -2061,7 +2114,11 @@ export default function MealPlanning() {
       <Tabs value={selectedDay} onValueChange={setSelectedDay} className="mb-6">
         <TabsList>
           {DAYS.map((day) => (
-            <TabsTrigger key={day} value={day}>
+            <TabsTrigger
+              key={day}
+              value={day}
+              className="data-[state=active]:!bg-primary data-[state=active]:!text-primary-foreground"
+            >
               {day}
             </TabsTrigger>
           ))}
@@ -2128,6 +2185,37 @@ export default function MealPlanning() {
                     <div className={`${palette.header} px-4 py-2.5 flex items-center gap-4`}>
                       <span className={`font-semibold text-sm w-28 shrink-0 ${palette.headerText}`}>{mealType}</span>
                       <span className="text-xs text-muted-foreground">{mealTypeTime[mealType]}</span>
+                      <div className="ml-auto flex gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs"
+                          onClick={() => {
+                            setCreateData({ ...getInitialCreateData(day), mealTypes: [mealType] });
+                            setActiveChoiceForItems(0);
+                            setPendingSpecialMeal(null);
+                            setPendingSpecialMealForType(null);
+                            setActiveChoicePercentType("");
+                            setActiveItemsTab("");
+                            setActiveMealTab(mealType);
+                            setCreateErrors([]);
+                            setCreateStep(1);
+                            setCreateModalOpen(true);
+                          }}
+                        >
+                          + Add New
+                        </Button>
+                        {mealsForType.length > 0 && (
+                          <Button
+                            size="sm"
+                            variant={removeModeType === mealType ? "destructive" : "outline"}
+                            className="h-7 text-xs"
+                            onClick={() => setRemoveModeType(removeModeType === mealType ? null : mealType)}
+                          >
+                            Remove
+                          </Button>
+                        )}
+                      </div>
                     </div>
                     <div className={`${palette.body} p-3`}>
                       {mealsForType.length === 0 ? (
@@ -2162,7 +2250,10 @@ export default function MealPlanning() {
                                     const choiceTotal = choice.items.reduce((s, it) => s + (it.calories || 0), 0);
                                     const noteKey = `${meal.id}-${choiceIdx}`;
                                     return (
-                                      <Card key={choiceIdx} className={`border ${cc.border} w-56 shrink-0 bg-card`}>
+                                      <Card key={choiceIdx} className={`border ${cc.border} w-56 shrink-0 bg-card relative`}>
+                                        {removeModeType === mealType && (
+                                          <button className="absolute top-1.5 right-1.5 z-10 w-5 h-5 rounded-full bg-red-500 hover:bg-red-600 text-white text-xs flex items-center justify-center leading-none" onClick={() => setRemoveConfirmCard({ mealId: meal.id, kind: "choice", choiceIdx })}>×</button>
+                                        )}
                                         <div className={`px-3 py-2 rounded-t-lg font-semibold text-xs ${cc.header}`}>
                                           CHOICE {String(choiceIdx + 1).padStart(2, "0")} — {choice.percentage}%
                                         </div>
@@ -2195,7 +2286,10 @@ export default function MealPlanning() {
                                   {meal.specialMeals.filter((sm) => sm.enabled).map((sm) => {
                                     const smTotal = sm.items.reduce((s, it) => s + (it.calories || 0), 0);
                                     return (
-                                      <Card key={sm.type} className="border border-purple-200 w-56 shrink-0 bg-card">
+                                      <Card key={sm.type} className="border border-purple-200 w-56 shrink-0 bg-card relative">
+                                        {removeModeType === mealType && (
+                                          <button className="absolute top-1.5 right-1.5 z-10 w-5 h-5 rounded-full bg-red-500 hover:bg-red-600 text-white text-xs flex items-center justify-center leading-none" onClick={() => setRemoveConfirmCard({ mealId: meal.id, kind: "specialMeal", smType: sm.type })}>×</button>
+                                        )}
                                         <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-purple-100 text-purple-800">
                                           {sm.type} {typeof sm.portions === "number" ? `(${sm.portions} portion${sm.portions !== 1 ? "s" : ""})` : `(${sm.portions})`}
                                         </div>
@@ -2226,7 +2320,10 @@ export default function MealPlanning() {
 
                                   {/* Dessert card */}
                                   {meal.dessert.name && (
-                                    <Card className="border border-pink-200 w-56 shrink-0 bg-card">
+                                    <Card className="border border-pink-200 w-56 shrink-0 bg-card relative">
+                                      {removeModeType === mealType && (
+                                        <button className="absolute top-1.5 right-1.5 z-10 w-5 h-5 rounded-full bg-red-500 hover:bg-red-600 text-white text-xs flex items-center justify-center leading-none" onClick={() => setRemoveConfirmCard({ mealId: meal.id, kind: "dessert" })}>×</button>
+                                      )}
                                       <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-pink-100 text-pink-800">Dessert</div>
                                       <CardContent className="p-3 space-y-2">
                                         <div className="text-xs font-medium">{meal.dessert.name}{meal.dessert.weight > 0 && ` – ${meal.dessert.weight}g`}</div>
@@ -2470,6 +2567,40 @@ export default function MealPlanning() {
               }}
             >
               Update
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Remove Card Confirmation */}
+      <Dialog open={!!removeConfirmCard} onOpenChange={(open) => { if (!open) setRemoveConfirmCard(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove Meal?</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground">Do you want to remove this meal?</p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRemoveConfirmCard(null)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (removeConfirmCard) {
+                  const { mealId, kind, choiceIdx, smType } = removeConfirmCard;
+                  setMeals((prev) => prev.map((m) => {
+                    if (m.id !== mealId) return m;
+                    if (kind === "choice" && choiceIdx !== undefined)
+                      return { ...m, choices: m.choices.filter((_, ci) => ci !== choiceIdx) };
+                    if (kind === "specialMeal")
+                      return { ...m, specialMeals: m.specialMeals.map((sm) => sm.type === smType ? { ...sm, enabled: false } : sm) };
+                    if (kind === "dessert")
+                      return { ...m, dessert: { ...m.dessert, name: "" } };
+                    return m;
+                  }));
+                }
+                setRemoveConfirmCard(null);
+              }}
+            >
+              Yes, Remove
             </Button>
           </DialogFooter>
         </DialogContent>

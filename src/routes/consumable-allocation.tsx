@@ -1,52 +1,240 @@
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
-import { Plane, Layers, Coins } from "lucide-react";
-import { consumableUsage, consumableItems } from "@/lib/sample-data";
+import { Plane, Layers, Coins, Plus, ArrowLeft, Save, Clock, X, Search } from "lucide-react";
+import { toast } from "sonner";
+import {
+  consumableUsage as SEED_USAGE,
+  consumableItems,
+  type ConsumableItem,
+} from "@/lib/sample-data";
+
+// ── Types ──────────────────────────────────────────────────────────────────
+
+type AllocLine = {
+  itemId: string;
+  itemName: string;
+  qty: number;
+  uom: string;
+};
+
+type AllocRecord = {
+  id: string;
+  date: string;
+  scheduledTime: string;
+  flight: string;
+  sector: string;
+  lines: AllocLine[];
+};
+
+type DraftAllocLine = {
+  itemId: string;
+  qty: string;
+};
+
+// ── Flight schedule seed ────────────────────────────────────────────────────
+
+const FLIGHT_SCHEDULES = [
+  { time: "06:30", flight: "BG-401", sector: "DAC→DXB" },
+  { time: "06:30", flight: "BS-141", sector: "DAC→CGP" },
+  { time: "08:45", flight: "BS-105", sector: "DAC→CXB" },
+  { time: "10:15", flight: "BG-522", sector: "DAC→LHR" },
+  { time: "14:00", flight: "VQ-901", sector: "DAC→KUL" },
+];
+
+const SCHEDULE_TIMES = [...new Set(FLIGHT_SCHEDULES.map((f) => f.time))].sort();
+
+// ── Shared select style ─────────────────────────────────────────────────────
+
+const selectCls =
+  "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:cursor-not-allowed";
+
+// ── Page ───────────────────────────────────────────────────────────────────
 
 export default function FlightAllocationPage() {
-  // Group usage by flight
-  const byFlight = new Map<string, typeof consumableUsage>();
-  for (const u of consumableUsage) {
-    if (!byFlight.has(u.flight)) byFlight.set(u.flight, []);
-    byFlight.get(u.flight)!.push(u);
-  }
-  const entries = Array.from(byFlight.entries());
+  const [view, setView] = useState<"list" | "create">("list");
+  const [allocations, setAllocations] = usePersistedState<AllocRecord[]>("consumable-allocations", []);
+  const [inventoryItems, setInventoryItems] = usePersistedState<ConsumableItem[]>(
+    "airline-consumables-items",
+    consumableItems,
+  );
 
-  const flights = entries.length;
-  const totalLines = consumableUsage.length;
-  const totalValue = consumableUsage.reduce((s, u) => {
-    const item = consumableItems.find((i) => i.id === u.itemId);
-    return s + u.qty * (item?.unitCost ?? 0);
-  }, 0);
+  const nextId = `FA-${String(1000 + allocations.length + 1).padStart(4, "0")}`;
+
+  const addAllocation = (r: AllocRecord) => {
+    setInventoryItems((prev) =>
+      prev.map((item) => {
+        const issuedQty = r.lines
+          .filter((l) => l.itemId === item.id)
+          .reduce((s, l) => s + l.qty, 0);
+        return issuedQty > 0 ? { ...item, stock: item.stock - issuedQty } : item;
+      }),
+    );
+    setAllocations((prev) => [r, ...prev]);
+    setView("list");
+  };
 
   return (
     <>
       <PageHeader
         title="Flight Allocation"
         subtitle="Consumables grouped by flight — what was loaded on each leg, with cabin-class split and total value"
+        actions={
+          <Button
+            variant={view !== "list" ? "outline" : "default"}
+            onClick={() => (view !== "list" ? setView("list") : setView("create"))}
+          >
+            {view !== "list"
+              ? <><ArrowLeft className="h-4 w-4 mr-1" /> Back to List</>
+              : <><Plus className="h-4 w-4 mr-1" /> New Allocation</>}
+          </Button>
+        }
       />
 
+      {view === "list" && (
+        <AllocationList allocations={allocations} inventoryItems={inventoryItems} />
+      )}
+      {view === "create" && (
+        <AllocationCreate
+          nextId={nextId}
+          inventoryItems={inventoryItems}
+          onSave={addAllocation}
+        />
+      )}
+    </>
+  );
+}
+
+// ── List ───────────────────────────────────────────────────────────────────
+
+function AllocationList({
+  allocations,
+  inventoryItems,
+}: {
+  allocations: AllocRecord[];
+  inventoryItems: ConsumableItem[];
+}) {
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+
+  // Convert new AllocRecord[] to the same row shape as SEED_USAGE and merge
+  const allocRows = allocations.flatMap((a) =>
+    a.lines.map((l) => ({
+      id: `${a.id}-${l.itemId}`,
+      date: a.date,
+      flight: a.flight,
+      sector: a.sector,
+      cabinClass: "Economy",
+      itemId: l.itemId,
+      itemName: l.itemName,
+      qty: l.qty,
+      uom: l.uom,
+    })),
+  );
+
+  const allRows = [...allocRows, ...SEED_USAGE];
+
+  // KPIs always reflect full dataset
+  const kpiFlight = new Set(allRows.map((r) => r.flight)).size;
+  const kpiLines = allRows.length;
+  const kpiValue = allRows.reduce((s, u) => {
+    const item = inventoryItems.find((i) => i.id === u.itemId);
+    return s + u.qty * (item?.unitCost ?? 0);
+  }, 0);
+
+  // Apply filters
+  const filteredRows = allRows.filter((r) => {
+    if (dateFrom && r.date < dateFrom) return false;
+    if (dateTo && r.date > dateTo) return false;
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      if (!r.flight.toLowerCase().includes(q) && !r.itemName.toLowerCase().includes(q)) return false;
+    }
+    return true;
+  });
+
+  // Group filtered rows by flight
+  const byFlight = new Map<string, typeof allRows>();
+  for (const u of filteredRows) {
+    if (!byFlight.has(u.flight)) byFlight.set(u.flight, []);
+    byFlight.get(u.flight)!.push(u);
+  }
+  const entries = Array.from(byFlight.entries());
+
+  const hasFilters = !!(dateFrom || dateTo || searchQuery.trim());
+
+  return (
+    <>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
-        <KpiCard label="Flights" value={flights} icon={Plane} tone="navy" />
-        <KpiCard label="Item Lines" value={totalLines} icon={Layers} tone="warning" />
+        <KpiCard label="Flights" value={kpiFlight} icon={Plane} tone="navy" />
+        <KpiCard label="Item Lines" value={kpiLines} icon={Layers} tone="warning" />
         <KpiCard
           label="Total Value"
-          value={`৳ ${Math.round(totalValue).toLocaleString()}`}
+          value={`৳ ${Math.round(kpiValue).toLocaleString()}`}
           icon={Coins}
           tone="success"
         />
       </div>
 
+      {/* Filters */}
+      <div className="flex flex-wrap items-end gap-3 mb-6">
+        <div className="flex flex-col gap-1 min-w-[130px]">
+          <span className="text-xs text-muted-foreground uppercase tracking-wider">From</span>
+          <Input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            className="h-8 text-xs tabular-nums"
+          />
+        </div>
+        <div className="flex flex-col gap-1 min-w-[130px]">
+          <span className="text-xs text-muted-foreground uppercase tracking-wider">To</span>
+          <Input
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            className="h-8 text-xs tabular-nums"
+          />
+        </div>
+        <div className="flex flex-col gap-1 flex-1 min-w-[200px]">
+          <span className="text-xs text-muted-foreground uppercase tracking-wider">Search Flight / Item</span>
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+            <Input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Flight number or item name…"
+              className="h-8 text-xs pl-7"
+            />
+          </div>
+        </div>
+        {hasFilters && (
+          <button
+            type="button"
+            onClick={() => { setDateFrom(""); setDateTo(""); setSearchQuery(""); }}
+            className="h-8 px-3 text-xs text-muted-foreground hover:text-foreground border border-border rounded-md transition-colors self-end"
+          >
+            Clear
+          </button>
+        )}
+      </div>
+
       {entries.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            No flight allocations recorded yet.
+            {allRows.length === 0
+              ? "No flight allocations recorded yet."
+              : "No records match the current filters."}
           </CardContent>
         </Card>
       ) : (
@@ -56,7 +244,6 @@ export default function FlightAllocationPage() {
               <TableRow>
                 <TableHead className="text-xs uppercase tracking-wider">Flight / Item</TableHead>
                 <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
-                <TableHead className="text-xs uppercase tracking-wider">Class</TableHead>
                 <TableHead className="text-xs uppercase tracking-wider text-right">Qty</TableHead>
                 <TableHead className="text-xs uppercase tracking-wider text-right">Unit Cost</TableHead>
                 <TableHead className="text-xs uppercase tracking-wider text-right">Total</TableHead>
@@ -66,13 +253,13 @@ export default function FlightAllocationPage() {
               {entries.map(([flight, rows]) => {
                 const sector = rows[0]?.sector ?? "—";
                 const flightValue = rows.reduce((s, r) => {
-                  const item = consumableItems.find((i) => i.id === r.itemId);
+                  const item = inventoryItems.find((i) => i.id === r.itemId);
                   return s + r.qty * (item?.unitCost ?? 0);
                 }, 0);
                 return (
                   <Fragment key={flight}>
                     <TableRow className="bg-primary/5 hover:bg-primary/10 border-t-2 border-t-primary/40">
-                      <TableCell colSpan={5} className="py-2">
+                      <TableCell colSpan={4} className="py-2">
                         <span className="font-mono text-sm font-semibold text-primary">{flight}</span>
                         <span className="ml-2 text-[11px] text-muted-foreground">{sector}</span>
                         <span className="ml-3 text-[11px] text-muted-foreground tabular-nums">
@@ -84,7 +271,7 @@ export default function FlightAllocationPage() {
                       </TableCell>
                     </TableRow>
                     {rows.map((r) => {
-                      const item = consumableItems.find((i) => i.id === r.itemId);
+                      const item = inventoryItems.find((i) => i.id === r.itemId);
                       const unitCost = item?.unitCost ?? 0;
                       return (
                         <TableRow key={r.id} className="hover:bg-muted/30">
@@ -93,9 +280,6 @@ export default function FlightAllocationPage() {
                             <div className="font-mono text-[10px] text-muted-foreground">{r.itemId}</div>
                           </TableCell>
                           <TableCell className="text-xs text-muted-foreground">{r.sector}</TableCell>
-                          <TableCell>
-                            <Badge variant="outline" className="text-[10px]">{r.cabinClass}</Badge>
-                          </TableCell>
                           <TableCell className="text-right tabular-nums">{r.qty.toLocaleString()} {r.uom}</TableCell>
                           <TableCell className="text-right tabular-nums text-muted-foreground">৳ {unitCost.toFixed(2)}</TableCell>
                           <TableCell className="text-right tabular-nums font-medium">
@@ -112,5 +296,209 @@ export default function FlightAllocationPage() {
         </div>
       )}
     </>
+  );
+}
+
+// ── Create form ─────────────────────────────────────────────────────────────
+
+const emptyDraftLine = (): DraftAllocLine => ({ itemId: "", qty: "" });
+
+function AllocationCreate({
+  nextId,
+  inventoryItems,
+  onSave,
+}: {
+  nextId: string;
+  inventoryItems: ConsumableItem[];
+  onSave: (r: AllocRecord) => void;
+}) {
+  const today = new Date().toISOString().slice(0, 10);
+
+  const [scheduledTime, setScheduledTime] = useState("");
+  const [flight, setFlight] = useState("");
+  const [lines, setLines] = useState<DraftAllocLine[]>([emptyDraftLine()]);
+
+  const flightsAtTime = FLIGHT_SCHEDULES.filter((f) => f.time === scheduledTime);
+  const selectedSchedule = FLIGHT_SCHEDULES.find((f) => f.flight === flight);
+
+  const handleTimeChange = (time: string) => {
+    setScheduledTime(time);
+    setFlight("");
+  };
+
+  const updateLine = (idx: number, patch: Partial<DraftAllocLine>) => {
+    setLines((prev) => prev.map((l, i) => (i === idx ? { ...l, ...patch } : l)));
+  };
+
+  const removeLine = (idx: number) => {
+    setLines((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const save = () => {
+    if (!scheduledTime) { toast.error("Select a flight time."); return; }
+    if (!flight) { toast.error("Select a flight number."); return; }
+    if (lines.length === 0) { toast.error("Add at least one item."); return; }
+
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      if (!l.itemId) { toast.error(`Line ${i + 1}: select an item.`); return; }
+      const q = Number(l.qty);
+      if (!q || q <= 0) { toast.error(`Line ${i + 1}: quantity must be positive.`); return; }
+    }
+
+    const allocLines: AllocLine[] = lines.map((l) => {
+      const inv = inventoryItems.find((it) => it.id === l.itemId)!;
+      return {
+        itemId: inv.id,
+        itemName: inv.name,
+        qty: Number(l.qty),
+        uom: inv.uom,
+      };
+    });
+
+    onSave({
+      id: nextId,
+      date: today,
+      scheduledTime,
+      flight,
+      sector: selectedSchedule?.sector ?? "",
+      lines: allocLines,
+    });
+
+    toast.success(
+      `${nextId} issued — ${allocLines.length} item${allocLines.length !== 1 ? "s" : ""} allocated to ${flight}.`,
+    );
+  };
+
+  return (
+    <Card>
+      <CardContent className="pt-6">
+        <div className="flex items-center justify-between mb-6">
+          <h3 className="text-sm font-semibold uppercase tracking-wider">New Flight Allocation</h3>
+        </div>
+
+        {/* Header fields */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-x-6 gap-y-4 mb-6">
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Allocation ID</Label>
+            <Input value={nextId} disabled className="mt-1 font-mono" />
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Date</Label>
+            <Input value={today} disabled className="mt-1 tabular-nums" />
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground flex items-center gap-1">
+              <Clock className="h-3 w-3" /> Flight Time *
+            </Label>
+            <select
+              value={scheduledTime}
+              onChange={(e) => handleTimeChange(e.target.value)}
+              className={selectCls}
+            >
+              <option value="">Select time…</option>
+              {SCHEDULE_TIMES.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Flight Number *</Label>
+            <select
+              value={flight}
+              onChange={(e) => setFlight(e.target.value)}
+              className={selectCls}
+              disabled={!scheduledTime}
+            >
+              <option value="">Select flight…</option>
+              {flightsAtTime.map((f) => (
+                <option key={f.flight} value={f.flight}>
+                  {f.flight} — {f.sector}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Sector</Label>
+            <div className="mt-1 h-9 flex items-center px-3 rounded-md border border-input bg-muted/40 text-sm text-muted-foreground">
+              {selectedSchedule?.sector ?? "—"}
+            </div>
+          </div>
+        </div>
+
+        {/* Item lines */}
+        <div className="mb-5">
+          <div className="flex items-center justify-between mb-3">
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Items</Label>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setLines((prev) => [...prev, emptyDraftLine()])}
+            >
+              <Plus className="h-3.5 w-3.5 mr-1" /> Add New
+            </Button>
+          </div>
+
+          <div className="space-y-3">
+            {lines.map((line, idx) => {
+              const inv = inventoryItems.find((it) => it.id === line.itemId);
+              return (
+                <div key={idx} className="border border-border rounded-md p-4 bg-muted/20 relative">
+                  {lines.length > 1 && (
+                    <button
+                      className="absolute top-3 right-3 text-muted-foreground hover:text-destructive transition-colors"
+                      onClick={() => removeLine(idx)}
+                      type="button"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  )}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
+                    <div>
+                      <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item *</Label>
+                      <select
+                        value={line.itemId}
+                        onChange={(e) => updateLine(idx, { itemId: e.target.value })}
+                        className={selectCls}
+                      >
+                        <option value="">Select item…</option>
+                        {inventoryItems.map((it) => (
+                          <option key={it.id} value={it.id}>
+                            {it.name} ({it.id})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item QTY *</Label>
+                      <div className="mt-1 flex items-center gap-2">
+                        <Input
+                          type="number"
+                          min={1}
+                          value={line.qty}
+                          onChange={(e) => updateLine(idx, { qty: e.target.value })}
+                          className="tabular-nums"
+                          placeholder="0"
+                        />
+                        <span className="text-xs text-muted-foreground whitespace-nowrap">
+                          {inv?.uom ?? "—"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Save and Issue button */}
+        <div className="flex justify-end mt-6 pt-4 border-t border-border">
+          <Button onClick={save}>
+            <Save className="h-4 w-4 mr-1.5" /> Save and Issue
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
