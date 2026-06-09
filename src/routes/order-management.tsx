@@ -11,7 +11,7 @@ import { Progress } from "@/components/ui/progress";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
 import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
@@ -22,6 +22,7 @@ import {
 import {
   Plus, Upload, Download, Save, FileSpreadsheet, FileText, FileType,
   History, CheckCircle2, AlertCircle, Eye, CalendarRange, X, Plane, ArrowLeft, Pencil, CircleDot,
+  Users, Utensils,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -141,7 +142,125 @@ type ParsedRow = {
   returnFlight?: string;
   returnSector?: string;
   date?: string;
+  direction?: FlightDirection;
+  /** Special-meal manifest rows matched to this flight (Flight No + Date). */
+  roster?: SpecialMealEntry[];
 };
+
+/** One row of an uploaded Special-Meals manifest, before it's matched to a flight. */
+type SpecialMealUpload = {
+  flight: string;
+  date: string;
+  pnr: string;
+  passengerName: string;
+  seat: string;
+  mealCode: string;
+};
+
+// ── CSV parsing for the bulk-upload templates ───────────────────────────────
+// Splits one CSV line honouring double-quoted fields (so a quoted comma or an
+// escaped "" inside a value doesn't break the column count).
+function splitCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; }
+        else inQuotes = false;
+      } else cur += ch;
+    } else if (ch === '"') inQuotes = true;
+    else if (ch === ",") { out.push(cur); cur = ""; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out.map((c) => c.trim());
+}
+
+/** Parse CSV text into objects keyed by lower-cased header. Strips a UTF-8 BOM. */
+function parseCsvRecords(text: string): Record<string, string>[] {
+  const clean = text.replace(/^﻿/, "");
+  const lines = clean.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length < 2) return [];
+  const headers = splitCsvLine(lines[0]).map((h) => h.toLowerCase());
+  return lines.slice(1).map((line) => {
+    const cells = splitCsvLine(line);
+    const rec: Record<string, string> = {};
+    headers.forEach((h, i) => { rec[h] = cells[i] ?? ""; });
+    return rec;
+  });
+}
+
+/** Normalise a date cell to yyyy-mm-dd (accepts "2026-05-24" or Excel "5/24/2026"). */
+function normalizeDate(s: string): string {
+  const t = (s || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(t)) return t.slice(0, 10);
+  const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); // M/D/YYYY (Excel default)
+  if (m) return `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
+  return t;
+}
+
+const pick = (rec: Record<string, string>, ...keys: string[]): string => {
+  for (const k of keys) if (rec[k]) return rec[k];
+  return "";
+};
+
+/** Parse an uploaded flight-orders CSV into ParsedRow[]. Returns [] when the
+ *  text isn't our CSV (e.g. a binary .xlsx read as text) so callers can fall
+ *  back to the sample preview. */
+function parseFlightCsv(text: string): ParsedRow[] {
+  if (!/flight/i.test(text.split(/\r?\n/)[0] || "")) return [];
+  return parseCsvRecords(text).map((rec, i) => {
+    const flight = pick(rec, "flight no", "flight").toUpperCase();
+    const from = pick(rec, "from");
+    const to = pick(rec, "to");
+    const sector = pick(rec, "sector") || (from && to ? `${from} → ${to}` : "");
+    const pax = Number(pick(rec, "pax")) || 0;
+    const specialMeals = Number(pick(rec, "special meals", "special meal")) || 0;
+    const scopeRaw = pick(rec, "scope").toLowerCase();
+    const type: "Domestic" | "International" = scopeRaw.startsWith("int")
+      ? "International"
+      : scopeRaw.startsWith("dom")
+        ? "Domestic"
+        : isDomesticSector(sector) ? "Domestic" : "International";
+    const dirRaw = pick(rec, "direction").toLowerCase();
+    const direction: FlightDirection = dirRaw.startsWith("ret") ? "Return" : "Outbound";
+    return {
+      row: i + 1,
+      id: "",
+      flight,
+      airline: pick(rec, "airline"),
+      sector,
+      etd: pick(rec, "etd"),
+      pax,
+      specialMeals,
+      valid: !!flight && !!sector && pax > 0,
+      type,
+      direction,
+      date: normalizeDate(pick(rec, "date")),
+    };
+  });
+}
+
+/** Parse an uploaded Special-Meals manifest CSV. */
+function parseSpecialCsv(text: string): SpecialMealUpload[] {
+  if (!/pnr|meal code/i.test(text.split(/\r?\n/)[0] || "")) return [];
+  return parseCsvRecords(text)
+    .map((rec) => ({
+      flight: pick(rec, "flight no", "flight").toUpperCase(),
+      date: normalizeDate(pick(rec, "date")),
+      pnr: pick(rec, "pnr"),
+      passengerName: pick(rec, "passenger name", "name"),
+      seat: pick(rec, "seat"),
+      mealCode: pick(rec, "meal code", "code").toUpperCase(),
+    }))
+    .filter((r) => r.flight && r.mealCode);
+}
+
+/** Key a flight by Flight No + Date — the join key between manifests and flights. */
+const flightKey = (flight: string, date?: string) => `${flight.toUpperCase()}__${date ?? ""}`;
 
 const SAMPLE_PARSED_DOM: ParsedRow[] = [
   { row: 1, id: "ORD-3501", flight: "BS-141", airline: "US-Bangla", sector: "DAC → CXB", etd: "08:15", pax: 72, specialMeals: 4, valid: true,  type: "Domestic", zenLoad: 72, totalMeal: 72, specMeal: 4, crewMeal: 4, returnFlight: "BS-142", returnSector: "CXB → DAC", date: "2026-05-24" },
@@ -605,7 +724,13 @@ export default function OrderManagementPage() {
           nextRowSeq={orders.length + 1}
         />
       )}
-      {view === "bulk" && <BulkUpload onImport={addOrdersBulk} onOrderConfirmed={(data) => setConfirmedOrder(data)} />}
+      {view === "bulk" && (
+        <BulkUpload
+          onPersistOrders={addOrdersBulk}
+          orderNoSeed={Math.max(3410, ...orders.map((o) => Number(o.orderNo.split("-").pop()) || 0))}
+          onOrderConfirmed={(data) => setConfirmedOrder(data)}
+        />
+      )}
 
       <FlightOrderDetailsDialog
         order={selectedOrder}
@@ -907,6 +1032,8 @@ function OrdersList({
   const [airline, setAirline] = useState<string>("All");
   const [scope, setScope] = useState<"All" | "Domestic" | "International">("All");
   const [status, setStatus] = useState<"All" | FlightOrderStatus>("All");
+  // Flight whose special-meal count was clicked — drives the focused roster dialog.
+  const [mealDetailLeg, setMealDetailLeg] = useState<FlightOrder | null>(null);
 
   const airlineOptions = Array.from(new Set(orders.map((o) => o.airline))).sort();
 
@@ -1229,7 +1356,22 @@ function OrdersList({
                         <TableCell className="tabular-nums text-xs">{o.date}</TableCell>
                         <TableCell>{o.etd}</TableCell>
                         <TableCell className="text-right tabular-nums">{o.pax}</TableCell>
-                        {showSpecMeals && <TableCell className={"text-right tabular-nums" + (o.specialMeals === 0 ? " text-muted-foreground/60" : "")}>{o.specialMeals}</TableCell>}
+                        {showSpecMeals && (
+                          <TableCell className="text-right tabular-nums">
+                            {o.specialMeals > 0 ? (
+                              <button
+                                type="button"
+                                onClick={() => setMealDetailLeg(o)}
+                                className="font-medium text-sky-700 underline decoration-dotted underline-offset-2 hover:text-sky-800 tabular-nums"
+                                title="View special meal count & roster"
+                              >
+                                {o.specialMeals}
+                              </button>
+                            ) : (
+                              <span className="text-muted-foreground/60">0</span>
+                            )}
+                          </TableCell>
+                        )}
                         <TableCell>
                           <Button
                             size="icon"
@@ -1329,6 +1471,40 @@ function OrdersList({
             </div>
           </div>
         )}
+
+        {/* Focused special-meal handler — count + per-code breakdown + roster for one flight. */}
+        <Dialog open={!!mealDetailLeg} onOpenChange={(open) => !open && setMealDetailLeg(null)}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 flex-wrap">
+                Special Meals
+                {mealDetailLeg && (
+                  <>
+                    <span className="font-mono text-sm text-muted-foreground">— {mealDetailLeg.flight}</span>
+                    <DirectionBadge direction={mealDetailLeg.direction} />
+                    <Badge variant="outline" className="h-5 px-1.5 text-[10px] tabular-nums">
+                      {mealDetailLeg.specialMeals} {mealDetailLeg.specialMeals === 1 ? "meal" : "meals"}
+                    </Badge>
+                  </>
+                )}
+              </DialogTitle>
+            </DialogHeader>
+            {mealDetailLeg && (
+              <div className="mt-2 space-y-3">
+                <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+                  <DetailRow label="Order" value={mealDetailLeg.orderNo} mono />
+                  <DetailRow label="Sector" value={mealDetailLeg.sector} />
+                  <DetailRow label="Date" value={mealDetailLeg.date} />
+                  <DetailRow label="ETD" value={mealDetailLeg.etd} />
+                </div>
+                <SpecialMealRosterPanel legs={[mealDetailLeg]} />
+              </div>
+            )}
+            <DialogFooter className="mt-4">
+              <Button variant="outline" onClick={() => setMealDetailLeg(null)}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </CardContent>
     </Card>
   );
@@ -2348,7 +2524,13 @@ const BU_MEAL_TYPE_TIME: Record<string, string> = {
   Dinner: "07:00 PM – 10:00 PM",
 };
 
-function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightOrder[]) => void; onOrderConfirmed?: (data: MealOrderConfirmation) => void }) {
+function BulkUpload({ onPersistOrders, orderNoSeed, onOrderConfirmed }: {
+  /** Persists imported orders into the Order Management table without navigating away. */
+  onPersistOrders: (orders: FlightOrder[]) => void;
+  /** Highest existing order number — new bulk orders get sequential numbers above it. */
+  orderNoSeed: number;
+  onOrderConfirmed?: (data: MealOrderConfirmation) => void;
+}) {
   const navigate = useNavigate();
   const [draftSaved, setDraftSaved] = useState(false);
   const domFileRef = useRef<HTMLInputElement>(null);
@@ -2362,6 +2544,18 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
   const [intlProgress, setIntlProgress] = useState(0);
   const [intlDone, setIntlDone] = useState(false);
   const [intlParsed, setIntlParsed] = useState<ParsedRow[]>(SAMPLE_PARSED_INTL);
+
+  // Crew-meal and special-meal manifests upload separately from the flight
+  // orders — each attaches to existing flights by Flight No + Date.
+  const crewFileRef = useRef<HTMLInputElement>(null);
+  const [crewFile, setCrewFile] = useState<File | null>(null);
+  const [crewDone, setCrewDone] = useState(false);
+  const specialFileRef = useRef<HTMLInputElement>(null);
+  const [specialFile, setSpecialFile] = useState<File | null>(null);
+  const [specialDone, setSpecialDone] = useState(false);
+  // Parsed special-meal manifest rows (Flight No + Date keyed), used to attach
+  // rosters on import and to validate counts against each flight's declared total.
+  const [specialRows, setSpecialRows] = useState<SpecialMealUpload[]>([]);
 
   const [importConfirmed, setImportConfirmed] = useState(false);
   const [showFinalReview, setShowFinalReview] = useState(false);
@@ -2419,42 +2613,150 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
 
   const anyDone = domDone || intlDone;
 
-  const startDomUpload = (f: File) => {
-    setDomFile(f);
-    setDomDone(false);
-    setDomProgress(0);
-    setDomParsed(SAMPLE_PARSED_DOM);
-    const t = setInterval(() => {
-      setDomProgress((p) => {
-        if (p >= 100) {
-          clearInterval(t);
-          setDomDone(true);
-          toast.success(`Domestic file parsed — ${SAMPLE_PARSED_DOM.filter((r) => r.valid).length}/${SAMPLE_PARSED_DOM.length} rows valid.`);
-          addLog("Domestic orders file parsed and validated");
-          return 100;
-        }
-        return p + 10;
-      });
-    }, 100);
+  // Read the uploaded CSV; use the real parsed rows when it's our template,
+  // otherwise fall back to the sample preview (e.g. a binary .xlsx).
+  const runFlightUpload = (
+    f: File,
+    fallback: ParsedRow[],
+    setFile: (v: File) => void,
+    setDone: (v: boolean) => void,
+    setProgress: (fn: (p: number) => number) => void,
+    setParsed: (rows: ParsedRow[]) => void,
+    label: string,
+  ) => {
+    setFile(f);
+    setDone(false);
+    setProgress(() => 0);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const parsed = parseFlightCsv(String(reader.result ?? ""));
+      const rows = parsed.length > 0 ? parsed : fallback;
+      setParsed(rows);
+      const t = setInterval(() => {
+        setProgress((p) => {
+          if (p >= 100) {
+            clearInterval(t);
+            setDone(true);
+            toast.success(`${label} file parsed — ${rows.filter((r) => r.valid).length}/${rows.length} rows valid.`);
+            addLog(`${label} orders file parsed and validated`);
+            return 100;
+          }
+          return p + 10;
+        });
+      }, 80);
+    };
+    reader.onerror = () => toast.error(`Could not read ${f.name}.`);
+    reader.readAsText(f);
   };
 
-  const startIntlUpload = (f: File) => {
-    setIntlFile(f);
-    setIntlDone(false);
-    setIntlProgress(0);
-    setIntlParsed(SAMPLE_PARSED_INTL);
-    const t = setInterval(() => {
-      setIntlProgress((p) => {
-        if (p >= 100) {
-          clearInterval(t);
-          setIntlDone(true);
-          toast.success(`International file parsed — ${SAMPLE_PARSED_INTL.filter((r) => r.valid).length}/${SAMPLE_PARSED_INTL.length} rows valid.`);
-          addLog("International orders file parsed and validated");
-          return 100;
-        }
-        return p + 10;
-      });
-    }, 100);
+  const startDomUpload = (f: File) =>
+    runFlightUpload(f, SAMPLE_PARSED_DOM, setDomFile, setDomDone, setDomProgress, setDomParsed, "Domestic");
+
+  const startIntlUpload = (f: File) =>
+    runFlightUpload(f, SAMPLE_PARSED_INTL, setIntlFile, setIntlDone, setIntlProgress, setIntlParsed, "International");
+
+  // Crew-meal and special-meal manifests attach to flights already created (via
+  // the flight orders upload / single screen) — keyed by Flight No + Date — so
+  // they parse-and-acknowledge rather than creating standalone flight rows.
+  const startCrewUpload = (f: File) => {
+    setCrewFile(f);
+    setCrewDone(false);
+    setTimeout(() => {
+      setCrewDone(true);
+      toast.success(`Crew meal manifest received — ${f.name}`);
+      addLog("Crew meal manifest uploaded and queued for matching");
+    }, 600);
+  };
+
+  const startSpecialUpload = (f: File) => {
+    setSpecialFile(f);
+    setSpecialDone(false);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rows = parseSpecialCsv(String(reader.result ?? ""));
+      setSpecialRows(rows);
+      setSpecialDone(true);
+      if (rows.length === 0) {
+        toast.error("No special-meal rows found — check the file matches the Special Meals template.");
+      } else {
+        toast.success(`Special meal manifest parsed — ${rows.length} passenger${rows.length === 1 ? "" : "s"}.`);
+      }
+      addLog(`Special meal manifest uploaded — ${rows.length} rows`);
+    };
+    reader.onerror = () => toast.error(`Could not read ${f.name}.`);
+    reader.readAsText(f);
+  };
+
+  const downloadTemplate = (kind: "dom" | "intl" | "crew" | "special") => {
+    // CSV columns mirror the exact ParsedRow fields the bulk-upload parser reads
+    // for each flight type, with two example rows lifted from the seed dataset so
+    // the file is immediately fillable against the current architecture.
+    const csvCell = (v: string | number | undefined) => {
+      const s = v === undefined || v === null ? "" : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    // Three templates, each mirroring the matching single-order screen:
+    //  • Flights (Domestic / International) — flight-level only, with a Special
+    //    Meals COUNT column (no per-passenger detail). Order No is system-
+    //    generated, never on the sheet.
+    //  • Special Meals — the per-passenger roster (PNR / Name / Seat / Code),
+    //    attaching to a flight by Flight No + Date. Same shape the single
+    //    screen's roster bulk-paste accepts.
+    //  • Crew Meals — crew-meal order fields from the Create Crew Meal screen
+    //    (Scope, Flight, Airline, sector, Date, ETD, Meal Slot, No of Crew).
+    const FLIGHT_HEADERS = ["Scope", "Flight No", "Airline", "From", "To", "Date", "ETD", "Direction", "PAX", "Special Meals"];
+    const TEMPLATES: Record<typeof kind, { fileName: string; label: string; headers: string[]; rows: (string | number)[][] }> = {
+      dom: {
+        fileName: "domestic-flights-template.csv",
+        label: "Domestic flights",
+        headers: FLIGHT_HEADERS,
+        rows: [
+          ["Domestic", "BS-141", "US-Bangla", "DAC", "CXB", "2026-05-24", "08:15", "Outbound", 72, 4],
+          ["Domestic", "BS-203", "US-Bangla", "DAC", "CGP", "2026-05-24", "10:30", "Outbound", 88, 2],
+        ],
+      },
+      intl: {
+        fileName: "international-flights-template.csv",
+        label: "International flights",
+        headers: FLIGHT_HEADERS,
+        rows: [
+          ["International", "BS-225", "US-Bangla", "DAC", "DXB", "2026-05-24", "12:30", "Outbound", 174, 14],
+          ["International", "BS-307", "US-Bangla", "DAC", "KUL", "2026-05-24", "23:50", "Outbound", 282, 18],
+        ],
+      },
+      special: {
+        fileName: "special-meals-template.csv",
+        label: "Special meals",
+        headers: ["Flight No", "Date", "PNR", "Passenger Name", "Seat", "Meal Code"],
+        rows: [
+          ["BS-225", "2026-05-24", "RT3M9P", "Karim Chowdhury", "3A", "CHML"],
+          ["BS-225", "2026-05-24", "LW6N2Q", "Sadia Islam", "22F", "VGML"],
+          ["BS-225", "2026-05-24", "HB5J7D", "Imran Hossain", "30C", "MOML"],
+          ["BS-141", "2026-05-24", "BS3X9K", "Rahim Uddin", "12C", "MOML"],
+        ],
+      },
+      crew: {
+        fileName: "crew-meals-template.csv",
+        label: "Crew meals",
+        headers: ["Scope", "Flight No", "Airline", "From", "To", "Date", "ETD", "Meal Slot", "Direction", "No of Crew"],
+        rows: [
+          ["Domestic", "BS-141", "US-Bangla", "DAC", "CXB", "2026-05-24", "08:15", "Breakfast", "Outbound", 4],
+          ["International", "BS-225", "US-Bangla", "DAC", "DXB", "2026-05-24", "12:30", "Lunch", "Outbound", 14],
+        ],
+      },
+    };
+    const config = TEMPLATES[kind];
+    const csv = [config.headers, ...config.rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = config.fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast.success(`${config.label} template downloaded.`);
   };
 
   const updateDomField = (rowNum: number, field: keyof ParsedRow, value: string) => {
@@ -2465,31 +2767,89 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
     setIntlParsed((prev) => prev.map((r) => (r.row === rowNum ? { ...r, [field]: value } : r)));
   };
 
+  // ── Special-meal manifest validation ──────────────────────────────────────
+  // The uploaded roster for a flight must contain EXACTLY the number of special
+  // meals that flight declares (Special Meals column) — no more, no fewer.
+  const allFlightRows = useMemo(
+    () => [...(domDone ? domParsed : []), ...(intlDone ? intlParsed : [])].filter((r) => r.valid),
+    [domDone, domParsed, intlDone, intlParsed],
+  );
+  const declaredByFlight = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of allFlightRows) m.set(flightKey(r.flight, r.date), r.specialMeals);
+    return m;
+  }, [allFlightRows]);
+  const uploadedByFlight = useMemo(() => {
+    const m = new Map<string, SpecialMealUpload[]>();
+    for (const r of specialRows) {
+      const k = flightKey(r.flight, r.date);
+      (m.get(k) ?? m.set(k, []).get(k)!).push(r);
+    }
+    return m;
+  }, [specialRows]);
+  // One issue per manifest flight whose roster count ≠ declared count, or whose
+  // flight isn't in the uploaded flight orders.
+  const specialMealIssues = useMemo(() => {
+    if (!specialDone) return [] as { flight: string; date: string; declared: number | null; uploaded: number }[];
+    const issues: { flight: string; date: string; declared: number | null; uploaded: number }[] = [];
+    for (const [k, entries] of uploadedByFlight) {
+      const declared = declaredByFlight.has(k) ? declaredByFlight.get(k)! : null;
+      if (declared === null || declared !== entries.length) {
+        issues.push({ flight: entries[0].flight, date: entries[0].date, declared, uploaded: entries.length });
+      }
+    }
+    return issues;
+  }, [specialDone, uploadedByFlight, declaredByFlight]);
+  const specialMealsMatched = specialDone && specialRows.length > 0 && specialMealIssues.length === 0;
+
   const confirmImport = () => {
+    // Block import while any special-meal manifest count disagrees with the
+    // declared count — the user must fix the file (or the flight) first.
+    if (specialMealIssues.length > 0) {
+      toast.error(
+        `Import blocked — ${specialMealIssues.length} flight${specialMealIssues.length === 1 ? "" : "s"} have a special-meal count that doesn't match the uploaded manifest.`,
+      );
+      return;
+    }
     const allParsed = [
       ...(domDone ? domParsed : []),
       ...(intlDone ? intlParsed : []),
     ];
     const valid = allParsed.filter((r) => r.valid);
     const today = new Date().toISOString().slice(0, 10);
-    const orders: FlightOrder[] = valid.map((r, i) => ({
-      id: `FO-IMP-${String(Date.now()).slice(-4)}-${i + 1}`,
-      orderNo: r.id,
-      flight: r.flight,
-      airline: r.airline,
-      sector: r.sector,
-      date: today,
-      etd: r.etd,
-      pax: r.pax,
-      crew: 16,
-      specialMeals: r.specialMeals,
-      status: "Pending",
-      direction: "Outbound",
-    }));
+    const stamp = String(Date.now()).slice(-5);
+    const orders: FlightOrder[] = valid.map((r, i) => {
+      const orderNo = `ORD-${orderNoSeed + 1 + i}`;
+      const manifest = uploadedByFlight.get(flightKey(r.flight, r.date)) ?? [];
+      const roster: SpecialMealEntry[] = manifest.map((m, j) => ({
+        id: `SM-IMP-${stamp}-${i}-${j}`,
+        pnr: m.pnr,
+        passengerName: m.passengerName,
+        seat: m.seat,
+        mealCode: m.mealCode,
+      }));
+      return {
+        id: `FO-IMP-${stamp}-${i + 1}`,
+        orderNo,
+        flight: r.flight,
+        airline: r.airline,
+        sector: r.sector,
+        date: r.date || today,
+        etd: r.etd,
+        pax: r.pax,
+        crew: r.type === "International" ? 14 : 4,
+        specialMeals: r.specialMeals,
+        status: "Pending",
+        direction: r.direction ?? "Outbound",
+        specialMealRoster: roster.length > 0 ? roster : undefined,
+      };
+    });
     setImportedOrders(orders);
     setImportConfirmed(true);
-    addLog(`Confirmed import of ${orders.length} orders`);
-    toast.success(`${orders.length} orders confirmed. ${allParsed.length - valid.length} skipped.`);
+    // Persist into the Order Management table immediately, with system Order Nos.
+    onPersistOrders(orders);
+    addLog(`Imported ${orders.length} orders into Order Management (${orders[0]?.orderNo} … ${orders[orders.length - 1]?.orderNo})`);
+    toast.success(`${orders.length} orders added to Order Management. ${allParsed.length - valid.length} skipped.`);
   };
 
   // Summary values derived from parsed data
@@ -2530,7 +2890,8 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
       );
       const confirmationData = { timestamp: ts, totalFlights, totalMeals, tomorrowDayName, dayAfterDayName, dayAfterDateStr, validIntl, validDom, dayAfterMenu };
       onOrderConfirmed?.(confirmationData);
-      onImport(importedOrders);
+      // Orders were already persisted to the table in confirmImport; here we
+      // only forward the meal plan to Production.
       toast.success("Meal plan tagged and forwarded to Production.");
       onComplete?.();
       navigate("/production-entry", { state: { mealOrderConfirmation: confirmationData } });
@@ -2564,9 +2925,30 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
               Bulk Upload
             </h3>
             <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => toast.success("Sample template downloaded.")}>
-                <Download className="h-3.5 w-3.5 mr-1.5" /> Sample Template
-              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm">
+                    <Download className="h-3.5 w-3.5 mr-1.5" /> Sample Template
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-60">
+                  <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground">Flight Orders</DropdownMenuLabel>
+                  <DropdownMenuItem onClick={() => downloadTemplate("dom")}>
+                    Domestic Flights (.csv)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => downloadTemplate("intl")}>
+                    International Flights (.csv)
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground">Meal Manifests</DropdownMenuLabel>
+                  <DropdownMenuItem onClick={() => downloadTemplate("special")}>
+                    Special Meals (.csv)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => downloadTemplate("crew")}>
+                    Crew Meals (.csv)
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" size="sm">
@@ -2598,6 +2980,20 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
             accept=".xlsx,.xls,.csv,.doc,.docx"
             hidden
             onChange={(e) => { const f = e.target.files?.[0]; if (f) startIntlUpload(f); }}
+          />
+          <input
+            ref={crewFileRef}
+            type="file"
+            accept=".xlsx,.xls,.csv,.doc,.docx"
+            hidden
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) startCrewUpload(f); }}
+          />
+          <input
+            ref={specialFileRef}
+            type="file"
+            accept=".xlsx,.xls,.csv,.doc,.docx"
+            hidden
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) startSpecialUpload(f); }}
           />
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2673,6 +3069,77 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+
+          {/* Meal manifests — attach to flights already in the system by Flight No + Date. */}
+          <div className="mt-6 pt-5 border-t border-border">
+            <div className="flex items-center gap-2 mb-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Meal Manifests</h4>
+              <span className="text-[11px] text-muted-foreground">— attach crew &amp; special meals to existing flights (matched by Flight No + Date)</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Crew Meals upload slot */}
+              <div
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) startCrewUpload(f); }}
+                className="rounded-lg border-2 border-dashed border-amber-400/40 bg-gradient-to-br from-amber-50 to-transparent py-8 text-center"
+              >
+                <div className="mx-auto h-12 w-12 rounded-full bg-amber-100 grid place-items-center mb-3">
+                  <Users className="h-6 w-6 text-amber-600" />
+                </div>
+                <h4 className="text-sm font-semibold">Crew Meals</h4>
+                <p className="text-xs text-muted-foreground mt-1">.xlsx, .xls, .csv, .doc, .docx</p>
+                <Button size="sm" variant="outline" className="mt-3 border-amber-400/40 text-amber-700 hover:bg-amber-50" onClick={() => crewFileRef.current?.click()}>
+                  <Upload className="h-3.5 w-3.5 mr-1" /> Select File
+                </Button>
+                {crewFile && (
+                  <div className="mt-4 max-w-xs mx-auto text-left px-4">
+                    <div className="flex items-center gap-1.5 text-xs">
+                      {crewDone ? (
+                        <>
+                          <CheckCircle2 className="h-3.5 w-3.5 text-success" />
+                          <span className="font-medium truncate">{crewFile.name}</span>
+                          <span className="text-success ml-auto">received</span>
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground">Uploading…</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Special Meals upload slot */}
+              <div
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) startSpecialUpload(f); }}
+                className="rounded-lg border-2 border-dashed border-emerald-400/40 bg-gradient-to-br from-emerald-50 to-transparent py-8 text-center"
+              >
+                <div className="mx-auto h-12 w-12 rounded-full bg-emerald-100 grid place-items-center mb-3">
+                  <Utensils className="h-6 w-6 text-emerald-600" />
+                </div>
+                <h4 className="text-sm font-semibold">Special Meals</h4>
+                <p className="text-xs text-muted-foreground mt-1">.xlsx, .xls, .csv, .doc, .docx</p>
+                <Button size="sm" variant="outline" className="mt-3 border-emerald-400/40 text-emerald-700 hover:bg-emerald-50" onClick={() => specialFileRef.current?.click()}>
+                  <Upload className="h-3.5 w-3.5 mr-1" /> Select File
+                </Button>
+                {specialFile && (
+                  <div className="mt-4 max-w-xs mx-auto text-left px-4">
+                    <div className="flex items-center gap-1.5 text-xs">
+                      {specialDone ? (
+                        <>
+                          <CheckCircle2 className="h-3.5 w-3.5 text-success" />
+                          <span className="font-medium truncate">{specialFile.name}</span>
+                          <span className="text-success ml-auto">received</span>
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground">Uploading…</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -2887,22 +3354,60 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
         </Card>
       )}
 
+      {/* Special-meal manifest validation — the uploaded roster count for each
+          flight must equal that flight's declared Special Meals count. */}
+      {specialDone && anyDone && !importConfirmed && !showFinalReview && (
+        <div className={"rounded-lg border px-4 py-3 " + (specialMealIssues.length > 0 ? "border-destructive/40 bg-destructive/5" : "border-success/40 bg-success/5")}>
+          <div className="flex items-center gap-2 mb-1">
+            {specialMealIssues.length > 0 ? (
+              <AlertCircle className="h-4 w-4 text-destructive" />
+            ) : (
+              <CheckCircle2 className="h-4 w-4 text-success" />
+            )}
+            <span className="text-sm font-semibold">
+              Special Meals — {specialRows.length} passenger{specialRows.length === 1 ? "" : "s"} across {uploadedByFlight.size} flight{uploadedByFlight.size === 1 ? "" : "s"}
+            </span>
+          </div>
+          {specialMealIssues.length > 0 ? (
+            <ul className="mt-1 space-y-0.5 text-xs text-destructive">
+              {specialMealIssues.map((iss) => (
+                <li key={`${iss.flight}-${iss.date}`}>
+                  <span className="font-mono font-medium">{iss.flight}</span> ({iss.date}) —{" "}
+                  {iss.declared === null
+                    ? `no matching flight in the uploaded orders (${iss.uploaded} meal${iss.uploaded === 1 ? "" : "s"} in manifest)`
+                    : `declares ${iss.declared} special meal${iss.declared === 1 ? "" : "s"} but manifest has ${iss.uploaded} — counts must match exactly.`}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-xs text-success">All manifest counts match each flight's declared Special Meals total. Ready to import.</p>
+          )}
+        </div>
+      )}
+
       {/* Confirm Import — available when at least one file is done */}
       {anyDone && !importConfirmed && !showFinalReview && (
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={() => toast.success("Error report downloaded.")}>
             <Download className="h-3.5 w-3.5 mr-1.5" /> Error Report
           </Button>
-          <Button onClick={() => {
-            const invalidCount = allInvalidCount;
-            if (invalidCount > 0) {
-              toast.error(
-                `Import blocked — ${invalidCount} invalid row${invalidCount !== 1 ? "s" : ""} must be fixed before proceeding. Use the Edit button on highlighted rows.`,
-              );
-              return;
-            }
-            setShowFinalReview(true);
-          }}>Confirm Import</Button>
+          <Button
+            disabled={specialMealIssues.length > 0}
+            onClick={() => {
+              const invalidCount = allInvalidCount;
+              if (invalidCount > 0) {
+                toast.error(
+                  `Import blocked — ${invalidCount} invalid row${invalidCount !== 1 ? "s" : ""} must be fixed before proceeding. Use the Edit button on highlighted rows.`,
+                );
+                return;
+              }
+              if (specialMealIssues.length > 0) {
+                toast.error("Import blocked — special-meal manifest counts don't match the declared totals.");
+                return;
+              }
+              setShowFinalReview(true);
+            }}
+          >Confirm Import</Button>
         </div>
       )}
 
@@ -3969,6 +4474,7 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
             title="uploads"
             data={recentUploads}
             columns={uploadCols}
+            selectable={false}
             searchKeys={["file", "by", "status"]}
             actions={(row) => <RowActions row={row} actions={["view", "export", "delete"]} />}
           />
