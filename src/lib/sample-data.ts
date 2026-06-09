@@ -669,16 +669,22 @@ export const consumableUsage: ConsumableUsage[] = [
 export type EquipmentCategory =
   | "Trolley" | "Oven Rack" | "Container" | "Tray" | "Galley Insert" | "Hot Box";
 
+export type EquipmentAttachment = { label: string; fileName: string };
+
 export type EquipmentAsset = {
   id: string;
   name: string;
-  category: EquipmentCategory;
+  category: EquipmentCategory | string;
   serialNo: string;
   rfidTag?: string;
   location: string;
   lastMaintenance: string;
   nextMaintenance: string;
-  status: "In Service" | "In Maintenance" | "Damaged" | "Retired";
+  status: "In Service" | "In Maintenance" | "Damaged" | "Retired" | "New" | "Used";
+  poNumber?: string;
+  purchaseDate?: string;
+  supplierName?: string;
+  attachments?: EquipmentAttachment[];
 };
 
 export const equipmentAssets: EquipmentAsset[] = [

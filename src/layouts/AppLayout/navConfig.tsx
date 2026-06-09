@@ -195,27 +195,16 @@ export const NAV_MODULES: NavModule[] = [
     ],
   },
 
-  // ── 9. Airline Equipments ──────────────────────────────────────────────────
+  // ── 9. Fleet Operations (Airline Equipments + Maintenance & Assets) ──────────
   {
-    key: 'airline-equipments',
-    label: 'Airline Equipments',
-    icon: I(ScanBarcode),
+    key: 'fleet-operations',
+    label: 'Fleet Operations',
+    icon: I(Plane),
     children: [
-      { key: '/airline-equipments-overview', label: 'Equipments Dashboard', icon: I(LayoutDashboard) },
-      { key: '/airline-equipments',     label: 'Assets',         icon: I(Boxes) },
-      { key: '/equipment-maintenance',  label: 'Maintenance',    icon: I(Wrench) },
-      { key: '/equipment-damage',       label: 'Damage Reports', icon: I(ShieldAlert) },
-    ],
-  },
-
-  // ── 10. Maintenance ────────────────────────────────────────────────────────
-  {
-    key: 'maintenance',
-    label: 'Maintenance & Assets',
-    icon: I(Wrench),
-    children: [
-      { key: '/maintenance-overview', label: 'Maintenance Dashboard', icon: I(LayoutDashboard) },
-      { key: '/maintenance',          label: 'Maintenance', icon: I(Wrench) },
+      { key: '/fleet-overview',        label: 'Fleet Overview',  icon: I(LayoutDashboard) },
+      { key: '/airline-equipments',    label: 'Assets',          icon: I(Boxes) },
+      { key: '/equipment-maintenance', label: 'Maintenance',     icon: I(Wrench) },
+      { key: '/equipment-damage',      label: 'Damage Reports',  icon: I(ShieldAlert) },
     ],
   },
 

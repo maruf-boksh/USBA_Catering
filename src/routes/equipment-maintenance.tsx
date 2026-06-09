@@ -12,7 +12,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  Plus, ArrowLeft, Save, Wrench, Clock, AlertTriangle, CheckCircle2,
+  Plus, ArrowLeft, Save, Wrench, Clock, AlertTriangle, CheckCircle2, Eye,
 } from "lucide-react";
 import { toast } from "sonner";
 import { equipmentAssets as SEED_ASSETS, type EquipmentAsset } from "@/lib/sample-data";
@@ -87,7 +87,9 @@ function MaintenanceList({
   const today = new Date().toISOString().slice(0, 10);
   const cutoff30 = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
 
-  const eligible = assets.filter((a) => a.status !== "Damaged" && a.status !== "Retired");
+  const eligible = assets.filter(
+    (a) => a.status !== "Damaged" && a.status !== "Retired" && a.status !== "New" && a.status !== "Used",
+  );
   const overdue = eligible.filter((a) => a.nextMaintenance <= today);
   const dueSoon = eligible.filter((a) => a.nextMaintenance > today && a.nextMaintenance <= cutoff30);
   const allDue = [...overdue, ...dueSoon].sort((a, b) => a.nextMaintenance.localeCompare(b.nextMaintenance));
@@ -121,6 +123,7 @@ function MaintenanceList({
                 <TableHead className="text-xs uppercase tracking-wider">Last Maint.</TableHead>
                 <TableHead className="text-xs uppercase tracking-wider">Next Maint.</TableHead>
                 <TableHead className="text-xs uppercase tracking-wider text-right">Days</TableHead>
+                <TableHead className="text-xs uppercase tracking-wider text-right">Action</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -151,6 +154,11 @@ function MaintenanceList({
                         {isOverdue ? `${Math.abs(days)}d overdue` : `${days}d`}
                       </span>
                     </TableCell>
+                    <TableCell className="text-right">
+                      <button className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
+                        <Eye className="h-4 w-4" />
+                      </button>
+                    </TableCell>
                   </TableRow>
                 );
               })}
@@ -173,12 +181,13 @@ function MaintenanceList({
               <TableHead className="text-xs uppercase tracking-wider">Performed By</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Next Due</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Notes</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider text-right">Action</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {logs.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="text-center text-xs text-muted-foreground py-6">
+                <TableCell colSpan={8} className="text-center text-xs text-muted-foreground py-6">
                   No maintenance logged yet. Click "Log Maintenance" to record a service event.
                 </TableCell>
               </TableRow>
@@ -192,11 +201,27 @@ function MaintenanceList({
                     <div className="font-mono text-[10px] text-muted-foreground">{l.assetId}</div>
                   </TableCell>
                   <TableCell>
-                    <Badge variant="outline" className="text-[10px]">{l.workType}</Badge>
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        "text-[10px]",
+                        l.workType === "Routine"     && "bg-[#f0fdfa] text-[#0f766e] border-[#99f6e4]",
+                        l.workType === "Repair"      && "bg-[#FEF2F2] text-[#DC2626] border-[#FECACA]",
+                        l.workType === "Calibration" && "bg-[#EFF6FF] text-[#1d4ed8] border-[#BFDBFE]",
+                        l.workType === "Inspection"  && "bg-[#F5F3FF] text-[#7C3AED] border-[#DDD6FE]",
+                      )}
+                    >
+                      {l.workType}
+                    </Badge>
                   </TableCell>
                   <TableCell className="text-xs">{l.performedBy}</TableCell>
                   <TableCell className="tabular-nums text-xs">{l.nextDue}</TableCell>
                   <TableCell className="text-xs text-muted-foreground max-w-[260px]">{l.notes ?? "—"}</TableCell>
+                  <TableCell className="text-right">
+                    <button className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
+                      <Eye className="h-4 w-4" />
+                    </button>
+                  </TableCell>
                 </TableRow>
               ))
             )}

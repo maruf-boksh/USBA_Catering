@@ -12,21 +12,32 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  Plus, ArrowLeft, Save, Boxes, Wrench, ShieldAlert, ScanBarcode, Truck,
+  Plus, ArrowLeft, Save, Boxes, Wrench, ShieldAlert, ScanBarcode, Truck, Eye,
+  Paperclip, X, FileText,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
   equipmentAssets as SEED_ASSETS,
-  type EquipmentCategory, type EquipmentAsset,
+  purchaseOrders,
+  type EquipmentCategory, type EquipmentAsset, type EquipmentAttachment,
 } from "@/lib/sample-data";
 import { cn } from "@/lib/utils";
 
 const CATEGORIES: EquipmentCategory[] = [
   "Trolley", "Oven Rack", "Container", "Tray", "Galley Insert", "Hot Box",
 ];
-const STATUSES: EquipmentAsset["status"][] = [
-  "In Service", "In Maintenance", "Damaged", "Retired",
-];
+const REGISTER_STATUSES = ["New", "Used"] as const;
+type RegisterStatus = (typeof REGISTER_STATUSES)[number];
+
+const ATTACHMENT_LABELS = ["Purchase Invoice", "Warranty Document", "Other"] as const;
+type AttachmentLabel = (typeof ATTACHMENT_LABELS)[number];
+
+type AttachmentEntry = {
+  uid: string;
+  label: AttachmentLabel;
+  fileName: string;
+  fileRef: File | null;
+};
 
 const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
@@ -66,9 +77,119 @@ export default function EquipmentAssetsPage() {
   );
 }
 
+// ── View Modal ────────────────────────────────────────────────────────────────
+
+function Field({ label, value, mono }: { label: string; value?: string; mono?: boolean }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">{label}</div>
+      <div className={cn("text-sm", mono && "font-mono text-xs")}>{value || <span className="text-muted-foreground">—</span>}</div>
+    </div>
+  );
+}
+
+function AssetViewModal({ asset, onClose }: { asset: EquipmentAsset; onClose: () => void }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="bg-background rounded-xl shadow-2xl w-full max-w-2xl mx-4 overflow-hidden max-h-[90vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border shrink-0">
+          <div>
+            <div className="font-semibold text-base">{asset.name}</div>
+            <div className="font-mono text-xs text-muted-foreground mt-0.5">{asset.id}</div>
+          </div>
+          <div className="flex items-center gap-3">
+            <StatusBadge status={asset.status} />
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div className="overflow-y-auto px-6 py-5 space-y-5">
+          {/* Core registration fields */}
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+              Asset Details
+            </div>
+            <div className="grid grid-cols-2 gap-x-8 gap-y-4">
+              <Field label="Asset ID" value={asset.id} mono />
+              <Field label="Asset Name" value={asset.name} />
+              <Field label="Category" value={asset.category} />
+              <Field label="Serial No." value={asset.serialNo} mono />
+              <Field label="Status" value={asset.status} />
+              <Field label="PO Number" value={asset.poNumber} mono />
+              <Field label="Purchase Date" value={asset.purchaseDate} />
+              <Field label="Supplier" value={asset.supplierName} />
+            </div>
+          </div>
+
+          {/* Legacy fields — shown only if present (existing seed assets) */}
+          {(asset.location || asset.rfidTag || asset.nextMaintenance) && (
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+                Operations Info
+              </div>
+              <div className="grid grid-cols-2 gap-x-8 gap-y-4">
+                {asset.location && <Field label="Location" value={asset.location} />}
+                {asset.rfidTag && (
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">RFID Tag</div>
+                    <span className="inline-flex items-center gap-1 font-mono text-xs text-primary">
+                      <ScanBarcode className="h-3 w-3" />{asset.rfidTag}
+                    </span>
+                  </div>
+                )}
+                {asset.lastMaintenance && <Field label="Last Maintenance" value={asset.lastMaintenance} />}
+                {asset.nextMaintenance && <Field label="Next Maintenance" value={asset.nextMaintenance} />}
+              </div>
+            </div>
+          )}
+
+          {/* Attachments */}
+          {asset.attachments && asset.attachments.length > 0 && (
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+                Attachments
+              </div>
+              <div className="space-y-2">
+                {asset.attachments.map((att, i) => (
+                  <div key={i} className="flex items-center gap-2.5 rounded-md border border-border bg-muted/20 px-3 py-2">
+                    <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                    <span className="text-[11px] font-medium text-muted-foreground min-w-[120px]">{att.label}</span>
+                    <span className="text-xs truncate">{att.fileName}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-4 border-t border-border bg-muted/30 flex justify-end shrink-0">
+          <Button variant="outline" size="sm" onClick={onClose}>Close</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Asset List ────────────────────────────────────────────────────────────────
+
 function AssetList({ assets }: { assets: EquipmentAsset[] }) {
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState<EquipmentCategory | "All">("All");
+  const [viewAsset, setViewAsset] = useState<EquipmentAsset | null>(null);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -76,7 +197,9 @@ function AssetList({ assets }: { assets: EquipmentAsset[] }) {
       if (category !== "All" && a.category !== category) return false;
       if (q && !a.name.toLowerCase().includes(q) && !a.id.toLowerCase().includes(q)
         && !(a.rfidTag ?? "").toLowerCase().includes(q)
-        && !a.serialNo.toLowerCase().includes(q)) return false;
+        && !a.serialNo.toLowerCase().includes(q)
+        && !(a.poNumber ?? "").toLowerCase().includes(q)
+        && !(a.supplierName ?? "").toLowerCase().includes(q)) return false;
       return true;
     });
   }, [assets, search, category]);
@@ -87,12 +210,14 @@ function AssetList({ assets }: { assets: EquipmentAsset[] }) {
   const totalAssets = assets.length;
   const inService = assets.filter((a) => a.status === "In Service").length;
   const maintenanceDue = assets.filter(
-    (a) => a.status !== "Damaged" && a.status !== "Retired" && a.nextMaintenance <= cutoff30,
+    (a) => a.status !== "Damaged" && a.status !== "Retired" && !!a.nextMaintenance && a.nextMaintenance <= cutoff30,
   ).length;
   const damaged = assets.filter((a) => a.status === "Damaged").length;
 
   return (
     <>
+      {viewAsset && <AssetViewModal asset={viewAsset} onClose={() => setViewAsset(null)} />}
+
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
         <KpiCard label="Total Assets" value={totalAssets} icon={Boxes} tone="navy" />
         <KpiCard label="In Service" value={inService} icon={Truck} tone="success" />
@@ -107,7 +232,7 @@ function AssetList({ assets }: { assets: EquipmentAsset[] }) {
               <Input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search by asset id, name, serial or RFID tag…"
+                placeholder="Search by asset id, name, serial, PO or supplier…"
                 className="h-9"
               />
             </div>
@@ -137,55 +262,57 @@ function AssetList({ assets }: { assets: EquipmentAsset[] }) {
         <Table>
           <TableHeader className="bg-muted/40">
             <TableRow>
-              <TableHead className="w-14 text-xs uppercase tracking-wider">SL</TableHead>
+              <TableHead className="w-10 text-xs uppercase tracking-wider">SL</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Asset ID</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">Name</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">Asset Name</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Category</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">Serial</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">RFID Tag</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">Location</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">Next Maint.</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">Serial No.</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">PO #</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">Purchase Date</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">Supplier</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Status</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider text-right">Action</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={9} className="text-center text-sm text-muted-foreground py-8">
+                <TableCell colSpan={10} className="text-center text-sm text-muted-foreground py-8">
                   No assets match the selected filters.
                 </TableCell>
               </TableRow>
             ) : (
-              filtered.map((a, i) => {
-                const overdue = a.status !== "Damaged" && a.status !== "Retired" && a.nextMaintenance <= today;
-                const due = !overdue && a.status !== "Damaged" && a.status !== "Retired" && a.nextMaintenance <= cutoff30;
-                return (
-                  <TableRow key={a.id} className="hover:bg-muted/30">
-                    <TableCell className="text-xs text-muted-foreground tabular-nums">{i + 1}</TableCell>
-                    <TableCell className="font-mono text-xs">{a.id}</TableCell>
-                    <TableCell className="font-medium">{a.name}</TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className="text-[10px]">{a.category}</Badge>
-                    </TableCell>
-                    <TableCell className="font-mono text-[11px] text-muted-foreground">{a.serialNo}</TableCell>
-                    <TableCell className="font-mono text-[11px]">
-                      {a.rfidTag ? (
-                        <span className="inline-flex items-center gap-1 text-primary">
-                          <ScanBarcode className="h-3 w-3" />
-                          {a.rfidTag}
-                        </span>
-                      ) : <span className="text-muted-foreground">—</span>}
-                    </TableCell>
-                    <TableCell className="text-xs">{a.location}</TableCell>
-                    <TableCell className="tabular-nums text-xs">
-                      {a.nextMaintenance}
-                      {overdue && <span className="ml-1 text-[10px] text-destructive font-semibold">OVERDUE</span>}
-                      {due && <span className="ml-1 text-[10px] text-warning font-semibold">DUE</span>}
-                    </TableCell>
-                    <TableCell><StatusBadge status={a.status} /></TableCell>
-                  </TableRow>
-                );
-              })
+              filtered.map((a, i) => (
+                <TableRow key={a.id} className="hover:bg-muted/30">
+                  <TableCell className="text-xs text-muted-foreground tabular-nums">{i + 1}</TableCell>
+                  <TableCell className="font-mono text-xs">{a.id}</TableCell>
+                  <TableCell className="font-medium">{a.name}</TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className="text-[10px]">{a.category}</Badge>
+                  </TableCell>
+                  <TableCell className="font-mono text-[11px] text-muted-foreground">{a.serialNo}</TableCell>
+                  <TableCell className="font-mono text-[11px]">
+                    {a.poNumber
+                      ? <span className="text-primary">{a.poNumber}</span>
+                      : <span className="text-muted-foreground">—</span>}
+                  </TableCell>
+                  <TableCell className="tabular-nums text-xs">
+                    {a.purchaseDate || <span className="text-muted-foreground">—</span>}
+                  </TableCell>
+                  <TableCell className="text-xs">
+                    {a.supplierName || <span className="text-muted-foreground">—</span>}
+                  </TableCell>
+                  <TableCell><StatusBadge status={a.status} /></TableCell>
+                  <TableCell className="text-right">
+                    <button
+                      onClick={() => setViewAsset(a)}
+                      className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <Eye className="h-4 w-4" />
+                    </button>
+                  </TableCell>
+                </TableRow>
+              ))
             )}
           </TableBody>
         </Table>
@@ -194,85 +321,223 @@ function AssetList({ assets }: { assets: EquipmentAsset[] }) {
   );
 }
 
+// ── Asset Create ──────────────────────────────────────────────────────────────
+
 function AssetCreate({ nextId, onSave }: { nextId: string; onSave: (a: EquipmentAsset) => void }) {
   const today = new Date().toISOString().slice(0, 10);
-  const sixMonthsOut = new Date(Date.now() + 180 * 86400000).toISOString().slice(0, 10);
 
   const [name, setName] = useState("");
-  const [category, setCategory] = useState<EquipmentCategory>("Trolley");
+  const [category, setCategory] = useState<EquipmentCategory | "Other">("Trolley");
+  const [customCategory, setCustomCategory] = useState("");
+  const [status, setStatus] = useState<RegisterStatus>("New");
   const [serialNo, setSerialNo] = useState("");
-  const [rfidTag, setRfidTag] = useState("");
-  const [location, setLocation] = useState("");
-  const [lastMaintenance, setLastMaintenance] = useState(today);
-  const [nextMaintenance, setNextMaintenance] = useState(sixMonthsOut);
-  const [status, setStatus] = useState<EquipmentAsset["status"]>("In Service");
+  const [poNumber, setPoNumber] = useState("");
+  const [purchaseDate, setPurchaseDate] = useState(today);
+  const [supplierName, setSupplierName] = useState("");
+  const [attachments, setAttachments] = useState<AttachmentEntry[]>([
+    { uid: "att-1", label: "Purchase Invoice", fileName: "", fileRef: null },
+  ]);
+
+  const posForDate = useMemo(
+    () => (purchaseDate ? purchaseOrders.filter((po) => po.date === purchaseDate) : []),
+    [purchaseDate],
+  );
+
+  const handleDateChange = (date: string) => {
+    setPurchaseDate(date);
+    setPoNumber("");
+    setSupplierName("");
+  };
+
+  const handlePoSelect = (poId: string) => {
+    setPoNumber(poId);
+    const po = purchaseOrders.find((p) => p.id === poId);
+    setSupplierName(po ? po.vendor : "");
+  };
+
+  const addAttachment = () => {
+    setAttachments((prev) => [
+      ...prev,
+      { uid: `att-${Date.now()}`, label: "Other", fileName: "", fileRef: null },
+    ]);
+  };
+
+  const removeAttachment = (uid: string) => {
+    setAttachments((prev) => prev.filter((a) => a.uid !== uid));
+  };
+
+  const updateAttachment = (uid: string, updates: Partial<AttachmentEntry>) => {
+    setAttachments((prev) => prev.map((a) => (a.uid === uid ? { ...a, ...updates } : a)));
+  };
 
   const save = () => {
     if (!name.trim()) { toast.error("Asset name is required."); return; }
     if (!serialNo.trim()) { toast.error("Serial number is required."); return; }
-    if (!location.trim()) { toast.error("Location is required."); return; }
+    if (!purchaseDate) { toast.error("Purchase date is required."); return; }
+    if (category === "Other" && !customCategory.trim()) {
+      toast.error("Please enter the custom category name."); return;
+    }
+    const finalCategory = (category === "Other" ? customCategory.trim() : category) as EquipmentCategory;
+    const savedAttachments: EquipmentAttachment[] = attachments
+      .filter((a) => a.fileName)
+      .map((a) => ({ label: a.label, fileName: a.fileName }));
+
     onSave({
       id: nextId,
       name: name.trim(),
-      category,
+      category: finalCategory,
       serialNo: serialNo.trim().toUpperCase(),
-      rfidTag: rfidTag.trim() || undefined,
-      location: location.trim(),
-      lastMaintenance,
-      nextMaintenance,
-      status,
+      location: "",
+      lastMaintenance: "",
+      nextMaintenance: "",
+      status: status as EquipmentAsset["status"],
+      poNumber: poNumber.trim() || undefined,
+      purchaseDate,
+      supplierName: supplierName.trim() || undefined,
+      attachments: savedAttachments.length ? savedAttachments : undefined,
     });
     toast.success(`${name.trim()} registered as ${nextId}.`);
   };
 
   return (
     <Card>
-      <CardContent className="pt-6">
-        <div className="flex items-center justify-between mb-6">
-          <h3 className="text-sm font-semibold uppercase tracking-wider">Register Equipment Asset</h3>
-          <Button onClick={save}><Save className="h-4 w-4 mr-1.5" /> Save</Button>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
+      <CardContent className="pt-6 pb-6">
+        <h3 className="text-sm font-semibold uppercase tracking-wider mb-6">Register Equipment Asset</h3>
+
+        {/* ── Core fields ── */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 mb-6">
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Asset ID</Label>
             <Input value={nextId} disabled className="mt-1 font-mono" />
           </div>
           <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Name *</Label>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Asset Name *</Label>
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Full Size Meal Trolley" className="mt-1" />
           </div>
+
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Category</Label>
-            <select value={category} onChange={(e) => setCategory(e.target.value as EquipmentCategory)} className={selectCls}>
+            <select
+              value={category}
+              onChange={(e) => { setCategory(e.target.value as EquipmentCategory | "Other"); setCustomCategory(""); }}
+              className={selectCls}
+            >
               {CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+              <option value="Other">Other…</option>
             </select>
+            {category === "Other" && (
+              <Input
+                value={customCategory}
+                onChange={(e) => setCustomCategory(e.target.value)}
+                placeholder="Enter category name"
+                className="mt-2"
+              />
+            )}
           </div>
+
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Status</Label>
-            <select value={status} onChange={(e) => setStatus(e.target.value as EquipmentAsset["status"])} className={selectCls}>
-              {STATUSES.map((s) => <option key={s}>{s}</option>)}
+            <select value={status} onChange={(e) => setStatus(e.target.value as RegisterStatus)} className={selectCls}>
+              {REGISTER_STATUSES.map((s) => <option key={s}>{s}</option>)}
             </select>
           </div>
+
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Serial No. *</Label>
             <Input value={serialNo} onChange={(e) => setSerialNo(e.target.value)} placeholder="e.g. TR-004" className="mt-1 font-mono" />
           </div>
+
           <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">RFID Tag</Label>
-            <Input value={rfidTag} onChange={(e) => setRfidTag(e.target.value)} placeholder="e.g. RF-TR0004" className="mt-1 font-mono" />
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Purchase Date *</Label>
+            <Input type="date" value={purchaseDate} onChange={(e) => handleDateChange(e.target.value)} className="mt-1 tabular-nums" />
           </div>
-          <div className="md:col-span-2">
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Current Location *</Label>
-            <Input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="e.g. Hot Kitchen, BG-401, Damaged Pool" className="mt-1" />
-          </div>
+
           <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Last Maintenance</Label>
-            <Input type="date" value={lastMaintenance} onChange={(e) => setLastMaintenance(e.target.value)} className="mt-1 tabular-nums" />
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">PO Number</Label>
+            <select
+              value={poNumber}
+              onChange={(e) => handlePoSelect(e.target.value)}
+              className={selectCls}
+              disabled={!purchaseDate}
+            >
+              {posForDate.length === 0 ? (
+                <option value="">{purchaseDate ? "No POs found for this date" : "Select a purchase date first"}</option>
+              ) : (
+                <>
+                  <option value="">Select PO…</option>
+                  {posForDate.map((po) => (
+                    <option key={po.id} value={po.id}>{po.id} — {po.vendor}</option>
+                  ))}
+                </>
+              )}
+            </select>
           </div>
+
           <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Next Maintenance</Label>
-            <Input type="date" value={nextMaintenance} onChange={(e) => setNextMaintenance(e.target.value)} className="mt-1 tabular-nums" />
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Supplier Name</Label>
+            <Input
+              value={supplierName}
+              onChange={(e) => setSupplierName(e.target.value)}
+              placeholder="Auto-filled on PO selection"
+              className="mt-1"
+            />
           </div>
+        </div>
+
+        {/* ── Attachments ── */}
+        <div className="border border-border rounded-md p-4 bg-muted/20 mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Attachments</Label>
+            <Button type="button" size="sm" onClick={addAttachment}>
+              <Plus className="h-3.5 w-3.5 mr-1" /> Add
+            </Button>
+          </div>
+          <div className="space-y-2">
+            {attachments.map((att) => (
+              <div key={att.uid} className="flex items-center gap-2 rounded-md border border-border bg-background px-3 py-2">
+                <select
+                  value={att.label}
+                  onChange={(e) => updateAttachment(att.uid, { label: e.target.value as AttachmentLabel })}
+                  className="h-8 rounded border border-input bg-muted/40 px-2 text-xs min-w-[160px] shrink-0"
+                >
+                  {ATTACHMENT_LABELS.map((l) => <option key={l}>{l}</option>)}
+                </select>
+                <div className="flex-1 flex items-center gap-1.5 min-w-0">
+                  {att.fileName
+                    ? <><FileText className="h-3.5 w-3.5 text-primary shrink-0" /><span className="text-xs truncate font-medium">{att.fileName}</span></>
+                    : <span className="text-xs text-muted-foreground italic">No file selected</span>
+                  }
+                </div>
+                <label className="inline-flex items-center gap-1 cursor-pointer px-2.5 py-1 text-xs border border-input rounded-md bg-muted/40 hover:bg-muted transition-colors whitespace-nowrap shrink-0">
+                  <Paperclip className="h-3 w-3" /> Browse
+                  <input
+                    type="file"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) updateAttachment(att.uid, { fileName: f.name, fileRef: f });
+                    }}
+                  />
+                </label>
+                {attachments.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={() => removeAttachment(att.uid)}
+                    className="p-1 text-muted-foreground hover:text-destructive transition-colors shrink-0"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* ── Save — bottom right ── */}
+        <div className="flex justify-end">
+          <Button onClick={save}>
+            <Save className="h-4 w-4 mr-1.5" /> Save
+          </Button>
         </div>
       </CardContent>
     </Card>

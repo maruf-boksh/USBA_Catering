@@ -56,15 +56,33 @@ const MAP: Record<string, string> = {
   low:                   "bg-[#FFFBEB] text-[#B45309] border border-[#FDE68A]",
 
   /* ── Red: destructive / failed ── */
-  critical:  "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
-  delayed:   "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
-  fail:      "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
-  failed:    "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
+  critical:      "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
+  delayed:       "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
+  fail:          "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
+  failed:        "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
+  damaged:       "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
+  open:          "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
+
+  /* ── Blue: active repair / in-progress / used asset ── */
+  "under repair": "bg-[#EFF6FF] text-[#1d4ed8] border border-[#BFDBFE]",
+  used:           "bg-[#EFF6FF] text-[#1d4ed8] border border-[#BFDBFE]",
+
+  /* ── Teal: brand-new asset ── */
+  new:            "bg-[#f0fdfa] text-[#0f766e] border border-[#99f6e4]",
+
+  /* ── Green: fleet active / resolved ── */
+  "in service":  "bg-[#ECFDF5] text-[#059669] border border-[#A7F3D0]",
+  repaired:      "bg-[#ECFDF5] text-[#059669] border border-[#A7F3D0]",
+
+  /* ── Amber: fleet maintenance states ── */
+  "in maintenance": "bg-[#FFFBEB] text-[#B45309] border border-[#FDE68A]",
 
   /* ── Gray: terminal / muted ── */
-  closed:    "bg-[#F8FAFC] text-[#64748b] border border-[#E2E8F0]",
-  departed:  "bg-[#F8FAFC] text-[#64748b] border border-[#E2E8F0]",
-  exited:    "bg-[#F8FAFC] text-[#64748b] border border-[#E2E8F0]",
+  closed:       "bg-[#F8FAFC] text-[#64748b] border border-[#E2E8F0]",
+  departed:     "bg-[#F8FAFC] text-[#64748b] border border-[#E2E8F0]",
+  exited:       "bg-[#F8FAFC] text-[#64748b] border border-[#E2E8F0]",
+  retired:      "bg-[#F8FAFC] text-[#64748b] border border-[#E2E8F0]",
+  "written off": "bg-[#F8FAFC] text-[#64748b] border border-[#E2E8F0]",
 };
 
 export function StatusBadge({ status }: { status: string }) {

@@ -13,7 +13,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  Plus, ArrowLeft, Save, ShieldAlert, AlertCircle, Wrench, CheckCircle2,
+  Plus, ArrowLeft, Save, ShieldAlert, AlertCircle, Wrench, CheckCircle2, Eye,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -90,6 +90,7 @@ function DamageList({ reports }: { reports: DamageReport[] }) {
               <TableHead className="text-xs uppercase tracking-wider">Reported By</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Description</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Status</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider text-right">Action</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -118,6 +119,11 @@ function DamageList({ reports }: { reports: DamageReport[] }) {
                 <TableCell className="text-xs">{d.reportedBy}</TableCell>
                 <TableCell className="text-xs text-muted-foreground max-w-[300px]">{d.description}</TableCell>
                 <TableCell><StatusBadge status={d.status} /></TableCell>
+                <TableCell className="text-right">
+                  <button className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">
+                    <Eye className="h-4 w-4" />
+                  </button>
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>

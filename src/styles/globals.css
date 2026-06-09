@@ -679,6 +679,17 @@ html[data-theme="dark"] .app-quick-menu-module {
   opacity: 0.55;
 }
 
+.app-notif-item.app-notif-item-pinned {
+  background: var(--color-primary-light);
+  border-left: 3px solid var(--color-primary);
+  padding-left: 11px;
+}
+
+.app-notif-item.app-notif-item-pinned:hover {
+  background: var(--color-primary-light);
+  filter: brightness(0.96);
+}
+
 .app-notif-indicator {
   flex-shrink: 0;
   width: 7px;

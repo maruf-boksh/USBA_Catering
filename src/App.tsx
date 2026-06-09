@@ -67,6 +67,7 @@ import PackagingDispatchOverviewPage from "@/routes/packaging-dispatch-overview"
 import AirlineConsumablesOverviewPage from "@/routes/airline-consumables-overview";
 import AirlineEquipmentsOverviewPage from "@/routes/airline-equipments-overview";
 import MaintenanceOverviewPage from "@/routes/maintenance-overview";
+import FleetOverviewPage from "@/routes/fleet-overview";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 1000 * 60 * 5 } },
@@ -143,6 +144,7 @@ export function App() {
             <Route path="/airline-consumables-overview" element={<AirlineConsumablesOverviewPage />} />
             <Route path="/airline-equipments-overview" element={<AirlineEquipmentsOverviewPage />} />
             <Route path="/maintenance-overview" element={<MaintenanceOverviewPage />} />
+            <Route path="/fleet-overview" element={<FleetOverviewPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

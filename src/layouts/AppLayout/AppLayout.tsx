@@ -21,6 +21,7 @@ import {
   ClockCircleOutlined,
   IdcardOutlined,
   CheckOutlined,
+  PushpinFilled,
 } from '@ant-design/icons';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { GlobalSearch } from './GlobalSearch';
@@ -73,11 +74,8 @@ function useBreadcrumb(pathname: string): BreadcrumbItem[] | null {
 }
 
 // ─── Notification data (static mock) ──────────────────────────────────────────
-const NOTIFICATION_ITEMS = [
-  { id: 1, title: 'Leave request approved', desc: 'Annual leave for Apr 10–12 was approved.', time: '2m ago', unread: true },
-  { id: 2, title: 'New job application', desc: 'Senior Developer · Atif Zubair applied.', time: '1h ago', unread: true },
-  { id: 3, title: 'Payroll generated', desc: 'March 2026 payroll run completed.', time: '3h ago', unread: false },
-];
+const PINNED_NOTIFICATION = { id: 0, title: 'New Pending Approvals', desc: 'Pending items require your review and approval.', time: 'Pinned', unread: true, route: '/approval-management', pinned: true };
+const NOTIFICATION_ITEMS: { id: number; title: string; desc: string; time: string; unread: boolean; route: string; pinned: boolean }[] = [];
 
 const CLOCK_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
   hour: '2-digit',
@@ -108,7 +106,8 @@ const TopbarClock = memo(function TopbarClock() {
   );
 });
 
-function NotificationPanel() {
+function NotificationPanel({ onNavigate }: { onNavigate: (route: string) => void }) {
+  const allItems = [PINNED_NOTIFICATION, ...NOTIFICATION_ITEMS];
   return (
     <div className="app-notif-panel">
       <div className="app-notif-header">
@@ -116,9 +115,16 @@ function NotificationPanel() {
         <Button type="text" size="small" className="app-notif-mark-read">Mark all read</Button>
       </div>
       <div className="app-notif-list">
-        {NOTIFICATION_ITEMS.map(n => (
-          <div key={n.id} className={`app-notif-item${n.unread ? '' : ' is-read'}`}>
-            <span className="app-notif-indicator" />
+        {allItems.map(n => (
+          <div
+            key={n.id}
+            className={`app-notif-item${n.unread ? '' : ' is-read'}${n.pinned ? ' app-notif-item-pinned' : ''}`}
+            onClick={() => onNavigate(n.route)}
+          >
+            {n.pinned
+              ? <PushpinFilled style={{ fontSize: 11, color: 'var(--color-primary)', marginTop: 4, flexShrink: 0 }} />
+              : <span className="app-notif-indicator" />
+            }
             <div className="app-notif-body">
               <div className="app-notif-title">{n.title}</div>
               <div className="app-notif-desc">{n.desc}</div>
@@ -145,6 +151,7 @@ interface AppLayoutProps {
 
 export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) {
   const [collapsed, setCollapsed] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const { role, setRole } = useRole();
@@ -301,12 +308,21 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
 
               {/* Notifications dropdown */}
               <Dropdown
-                dropdownRender={() => <NotificationPanel />}
+                open={notifOpen}
+                onOpenChange={setNotifOpen}
+                dropdownRender={() => (
+                  <NotificationPanel
+                    onNavigate={(route) => {
+                      setNotifOpen(false);
+                      navigate(route);
+                    }}
+                  />
+                )}
                 trigger={['click']}
                 placement="bottomRight"
                 overlayClassName="app-notif-dropdown-overlay"
               >
-                <Badge count={3} size="small" offset={[-2, 2]}>
+                <Badge count={1} size="small" offset={[-2, 2]}>
                   <Button
                     type="text"
                     size="small"
