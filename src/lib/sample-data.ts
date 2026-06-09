@@ -1411,6 +1411,12 @@ export type FlightOrderRow = {
   status: FlightOrderStatus;
   direction: FlightDirection;
   specialMealRoster?: SpecialMealEntry[];
+  /** Distinguishes a passenger flight order from a crew-meal order. Absent on
+   *  legacy/seed rows, which are treated as "flight". */
+  orderType?: "flight" | "crew";
+  /** Epoch ms when created in-app. Absent on seed rows, which sort below
+   *  created orders so freshly created/imported orders surface at the top. */
+  createdAt?: number;
 };
 
 const ROSTER_FO_001: SpecialMealEntry[] = [

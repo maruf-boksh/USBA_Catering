@@ -14,12 +14,12 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import {
-  Plus, PackageCheck, Clock, CheckCircle2, Send, Search, Trash2, ChevronDown,
+  Plus, PackageCheck, Clock, CheckCircle2, Send, Search, Trash2, ChevronDown, Eye, AlertTriangle,
 } from "lucide-react";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { toast } from "sonner";
 import { inventory, allocateFefo, type FefoAllocation } from "@/lib/sample-data";
-import { getItemStockByWarehouse } from "@/lib/inventory-stock";
+import { getItemStockByWarehouse, getItemStock } from "@/lib/inventory-stock";
 import { useWorkflow, type WfTransferNote, type WfDemandRequest } from "@/lib/workflow-store";
 import { useRole } from "@/lib/roles";
 import { getAuthUser } from "@/lib/auth";
@@ -45,6 +45,8 @@ export default function ItemIssuePage() {
   const demandParam = searchParams.get("demand") ?? undefined;
 
   const [selected, setSelected] = useState<WfTransferNote | null>(null);
+  // Demand whose stock-vs-required breakdown is being viewed (read-only).
+  const [viewDemand, setViewDemand] = useState<WfDemandRequest | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [preselectedDemand, setPreselectedDemand] = useState("");
   const [filterOffice, setFilterOffice] = useState("");
@@ -276,15 +278,32 @@ export default function ItemIssuePage() {
                           <td className="px-3 py-2">{d.date}</td>
                           <td className="px-3 py-2">{d.requestedBy}</td>
                           <td className="px-3 py-2 text-right tabular-nums">{d.items.length}</td>
-                          <td className="px-3 py-2"><StatusBadge status={d.status} /></td>
+                          <td className="px-3 py-2">
+                            {/* From the store's view these demands are already approved and
+                                awaiting issuance — surface "Approved" rather than the internal
+                                "Pending Store Review" workflow state. */}
+                            <StatusBadge status={d.status === "Pending Store Review" ? "Approved" : d.status} />
+                          </td>
                           <td className="px-3 py-2 text-right">
-                            <Button
-                              size="sm"
-                              onClick={() => openIssueForDemand(d.id)}
-                              className="h-7 px-3 text-xs"
-                            >
-                              <Send className="h-3 w-3 mr-1" /> Issue Items
-                            </Button>
+                            <div className="flex items-center justify-end gap-1.5">
+                              <Button
+                                size="sm"
+                                onClick={() => openIssueForDemand(d.id)}
+                                className="h-7 px-3 text-xs"
+                              >
+                                <Send className="h-3 w-3 mr-1" /> Issue Items
+                              </Button>
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                className="h-7 w-7"
+                                onClick={() => setViewDemand(d)}
+                                aria-label={`View ${d.id}`}
+                                title="View stock vs required"
+                              >
+                                <Eye className="h-3.5 w-3.5" />
+                              </Button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -339,7 +358,146 @@ export default function ItemIssuePage() {
         demands={demands}
         onCreate={handleIssue}
       />
+
+      <DemandViewDialog demand={viewDemand} onClose={() => setViewDemand(null)} onIssue={openIssueForDemand} />
     </>
+  );
+}
+
+// Read-only stock-vs-required breakdown for a pending demand: which items are
+// in stock (sufficient) and which fall short (must be procured).
+function DemandViewDialog({
+  demand, onClose, onIssue,
+}: {
+  demand: WfDemandRequest | null;
+  onClose: () => void;
+  onIssue: (id: string) => void;
+}) {
+  const tagged = useMemo(() => {
+    if (!demand) return [];
+    return demand.items.map((item) => {
+      const currentStock = getItemStock(item.id || item.name);
+      const shortfall = item.qty - currentStock;
+      return { ...item, currentStock, shortfall, insufficient: shortfall > 0 };
+    });
+  }, [demand]);
+
+  if (!demand) return null;
+
+  const sufficientItems = tagged.filter((it) => !it.insufficient);
+  const shortfallItems = tagged.filter((it) => it.insufficient);
+
+  return (
+    <Dialog open={!!demand} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-3xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
+        <DialogHeader className="px-5 py-4 border-b border-border">
+          <DialogTitle className="flex items-center justify-between gap-3">
+            <span>Demand Request — {demand.id}</span>
+            <StatusBadge status={demand.status === "Pending Store Review" ? "Approved" : demand.status} />
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+          <div className="rounded-md border border-border bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
+            Ref: <strong className="text-foreground">{demand.reference}</strong>
+            {" · "}By <strong className="text-foreground">{demand.requestedBy}</strong> ({demand.role})
+            {" · "}{demand.date}
+          </div>
+
+          {tagged.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-3">No items attached to this request.</p>
+          ) : (
+            <>
+              {sufficientItems.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <CheckCircle2 className="h-3 w-3 text-green-600" />
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                      Sufficient Items ({sufficientItems.length})
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 px-3 mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                    <div>Item</div>
+                    <div className="text-center">In Stock</div>
+                    <div className="text-center">Required</div>
+                    <div className="text-center">Status</div>
+                  </div>
+                  <div className="space-y-2">
+                    {sufficientItems.map((item) => (
+                      <div key={item.id} className="rounded-lg border border-green-200 bg-green-50/50 p-3">
+                        <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 items-center">
+                          <div className="font-semibold text-sm">{item.name}</div>
+                          <div className="text-center">
+                            <span className="text-sm font-semibold text-green-700">{item.currentStock}</span>
+                            <div className="text-[10px] text-muted-foreground">{item.uom}</div>
+                          </div>
+                          <div className="text-center">
+                            <span className="text-sm font-semibold">{item.qty}</span>
+                            <div className="text-[10px] text-muted-foreground">{item.uom}</div>
+                          </div>
+                          <div className="text-center">
+                            <span className="text-sm font-bold text-green-600">OK</span>
+                            <div className="text-[10px] text-green-600">sufficient</div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {shortfallItems.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <AlertTriangle className="h-3 w-3 text-destructive" />
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                      Shortfall Items ({shortfallItems.length})
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 px-3 mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                    <div>Item</div>
+                    <div className="text-center">In Stock</div>
+                    <div className="text-center">Required</div>
+                    <div className="text-center">Status</div>
+                  </div>
+                  <div className="space-y-2">
+                    {shortfallItems.map((item) => (
+                      <div key={item.id} className="rounded-lg border border-red-200 bg-red-50/50 p-3">
+                        <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 items-center">
+                          <div className="font-semibold text-sm">{item.name}</div>
+                          <div className="text-center">
+                            <span className="text-sm font-semibold text-red-600">{item.currentStock}</span>
+                            <div className="text-[10px] text-muted-foreground">{item.uom}</div>
+                          </div>
+                          <div className="text-center">
+                            <span className="text-sm font-semibold">{item.qty}</span>
+                            <div className="text-[10px] text-muted-foreground">{item.uom}</div>
+                          </div>
+                          <div className="text-center">
+                            <span className="text-sm font-bold text-red-600">−{item.shortfall}</span>
+                            <div className="text-[10px] text-red-500">{item.uom} short</div>
+                          </div>
+                        </div>
+                        <div className="mt-2 flex items-center gap-1.5 text-[11px] text-red-600">
+                          <AlertTriangle className="h-3 w-3 shrink-0" />
+                          Stock insufficient — {item.shortfall} {item.uom} must be procured
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <DialogFooter className="px-5 py-3 border-t border-border bg-muted/20 flex-wrap gap-2">
+          <Button variant="outline" onClick={onClose}>Close</Button>
+          <Button onClick={() => { onClose(); onIssue(demand.id); }}>
+            <Send className="h-3.5 w-3.5 mr-1.5" /> Issue Items
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
