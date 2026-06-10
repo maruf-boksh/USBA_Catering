@@ -16,16 +16,20 @@ import {
 } from "@ant-design/icons";
 import { getAuthUser } from "@/lib/auth";
 import { KpiCard } from "@/components/common/KpiCard";
-import { StatusBadge } from "@/components/common/StatusBadge";
 import { useRole } from "@/lib/roles";
 import { useAccess, canElement } from "@/lib/access-control";
 import {
-  flights, productionOrders, purchaseOrders, dispatch, qcChecks,
+  flights, productionOrders, purchaseOrders, qcChecks,
   seedFlightOrders, inventory, inventoryValue,
 } from "@/lib/sample-data";
 import { useWorkflow } from "@/lib/workflow-store";
 import { useFlightOrders } from "@/lib/flight-orders-store";
 import { flagArrival } from "@/lib/arrival-flash";
+import { usePersistedState } from "@/lib/use-persisted-state";
+import {
+  INITIAL_PACKAGING_ROWS, buildDispatchList, FLIGHT_STATUS_BADGE,
+  type PackagingRow,
+} from "@/routes/dispatch";
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Legend,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -70,7 +74,7 @@ type ActivityEntry = {
 };
 
 function useDashboardKpis(period: Period, range?: DateRange) {
-  const { wfRequisitions, wfPurchaseOrders, productionEntries, productionEntryRecords, transferNotes } = useWorkflow();
+  const { wfRequisitions, wfPurchaseOrders, productionEntries, productionEntryRecords, transferNotes, qcClearedFlights, dispatchApprovals } = useWorkflow();
   // Live flight orders — same source as the Order Management table (seed +
   // runtime-created orders), so Active Orders shows real Order Nos from there.
   const liveFlightOrders = useFlightOrders();
@@ -158,10 +162,15 @@ function useDashboardKpis(period: Period, range?: DateRange) {
   const invAlerts = lowItems.length + criticalItems.length;
   const invAlertRowIds = [...criticalItems.map((i) => i.id), ...lowItems.map((i) => i.id)];
 
-  const activeDispatch = dispatch.filter((d) => d.status !== "Delivered");
+  // Derive the same flight-level dispatch list the Dispatch page renders
+  // (packaging rows grouped by flight + computed status) so KPIs and the
+  // tracker panel never drift from the module.
+  const [packagingRows] = usePersistedState<PackagingRow[]>("dispatch-packaging-rows", INITIAL_PACKAGING_ROWS);
+  const dispatchList = buildDispatchList(packagingRows, qcClearedFlights, dispatchApprovals);
+  const activeDispatch = dispatchList.filter((d) => d.status !== "Dispatched");
   const dispatchActive = activeDispatch.length;
-  const dispatchEnRoute = dispatch.filter((d) => d.status === "En Route").length;
-  const dispatchRowIds = activeDispatch.map((d) => d.id);
+  const dispatchReady = dispatchList.filter((d) => d.status === "Ready for Dispatch").length;
+  const dispatchRowIds = activeDispatch.map((d) => d.dspId ?? d.flight);
 
   const stockValue = inventoryValue(inventory);
 
@@ -206,7 +215,7 @@ function useDashboardKpis(period: Period, range?: DateRange) {
       qcIssues:{ value: qcOpen, sub: `${qcOpen} open, ${qcResolved} resolved`, ids: qcRowIds },
       pendingPOs:{ value: pendingPOCount, sub: pendingPOAmount > 0 ? `${formatLakh(pendingPOAmount)} pending` : "no value pending", ids: pendingPORowIds },
       invAlerts:{ value: invAlerts, sub: `${criticalItems.length} critical`, ids: invAlertRowIds },
-      dispatch: { value: dispatchActive, sub: `${dispatchEnRoute} en route`, ids: dispatchRowIds },
+      dispatch: { value: dispatchActive, sub: `${dispatchReady} ready for dispatch`, ids: dispatchRowIds },
       dailyCost:{ value: formatLakh(stockValue), sub: "on-hand valuation", ids: [] as string[] },
     },
     trend: isCustom ? buildCustomTrend(range!, producedTotal, targetTotal) : (isWeek || isWindow) ? trendWeek : trendToday,
@@ -609,6 +618,16 @@ export default function Dashboard() {
   const [period, setPeriod] = useState<Period>("today");
   const [range, setRange] = useState<DateRange | null>(null);
   const data = useDashboardKpis(period, range ?? undefined);
+  // Same packaging source + status computation as the Dispatch page, so the
+  // tracker panel mirrors the real module list (flights, DSP refs, statuses).
+  const { qcClearedFlights, dispatchApprovals } = useWorkflow();
+  const flightOrders = useFlightOrders();
+  const [packagingRows] = usePersistedState<PackagingRow[]>("dispatch-packaging-rows", INITIAL_PACKAGING_ROWS);
+  const dispatchList = buildDispatchList(packagingRows, qcClearedFlights, dispatchApprovals);
+  const sectorFor = (flight: string) =>
+    flightOrders.find((o) => o.flight === flight)?.sector ??
+    flights.find((f) => f.flight === flight)?.sector ??
+    "—";
 
   // Show the post-login welcome message once, handed off from the sign-in flow.
   // Deferred via setTimeout so the <Toaster> in the shell has subscribed to sonner's
@@ -857,11 +876,11 @@ export default function Dashboard() {
         </PanelCard>
         <PanelCard title="Dispatch Tracker" link="/dispatch" linkLabel="View all →" highlight="dispatch-list">
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {dispatch.slice(0, 5).map((d) => (
+            {dispatchList.slice(0, 5).map((d) => (
               <Link
-                key={d.id}
+                key={d.dspId ?? d.flight}
                 to="/dispatch"
-                onClick={() => flagArrival("dispatch-list")}
+                onClick={() => flagArrival({ target: "dispatch-list", ids: d.rowIds })}
                 style={{
                   display: "flex",
                   alignItems: "center",
@@ -884,12 +903,14 @@ export default function Dashboard() {
                 }}
               >
                 <div>
-                  <div style={{ fontWeight: 500 }}>{d.id} — {d.flight}</div>
+                  <div style={{ fontWeight: 500 }}>{d.dspId ? `${d.dspId} — ${d.flight}` : d.flight}</div>
                   <div style={{ fontSize: 12, color: "var(--color-muted-foreground)" }}>
-                    {d.trays} trays • {d.carts} carts • {d.vehicle}
+                    {sectorFor(d.flight)} • Dep {d.depTime}
                   </div>
                 </div>
-                <StatusBadge status={d.status} />
+                <span className={`px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap ${FLIGHT_STATUS_BADGE[d.status] ?? "bg-muted text-muted-foreground"}`}>
+                  {d.status}
+                </span>
               </Link>
             ))}
           </div>

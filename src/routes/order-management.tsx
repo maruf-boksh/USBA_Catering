@@ -8,8 +8,6 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Progress } from "@/components/ui/progress";
-import { DataTable, type Column } from "@/components/common/DataTable";
-import { RowActions } from "@/components/common/RowActions";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -331,7 +329,6 @@ const SAMPLE_PARSED_INTL: ParsedRow[] = [
 
 type MealPlan = Record<string, number>;
 type ActivityEntry = { message: string; user: string; role: string; at: string };
-type RecentUploadRow = (typeof recentUploads)[number];
 type MealOrderConfirmation = {
   timestamp: string;
   totalFlights: number;
@@ -3446,17 +3443,6 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
   const crewInvalidCount = crewParsed.length - crewValidCount;
   const allInvalidCount = (domDone ? domInvalidCount : 0) + (intlDone ? intlInvalidCount : 0) + (crewDone ? crewInvalidCount : 0);
 
-  const uploadCols: Column<RecentUploadRow>[] = [
-    { key: "id", header: "Upload ID" },
-    { key: "file", header: "File" },
-    { key: "rows", header: "Rows" },
-    { key: "valid", header: "Valid" },
-    { key: "errors", header: "Errors", render: (r) => <span className={r.errors > 0 ? "text-destructive font-medium" : ""}>{r.errors}</span> },
-    { key: "by", header: "Uploaded By" },
-    { key: "at", header: "Date" },
-    { key: "status", header: "Status", render: (r) => <StatusBadge status={r.status} /> },
-  ];
-
   return (
     <div className="space-y-6">
       {/* Upload section */}
@@ -5134,21 +5120,6 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
         </Card>
       )}
 
-      <Card>
-        <CardContent className="pt-6">
-          <h3 className="text-sm font-semibold tracking-wider uppercase text-foreground mb-4">
-            Recent Uploads
-          </h3>
-          <DataTable
-            title="uploads"
-            data={recentUploads}
-            columns={uploadCols}
-            selectable={false}
-            searchKeys={["file", "by", "status"]}
-            actions={(row) => <RowActions row={row} actions={["view", "export", "delete"]} />}
-          />
-        </CardContent>
-      </Card>
     </div>
   );
 }
@@ -5294,7 +5265,6 @@ function FlightOrderDetailsDialog({
               <DetailRow label="Date" value={leg.date} />
               <DetailRow label="ETD" value={leg.etd} />
               <DetailRow label="Passengers" value={leg.pax.toLocaleString()} />
-              <DetailRow label="Crew" value={leg.crew.toString()} />
               <DetailRow label="Special Meals" value={leg.specialMeals.toString()} />
             </div>
 
