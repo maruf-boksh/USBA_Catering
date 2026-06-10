@@ -7,7 +7,7 @@ import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Boxes, AlertTriangle, Eye, FileText } from "lucide-react";
+import { Boxes, AlertTriangle, Eye, FileText, CalendarDays } from "lucide-react";
 import { Select as AntSelect, Button as AntButton } from "antd";
 import { AppstoreOutlined, TagsOutlined, CloseOutlined, ProfileOutlined } from "@ant-design/icons";
 import { toast } from "sonner";
@@ -33,7 +33,7 @@ import { useArrivalFlash } from "@/lib/arrival-flash";
 import { useWorkflow } from "@/lib/workflow-store";
 import { getStockAdjustments } from "@/lib/stock-adjustments";
 import { getItemProfiles } from "@/lib/item-profiles";
-import { buildItemLedger, itemMovementTotals, type LedgerSources, type RawMovement } from "@/lib/stock-ledger";
+import { buildItemLedger, itemMovementTotals, itemLedgerSummary, type LedgerSources, type LedgerRange, type RawMovement } from "@/lib/stock-ledger";
 import { weightedAvg, poUnitPrice, blendedOutCost, movingAverage } from "@/lib/item-cost";
 
 type BaseItem = (typeof inventory)[number];
@@ -195,6 +195,8 @@ export default function Inventory() {
   const [filterCategory, setFilterCategory] = useState("");
   const [filterSubCategory, setFilterSubCategory] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
+  const [filterDateFrom, setFilterDateFrom] = useState("");
+  const [filterDateTo, setFilterDateTo] = useState("");
 
   // Cascading filter options, derived from each item's live Item Profile. Item
   // Type comes first; Category is scoped to the chosen type; Sub-category to
@@ -330,6 +332,12 @@ export default function Inventory() {
     [grns, transferNotes, stockDeltas],
   );
   const movementFor = (r: Item) => itemMovementTotals(r.id, r.name, ledgerSources);
+  // Optional date window applied to the In/Out/Opening/Closing columns and the
+  // Item Details ledger modal.
+  const dateRange: LedgerRange | undefined =
+    filterDateFrom || filterDateTo
+      ? { from: filterDateFrom || undefined, to: filterDateTo || undefined }
+      : undefined;
 
   // Type-based display codes (FG-001, SFG-001, RM-001…). Numbered per type over
   // the full item set (sorted by id) so the sequence is stable regardless of the
@@ -386,6 +394,10 @@ export default function Inventory() {
   const totalStockFor = (item: Item) =>
     item.stock + getItemStockByWarehouse(item.name).slice(1).reduce((s, w) => s + w.stock, 0);
 
+  // Opening / In / Out / Closing for a row, scoped to the active date window.
+  const ledgerSummaryFor = (r: Item) =>
+    itemLedgerSummary(r.id, r.name, totalStockFor(r), ledgerSources, dateRange);
+
   /**
    * Per-item costing context for the ledger. Batch items cost issues by FIFO/
    * FEFO drawdown (`blendedOutCost`); single items by moving weighted-average
@@ -415,7 +427,7 @@ export default function Inventory() {
     };
     const openingCost = isBatch ? baseCost : wac;
     const closingCost = isBatch ? baseCost : wac;
-    return { unitCostFor, openingCost, closing, closingValue: closing * closingCost };
+    return { unitCostFor, openingCost, closing, closingCost, closingValue: closing * closingCost };
   };
 
   const cols: Column<Item>[] = [
@@ -432,38 +444,41 @@ export default function Inventory() {
       render: (r) => <StockCell item={r} onClick={() => openBatches(r)} />,
     },
     {
+      key: "id" as keyof Item, header: "Opening Qty",
+      render: (r) => {
+        const { opening } = ledgerSummaryFor(r);
+        return <span className="tabular-nums font-medium">{opening.toLocaleString()}</span>;
+      },
+    },
+    {
       key: "id" as keyof Item, header: "In Qty",
       render: (r) => {
-        const { inQty } = movementFor(r);
+        const { inQty } = ledgerSummaryFor(r);
         if (inQty === 0) return <span className="text-muted-foreground tabular-nums">—</span>;
-        return (
-          <button
-            type="button"
-            onClick={() => openLedger(r)}
-            className="group inline-flex items-center text-left rounded-sm px-1 py-0.5 -mx-1 hover:bg-emerald-50 transition-colors"
-            title="Click to see the transaction ledger"
-          >
-            <span className="tabular-nums font-medium text-emerald-700 underline decoration-dotted decoration-emerald-300 underline-offset-2 group-hover:decoration-emerald-500">
-              +{inQty.toLocaleString()}
-            </span>
-          </button>
-        );
+        return <span className="tabular-nums font-medium text-emerald-700">+{inQty.toLocaleString()}</span>;
       },
     },
     {
       key: "id" as keyof Item, header: "Out Qty",
       render: (r) => {
-        const { outQty } = movementFor(r);
+        const { outQty } = ledgerSummaryFor(r);
         if (outQty === 0) return <span className="text-muted-foreground tabular-nums">—</span>;
+        return <span className="tabular-nums font-medium text-rose-700">−{outQty.toLocaleString()}</span>;
+      },
+    },
+    {
+      key: "id" as keyof Item, header: "Closing Qty",
+      render: (r) => {
+        const { closing } = ledgerSummaryFor(r);
         return (
           <button
             type="button"
             onClick={() => openLedger(r)}
-            className="group inline-flex items-center text-left rounded-sm px-1 py-0.5 -mx-1 hover:bg-rose-50 transition-colors"
+            className="group inline-flex items-center text-left rounded-sm px-1 py-0.5 -mx-1 hover:bg-sky-50 transition-colors"
             title="Click to see the transaction ledger"
           >
-            <span className="tabular-nums font-medium text-rose-700 underline decoration-dotted decoration-rose-300 underline-offset-2 group-hover:decoration-rose-500">
-              −{outQty.toLocaleString()}
+            <span className="tabular-nums font-semibold text-sky-700 underline decoration-dotted decoration-sky-300 underline-offset-2 group-hover:decoration-sky-500">
+              {closing.toLocaleString()}
             </span>
           </button>
         );
@@ -591,12 +606,32 @@ export default function Inventory() {
             ]}
           />
         </div>
-        {(filterType || filterCategory || filterSubCategory) && (
+        {/* Date range — scopes the In/Out/Opening/Closing columns + ledger modal. */}
+        <div className="inline-flex items-center gap-1.5 bg-card border border-border rounded-lg px-2 py-1 shadow-sm">
+          <CalendarDays className="h-3 w-3 text-muted-foreground" />
+          <span className="field-label">Period</span>
+          <Input
+            type="date"
+            value={filterDateFrom}
+            onChange={(e) => setFilterDateFrom(e.target.value)}
+            className="h-7 w-[8.5rem] border-0 shadow-none px-1 text-xs tabular-nums focus-visible:ring-0"
+            aria-label="From date"
+          />
+          <span className="text-xs text-muted-foreground">to</span>
+          <Input
+            type="date"
+            value={filterDateTo}
+            onChange={(e) => setFilterDateTo(e.target.value)}
+            className="h-7 w-[8.5rem] border-0 shadow-none px-1 text-xs tabular-nums focus-visible:ring-0"
+            aria-label="To date"
+          />
+        </div>
+        {(filterType || filterCategory || filterSubCategory || filterDateFrom || filterDateTo) && (
           <AntButton
             size="small"
             type="text"
             icon={<CloseOutlined />}
-            onClick={() => { setFilterType(""); setFilterCategory(""); setFilterSubCategory(""); }}
+            onClick={() => { setFilterType(""); setFilterCategory(""); setFilterSubCategory(""); setFilterDateFrom(""); setFilterDateTo(""); }}
             style={{ color: "var(--color-muted-foreground)" }}
           >
             Clear
@@ -835,7 +870,7 @@ export default function Inventory() {
 
       {/* Item Details — full transaction ledger, opens from In/Out Qty cells */}
       <Dialog open={ledgerOpen} onOpenChange={setLedgerOpen}>
-        <DialogContent className="max-w-5xl max-h-[88vh] overflow-y-auto">
+        <DialogContent className="max-w-6xl w-[96vw] max-h-[88vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Item Details</DialogTitle>
           </DialogHeader>
@@ -845,6 +880,8 @@ export default function Inventory() {
               ledgerItem.id, ledgerItem.name,
               cost.closing, cost.openingCost, cost.unitCostFor,
               ledgerSources,
+              { officeId: ledgerItem.officeId, warehouseId: ledgerItem.warehouseId },
+              dateRange,
             );
             // Column totals INCLUDE the opening-balance row so they foot to the
             // closing balance: (Total In) − (Total Out) = Closing Balance.
@@ -868,10 +905,10 @@ export default function Inventory() {
                         <th className="px-2.5 py-2 text-left font-semibold">Reference</th>
                         <th className="px-2.5 py-2 text-left font-semibold">Office</th>
                         <th className="px-2.5 py-2 text-left font-semibold">Warehouse</th>
-                        <th className="px-2.5 py-2 text-left font-semibold">Transaction Type</th>
-                        <th className="px-2.5 py-2 text-right font-semibold">In Quantity</th>
-                        <th className="px-2.5 py-2 text-right font-semibold">Out Quantity</th>
-                        <th className="px-2.5 py-2 text-right font-semibold">Unit Cost</th>
+                        <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Transaction Type</th>
+                        <th className="px-2.5 py-2 text-right font-semibold whitespace-nowrap">In Qty</th>
+                        <th className="px-2.5 py-2 text-right font-semibold whitespace-nowrap">Out Qty</th>
+                        <th className="px-2.5 py-2 text-right font-semibold whitespace-nowrap">Unit Cost</th>
                         <th className="px-2.5 py-2 text-right font-semibold whitespace-nowrap">Balance ( QTY )</th>
                         <th className="px-2.5 py-2 text-right font-semibold whitespace-nowrap">Value ( ৳ )</th>
                       </tr>
@@ -917,7 +954,7 @@ export default function Inventory() {
                         </td>
                         <td className="px-2.5 py-2 text-right uppercase text-[10px] tracking-wider whitespace-nowrap">Closing Balance</td>
                         <td className="px-2.5 py-2 text-right tabular-nums whitespace-nowrap">{ledger.closing.toLocaleString()}</td>
-                        <td className="px-2.5 py-2 text-right tabular-nums whitespace-nowrap">{fmtMoney(cost.closingValue)}</td>
+                        <td className="px-2.5 py-2 text-right tabular-nums whitespace-nowrap">{fmtMoney(ledger.closing * cost.closingCost)}</td>
                       </tr>
                     </tbody>
                   </table>

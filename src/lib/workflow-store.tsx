@@ -131,7 +131,17 @@ export type WfGRN = {
   warehouseId?: string;
 };
 
-export type StockDelta = { itemId: string; delta: number };
+export type StockDelta = {
+  itemId: string;
+  delta: number;
+  /** Movement metadata surfaced in the Stock Overview ledger drill-down. */
+  date?: string;
+  reference?: string;
+  officeId?: string;
+  warehouseId?: string;
+  /** Transaction-type label (defaults to Production / Dispatch by sign). */
+  label?: string;
+};
 
 export type WfDispatchApproval = {
   id: string;
@@ -427,7 +437,15 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   const [stockDeltas, setStockDeltas] = useState<StockDelta[]>(
     initialProductionEntries
       .filter((e) => e.inventoryAdded && e.producedQty > 0)
-      .map((e) => ({ itemId: e.outputItemName ?? e.id, delta: e.producedQty })),
+      .map((e) => ({
+        itemId: e.outputItemName ?? e.id,
+        delta: e.producedQty,
+        date: e.date,
+        reference: e.id,
+        officeId: e.officeId,
+        warehouseId: e.warehouseId,
+        label: "Production",
+      })),
   );
   const [prdStatuses, setPrdStatuses] = useState<Record<string, string>>({});
   const [prdProgress, setPrdProgress] = useState<Record<string, number>>({});

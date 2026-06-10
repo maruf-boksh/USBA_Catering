@@ -231,7 +231,6 @@ export default function DemandOrders() {
               <DialogHeader className="px-5 py-4 border-b border-border">
                 <DialogTitle className="flex items-center justify-between gap-3">
                   <span>Demand Request — {activeDemand?.id}</span>
-                  {activeDemand && <StatusBadge status={activeDemand.status} />}
                 </DialogTitle>
               </DialogHeader>
 

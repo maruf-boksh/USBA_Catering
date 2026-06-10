@@ -8,10 +8,8 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Progress } from "@/components/ui/progress";
-import { DataTable, type Column } from "@/components/common/DataTable";
-import { RowActions } from "@/components/common/RowActions";
 import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
@@ -22,6 +20,7 @@ import {
 import {
   Plus, Upload, Download, Save, FileSpreadsheet, FileText, FileType,
   History, CheckCircle2, AlertCircle, Eye, CalendarRange, X, Plane, ArrowLeft, Pencil, CircleDot,
+  Users, Utensils,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -35,7 +34,7 @@ import {
 } from "@/lib/sample-data";
 import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-settings";
 import {
-  useFlightOrders, addFlightOrders, updateFlightOrderStatus,
+  useFlightOrders, addFlightOrders, updateFlightOrder, updateFlightOrderStatus,
 } from "@/lib/flight-orders-store";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useArrivalFlash } from "@/lib/arrival-flash";
@@ -97,6 +96,9 @@ type FlightOrder = {
   status: FlightOrderStatus;
   direction: FlightDirection;
   specialMealRoster?: SpecialMealEntry[];
+  orderType?: "flight" | "crew";
+  /** Epoch ms when created in-app — created orders sort above seed rows (newest first). */
+  createdAt?: number;
 };
 
 const AIRLINES = ["US-Bangla", "Air Astra"];
@@ -141,7 +143,166 @@ type ParsedRow = {
   returnFlight?: string;
   returnSector?: string;
   date?: string;
+  direction?: FlightDirection;
+  /** Crew-meal upload only: number of crew + the meal slot. */
+  crew?: number;
+  mealSlot?: string;
+  /** Special-meal manifest rows matched to this flight (Flight No + Date). */
+  roster?: SpecialMealEntry[];
 };
+
+/** One row of an uploaded Special-Meals manifest, before it's matched to a flight. */
+type SpecialMealUpload = {
+  flight: string;
+  date: string;
+  pnr: string;
+  passengerName: string;
+  seat: string;
+  mealCode: string;
+};
+
+// ── CSV parsing for the bulk-upload templates ───────────────────────────────
+// Splits one CSV line honouring double-quoted fields (so a quoted comma or an
+// escaped "" inside a value doesn't break the column count).
+function splitCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; }
+        else inQuotes = false;
+      } else cur += ch;
+    } else if (ch === '"') inQuotes = true;
+    else if (ch === ",") { out.push(cur); cur = ""; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out.map((c) => c.trim());
+}
+
+/** Parse CSV text into objects keyed by lower-cased header. Strips a UTF-8 BOM. */
+function parseCsvRecords(text: string): Record<string, string>[] {
+  const clean = text.replace(/^﻿/, "");
+  const lines = clean.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length < 2) return [];
+  const headers = splitCsvLine(lines[0]).map((h) => h.toLowerCase());
+  return lines.slice(1).map((line) => {
+    const cells = splitCsvLine(line);
+    const rec: Record<string, string> = {};
+    headers.forEach((h, i) => { rec[h] = cells[i] ?? ""; });
+    return rec;
+  });
+}
+
+/** Normalise a date cell to yyyy-mm-dd (accepts "2026-05-24" or Excel "5/24/2026"). */
+function normalizeDate(s: string): string {
+  const t = (s || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(t)) return t.slice(0, 10);
+  const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); // M/D/YYYY (Excel default)
+  if (m) return `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
+  return t;
+}
+
+const pick = (rec: Record<string, string>, ...keys: string[]): string => {
+  for (const k of keys) if (rec[k]) return rec[k];
+  return "";
+};
+
+/** Parse an uploaded flight-orders CSV into ParsedRow[]. Returns [] when the
+ *  text isn't our CSV (e.g. a binary .xlsx read as text) so callers can fall
+ *  back to the sample preview. */
+function parseFlightCsv(text: string): ParsedRow[] {
+  if (!/flight/i.test(text.split(/\r?\n/)[0] || "")) return [];
+  return parseCsvRecords(text).map((rec, i) => {
+    const flight = pick(rec, "flight no", "flight").toUpperCase();
+    const from = pick(rec, "from");
+    const to = pick(rec, "to");
+    const sector = pick(rec, "sector") || (from && to ? `${from} → ${to}` : "");
+    const pax = Number(pick(rec, "pax")) || 0;
+    const specialMeals = Number(pick(rec, "special meals", "special meal")) || 0;
+    const scopeRaw = pick(rec, "scope").toLowerCase();
+    const type: "Domestic" | "International" = scopeRaw.startsWith("int")
+      ? "International"
+      : scopeRaw.startsWith("dom")
+        ? "Domestic"
+        : isDomesticSector(sector) ? "Domestic" : "International";
+    const dirRaw = pick(rec, "direction").toLowerCase();
+    const direction: FlightDirection = dirRaw.startsWith("ret") ? "Return" : "Outbound";
+    return {
+      row: i + 1,
+      id: "",
+      flight,
+      airline: pick(rec, "airline"),
+      sector,
+      etd: pick(rec, "etd"),
+      pax,
+      specialMeals,
+      valid: !!flight && !!sector && pax > 0,
+      type,
+      direction,
+      date: normalizeDate(pick(rec, "date")),
+    };
+  });
+}
+
+/** Parse an uploaded Special-Meals manifest CSV. */
+function parseSpecialCsv(text: string): SpecialMealUpload[] {
+  if (!/pnr|meal code/i.test(text.split(/\r?\n/)[0] || "")) return [];
+  return parseCsvRecords(text)
+    .map((rec) => ({
+      flight: pick(rec, "flight no", "flight").toUpperCase(),
+      date: normalizeDate(pick(rec, "date")),
+      pnr: pick(rec, "pnr"),
+      passengerName: pick(rec, "passenger name", "name"),
+      seat: pick(rec, "seat"),
+      mealCode: pick(rec, "meal code", "code").toUpperCase(),
+    }))
+    .filter((r) => r.flight && r.mealCode);
+}
+
+/** Parse an uploaded Crew-Meals CSV into ParsedRow[] (one row per flight, with a
+ *  crew count + meal slot). Mirrors parseFlightCsv so crew meals follow the same
+ *  preview → import flow as flight orders. Returns [] for non-CSV (xlsx) text. */
+function parseCrewCsv(text: string): ParsedRow[] {
+  if (!/flight/i.test(text.split(/\r?\n/)[0] || "")) return [];
+  return parseCsvRecords(text).map((rec, i) => {
+    const flight = pick(rec, "flight no", "flight").toUpperCase();
+    const from = pick(rec, "from");
+    const to = pick(rec, "to");
+    const sector = pick(rec, "sector") || (from && to ? `${from} → ${to}` : "");
+    const crew = Number(pick(rec, "no of crew", "crew")) || 0;
+    const scopeRaw = pick(rec, "scope").toLowerCase();
+    const type: "Domestic" | "International" = scopeRaw.startsWith("int")
+      ? "International"
+      : scopeRaw.startsWith("dom")
+        ? "Domestic"
+        : isDomesticSector(sector) ? "Domestic" : "International";
+    const dirRaw = pick(rec, "direction").toLowerCase();
+    const direction: FlightDirection = dirRaw.startsWith("ret") ? "Return" : "Outbound";
+    return {
+      row: i + 1,
+      id: "",
+      flight,
+      airline: pick(rec, "airline"),
+      sector,
+      etd: pick(rec, "etd"),
+      pax: 0,
+      specialMeals: 0,
+      valid: !!flight && !!sector && crew > 0,
+      type,
+      direction,
+      crew,
+      mealSlot: pick(rec, "meal slot", "slot"),
+      date: normalizeDate(pick(rec, "date")),
+    };
+  });
+}
+
+/** Key a flight by Flight No + Date — the join key between manifests and flights. */
+const flightKey = (flight: string, date?: string) => `${flight.toUpperCase()}__${date ?? ""}`;
 
 const SAMPLE_PARSED_DOM: ParsedRow[] = [
   { row: 1, id: "ORD-3501", flight: "BS-141", airline: "US-Bangla", sector: "DAC → CXB", etd: "08:15", pax: 72, specialMeals: 4, valid: true,  type: "Domestic", zenLoad: 72, totalMeal: 72, specMeal: 4, crewMeal: 4, returnFlight: "BS-142", returnSector: "CXB → DAC", date: "2026-05-24" },
@@ -168,7 +329,6 @@ const SAMPLE_PARSED_INTL: ParsedRow[] = [
 
 type MealPlan = Record<string, number>;
 type ActivityEntry = { message: string; user: string; role: string; at: string };
-type RecentUploadRow = (typeof recentUploads)[number];
 type MealOrderConfirmation = {
   timestamp: string;
   totalFlights: number;
@@ -605,7 +765,15 @@ export default function OrderManagementPage() {
           nextRowSeq={orders.length + 1}
         />
       )}
-      {view === "bulk" && <BulkUpload onImport={addOrdersBulk} onOrderConfirmed={(data) => setConfirmedOrder(data)} />}
+      {view === "bulk" && (
+        <BulkUpload
+          onPersistOrders={addOrdersBulk}
+          orderNoSeed={Math.max(3410, ...orders.map((o) => Number(o.orderNo.split("-").pop()) || 0))}
+          existingOrders={orders}
+          onAttachRoster={(legId, roster) => updateFlightOrder(legId, { specialMealRoster: roster })}
+          onOrderConfirmed={(data) => setConfirmedOrder(data)}
+        />
+      )}
 
       <FlightOrderDetailsDialog
         order={selectedOrder}
@@ -623,6 +791,10 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
   const [date, setDate] = useState<string>(today);
   const [scope, setScope] = useState<"Domestic" | "International" | "All">("Domestic");
   const [airline, setAirline] = useState<string>("All");
+  // Crew leg being edited — only Pending legs can open this.
+  const [editLeg, setEditLeg] = useState<FlightOrder | null>(null);
+  // Crew leg whose special-meal count was clicked — drives the roster dialog.
+  const [mealDetailLeg, setMealDetailLeg] = useState<FlightOrder | null>(null);
   const slots = useMealSlots();
 
   const airlineOptions = Array.from(new Set(orders.map((o) => o.airline))).sort();
@@ -635,19 +807,30 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
     return true;
   });
 
-  // Group by meal slot (using the user's current slot configuration)
+  const grandCrew = filtered.reduce((s, o) => s + o.crew, 0);
+
+  // Pagination — paginate the flat flight-row list, then re-group the current
+  // page by meal slot for display. The summary cards above reflect the FULL
+  // filtered set, not just the visible page.
+  const pageSize = 12;
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  useEffect(() => { setPage(1); }, [date, scope, airline]);
+  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
+  const pageStart = (page - 1) * pageSize;
+  const pageEnd = Math.min(pageStart + pageSize, filtered.length);
+  const pageRows = filtered.slice(pageStart, pageEnd);
+
+  // Group the current page by meal slot (using the user's slot configuration).
   const groups = new Map<MealSlot, FlightOrder[]>();
   slots.forEach((s) => groups.set(s.name, []));
-  filtered.forEach((o) => {
+  pageRows.forEach((o) => {
     const slotName = resolveMealSlot(o.etd, slots).name;
     groups.get(slotName)!.push(o);
   });
   slots.forEach((s) => {
     groups.get(s.name)!.sort((a, b) => a.etd.localeCompare(b.etd));
   });
-
-  const grandCrew = filtered.reduce((s, o) => s + o.crew, 0);
-  const grandPax = filtered.reduce((s, o) => s + o.pax, 0);
 
   return (
     <Card>
@@ -672,6 +855,18 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                 onChange={(e) => setDate(e.target.value)}
                 className="h-7 w-[140px] border-0 shadow-none px-1 focus-visible:ring-0"
               />
+              {date ? (
+                <button
+                  type="button"
+                  onClick={() => setDate("")}
+                  className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
+                  title="Show all dates"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              ) : (
+                <span className="text-[11px] font-medium text-primary px-1">All dates</span>
+              )}
             </div>
             <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
               <Plane className="h-3.5 w-3.5 text-muted-foreground" />
@@ -709,6 +904,18 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
           </div>
         </div>
 
+        {/* Summary cards — moved to the top header; reflect the full filtered set. */}
+        <div className="grid grid-cols-2 gap-3">
+          <div className="rounded-lg border border-border bg-muted/30 px-4 py-3">
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Flights</div>
+            <div className="mt-1 text-lg font-semibold tabular-nums">{filtered.length}</div>
+          </div>
+          <div className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3">
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Crew Meals</div>
+            <div className="mt-1 text-lg font-semibold tabular-nums text-primary">{grandCrew}</div>
+          </div>
+        </div>
+
         {filtered.length === 0 ? (
           <div className="py-12 text-center text-sm text-muted-foreground">
             No {scope.toLowerCase()} flights on {date || "the selected date"}.
@@ -721,9 +928,11 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                   <TableRow>
                     <TableHead className="text-xs uppercase tracking-wider w-44">Flight No</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Airline</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider w-20">ETD</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider text-right w-24">PAX</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right w-28">Spec. Meals</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider text-right w-28">No of Crew</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider w-20">Action</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -743,7 +952,7 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                     return (
                       <Fragment key={slot.name}>
                         <TableRow className="bg-primary/5 border-t-2 border-t-primary/40 hover:bg-primary/10">
-                          <TableCell colSpan={5} className="py-2">
+                          <TableCell colSpan={7} className="py-2">
                             <span className="font-semibold text-primary uppercase tracking-wider text-xs">
                               {slot.name}
                             </span>
@@ -755,7 +964,7 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                         {Array.from(slotOrderGroups.entries()).map(([orderNo, legs]) => (
                           <Fragment key={`${slot.name}-${orderNo}`}>
                             <TableRow className="bg-muted/40 hover:bg-muted/50">
-                              <TableCell colSpan={5} className="pl-4 py-1.5">
+                              <TableCell colSpan={7} className="pl-4 py-1.5">
                                 <div className="flex items-center flex-wrap gap-2">
                                   <span className="font-mono text-sm font-semibold text-primary">{orderNo}</span>
                                   {legs.length > 1 && (
@@ -779,18 +988,46 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                                   </span>
                                 </TableCell>
                                 <TableCell>{o.sector}</TableCell>
+                                <TableCell>{o.airline}</TableCell>
                                 <TableCell className="tabular-nums">{o.etd}</TableCell>
-                                <TableCell className="text-right tabular-nums">{o.pax}</TableCell>
+                                <TableCell className="text-right tabular-nums">
+                                  {o.specialMeals > 0 ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => setMealDetailLeg(o)}
+                                      className="font-medium text-sky-700 underline decoration-dotted underline-offset-2 hover:text-sky-800 tabular-nums"
+                                      title="View special meal count & roster"
+                                    >
+                                      {o.specialMeals}
+                                    </button>
+                                  ) : (
+                                    <span className="text-muted-foreground/60">0</span>
+                                  )}
+                                </TableCell>
                                 <TableCell className="text-right tabular-nums font-semibold">{o.crew}</TableCell>
+                                <TableCell>
+                                  <Button
+                                    size="icon"
+                                    variant="outline"
+                                    className="h-7 w-7"
+                                    onClick={() => setEditLeg(o)}
+                                    disabled={o.status !== "Pending"}
+                                    aria-label={`Edit ${o.flight}`}
+                                    title={o.status === "Pending" ? "Edit" : `Locked — ${o.status}`}
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                  </Button>
+                                </TableCell>
                               </TableRow>
                             ))}
                           </Fragment>
                         ))}
                         <TableRow className="bg-muted/30 font-semibold">
-                          <TableCell colSpan={4} className="text-right uppercase text-[10px] tracking-wider">
+                          <TableCell colSpan={5} className="text-right uppercase text-[10px] tracking-wider">
                             {slot.name} Total
                           </TableCell>
                           <TableCell className="text-right tabular-nums text-primary">{slotCrew}</TableCell>
+                          <TableCell />
                         </TableRow>
                       </Fragment>
                     );
@@ -799,22 +1036,108 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
               </Table>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="rounded-lg border border-border bg-muted/30 px-4 py-3">
-                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Flights</div>
-                <div className="mt-1 text-lg font-semibold tabular-nums">{filtered.length}</div>
+            {filtered.length > pageSize && (
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="text-xs text-muted-foreground">
+                  Showing flights{" "}
+                  <strong className="text-foreground tabular-nums">{pageStart + 1}</strong>–
+                  <strong className="text-foreground tabular-nums">{pageEnd}</strong>{" "}
+                  of <strong className="text-foreground tabular-nums">{filtered.length}</strong>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 px-2"
+                    onClick={() => setPage(1)}
+                    disabled={page === 1}
+                    aria-label="First page"
+                    title="First page"
+                  >
+                    «
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 px-2"
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page === 1}
+                    aria-label="Previous page"
+                    title="Previous page"
+                  >
+                    ‹
+                  </Button>
+                  <span className="text-xs text-muted-foreground tabular-nums min-w-[80px] text-center">
+                    Page {page} / {totalPages}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 px-2"
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={page === totalPages}
+                    aria-label="Next page"
+                    title="Next page"
+                  >
+                    ›
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 px-2"
+                    onClick={() => setPage(totalPages)}
+                    disabled={page === totalPages}
+                    aria-label="Last page"
+                    title="Last page"
+                  >
+                    »
+                  </Button>
+                </div>
               </div>
-              <div className="rounded-lg border border-border bg-muted/30 px-4 py-3">
-                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Passenger Meals</div>
-                <div className="mt-1 text-lg font-semibold tabular-nums">{grandPax}</div>
-              </div>
-              <div className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3">
-                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Crew Meals</div>
-                <div className="mt-1 text-lg font-semibold tabular-nums text-primary">{grandCrew}</div>
-              </div>
-            </div>
+            )}
           </>
         )}
+
+        <EditOrderLegDialog leg={editLeg} onClose={() => setEditLeg(null)} />
+
+        {/* Focused special-meal handler — count + per-code breakdown + roster for one flight. */}
+        <Dialog open={!!mealDetailLeg} onOpenChange={(open) => !open && setMealDetailLeg(null)}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 flex-wrap">
+                Special Meals
+                {mealDetailLeg && (
+                  <>
+                    <span className="font-mono text-sm text-muted-foreground">— {mealDetailLeg.flight}</span>
+                    <DirectionBadge direction={mealDetailLeg.direction} />
+                    <Badge variant="outline" className="h-5 px-1.5 text-[10px] tabular-nums">
+                      {mealDetailLeg.specialMeals} ordered
+                    </Badge>
+                    <Badge variant="outline" className="h-5 px-1.5 text-[10px] tabular-nums bg-emerald-50 text-emerald-700 border-emerald-300">
+                      {mealDetailLeg.specialMealRoster?.length ?? 0} attached
+                    </Badge>
+                  </>
+                )}
+              </DialogTitle>
+            </DialogHeader>
+            {mealDetailLeg && (
+              <div className="mt-2 space-y-3">
+                <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+                  <DetailRow label="Order" value={mealDetailLeg.orderNo} mono />
+                  <DetailRow label="Sector" value={mealDetailLeg.sector} />
+                  <DetailRow label="Date" value={mealDetailLeg.date} />
+                  <DetailRow label="ETD" value={mealDetailLeg.etd} />
+                  <DetailRow label="Special Meals (from order)" value={String(mealDetailLeg.specialMeals)} />
+                  <DetailRow label="Attached (manifest)" value={String(mealDetailLeg.specialMealRoster?.length ?? 0)} />
+                </div>
+                <SpecialMealRosterPanel legs={[mealDetailLeg]} level="crew" />
+              </div>
+            )}
+            <DialogFooter className="mt-4">
+              <Button variant="outline" onClick={() => setMealDetailLeg(null)}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </CardContent>
 
     </Card>
@@ -907,6 +1230,10 @@ function OrdersList({
   const [airline, setAirline] = useState<string>("All");
   const [scope, setScope] = useState<"All" | "Domestic" | "International">("All");
   const [status, setStatus] = useState<"All" | FlightOrderStatus>("All");
+  // Flight whose special-meal count was clicked — drives the focused roster dialog.
+  const [mealDetailLeg, setMealDetailLeg] = useState<FlightOrder | null>(null);
+  // Leg being edited — only Pending legs can open this (button disabled otherwise).
+  const [editLeg, setEditLeg] = useState<FlightOrder | null>(null);
 
   const airlineOptions = Array.from(new Set(orders.map((o) => o.airline))).sort();
 
@@ -914,6 +1241,8 @@ function OrdersList({
     () =>
       orders
         .filter((o) => {
+          // Crew-meal orders live in the Crew Meals tab, not the flight list.
+          if (o.orderType === "crew") return false;
           if (from && o.date < from) return false;
           if (to && o.date > to) return false;
           if (airline !== "All" && o.airline !== airline) return false;
@@ -922,7 +1251,12 @@ function OrdersList({
           if (status !== "All" && o.status !== status) return false;
           return true;
         })
-        .sort((a, b) => b.date.localeCompare(a.date) || b.etd.localeCompare(a.etd)),
+        // Freshly created/imported orders (with createdAt) surface first, newest
+        // first; the rest fall back to flight date / ETD descending.
+        .sort((a, b) =>
+          (b.createdAt ?? 0) - (a.createdAt ?? 0)
+          || b.date.localeCompare(a.date)
+          || b.etd.localeCompare(a.etd)),
     [orders, from, to, airline, scope, status],
   );
 
@@ -973,17 +1307,46 @@ function OrdersList({
   // scroll effect below — kept separate so stripping ?ord doesn't tear down the
   // pending scroll before the target page has rendered.
   const [pendingScrollId, setPendingScrollId] = useState<string | null>(null);
+  // All leg ids of the deep-linked order — flashed amber so the order the user
+  // was just sent back to is clearly highlighted.
+  const [pendingFlashIds, setPendingFlashIds] = useState<string[]>([]);
   useEffect(() => {
     if (!ordParam) return;
     const idx = groupedOrders.findIndex(([no]) => no === ordParam);
     if (idx < 0) return;
     const targetPage = Math.floor(idx / pageSize) + 1;
     if (targetPage !== page) setPage(targetPage);
-    setPendingScrollId(groupedOrders[idx]?.[1]?.[0]?.id ?? null);
+    const legs = groupedOrders[idx]?.[1] ?? [];
+    setPendingScrollId(legs[0]?.id ?? null);
+    setPendingFlashIds(legs.map((l) => l.id));
     const next = new URLSearchParams(searchParams);
     next.delete("ord");
     setSearchParams(next, { replace: true });
   }, [ordParam, groupedOrders, page, searchParams, setSearchParams]);
+
+  // Flash every leg row of the deep-linked order with the amber arrival tint.
+  // Retries because the target page renders asynchronously after the jump.
+  useEffect(() => {
+    if (pendingFlashIds.length === 0) return;
+    let done = false;
+    const apply = () => {
+      let any = false;
+      for (const id of pendingFlashIds) {
+        const el = document.querySelector<HTMLElement>(`[data-arrival-row-id="${CSS.escape(id)}"]`);
+        if (!el) continue;
+        el.classList.remove("arrival-row-flash");
+        void el.offsetWidth;
+        el.classList.add("arrival-row-flash");
+        any = true;
+      }
+      return any;
+    };
+    const timers = [0, 150, 350, 700, 1100].map((d) =>
+      setTimeout(() => { if (!done && apply()) done = true; }, d),
+    );
+    const clear = setTimeout(() => setPendingFlashIds([]), 5000);
+    return () => { timers.forEach((t) => clearTimeout(t)); clearTimeout(clear); };
+  }, [pendingFlashIds, page]);
 
   // Scroll the deep-linked order's first row into view once it renders on the
   // freshly selected page. Retries because the page switch re-renders the table
@@ -1011,6 +1374,7 @@ function OrdersList({
   const pageGroups = groupedOrders.slice(pageStart, pageEnd);
 
   const pendingCount = filteredOrders.filter((o) => o.status === "Pending").length;
+  const totalPaxMeals = filteredOrders.reduce((s, o) => s + o.pax, 0);
   const rangeActive = from !== "" || to !== "";
   const filtersActive = rangeActive || airline !== "All" || scope !== "All" || status !== "All";
   const rangeLabel =
@@ -1135,6 +1499,18 @@ function OrdersList({
           </div>
         </div>
 
+        {/* Summary cards — top header; reflect the full filtered set. */}
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <div className="rounded-lg border border-border bg-muted/30 px-4 py-3">
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Flights</div>
+            <div className="mt-1 text-lg font-semibold tabular-nums">{filteredOrders.length}</div>
+          </div>
+          <div className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3">
+            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Passenger Meals</div>
+            <div className="mt-1 text-lg font-semibold tabular-nums text-primary">{totalPaxMeals}</div>
+          </div>
+        </div>
+
         <div className="text-xs text-muted-foreground mb-2">
           Showing <strong className="text-foreground tabular-nums">{filteredOrders.length}</strong> of {orders.length} order{orders.length === 1 ? "" : "s"} ·{" "}
           <strong className="text-foreground tabular-nums">{groupedOrders.length}</strong> Order{groupedOrders.length === 1 ? "" : "s"}{" "}
@@ -1229,18 +1605,46 @@ function OrdersList({
                         <TableCell className="tabular-nums text-xs">{o.date}</TableCell>
                         <TableCell>{o.etd}</TableCell>
                         <TableCell className="text-right tabular-nums">{o.pax}</TableCell>
-                        {showSpecMeals && <TableCell className={"text-right tabular-nums" + (o.specialMeals === 0 ? " text-muted-foreground/60" : "")}>{o.specialMeals}</TableCell>}
+                        {showSpecMeals && (
+                          <TableCell className="text-right tabular-nums">
+                            {o.specialMeals > 0 ? (
+                              <button
+                                type="button"
+                                onClick={() => setMealDetailLeg(o)}
+                                className="font-medium text-sky-700 underline decoration-dotted underline-offset-2 hover:text-sky-800 tabular-nums"
+                                title="View special meal count & roster"
+                              >
+                                {o.specialMeals}
+                              </button>
+                            ) : (
+                              <span className="text-muted-foreground/60">0</span>
+                            )}
+                          </TableCell>
+                        )}
                         <TableCell>
-                          <Button
-                            size="icon"
-                            variant="outline"
-                            className="h-7 w-7"
-                            onClick={() => onView(o)}
-                            aria-label={`View ${o.orderNo}`}
-                            title="View"
-                          >
-                            <Eye className="h-3.5 w-3.5" />
-                          </Button>
+                          <div className="flex items-center gap-1.5">
+                            <Button
+                              size="icon"
+                              variant="outline"
+                              className="h-7 w-7"
+                              onClick={() => onView(o)}
+                              aria-label={`View ${o.orderNo}`}
+                              title="View"
+                            >
+                              <Eye className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              size="icon"
+                              variant="outline"
+                              className="h-7 w-7"
+                              onClick={() => setEditLeg(o)}
+                              disabled={o.status !== "Pending"}
+                              aria-label={`Edit ${o.flight}`}
+                              title={o.status === "Pending" ? "Edit" : `Locked — ${o.status}`}
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
                         </TableCell>
                       </TableRow>,
                     );
@@ -1329,8 +1733,167 @@ function OrdersList({
             </div>
           </div>
         )}
+
+        {/* Focused special-meal handler — count + per-code breakdown + roster for one flight. */}
+        <Dialog open={!!mealDetailLeg} onOpenChange={(open) => !open && setMealDetailLeg(null)}>
+          <DialogContent className="max-w-2xl">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 flex-wrap">
+                Special Meals
+                {mealDetailLeg && (
+                  <>
+                    <span className="font-mono text-sm text-muted-foreground">— {mealDetailLeg.flight}</span>
+                    <DirectionBadge direction={mealDetailLeg.direction} />
+                    <Badge variant="outline" className="h-5 px-1.5 text-[10px] tabular-nums">
+                      {mealDetailLeg.specialMeals} ordered
+                    </Badge>
+                    <Badge variant="outline" className="h-5 px-1.5 text-[10px] tabular-nums bg-emerald-50 text-emerald-700 border-emerald-300">
+                      {mealDetailLeg.specialMealRoster?.length ?? 0} attached
+                    </Badge>
+                  </>
+                )}
+              </DialogTitle>
+            </DialogHeader>
+            {mealDetailLeg && (
+              <div className="mt-2 space-y-3">
+                <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+                  <DetailRow label="Order" value={mealDetailLeg.orderNo} mono />
+                  <DetailRow label="Sector" value={mealDetailLeg.sector} />
+                  <DetailRow label="Date" value={mealDetailLeg.date} />
+                  <DetailRow label="ETD" value={mealDetailLeg.etd} />
+                  <DetailRow label="Special Meals (from order)" value={String(mealDetailLeg.specialMeals)} />
+                  <DetailRow label="Attached (manifest)" value={String(mealDetailLeg.specialMealRoster?.length ?? 0)} />
+                </div>
+                <SpecialMealRosterPanel legs={[mealDetailLeg]} />
+              </div>
+            )}
+            <DialogFooter className="mt-4">
+              <Button variant="outline" onClick={() => setMealDetailLeg(null)}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        <EditOrderLegDialog leg={editLeg} onClose={() => setEditLeg(null)} />
       </CardContent>
     </Card>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edit a single flight/crew order leg in place. Only reachable while the leg is
+// Pending (the row's Edit button is disabled otherwise). Persists via the
+// flight-orders store. Crew legs edit "No of Crew"; flight legs edit PAX +
+// Special Meals.
+// ─────────────────────────────────────────────────────────────────────────────
+function EditOrderLegDialog({
+  leg, onClose,
+}: {
+  leg: FlightOrder | null;
+  onClose: () => void;
+}) {
+  const isCrew = leg?.orderType === "crew";
+  const [draft, setDraft] = useState<FlightOrder | null>(leg);
+  // Reset the working copy whenever a new leg is opened.
+  useEffect(() => { setDraft(leg); }, [leg]);
+
+  if (!leg || !draft) return null;
+
+  const set = <K extends keyof FlightOrder>(key: K, value: FlightOrder[K]) =>
+    setDraft((p) => (p ? { ...p, [key]: value } : p));
+
+  const save = () => {
+    if (!draft.flight.trim()) { toast.error("Flight number is required."); return; }
+    if (!draft.sector.trim()) { toast.error("Sector is required."); return; }
+    updateFlightOrder(leg.id, {
+      flight: draft.flight.trim(),
+      airline: draft.airline.trim(),
+      sector: draft.sector.trim(),
+      date: draft.date,
+      etd: draft.etd,
+      direction: draft.direction,
+      pax: isCrew ? 0 : Math.max(0, draft.pax),
+      crew: isCrew ? Math.max(0, draft.crew) : draft.crew,
+      specialMeals: Math.max(0, draft.specialMeals),
+    });
+    toast.success(`${draft.flight} updated.`);
+    onClose();
+  };
+
+  return (
+    <Dialog open={!!leg} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 flex-wrap">
+            Edit {isCrew ? "Crew Order" : "Flight Order"}
+            <span className="font-mono text-sm text-muted-foreground">— {leg.flight}</span>
+            <DirectionBadge direction={leg.direction} />
+            <Badge variant="outline" className="h-5 px-1.5 text-[10px] uppercase tracking-wider">
+              {leg.orderNo}
+            </Badge>
+          </DialogTitle>
+        </DialogHeader>
+        <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-3">
+          <div>
+            <Label className="text-xs text-muted-foreground">Flight No</Label>
+            <Input value={draft.flight} onChange={(e) => set("flight", e.target.value)} className="mt-1 h-9" />
+          </div>
+          <div>
+            <Label className="text-xs text-muted-foreground">Airline</Label>
+            <Input value={draft.airline} onChange={(e) => set("airline", e.target.value)} className="mt-1 h-9" />
+          </div>
+          <div>
+            <Label className="text-xs text-muted-foreground">Sector</Label>
+            <Input value={draft.sector} onChange={(e) => set("sector", e.target.value)} className="mt-1 h-9" />
+          </div>
+          <div>
+            <Label className="text-xs text-muted-foreground">Direction</Label>
+            <select
+              value={draft.direction}
+              onChange={(e) => set("direction", e.target.value as FlightDirection)}
+              className={selectCls}
+            >
+              <option value="Outbound">Outbound</option>
+              <option value="Return">Return</option>
+            </select>
+          </div>
+          <div>
+            <Label className="text-xs text-muted-foreground">Date</Label>
+            <Input type="date" value={draft.date} onChange={(e) => set("date", e.target.value)} className="mt-1 h-9" />
+          </div>
+          <div>
+            <Label className="text-xs text-muted-foreground">ETD</Label>
+            <Input value={draft.etd} onChange={(e) => set("etd", e.target.value)} placeholder="HH:MM" className="mt-1 h-9" />
+          </div>
+          {isCrew ? (
+            <>
+              <div>
+                <Label className="text-xs text-muted-foreground">No of Crew</Label>
+                <Input type="number" min={0} value={draft.crew} onChange={(e) => set("crew", Number(e.target.value))} className="mt-1 h-9" />
+              </div>
+              <div>
+                <Label className="text-xs text-muted-foreground">Special Meals</Label>
+                <Input type="number" min={0} value={draft.specialMeals} onChange={(e) => set("specialMeals", Number(e.target.value))} className="mt-1 h-9" />
+              </div>
+            </>
+          ) : (
+            <>
+              <div>
+                <Label className="text-xs text-muted-foreground">PAX</Label>
+                <Input type="number" min={0} value={draft.pax} onChange={(e) => set("pax", Number(e.target.value))} className="mt-1 h-9" />
+              </div>
+              <div>
+                <Label className="text-xs text-muted-foreground">Special Meals</Label>
+                <Input type="number" min={0} value={draft.specialMeals} onChange={(e) => set("specialMeals", Number(e.target.value))} className="mt-1 h-9" />
+              </div>
+            </>
+          )}
+        </div>
+        <DialogFooter className="mt-5">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={save}>Save Changes</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1483,6 +2046,8 @@ function OrderCreate({
       specialMeals: l.specialMeals,
       status: l.status,
       direction: l.direction,
+      orderType: "flight",
+      createdAt: Date.now(),
       specialMealRoster: l.roster.length > 0 ? l.roster : undefined,
     }));
     onSave(rows);
@@ -2005,6 +2570,8 @@ function CrewMealCreate({
       specialMeals: l.specialMeals,
       status: l.status,
       direction: l.direction,
+      orderType: "crew",
+      createdAt: Date.now(),
     }));
     onSave(rows);
     toast.success(`${nextOrderNo} created with ${legs.length} ${legs.length === 1 ? "flight" : "flights"}.`);
@@ -2168,11 +2735,6 @@ function CrewMealCreate({
           </div>
 
           <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">PAX</Label>
-            <Input type="number" min={0} value={pax} onChange={(e) => setPax(e.target.value)} placeholder="0" className="mt-1" />
-          </div>
-
-          <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Special Meals</Label>
             <Input type="number" min={0} value={specialMeals} onChange={(e) => setSpecialMeals(e.target.value)} placeholder="0" className="mt-1" />
           </div>
@@ -2225,7 +2787,6 @@ function CrewMealCreate({
                   <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider w-20">ETD</TableHead>
-                  <TableHead className="text-xs uppercase tracking-wider text-right w-20">PAX</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider text-right w-24">Crew</TableHead>
                   <TableHead className="w-16" />
                 </TableRow>
@@ -2233,7 +2794,7 @@ function CrewMealCreate({
               <TableBody>
                 {legs.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-8">
+                    <TableCell colSpan={7} className="text-center text-sm text-muted-foreground py-8">
                       Add flights above and they'll appear here grouped by meal slot.
                     </TableCell>
                   </TableRow>
@@ -2246,7 +2807,7 @@ function CrewMealCreate({
                       return (
                         <Fragment key={slot.name}>
                           <TableRow className="bg-primary/5 border-t-2 border-t-primary/40 hover:bg-primary/10">
-                            <TableCell colSpan={8} className="py-2">
+                            <TableCell colSpan={7} className="py-2">
                               <span className="font-semibold text-primary uppercase tracking-wider text-xs">
                                 {slot.name}
                               </span>
@@ -2269,7 +2830,6 @@ function CrewMealCreate({
                                 </TableCell>
                                 <TableCell>{l.sector}</TableCell>
                                 <TableCell className="tabular-nums">{l.etd}</TableCell>
-                                <TableCell className="text-right tabular-nums">{l.pax}</TableCell>
                                 <TableCell className="text-right tabular-nums font-semibold">{Number(crew) || 0}</TableCell>
                                 <TableCell className="text-right">
                                   <Button
@@ -2286,7 +2846,7 @@ function CrewMealCreate({
                             );
                           })}
                           <TableRow className="bg-muted/30 font-semibold">
-                            <TableCell colSpan={6} className="text-right uppercase text-[10px] tracking-wider">
+                            <TableCell colSpan={5} className="text-right uppercase text-[10px] tracking-wider">
                               {slot.name} Total
                             </TableCell>
                             <TableCell className="text-right tabular-nums text-primary">{slotCrew}</TableCell>
@@ -2348,7 +2908,18 @@ const BU_MEAL_TYPE_TIME: Record<string, string> = {
   Dinner: "07:00 PM – 10:00 PM",
 };
 
-function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightOrder[]) => void; onOrderConfirmed?: (data: MealOrderConfirmation) => void }) {
+function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRoster, onOrderConfirmed }: {
+  /** Persists imported orders into the Order Management table without navigating away. */
+  onPersistOrders: (orders: FlightOrder[]) => void;
+  /** Highest existing order number — new bulk orders get sequential numbers above it. */
+  orderNoSeed: number;
+  /** Flight orders already in the system — so a special-meal manifest can attach
+   *  to flights that were imported/created earlier, not just this session's upload. */
+  existingOrders: FlightOrder[];
+  /** Attach a parsed roster to an existing order leg (by leg id). */
+  onAttachRoster: (legId: string, roster: SpecialMealEntry[]) => void;
+  onOrderConfirmed?: (data: MealOrderConfirmation) => void;
+}) {
   const navigate = useNavigate();
   const [draftSaved, setDraftSaved] = useState(false);
   const domFileRef = useRef<HTMLInputElement>(null);
@@ -2362,6 +2933,20 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
   const [intlProgress, setIntlProgress] = useState(0);
   const [intlDone, setIntlDone] = useState(false);
   const [intlParsed, setIntlParsed] = useState<ParsedRow[]>(SAMPLE_PARSED_INTL);
+
+  // Crew-meal and special-meal manifests upload separately from the flight
+  // orders — each attaches to existing flights by Flight No + Date.
+  const crewFileRef = useRef<HTMLInputElement>(null);
+  const [crewFile, setCrewFile] = useState<File | null>(null);
+  const [crewProgress, setCrewProgress] = useState(0);
+  const [crewDone, setCrewDone] = useState(false);
+  const [crewParsed, setCrewParsed] = useState<ParsedRow[]>([]);
+  const specialFileRef = useRef<HTMLInputElement>(null);
+  const [specialFile, setSpecialFile] = useState<File | null>(null);
+  const [specialDone, setSpecialDone] = useState(false);
+  // Parsed special-meal manifest rows (Flight No + Date keyed), used to attach
+  // rosters on import and to validate counts against each flight's declared total.
+  const [specialRows, setSpecialRows] = useState<SpecialMealUpload[]>([]);
 
   const [importConfirmed, setImportConfirmed] = useState(false);
   const [showFinalReview, setShowFinalReview] = useState(false);
@@ -2417,44 +3002,171 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
     ]);
   };
 
-  const anyDone = domDone || intlDone;
+  const anyDone = domDone || intlDone || crewDone;
 
-  const startDomUpload = (f: File) => {
-    setDomFile(f);
-    setDomDone(false);
-    setDomProgress(0);
-    setDomParsed(SAMPLE_PARSED_DOM);
-    const t = setInterval(() => {
-      setDomProgress((p) => {
-        if (p >= 100) {
-          clearInterval(t);
-          setDomDone(true);
-          toast.success(`Domestic file parsed — ${SAMPLE_PARSED_DOM.filter((r) => r.valid).length}/${SAMPLE_PARSED_DOM.length} rows valid.`);
-          addLog("Domestic orders file parsed and validated");
-          return 100;
-        }
-        return p + 10;
-      });
-    }, 100);
+  // Read the uploaded CSV; use the real parsed rows when it's our template,
+  // otherwise fall back to the sample preview (e.g. a binary .xlsx).
+  const runFlightUpload = (
+    f: File,
+    fallback: ParsedRow[],
+    setFile: (v: File) => void,
+    setDone: (v: boolean) => void,
+    setProgress: (fn: (p: number) => number) => void,
+    setParsed: (rows: ParsedRow[]) => void,
+    label: string,
+  ) => {
+    setFile(f);
+    setDone(false);
+    setProgress(() => 0);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const parsed = parseFlightCsv(String(reader.result ?? ""));
+      const rows = parsed.length > 0 ? parsed : fallback;
+      setParsed(rows);
+      const t = setInterval(() => {
+        setProgress((p) => {
+          if (p >= 100) {
+            clearInterval(t);
+            setDone(true);
+            toast.success(`${label} file parsed — ${rows.filter((r) => r.valid).length}/${rows.length} rows valid.`);
+            addLog(`${label} orders file parsed and validated`);
+            return 100;
+          }
+          return p + 10;
+        });
+      }, 80);
+    };
+    reader.onerror = () => toast.error(`Could not read ${f.name}.`);
+    reader.readAsText(f);
   };
 
-  const startIntlUpload = (f: File) => {
-    setIntlFile(f);
-    setIntlDone(false);
-    setIntlProgress(0);
-    setIntlParsed(SAMPLE_PARSED_INTL);
-    const t = setInterval(() => {
-      setIntlProgress((p) => {
-        if (p >= 100) {
-          clearInterval(t);
-          setIntlDone(true);
-          toast.success(`International file parsed — ${SAMPLE_PARSED_INTL.filter((r) => r.valid).length}/${SAMPLE_PARSED_INTL.length} rows valid.`);
-          addLog("International orders file parsed and validated");
-          return 100;
-        }
-        return p + 10;
-      });
-    }, 100);
+  const startDomUpload = (f: File) =>
+    runFlightUpload(f, SAMPLE_PARSED_DOM, setDomFile, setDomDone, setDomProgress, setDomParsed, "Domestic");
+
+  const startIntlUpload = (f: File) =>
+    runFlightUpload(f, SAMPLE_PARSED_INTL, setIntlFile, setIntlDone, setIntlProgress, setIntlParsed, "International");
+
+  // Crew-meal and special-meal manifests attach to flights already created (via
+  // the flight orders upload / single screen) — keyed by Flight No + Date — so
+  // they parse-and-acknowledge rather than creating standalone flight rows.
+  const startCrewUpload = (f: File) => {
+    setCrewFile(f);
+    setCrewDone(false);
+    setCrewProgress(0);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rows = parseCrewCsv(String(reader.result ?? ""));
+      setCrewParsed(rows);
+      const t = setInterval(() => {
+        setCrewProgress((p) => {
+          if (p >= 100) {
+            clearInterval(t);
+            setCrewDone(true);
+            if (rows.length === 0) {
+              toast.error("No crew-meal rows found — check the file matches the Crew Meals template.");
+            } else {
+              toast.success(`Crew meal file parsed — ${rows.filter((r) => r.valid).length}/${rows.length} rows valid.`);
+            }
+            addLog(`Crew meal file parsed — ${rows.length} rows`);
+            return 100;
+          }
+          return p + 10;
+        });
+      }, 80);
+    };
+    reader.onerror = () => toast.error(`Could not read ${f.name}.`);
+    reader.readAsText(f);
+  };
+
+  const startSpecialUpload = (f: File) => {
+    setSpecialFile(f);
+    setSpecialDone(false);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rows = parseSpecialCsv(String(reader.result ?? ""));
+      setSpecialRows(rows);
+      setSpecialDone(true);
+      if (rows.length === 0) {
+        toast.error("No special-meal rows found — check the file matches the Special Meals template.");
+      } else {
+        toast.success(`Special meal manifest parsed — ${rows.length} passenger${rows.length === 1 ? "" : "s"}.`);
+      }
+      addLog(`Special meal manifest uploaded — ${rows.length} rows`);
+    };
+    reader.onerror = () => toast.error(`Could not read ${f.name}.`);
+    reader.readAsText(f);
+  };
+
+  const downloadTemplate = (kind: "dom" | "intl" | "crew" | "special") => {
+    // CSV columns mirror the exact ParsedRow fields the bulk-upload parser reads
+    // for each flight type, with two example rows lifted from the seed dataset so
+    // the file is immediately fillable against the current architecture.
+    const csvCell = (v: string | number | undefined) => {
+      const s = v === undefined || v === null ? "" : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    // Three templates, each mirroring the matching single-order screen:
+    //  • Flights (Domestic / International) — flight-level only, with a Special
+    //    Meals COUNT column (no per-passenger detail). Order No is system-
+    //    generated, never on the sheet.
+    //  • Special Meals — the per-passenger roster (PNR / Name / Seat / Code),
+    //    attaching to a flight by Flight No + Date. Same shape the single
+    //    screen's roster bulk-paste accepts.
+    //  • Crew Meals — crew-meal order fields from the Create Crew Meal screen
+    //    (Scope, Flight, Airline, sector, Date, ETD, Meal Slot, No of Crew).
+    const FLIGHT_HEADERS = ["Scope", "Flight No", "Airline", "From", "To", "Date", "ETD", "Direction", "PAX", "Special Meals"];
+    const TEMPLATES: Record<typeof kind, { fileName: string; label: string; headers: string[]; rows: (string | number)[][] }> = {
+      dom: {
+        fileName: "domestic-flights-template.csv",
+        label: "Domestic flights",
+        headers: FLIGHT_HEADERS,
+        rows: [
+          ["Domestic", "BS-141", "US-Bangla", "DAC", "CXB", "2026-05-24", "08:15", "Outbound", 72, 4],
+          ["Domestic", "BS-203", "US-Bangla", "DAC", "CGP", "2026-05-24", "10:30", "Outbound", 88, 2],
+        ],
+      },
+      intl: {
+        fileName: "international-flights-template.csv",
+        label: "International flights",
+        headers: FLIGHT_HEADERS,
+        rows: [
+          ["International", "BS-225", "US-Bangla", "DAC", "DXB", "2026-05-24", "12:30", "Outbound", 174, 14],
+          ["International", "BS-307", "US-Bangla", "DAC", "KUL", "2026-05-24", "23:50", "Outbound", 282, 18],
+        ],
+      },
+      special: {
+        fileName: "special-meals-template.csv",
+        label: "Special meals",
+        headers: ["Flight No", "Date", "PNR", "Passenger Name", "Seat", "Meal Code"],
+        rows: [
+          ["BS-225", "2026-05-24", "RT3M9P", "Karim Chowdhury", "3A", "CHML"],
+          ["BS-225", "2026-05-24", "LW6N2Q", "Sadia Islam", "22F", "VGML"],
+          ["BS-225", "2026-05-24", "HB5J7D", "Imran Hossain", "30C", "MOML"],
+          ["BS-141", "2026-05-24", "BS3X9K", "Rahim Uddin", "12C", "MOML"],
+        ],
+      },
+      crew: {
+        fileName: "crew-meals-template.csv",
+        label: "Crew meals",
+        headers: ["Scope", "Flight No", "Airline", "From", "To", "Date", "ETD", "Meal Slot", "Direction", "No of Crew"],
+        rows: [
+          ["Domestic", "BS-141", "US-Bangla", "DAC", "CXB", "2026-05-24", "08:15", "Breakfast", "Outbound", 4],
+          ["International", "BS-225", "US-Bangla", "DAC", "DXB", "2026-05-24", "12:30", "Lunch", "Outbound", 14],
+        ],
+      },
+    };
+    const config = TEMPLATES[kind];
+    const csv = [config.headers, ...config.rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = config.fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast.success(`${config.label} template downloaded.`);
   };
 
   const updateDomField = (rowNum: number, field: keyof ParsedRow, value: string) => {
@@ -2465,31 +3177,216 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
     setIntlParsed((prev) => prev.map((r) => (r.row === rowNum ? { ...r, [field]: value } : r)));
   };
 
+  // ── Special-meal manifest validation ──────────────────────────────────────
+  // The uploaded roster for a flight must contain EXACTLY the number of special
+  // meals that flight declares (Special Meals column) — no more, no fewer.
+  const allFlightRows = useMemo(
+    () => [...(domDone ? domParsed : []), ...(intlDone ? intlParsed : [])].filter((r) => r.valid),
+    [domDone, domParsed, intlDone, intlParsed],
+  );
+  // Existing flight orders (already imported/created) grouped by Flight No + Date,
+  // so a manifest can attach to flights that aren't in this upload session.
+  const existingByKey = useMemo(() => {
+    const m = new Map<string, FlightOrder[]>();
+    for (const o of existingOrders) {
+      const k = flightKey(o.flight, o.date);
+      (m.get(k) ?? m.set(k, []).get(k)!).push(o);
+    }
+    return m;
+  }, [existingOrders]);
+  // Declared special-meal count per flight — from THIS session's flight upload
+  // only. These are the flights subject to the strict count check on import.
+  const declaredByFlight = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of allFlightRows) m.set(flightKey(r.flight, r.date), r.specialMeals);
+    return m;
+  }, [allFlightRows]);
+  // Flight details (airline / sector / etd / direction) keyed by Flight No + Date,
+  // for showing each uploaded special meal alongside the flight it attaches to.
+  const flightRowByKey = useMemo(() => {
+    const m = new Map<string, { airline: string; sector: string; etd: string; direction?: FlightDirection; source: "upload" | "existing" }>();
+    for (const [k, legs] of existingByKey) {
+      const l = legs[0];
+      m.set(k, { airline: l.airline, sector: l.sector, etd: l.etd, direction: l.direction, source: "existing" });
+    }
+    for (const r of allFlightRows) {
+      m.set(flightKey(r.flight, r.date), { airline: r.airline, sector: r.sector, etd: r.etd, direction: r.direction, source: "upload" });
+    }
+    return m;
+  }, [allFlightRows, existingByKey]);
+  const uploadedByFlight = useMemo(() => {
+    const m = new Map<string, SpecialMealUpload[]>();
+    for (const r of specialRows) {
+      const k = flightKey(r.flight, r.date);
+      (m.get(k) ?? m.set(k, []).get(k)!).push(r);
+    }
+    return m;
+  }, [specialRows]);
+  // Classify each manifest flight against what we know:
+  //  • upload-match / upload-mismatch — flight is in THIS session's flight file
+  //    (strict: roster count must equal the declared count).
+  //  • existing — flight is an order already in the system (no file this session);
+  //    the manifest will be attached to it, setting its special meals.
+  //  • none — flight matches nothing → can't be placed.
+  type ManifestStatus = { kind: "upload-match" | "upload-mismatch" | "existing" | "none"; declared: number | null; uploaded: number; legIds: string[] };
+  const manifestStatus = useMemo(() => {
+    const m = new Map<string, ManifestStatus>();
+    for (const [k, entries] of uploadedByFlight) {
+      const uploaded = entries.length;
+      if (declaredByFlight.has(k)) {
+        const declared = declaredByFlight.get(k)!;
+        m.set(k, { kind: declared === uploaded ? "upload-match" : "upload-mismatch", declared, uploaded, legIds: [] });
+      } else if (existingByKey.has(k)) {
+        const legs = existingByKey.get(k)!;
+        const orderQty = legs.reduce((s, l) => s + l.specialMeals, 0);
+        m.set(k, { kind: "existing", declared: orderQty, uploaded, legIds: legs.map((l) => l.id) });
+      } else {
+        m.set(k, { kind: "none", declared: null, uploaded, legIds: [] });
+      }
+    }
+    return m;
+  }, [uploadedByFlight, declaredByFlight, existingByKey]);
+  // Strict blocker for the flight-file import flow only — count must match.
+  const specialMealIssues = useMemo(() => {
+    if (!specialDone) return [] as { flight: string; date: string; declared: number | null; uploaded: number }[];
+    const issues: { flight: string; date: string; declared: number | null; uploaded: number }[] = [];
+    for (const [k, entries] of uploadedByFlight) {
+      if (manifestStatus.get(k)?.kind === "upload-mismatch") {
+        issues.push({ flight: entries[0].flight, date: entries[0].date, declared: declaredByFlight.get(k)!, uploaded: entries.length });
+      }
+    }
+    return issues;
+  }, [specialDone, uploadedByFlight, manifestStatus, declaredByFlight]);
+  // Flights whose manifest attaches to an order already in the system.
+  const attachableKeys = useMemo(
+    () => Array.from(manifestStatus.entries()).filter(([, s]) => s.kind === "existing").map(([k]) => k),
+    [manifestStatus],
+  );
+
+  // Attach the uploaded manifest to existing orders (the "attach to existing
+  // flights" flow) — sets each matched order leg's roster + special-meal count.
+  const attachToExistingOrders = () => {
+    const stamp = String(Date.now()).slice(-5);
+    let attached = 0;
+    let pax = 0;
+    for (const k of attachableKeys) {
+      const entries = uploadedByFlight.get(k) ?? [];
+      const legIds = manifestStatus.get(k)?.legIds ?? [];
+      const roster: SpecialMealEntry[] = entries.map((m, j) => ({
+        id: `SM-ATT-${stamp}-${attached}-${j}`,
+        pnr: m.pnr, passengerName: m.passengerName, seat: m.seat, mealCode: m.mealCode,
+      }));
+      for (const legId of legIds) onAttachRoster(legId, roster);
+      attached += 1;
+      pax += entries.length;
+    }
+    if (attached === 0) {
+      toast.error("No manifest flights match an existing order.");
+      return;
+    }
+    toast.success(`Attached ${pax} special meal${pax === 1 ? "" : "s"} to ${attached} existing flight${attached === 1 ? "" : "s"}.`);
+    addLog(`Special meals attached to ${attached} existing flight(s)`);
+    setSpecialRows([]); setSpecialFile(null); setSpecialDone(false);
+  };
+
   const confirmImport = () => {
+    // Block import while any special-meal manifest count disagrees with the
+    // declared count — the user must fix the file (or the flight) first.
+    if (specialMealIssues.length > 0) {
+      toast.error(
+        `Import blocked — ${specialMealIssues.length} flight${specialMealIssues.length === 1 ? "" : "s"} have a special-meal count that doesn't match the uploaded manifest.`,
+      );
+      return;
+    }
     const allParsed = [
       ...(domDone ? domParsed : []),
       ...(intlDone ? intlParsed : []),
     ];
     const valid = allParsed.filter((r) => r.valid);
     const today = new Date().toISOString().slice(0, 10);
-    const orders: FlightOrder[] = valid.map((r, i) => ({
-      id: `FO-IMP-${String(Date.now()).slice(-4)}-${i + 1}`,
-      orderNo: r.id,
-      flight: r.flight,
-      airline: r.airline,
-      sector: r.sector,
-      date: today,
-      etd: r.etd,
-      pax: r.pax,
-      crew: 16,
-      specialMeals: r.specialMeals,
-      status: "Pending",
-      direction: "Outbound",
-    }));
+    const stamp = String(Date.now()).slice(-5);
+    // Group flights by date — each date becomes ONE order (with a system Order
+    // No) carrying all that day's flights as legs, mirroring the Order
+    // Management table (e.g. ORD-3514 · 34 flights).
+    const byDate = new Map<string, ParsedRow[]>();
+    for (const r of valid) {
+      const d = r.date || today;
+      (byDate.get(d) ?? byDate.set(d, []).get(d)!).push(r);
+    }
+    const orders: FlightOrder[] = [];
+    let orderIdx = 0;
+    let legSeq = 0;
+    for (const [, rows] of byDate) {
+      const orderNo = `ORD-${orderNoSeed + 1 + orderIdx}`;
+      orderIdx += 1;
+      for (const r of rows) {
+        const manifest = uploadedByFlight.get(flightKey(r.flight, r.date)) ?? [];
+        const roster: SpecialMealEntry[] = manifest.map((m, j) => ({
+          id: `SM-IMP-${stamp}-${legSeq}-${j}`,
+          pnr: m.pnr,
+          passengerName: m.passengerName,
+          seat: m.seat,
+          mealCode: m.mealCode,
+        }));
+        orders.push({
+          id: `FO-IMP-${stamp}-${legSeq++}`,
+          orderNo,
+          flight: r.flight,
+          airline: r.airline,
+          sector: r.sector,
+          date: r.date || today,
+          etd: r.etd,
+          pax: r.pax,
+          crew: r.type === "International" ? 14 : 4,
+          specialMeals: r.specialMeals,
+          status: "Pending",
+          direction: r.direction ?? "Outbound",
+          orderType: "flight",
+          createdAt: Date.now(),
+          specialMealRoster: roster.length > 0 ? roster : undefined,
+        });
+      }
+    }
+    // Crew meals — grouped by date into their own crew orders (orderType "crew"),
+    // following the same one-order-per-date pattern as flight orders.
+    const crewValid = crewDone ? crewParsed.filter((r) => r.valid) : [];
+    const crewByDate = new Map<string, ParsedRow[]>();
+    for (const r of crewValid) {
+      const d = r.date || today;
+      (crewByDate.get(d) ?? crewByDate.set(d, []).get(d)!).push(r);
+    }
+    let crewOrderCount = 0;
+    for (const [, rows] of crewByDate) {
+      const orderNo = `ORD-${orderNoSeed + 1 + orderIdx}`;
+      orderIdx += 1;
+      crewOrderCount += 1;
+      for (const r of rows) {
+        orders.push({
+          id: `FO-IMP-${stamp}-${legSeq++}`,
+          orderNo,
+          flight: r.flight,
+          airline: r.airline,
+          sector: r.sector,
+          date: r.date || today,
+          etd: r.etd,
+          pax: 0,
+          crew: r.crew ?? 0,
+          specialMeals: 0,
+          status: "Pending",
+          direction: r.direction ?? "Outbound",
+          orderType: "crew",
+          createdAt: Date.now(),
+        });
+      }
+    }
     setImportedOrders(orders);
     setImportConfirmed(true);
-    addLog(`Confirmed import of ${orders.length} orders`);
-    toast.success(`${orders.length} orders confirmed. ${allParsed.length - valid.length} skipped.`);
+    // Persist into the Order Management table immediately, with system Order Nos.
+    onPersistOrders(orders);
+    const orderCount = orderIdx;
+    const crewNote = crewOrderCount > 0 ? ` (incl. ${crewOrderCount} crew order${crewOrderCount === 1 ? "" : "s"})` : "";
+    addLog(`Imported ${orderCount} order${orderCount === 1 ? "" : "s"} (${orders.length} flights) into Order Management${crewNote}`);
+    toast.success(`${orderCount} order${orderCount === 1 ? "" : "s"} (${orders.length} flights) added to Order Management${crewNote}.`);
   };
 
   // Summary values derived from parsed data
@@ -2530,7 +3427,8 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
       );
       const confirmationData = { timestamp: ts, totalFlights, totalMeals, tomorrowDayName, dayAfterDayName, dayAfterDateStr, validIntl, validDom, dayAfterMenu };
       onOrderConfirmed?.(confirmationData);
-      onImport(importedOrders);
+      // Orders were already persisted to the table in confirmImport; here we
+      // only forward the meal plan to Production.
       toast.success("Meal plan tagged and forwarded to Production.");
       onComplete?.();
       navigate("/production-entry", { state: { mealOrderConfirmation: confirmationData } });
@@ -2541,18 +3439,9 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
   const domInvalidCount = domParsed.length - domValidCount;
   const intlValidCount = intlParsed.filter((r) => r.valid).length;
   const intlInvalidCount = intlParsed.length - intlValidCount;
-  const allInvalidCount = (domDone ? domInvalidCount : 0) + (intlDone ? intlInvalidCount : 0);
-
-  const uploadCols: Column<RecentUploadRow>[] = [
-    { key: "id", header: "Upload ID" },
-    { key: "file", header: "File" },
-    { key: "rows", header: "Rows" },
-    { key: "valid", header: "Valid" },
-    { key: "errors", header: "Errors", render: (r) => <span className={r.errors > 0 ? "text-destructive font-medium" : ""}>{r.errors}</span> },
-    { key: "by", header: "Uploaded By" },
-    { key: "at", header: "Date" },
-    { key: "status", header: "Status", render: (r) => <StatusBadge status={r.status} /> },
-  ];
+  const crewValidCount = crewParsed.filter((r) => r.valid).length;
+  const crewInvalidCount = crewParsed.length - crewValidCount;
+  const allInvalidCount = (domDone ? domInvalidCount : 0) + (intlDone ? intlInvalidCount : 0) + (crewDone ? crewInvalidCount : 0);
 
   return (
     <div className="space-y-6">
@@ -2564,9 +3453,30 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
               Bulk Upload
             </h3>
             <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => toast.success("Sample template downloaded.")}>
-                <Download className="h-3.5 w-3.5 mr-1.5" /> Sample Template
-              </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm">
+                    <Download className="h-3.5 w-3.5 mr-1.5" /> Sample Template
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-60">
+                  <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground">Flight Orders</DropdownMenuLabel>
+                  <DropdownMenuItem onClick={() => downloadTemplate("dom")}>
+                    Domestic Flights (.csv)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => downloadTemplate("intl")}>
+                    International Flights (.csv)
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground">Meal Manifests</DropdownMenuLabel>
+                  <DropdownMenuItem onClick={() => downloadTemplate("special")}>
+                    Special Meals (.csv)
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => downloadTemplate("crew")}>
+                    Crew Meals (.csv)
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" size="sm">
@@ -2599,6 +3509,20 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
             hidden
             onChange={(e) => { const f = e.target.files?.[0]; if (f) startIntlUpload(f); }}
           />
+          <input
+            ref={crewFileRef}
+            type="file"
+            accept=".xlsx,.xls,.csv,.doc,.docx"
+            hidden
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) startCrewUpload(f); }}
+          />
+          <input
+            ref={specialFileRef}
+            type="file"
+            accept=".xlsx,.xls,.csv,.doc,.docx"
+            hidden
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) startSpecialUpload(f); }}
+          />
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {/* Domestic upload slot */}
@@ -2611,7 +3535,6 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                 <FileSpreadsheet className="h-6 w-6 text-primary" />
               </div>
               <h4 className="text-sm font-semibold">Domestic Flights</h4>
-              <p className="text-xs text-muted-foreground mt-1">.xlsx, .xls, .csv, .doc, .docx</p>
               <Button size="sm" className="mt-3" onClick={() => domFileRef.current?.click()}>
                 <Upload className="h-3.5 w-3.5 mr-1" /> Select File
               </Button>
@@ -2648,7 +3571,6 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                 <FileSpreadsheet className="h-6 w-6 text-navy" />
               </div>
               <h4 className="text-sm font-semibold">International Flights</h4>
-              <p className="text-xs text-muted-foreground mt-1">.xlsx, .xls, .csv, .doc, .docx</p>
               <Button size="sm" variant="outline" className="mt-3 border-navy/30 text-navy hover:bg-navy/5" onClick={() => intlFileRef.current?.click()}>
                 <Upload className="h-3.5 w-3.5 mr-1" /> Select File
               </Button>
@@ -2676,6 +3598,81 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
             </div>
           </div>
 
+          {/* Meal manifests — attach to flights already in the system by Flight No + Date. */}
+          <div className="mt-6 pt-5 border-t border-border">
+            <div className="flex items-center gap-2 mb-3">
+              <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Meal Manifests</h4>
+              <span className="text-[11px] text-muted-foreground">— crew meals import as crew orders; special meals attach to existing flights (matched by Flight No + Date)</span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Crew Meals upload slot */}
+              <div
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) startCrewUpload(f); }}
+                className="rounded-lg border-2 border-dashed border-amber-400/40 bg-gradient-to-br from-amber-50 to-transparent py-8 text-center"
+              >
+                <div className="mx-auto h-12 w-12 rounded-full bg-amber-100 grid place-items-center mb-3">
+                  <Users className="h-6 w-6 text-amber-600" />
+                </div>
+                <h4 className="text-sm font-semibold">Crew Meals</h4>
+                <Button size="sm" variant="outline" className="mt-3 border-amber-400/40 text-amber-700 hover:bg-amber-50" onClick={() => crewFileRef.current?.click()}>
+                  <Upload className="h-3.5 w-3.5 mr-1" /> Select File
+                </Button>
+                {crewFile && (
+                  <div className="mt-4 max-w-xs mx-auto text-left px-4">
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="font-medium truncate">{crewFile.name}</span>
+                      <span className="text-muted-foreground">{crewProgress}%</span>
+                    </div>
+                    <Progress value={crewProgress} />
+                    <div className="mt-1.5 flex items-center gap-1.5 text-xs">
+                      {crewDone ? (
+                        <>
+                          <CheckCircle2 className="h-3.5 w-3.5 text-success" />
+                          <span className={crewInvalidCount > 0 ? "text-warning" : "text-success"}>
+                            {crewValidCount}/{crewParsed.length} rows valid
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground">Parsing…</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Special Meals upload slot */}
+              <div
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) startSpecialUpload(f); }}
+                className="rounded-lg border-2 border-dashed border-emerald-400/40 bg-gradient-to-br from-emerald-50 to-transparent py-8 text-center"
+              >
+                <div className="mx-auto h-12 w-12 rounded-full bg-emerald-100 grid place-items-center mb-3">
+                  <Utensils className="h-6 w-6 text-emerald-600" />
+                </div>
+                <h4 className="text-sm font-semibold">Special Meals</h4>
+                <Button size="sm" variant="outline" className="mt-3 border-emerald-400/40 text-emerald-700 hover:bg-emerald-50" onClick={() => specialFileRef.current?.click()}>
+                  <Upload className="h-3.5 w-3.5 mr-1" /> Select File
+                </Button>
+                {specialFile && (
+                  <div className="mt-4 max-w-xs mx-auto text-left px-4">
+                    <div className="flex items-center gap-1.5 text-xs">
+                      {specialDone ? (
+                        <>
+                          <CheckCircle2 className="h-3.5 w-3.5 text-success" />
+                          <span className="font-medium truncate">{specialFile.name}</span>
+                          <span className="text-success ml-auto">received</span>
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground">Uploading…</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
           {domDone && !intlDone && (
             <p className="mt-3 text-center text-xs text-muted-foreground">
               International file not uploaded — only Domestic flights will be included. You can upload it above to include International flights.
@@ -2698,7 +3695,6 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                 <span className="inline-flex items-center rounded-md bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary uppercase tracking-wider">
                   Domestic Flights
                 </span>
-                <span className="text-xs text-muted-foreground">Zenith PAX Load</span>
               </div>
               {domInvalidCount > 0 && (
                 <span className="inline-flex items-center text-xs text-muted-foreground">
@@ -2709,63 +3705,44 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
             </div>
             <div className="space-y-3">
               {groupByDate(domParsed).map(({ date, rows: dayRows }) => (
-                <div key={date} className="border border-border rounded-md overflow-hidden overflow-x-auto">
+                <div key={date} className="border border-border rounded-md overflow-hidden">
                   <Table>
                     <TableHeader className="bg-muted/40">
-                      <TableRow className="bg-primary/5 border-b border-primary/20">
-                        <TableHead colSpan={15} className="py-2">
-                          <span className="font-semibold text-primary text-xs">{formatDayLabel(date)}</span>
+                      <TableRow className="bg-primary/5 border-b border-primary/20 hover:bg-primary/5">
+                        <TableHead colSpan={8} className="py-2">
+                          <span className="text-sm font-bold text-primary">{formatDayLabel(date)}</span>
+                          <span className="ml-2 inline-flex items-center rounded-md border border-border bg-white px-2 py-[2px] text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                            {dayRows.length} flight{dayRows.length === 1 ? "" : "s"}
+                          </span>
+                          <span className="ml-1.5 text-[10px] text-muted-foreground">→ imports as one order</span>
                         </TableHead>
                       </TableRow>
                       <TableRow>
-                        <TableHead colSpan={7} className="text-xs uppercase tracking-wider text-center border-r border-border bg-primary/5 text-primary py-1.5">
-                          Departure Flight
-                        </TableHead>
-                        <TableHead colSpan={8} className="text-xs uppercase tracking-wider text-center bg-navy/5 text-navy py-1.5">
-                          Return Flight
-                        </TableHead>
-                      </TableRow>
-                      <TableRow>
-                        <TableHead className="text-xs uppercase tracking-wider">AIRLINE NAME</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider">FLT NO</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider">SECTOR</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider">DEP TIME</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">B/C</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">E/C</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right border-r border-border">TOTAL MEAL</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider">FLT NO</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider">SECTOR</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">B/C</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">E/C</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">CHML</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">VGML</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">CREW MEAL</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider">ACTIONS</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Airline</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">ETD</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider text-right">Pax</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider text-right">Spec. Meals</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Action</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {dayRows.map((r) => (
                         <TableRow key={`dom-${r.row}`} className={!r.valid ? "bg-destructive/10" : ""}>
-                          <TableCell className="text-xs">{r.airline}</TableCell>
                           <TableCell>
-                            <input
-                              value={r.flight}
-                              onChange={(e) => updateDomField(r.row, "flight", e.target.value)}
-                              className="bg-transparent border-b border-transparent hover:border-border focus:border-primary focus:outline-none w-full text-sm font-medium"
-                            />
+                            <div className="flex items-center gap-1.5">
+                              <span className="inline-flex items-center rounded-[7px] bg-[#2a2528] px-[9px] py-1 text-xs font-bold tabular-nums text-white">{r.flight || "—"}</span>
+                              {r.direction && <DirectionBadge direction={r.direction} />}
+                            </div>
                           </TableCell>
+                          <TableCell className="text-xs">{r.airline}</TableCell>
                           <TableCell className="text-xs">{r.sector}</TableCell>
+                          <TableCell className="text-xs tabular-nums">{r.date}</TableCell>
                           <TableCell className="text-xs tabular-nums">{r.etd}</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs border-r border-border">{r.totalMeal ?? "—"}</TableCell>
-                          <TableCell className="text-xs tabular-nums">{r.returnFlight ?? "—"}</TableCell>
-                          <TableCell className="text-xs">{r.returnSector ?? "—"}</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs">{r.crewMeal ?? "—"}</TableCell>
+                          <TableCell className="text-right text-xs tabular-nums">{r.pax}</TableCell>
+                          <TableCell className="text-right text-xs tabular-nums">{r.specialMeals > 0 ? r.specialMeals : "—"}</TableCell>
                           <TableCell>
                             <div className="flex items-center gap-1.5">
                               <StatusBadge status={r.valid ? "OK" : "Failed"} />
@@ -2797,7 +3774,6 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                 <span className="inline-flex items-center rounded-md bg-navy/10 px-2.5 py-1 text-xs font-semibold text-navy uppercase tracking-wider">
                   International Flights
                 </span>
-                <span className="text-xs text-muted-foreground">Zenith PAX Load</span>
               </div>
               {intlInvalidCount > 0 && (
                 <span className="inline-flex items-center text-xs text-muted-foreground">
@@ -2808,63 +3784,44 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
             </div>
             <div className="space-y-3">
               {groupByDate(intlParsed).map(({ date, rows: dayRows }) => (
-                <div key={date} className="border border-border rounded-md overflow-hidden overflow-x-auto">
+                <div key={date} className="border border-border rounded-md overflow-hidden">
                   <Table>
                     <TableHeader className="bg-muted/40">
-                      <TableRow className="bg-navy/5 border-b border-navy/20">
-                        <TableHead colSpan={15} className="py-2">
-                          <span className="font-semibold text-navy text-xs">{formatDayLabel(date)}</span>
+                      <TableRow className="bg-navy/5 border-b border-navy/20 hover:bg-navy/5">
+                        <TableHead colSpan={8} className="py-2">
+                          <span className="text-sm font-bold text-navy">{formatDayLabel(date)}</span>
+                          <span className="ml-2 inline-flex items-center rounded-md border border-border bg-white px-2 py-[2px] text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                            {dayRows.length} flight{dayRows.length === 1 ? "" : "s"}
+                          </span>
+                          <span className="ml-1.5 text-[10px] text-muted-foreground">→ imports as one order</span>
                         </TableHead>
                       </TableRow>
                       <TableRow>
-                        <TableHead colSpan={7} className="text-xs uppercase tracking-wider text-center border-r border-border bg-primary/5 text-primary py-1.5">
-                          Departure Flight
-                        </TableHead>
-                        <TableHead colSpan={8} className="text-xs uppercase tracking-wider text-center bg-navy/5 text-navy py-1.5">
-                          Return Flight
-                        </TableHead>
-                      </TableRow>
-                      <TableRow>
-                        <TableHead className="text-xs uppercase tracking-wider">AIRLINE NAME</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider">FLT NO</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider">SECTOR</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider">DEP TIME</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">B/C</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">E/C</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right border-r border-border">TOTAL MEAL</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider">FLT NO</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider">SECTOR</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">B/C</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">E/C</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">CHML</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">VGML</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">CREW MEAL</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider">ACTIONS</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Airline</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">ETD</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider text-right">Pax</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider text-right">Spec. Meals</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Action</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {dayRows.map((r) => (
                         <TableRow key={`intl-${r.row}`} className={!r.valid ? "bg-destructive/10" : ""}>
-                          <TableCell className="text-xs">{r.airline}</TableCell>
                           <TableCell>
-                            <input
-                              value={r.flight}
-                              onChange={(e) => updateIntlField(r.row, "flight", e.target.value)}
-                              className="bg-transparent border-b border-transparent hover:border-border focus:border-primary focus:outline-none w-full text-sm font-medium"
-                            />
+                            <div className="flex items-center gap-1.5">
+                              <span className="inline-flex items-center rounded-[7px] bg-[#2a2528] px-[9px] py-1 text-xs font-bold tabular-nums text-white">{r.flight || "—"}</span>
+                              {r.direction && <DirectionBadge direction={r.direction} />}
+                            </div>
                           </TableCell>
+                          <TableCell className="text-xs">{r.airline}</TableCell>
                           <TableCell className="text-xs">{r.sector}</TableCell>
+                          <TableCell className="text-xs tabular-nums">{r.date}</TableCell>
                           <TableCell className="text-xs tabular-nums">{r.etd}</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs">{r.bcLoad ?? "—"}</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs">{r.ecLoad ?? "—"}</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground border-r border-border">—</TableCell>
-                          <TableCell className="text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs">{r.bcMeal ?? "—"}</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs">{r.ecMeal ?? "—"}</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs">{r.chml ?? "—"}</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs">{r.vgml ?? "—"}</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
+                          <TableCell className="text-right text-xs tabular-nums">{r.pax}</TableCell>
+                          <TableCell className="text-right text-xs tabular-nums">{r.specialMeals > 0 ? r.specialMeals : "—"}</TableCell>
                           <TableCell>
                             <div className="flex items-center gap-1.5">
                               <StatusBadge status={r.valid ? "OK" : "Failed"} />
@@ -2887,22 +3844,218 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
         </Card>
       )}
 
+      {/* Per-file preview — Crew Meals (one crew order per date, like flights) */}
+      {crewDone && !importConfirmed && !showFinalReview && (
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex items-center justify-between mb-4">
+              <span className="inline-flex items-center rounded-md bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-700 uppercase tracking-wider">
+                Crew Meals
+              </span>
+              {crewInvalidCount > 0 && (
+                <span className="inline-flex items-center text-xs text-muted-foreground">
+                  <AlertCircle className="h-3.5 w-3.5 text-warning mr-1" />
+                  {crewInvalidCount} invalid row{crewInvalidCount > 1 ? "s" : ""} highlighted
+                </span>
+              )}
+            </div>
+            <div className="space-y-3">
+              {groupByDate(crewParsed).map(({ date, rows: dayRows }) => (
+                <div key={date} className="border border-border rounded-md overflow-hidden">
+                  <Table>
+                    <TableHeader className="bg-muted/40">
+                      <TableRow className="bg-amber-50/60 border-b border-amber-200/60 hover:bg-amber-50/60">
+                        <TableHead colSpan={8} className="py-2">
+                          <span className="text-sm font-bold text-amber-700">{formatDayLabel(date)}</span>
+                          <span className="ml-2 inline-flex items-center rounded-md border border-border bg-white px-2 py-[2px] text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                            {dayRows.length} flight{dayRows.length === 1 ? "" : "s"}
+                          </span>
+                          <span className="ml-1.5 text-[10px] text-muted-foreground">→ imports as one crew order</span>
+                        </TableHead>
+                      </TableRow>
+                      <TableRow>
+                        <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Airline</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">ETD</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Meal Slot</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider text-right">Crew</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Action</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {dayRows.map((r) => (
+                        <TableRow key={`crew-${r.row}`} className={!r.valid ? "bg-destructive/10" : ""}>
+                          <TableCell>
+                            <div className="flex items-center gap-1.5">
+                              <span className="inline-flex items-center rounded-[7px] bg-[#2a2528] px-[9px] py-1 text-xs font-bold tabular-nums text-white">{r.flight || "—"}</span>
+                              {r.direction && <DirectionBadge direction={r.direction} />}
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-xs">{r.airline}</TableCell>
+                          <TableCell className="text-xs">{r.sector}</TableCell>
+                          <TableCell className="text-xs tabular-nums">{r.date}</TableCell>
+                          <TableCell className="text-xs tabular-nums">{r.etd}</TableCell>
+                          <TableCell className="text-xs">{r.mealSlot || "—"}</TableCell>
+                          <TableCell className="text-right text-xs tabular-nums">{r.crew ?? 0}</TableCell>
+                          <TableCell><StatusBadge status={r.valid ? "OK" : "Failed"} /></TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Special-meal manifest preview — each uploaded passenger grouped under
+          the flight it attaches to (Flight No + Date), with that flight's
+          details and a declared-vs-uploaded count check. */}
+      {specialDone && specialRows.length > 0 && !importConfirmed && !showFinalReview && (
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+              <div className="flex items-center gap-3">
+                <span className="inline-flex items-center rounded-md bg-emerald-100 px-2.5 py-1 text-xs font-semibold text-emerald-700 uppercase tracking-wider">
+                  Special Meals
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {specialRows.length} passenger{specialRows.length === 1 ? "" : "s"} · {uploadedByFlight.size} flight{uploadedByFlight.size === 1 ? "" : "s"} — attach to flights by Flight No + Date
+                </span>
+              </div>
+              {attachableKeys.length > 0 && (
+                <Button size="sm" onClick={attachToExistingOrders}>
+                  <Utensils className="h-3.5 w-3.5 mr-1.5" />
+                  Attach to {attachableKeys.length} existing flight{attachableKeys.length === 1 ? "" : "s"}
+                </Button>
+              )}
+            </div>
+            <div className="space-y-3">
+              {Array.from(uploadedByFlight.entries()).map(([key, entries]) => {
+                const fr = flightRowByKey.get(key);
+                const st = manifestStatus.get(key);
+                const codeCounts = new Map<string, number>();
+                entries.forEach((e) => codeCounts.set(e.mealCode, (codeCounts.get(e.mealCode) ?? 0) + 1));
+                const badge =
+                  st?.kind === "upload-match" ? { cls: "bg-success/15 text-success border-success/40", text: `Order ${st.declared} · attached ${entries.length}` }
+                  : st?.kind === "upload-mismatch" ? { cls: "bg-destructive/15 text-destructive border-destructive/40", text: `Order ${st.declared} · attached ${entries.length} — mismatch` }
+                  : st?.kind === "existing" ? { cls: "bg-sky-100 text-sky-700 border-sky-300", text: `Order ${st.declared} · attaching ${entries.length}` }
+                  : { cls: "bg-muted text-muted-foreground", text: `${entries.length} uploaded · no matching flight` };
+                return (
+                  <div key={key} className="border border-border rounded-md overflow-hidden">
+                    <Table>
+                      <TableHeader className="bg-muted/40">
+                        <TableRow className="bg-emerald-50/60 border-b border-emerald-200/60 hover:bg-emerald-50/60">
+                          <TableHead colSpan={5} className="py-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="inline-flex items-center rounded-[7px] bg-[#2a2528] px-[9px] py-1 text-xs font-bold tabular-nums text-white">{entries[0].flight}</span>
+                              {fr?.direction && <DirectionBadge direction={fr.direction} />}
+                              <span className="text-xs font-medium text-foreground">
+                                {fr ? `${fr.airline} · ${fr.sector} · ${fr.etd}` : "no matching flight — upload its flight order, or it must already exist"}
+                              </span>
+                              <span className="text-[11px] text-muted-foreground tabular-nums">{entries[0].date}</span>
+                              <Badge variant="outline" className={cn("ml-auto h-5 px-1.5 text-[10px] tabular-nums", badge.cls)}>
+                                {badge.text}
+                              </Badge>
+                            </div>
+                            <div className="mt-1.5 flex flex-wrap gap-1">
+                              {Array.from(codeCounts.entries()).map(([code, n]) => (
+                                <Badge key={code} variant="outline" className="h-5 px-1.5 text-[10px] font-mono" title={SPECIAL_MEAL_BY_CODE[code]?.name ?? code}>
+                                  {code} · {n}
+                                </Badge>
+                              ))}
+                            </div>
+                          </TableHead>
+                        </TableRow>
+                        <TableRow>
+                          <TableHead className="text-xs uppercase tracking-wider w-10">#</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">PNR</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Passenger</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Seat</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Meal</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {entries.map((e, i) => (
+                          <TableRow key={`${key}-${i}`}>
+                            <TableCell className="text-xs tabular-nums text-muted-foreground">{i + 1}</TableCell>
+                            <TableCell className="font-mono text-xs">{e.pnr || "—"}</TableCell>
+                            <TableCell className="text-xs">{e.passengerName || "—"}</TableCell>
+                            <TableCell className="font-mono text-xs tabular-nums">{e.seat || "—"}</TableCell>
+                            <TableCell>
+                              <Badge variant="outline" className="h-5 px-1.5 text-[10px] font-mono" title={SPECIAL_MEAL_BY_CODE[e.mealCode]?.name ?? e.mealCode}>
+                                {e.mealCode}
+                              </Badge>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                );
+              })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Special-meal manifest validation — the uploaded roster count for each
+          flight must equal that flight's declared Special Meals count. */}
+      {specialDone && anyDone && !importConfirmed && !showFinalReview && (
+        <div className={"rounded-lg border px-4 py-3 " + (specialMealIssues.length > 0 ? "border-destructive/40 bg-destructive/5" : "border-success/40 bg-success/5")}>
+          <div className="flex items-center gap-2 mb-1">
+            {specialMealIssues.length > 0 ? (
+              <AlertCircle className="h-4 w-4 text-destructive" />
+            ) : (
+              <CheckCircle2 className="h-4 w-4 text-success" />
+            )}
+            <span className="text-sm font-semibold">
+              Special Meals — {specialRows.length} passenger{specialRows.length === 1 ? "" : "s"} across {uploadedByFlight.size} flight{uploadedByFlight.size === 1 ? "" : "s"}
+            </span>
+          </div>
+          {specialMealIssues.length > 0 ? (
+            <ul className="mt-1 space-y-0.5 text-xs text-destructive">
+              {specialMealIssues.map((iss) => (
+                <li key={`${iss.flight}-${iss.date}`}>
+                  <span className="font-mono font-medium">{iss.flight}</span> ({iss.date}) —{" "}
+                  {iss.declared === null
+                    ? `no matching flight in the uploaded orders (${iss.uploaded} meal${iss.uploaded === 1 ? "" : "s"} in manifest)`
+                    : `declares ${iss.declared} special meal${iss.declared === 1 ? "" : "s"} but manifest has ${iss.uploaded} — counts must match exactly.`}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-xs text-success">All manifest counts match each flight's declared Special Meals total. Ready to import.</p>
+          )}
+        </div>
+      )}
+
       {/* Confirm Import — available when at least one file is done */}
       {anyDone && !importConfirmed && !showFinalReview && (
         <div className="flex justify-end gap-2">
           <Button variant="outline" onClick={() => toast.success("Error report downloaded.")}>
             <Download className="h-3.5 w-3.5 mr-1.5" /> Error Report
           </Button>
-          <Button onClick={() => {
-            const invalidCount = allInvalidCount;
-            if (invalidCount > 0) {
-              toast.error(
-                `Import blocked — ${invalidCount} invalid row${invalidCount !== 1 ? "s" : ""} must be fixed before proceeding. Use the Edit button on highlighted rows.`,
-              );
-              return;
-            }
-            setShowFinalReview(true);
-          }}>Confirm Import</Button>
+          <Button
+            disabled={specialMealIssues.length > 0}
+            onClick={() => {
+              const invalidCount = allInvalidCount;
+              if (invalidCount > 0) {
+                toast.error(
+                  `Import blocked — ${invalidCount} invalid row${invalidCount !== 1 ? "s" : ""} must be fixed before proceeding. Use the Edit button on highlighted rows.`,
+                );
+                return;
+              }
+              if (specialMealIssues.length > 0) {
+                toast.error("Import blocked — special-meal manifest counts don't match the declared totals.");
+                return;
+              }
+              setShowFinalReview(true);
+            }}
+          >Confirm Import</Button>
         </div>
       )}
 
@@ -2925,55 +4078,38 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
               <Table>
                 <TableHeader className="bg-muted/40">
                   <TableRow>
-                    <TableHead colSpan={7} className="text-xs uppercase tracking-wider text-center border-r border-border bg-primary/5 text-primary py-1.5">
-                      Departure Flight
-                    </TableHead>
-                    <TableHead colSpan={8} className="text-xs uppercase tracking-wider text-center bg-navy/5 text-navy py-1.5">
-                      Return Flight
-                    </TableHead>
-                  </TableRow>
-                  <TableRow>
-                    <TableHead className="text-xs uppercase tracking-wider">AIRLINE NAME</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider">FLT NO</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider">SECTOR</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider">DEP TIME</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider text-right">B/C</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider text-right">E/C</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider text-right border-r border-border">TOTAL MEAL</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider">FLT NO</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider">SECTOR</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider text-right">B/C</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider text-right">E/C</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider text-right">CHML</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider text-right">VGML</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider text-right">CREW MEAL</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider">STATUS</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Airline</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">ETD</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right">Pax</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right">Spec. Meals</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Status</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {domDone && (
                     <>
                       <TableRow className="bg-primary/5 border-t-2 border-t-primary/40 hover:bg-primary/10">
-                        <TableCell colSpan={15} className="py-2">
+                        <TableCell colSpan={8} className="py-2">
                           <span className="font-semibold text-primary uppercase tracking-wider text-xs">Domestic</span>
                         </TableCell>
                       </TableRow>
                       {domParsed.map((r) => (
                         <TableRow key={`final-dom-${r.row}`} className={!r.valid ? "bg-destructive/10" : ""}>
+                          <TableCell>
+                            <div className="flex items-center gap-1.5">
+                              <span className="inline-flex items-center rounded-[7px] bg-[#2a2528] px-[9px] py-1 text-xs font-bold tabular-nums text-white">{r.flight || "—"}</span>
+                              {r.direction && <DirectionBadge direction={r.direction} />}
+                            </div>
+                          </TableCell>
                           <TableCell className="text-xs">{r.airline}</TableCell>
-                          <TableCell className="text-sm font-medium">{r.flight}</TableCell>
                           <TableCell className="text-xs">{r.sector}</TableCell>
+                          <TableCell className="text-xs tabular-nums">{r.date}</TableCell>
                           <TableCell className="text-xs tabular-nums">{r.etd}</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs border-r border-border">{r.totalMeal ?? "—"}</TableCell>
-                          <TableCell className="text-xs tabular-nums">{r.returnFlight ?? "—"}</TableCell>
-                          <TableCell className="text-xs">{r.returnSector ?? "—"}</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs">{r.crewMeal ?? "—"}</TableCell>
+                          <TableCell className="text-right text-xs tabular-nums">{r.pax}</TableCell>
+                          <TableCell className="text-right text-xs tabular-nums">{r.specialMeals > 0 ? r.specialMeals : "—"}</TableCell>
                           <TableCell><StatusBadge status={r.valid ? "OK" : "Failed"} /></TableCell>
                         </TableRow>
                       ))}
@@ -2982,25 +4118,49 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
                   {intlDone && (
                     <>
                       <TableRow className="bg-navy/5 border-t-2 border-t-navy/40 hover:bg-navy/10">
-                        <TableCell colSpan={15} className="py-2">
+                        <TableCell colSpan={8} className="py-2">
                           <span className="font-semibold text-navy uppercase tracking-wider text-xs">International</span>
                         </TableCell>
                       </TableRow>
                       {intlParsed.map((r) => (
                         <TableRow key={`final-intl-${r.row}`} className={!r.valid ? "bg-destructive/10" : ""}>
+                          <TableCell>
+                            <div className="flex items-center gap-1.5">
+                              <span className="inline-flex items-center rounded-[7px] bg-[#2a2528] px-[9px] py-1 text-xs font-bold tabular-nums text-white">{r.flight || "—"}</span>
+                              {r.direction && <DirectionBadge direction={r.direction} />}
+                            </div>
+                          </TableCell>
                           <TableCell className="text-xs">{r.airline}</TableCell>
-                          <TableCell className="text-sm font-medium">{r.flight}</TableCell>
                           <TableCell className="text-xs">{r.sector}</TableCell>
+                          <TableCell className="text-xs tabular-nums">{r.date}</TableCell>
                           <TableCell className="text-xs tabular-nums">{r.etd}</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs">{r.bcLoad ?? "—"}</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs">{r.ecLoad ?? "—"}</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground border-r border-border">—</TableCell>
-                          <TableCell className="text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-xs text-muted-foreground">—</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs">{r.bcMeal ?? "—"}</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs">{r.ecMeal ?? "—"}</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs">{r.chml ?? "—"}</TableCell>
-                          <TableCell className="text-right tabular-nums text-xs">{r.vgml ?? "—"}</TableCell>
+                          <TableCell className="text-right text-xs tabular-nums">{r.pax}</TableCell>
+                          <TableCell className="text-right text-xs tabular-nums">{r.specialMeals > 0 ? r.specialMeals : "—"}</TableCell>
+                          <TableCell><StatusBadge status={r.valid ? "OK" : "Failed"} /></TableCell>
+                        </TableRow>
+                      ))}
+                    </>
+                  )}
+                  {crewDone && crewParsed.length > 0 && (
+                    <>
+                      <TableRow className="bg-amber-50 border-t-2 border-t-amber-300 hover:bg-amber-50">
+                        <TableCell colSpan={8} className="py-2">
+                          <span className="font-semibold text-amber-700 uppercase tracking-wider text-xs">Crew Meals</span>
+                        </TableCell>
+                      </TableRow>
+                      {crewParsed.map((r) => (
+                        <TableRow key={`final-crew-${r.row}`} className={!r.valid ? "bg-destructive/10" : ""}>
+                          <TableCell>
+                            <div className="flex items-center gap-1.5">
+                              <span className="inline-flex items-center rounded-[7px] bg-[#2a2528] px-[9px] py-1 text-xs font-bold tabular-nums text-white">{r.flight || "—"}</span>
+                              {r.direction && <DirectionBadge direction={r.direction} />}
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-xs">{r.airline}</TableCell>
+                          <TableCell className="text-xs">{r.sector}</TableCell>
+                          <TableCell className="text-xs tabular-nums">{r.date}</TableCell>
+                          <TableCell className="text-xs tabular-nums">{r.etd}</TableCell>
+                          <TableCell className="text-right text-xs tabular-nums">{r.crew ?? 0} crew</TableCell>
                           <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
                           <TableCell><StatusBadge status={r.valid ? "OK" : "Failed"} /></TableCell>
                         </TableRow>
@@ -3960,20 +5120,6 @@ function BulkUpload({ onImport, onOrderConfirmed }: { onImport: (orders: FlightO
         </Card>
       )}
 
-      <Card>
-        <CardContent className="pt-6">
-          <h3 className="text-sm font-semibold tracking-wider uppercase text-foreground mb-4">
-            Recent Uploads
-          </h3>
-          <DataTable
-            title="uploads"
-            data={recentUploads}
-            columns={uploadCols}
-            searchKeys={["file", "by", "status"]}
-            actions={(row) => <RowActions row={row} actions={["view", "export", "delete"]} />}
-          />
-        </CardContent>
-      </Card>
     </div>
   );
 }
@@ -3985,18 +5131,20 @@ const SPECIAL_MEAL_CATEGORY_COLOR: Record<SpecialMealCategory, string> = {
   Other:      "border-border bg-muted text-muted-foreground",
 };
 
-function SpecialMealRosterPanel({ legs }: { legs: FlightOrder[] }) {
+function SpecialMealRosterPanel({ legs, level = "passenger" }: { legs: FlightOrder[]; level?: "crew" | "passenger" }) {
   const allEntries = legs.flatMap((l) =>
     (l.specialMealRoster ?? []).map((e) => ({ ...e, flight: l.flight, sector: l.sector })),
   );
   const plannedCount = legs.reduce((s, l) => s + l.specialMeals, 0);
+  // Crew Meals tab passes "crew"; flight order surfaces use the default.
+  const manifestLevel = level;
 
   if (allEntries.length === 0) {
     return (
       <div className="rounded-md border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
         {plannedCount > 0 ? (
           <>
-            <span className="font-medium text-foreground">{plannedCount}</span> special meal{plannedCount === 1 ? "" : "s"} planned on this flight — passenger-level manifest (PNR / Seat / Meal) not yet imported.
+            <span className="font-medium text-foreground">{plannedCount}</span> special meal{plannedCount === 1 ? "" : "s"} planned on this flight — {manifestLevel}-level manifest (PNR / Seat / Meal) not yet imported.
           </>
         ) : (
           <>No special meals on this flight.</>
@@ -4117,7 +5265,6 @@ function FlightOrderDetailsDialog({
               <DetailRow label="Date" value={leg.date} />
               <DetailRow label="ETD" value={leg.etd} />
               <DetailRow label="Passengers" value={leg.pax.toLocaleString()} />
-              <DetailRow label="Crew" value={leg.crew.toString()} />
               <DetailRow label="Special Meals" value={leg.specialMeals.toString()} />
             </div>
 

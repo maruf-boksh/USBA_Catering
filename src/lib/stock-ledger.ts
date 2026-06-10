@@ -42,6 +42,50 @@ const ts = (date: string): number => {
   return Number.isNaN(t) ? 0 : t;
 };
 
+/** Inclusive date window (yyyy-mm-dd). Either bound may be omitted. */
+export type LedgerRange = { from?: string; to?: string };
+
+/**
+ * Split movements into before / within / after a date window and tally each.
+ * Undated movements (ts === 0) fold into "before" when a `from` bound is set, so
+ * they stay in the opening balance rather than appearing inside the window.
+ */
+function partitionByRange<T extends { ts: number; inQty: number; outQty: number }>(
+  moves: T[],
+  range?: LedgerRange,
+): { within: T[]; afterIn: number; afterOut: number; winIn: number; winOut: number } {
+  const fromTs = range?.from ? ts(range.from) : -Infinity;
+  const toTs = range?.to ? ts(range.to) : Infinity;
+  const within: T[] = [];
+  let afterIn = 0, afterOut = 0, winIn = 0, winOut = 0;
+  for (const m of moves) {
+    if (m.ts > toTs) { afterIn += m.inQty; afterOut += m.outQty; }
+    else if (m.ts >= fromTs && m.ts <= toTs) { within.push(m); winIn += m.inQty; winOut += m.outQty; }
+    // else: before the window — folded into the opening balance.
+  }
+  return { within, afterIn, afterOut, winIn, winOut };
+}
+
+/**
+ * Quantity-only ledger summary for the report's columns: opening balance, period
+ * In/Out, and closing balance — scoped to an optional date window. Closing is
+ * back-computed from the item's current stock minus any movements after the
+ * window; opening is closing minus the in-window net.
+ */
+export function itemLedgerSummary(
+  itemId: string,
+  itemName: string,
+  closingStock: number,
+  src: LedgerSources,
+  range?: LedgerRange,
+): { opening: number; closing: number; inQty: number; outQty: number } {
+  const moves = collectItemMovements(itemId, itemName, src).sort((a, b) => a.ts - b.ts);
+  const { afterIn, afterOut, winIn, winOut } = partitionByRange(moves, range);
+  const closing = closingStock - afterIn + afterOut;
+  const opening = closing - winIn + winOut;
+  return { opening, closing, inQty: winIn, outQty: winOut };
+}
+
 export type LedgerSources = {
   grns: WfGRN[];
   transferNotes: WfTransferNote[];
@@ -117,9 +161,10 @@ export function collectItemMovements(
   for (const d of src.stockDeltas) {
     if (!matches(d.itemId)) continue;
     raw.push({
-      date: "—", ts: 0,
-      reference: "—",
-      type: d.delta >= 0 ? "Production" : "Dispatch",
+      date: d.date || "—", ts: d.date ? ts(d.date) : 0,
+      reference: d.reference || "—",
+      officeId: d.officeId, warehouseId: d.warehouseId,
+      type: d.label ?? (d.delta >= 0 ? "Production" : "Dispatch"),
       inQty: d.delta >= 0 ? d.delta : 0,
       outQty: d.delta < 0 ? -d.delta : 0,
     });
@@ -144,18 +189,31 @@ export function buildItemLedger(
   openingCost: number,
   unitCostFor: UnitCostFor,
   src: LedgerSources,
+  /** Item's home office/warehouse — fills the opening row and any movement whose
+   *  source didn't carry a location. */
+  location?: { officeId?: string; warehouseId?: string },
+  /** Optional date window — scopes the rows + opening/closing to the period. */
+  range?: LedgerRange,
 ): ItemLedger {
   const moves = collectItemMovements(itemId, itemName, src, unitCostFor)
-    .sort((a, b) => a.ts - b.ts);
+    .sort((a, b) => a.ts - b.ts)
+    .map((m) => ({
+      ...m,
+      officeId: m.officeId ?? location?.officeId,
+      warehouseId: m.warehouseId ?? location?.warehouseId,
+    }));
 
-  const totalIn = moves.reduce((s, m) => s + m.inQty, 0);
-  const totalOut = moves.reduce((s, m) => s + m.outQty, 0);
-  const opening = closingStock - totalIn + totalOut;
+  const { within, afterIn, afterOut, winIn, winOut } = partitionByRange(moves, range);
+  const totalIn = winIn;
+  const totalOut = winOut;
+  const closing = closingStock - afterIn + afterOut;
+  const opening = closing - totalIn + totalOut;
 
-  const openingDate = moves.find((m) => m.ts > 0)?.date ?? "—";
+  const openingDate = within.find((m) => m.ts > 0)?.date ?? (range?.from || "—");
   const rows: (LedgerEntry & { balance: number })[] = [
     {
       date: openingDate, ts: 0, reference: "Opening Balance",
+      officeId: location?.officeId, warehouseId: location?.warehouseId,
       type: "Opening Balance",
       inQty: opening > 0 ? opening : 0,
       outQty: opening < 0 ? -opening : 0,
@@ -166,12 +224,12 @@ export function buildItemLedger(
   ];
 
   let balance = opening;
-  for (const m of moves) {
+  for (const m of within) {
     balance += m.inQty - m.outQty;
     rows.push({ ...m, balance });
   }
 
-  return { opening, closing: closingStock, totalIn, totalOut, rows };
+  return { opening, closing, totalIn, totalOut, rows };
 }
 
 /** Lightweight In/Out totals for an item — used by the report's summary columns. */

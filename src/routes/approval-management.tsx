@@ -8,7 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -16,8 +16,8 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  BadgeCheck, Check, X as XIcon, Clock, ShieldCheck, Search,
-  FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, Layers, UserCog,
+  Check, X as XIcon, Clock, ShieldCheck, Search,
+  FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, ArrowLeft, Layers, UserCog, Users,
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
   PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane, MailQuestion, PlaneLanding, PlaneTakeoff,
   BadgeDollarSign,
@@ -37,7 +37,8 @@ import { getStockAdjustments, setStockAdjustmentStatus } from "@/lib/stock-adjus
 import { useRole } from "@/lib/roles";
 
 type Category =
-  | "Order Management"
+  | "Flight Orders"
+  | "Crew Orders"
   | "Demand Request"
   | "Request for Quotation"
   | "Quotation"
@@ -52,7 +53,8 @@ type Category =
   | "Dispatch";
 
 const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
-  { key: "Order Management",         label: "Order Management",   icon: Plane           },
+  { key: "Flight Orders",        label: "Flight Orders",      icon: Plane           },
+  { key: "Crew Orders",          label: "Crew Orders",        icon: Users           },
   { key: "Demand Request",       label: "Demand Req.",        icon: FileSearch      },
   { key: "Request for Quotation", label: "RFQ",               icon: MailQuestion    },
   { key: "Quotation",            label: "Quotations",         icon: BadgeDollarSign },
@@ -66,6 +68,18 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "User Account",         label: "Users",              icon: UserCog         },
   { key: "Dispatch",             label: "Dispatch",           icon: Truck           },
 ];
+
+// Overview grid — categories grouped into business sections (mirrors the
+// reference layout). Each card drills into that category's pending queue.
+const APPROVAL_SECTIONS: { label: string; keys: Category[] }[] = [
+  { label: "Operations Approval",     keys: ["Flight Orders", "Crew Orders"] },
+  { label: "Dispatch Approval",       keys: ["Dispatch"] },
+  { label: "Procurement Approval",    keys: ["Demand Request", "Request for Quotation", "Quotation", "Purchase Requisition", "Purchase Order", "Goods Receipt"] },
+  { label: "Inventory Approval",      keys: ["Transfer Request", "Stock Adjustment"] },
+  { label: "Production Approval",     keys: ["Production Order", "Bill of Materials"] },
+  { label: "Administration Approval", keys: ["User Account"] },
+];
+const CATEGORY_BY_KEY = new Map(CATEGORIES.map((c) => [c.key, c]));
 
 type ApprovalStatus = "Pending" | "Approved" | "Rejected";
 
@@ -241,6 +255,9 @@ export default function ApprovalManagementPage() {
     searchParams.get("tab") === "dispatch" ? "Dispatch" : "all"
   );
   const [search, setSearch] = useState("");
+  // Date-range filter (on requestedAt) inside each category screen.
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   // Bulk selection (ids of pending items ticked for a batch approve/reject).
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkReject, setBulkReject] = useState(false);
@@ -309,17 +326,22 @@ export default function ApprovalManagementPage() {
       const decision = foDecisions[orderNo];
       const hasPending = legs.some((l) => l.status === "Pending");
       if (!hasPending && !decision) continue;
+      const isCrew = legs.some((l) => l.orderType === "crew");
       const airlines = Array.from(new Set(legs.map((l) => l.airline)));
       const totalPax = legs.reduce((s, l) => s + (l.pax ?? 0), 0);
+      const totalCrew = legs.reduce((s, l) => s + (l.crew ?? 0), 0);
       const flightList = legs.map((l) => l.flight).slice(0, 4).join(", ");
+      const more = legs.length > 4 ? ` +${legs.length - 4} more` : "";
       result.push({
         id: `FO-AP-${orderNo}`,
-        category: "Order Management",
+        category: isCrew ? "Crew Orders" : "Flight Orders",
         refId: orderNo,
-        title: `Flight order — ${legs.length} flight${legs.length === 1 ? "" : "s"}`,
+        title: `${isCrew ? "Crew meal order" : "Flight order"} — ${legs.length} flight${legs.length === 1 ? "" : "s"}`,
         requestedBy: "Operations",
         requestedAt: legs[0].date,
-        summary: `${airlines.join(", ")} · ${flightList}${legs.length > 4 ? ` +${legs.length - 4} more` : ""} · ${totalPax} pax`,
+        summary: isCrew
+          ? `${airlines.join(", ")} · ${flightList}${more} · ${totalCrew} crew`
+          : `${airlines.join(", ")} · ${flightList}${more} · ${totalPax} pax`,
         itemsCount: legs.length,
         status: decision ? decision.status : "Pending",
         processedBy: decision?.by,
@@ -461,9 +483,12 @@ export default function ApprovalManagementPage() {
     return allItems.filter((it) => {
       if (activeTab !== "all" && it.category !== activeTab) return false;
       if (q && ![it.refId, it.title, it.requestedBy, it.summary].some((f) => f.toLowerCase().includes(q))) return false;
+      const day = (it.requestedAt || "").slice(0, 10);
+      if (dateFrom && day && day < dateFrom) return false;
+      if (dateTo && day && day > dateTo) return false;
       return true;
     });
-  }, [allItems, activeTab, search]);
+  }, [allItems, activeTab, search, dateFrom, dateTo]);
 
   const pendingItems = filtered.filter((it) => it.status === "Pending");
   const recentItems  = filtered
@@ -580,7 +605,7 @@ export default function ApprovalManagementPage() {
       approveDemand(dr, silent);
       return;
     }
-    if (it.category === "Order Management") {
+    if (it.category === "Flight Orders" || it.category === "Crew Orders") {
       const moved = updateFlightOrdersWhere(
         (o) => o.orderNo === it.refId && o.status === "Pending",
         { status: "Approved" },
@@ -650,7 +675,7 @@ export default function ApprovalManagementPage() {
         rejectedAt: new Date().toLocaleString(),
         rejectionReason: reason,
       });
-    } else if (it.category === "Order Management") {
+    } else if (it.category === "Flight Orders" || it.category === "Crew Orders") {
       setFoDecisions((p) => ({
         ...p,
         [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
@@ -741,6 +766,8 @@ export default function ApprovalManagementPage() {
   // Clear selection when the visible set changes, so a batch action never hits
   // items hidden by the current tab/search.
   useEffect(() => { setSelected(new Set()); }, [activeTab, search]);
+  // Reset the date-range filter when moving between category screens.
+  useEffect(() => { setDateFrom(""); setDateTo(""); }, [activeTab]);
 
   const openDetail = (it: ApprovalItem) => {
     setDetailItem(it);
@@ -826,7 +853,7 @@ export default function ApprovalManagementPage() {
         rejectedAt: new Date().toLocaleString(),
         rejectionReason: reason,
       });
-    } else if (detailItem.category === "Order Management") {
+    } else if (detailItem.category === "Flight Orders" || detailItem.category === "Crew Orders") {
       setFoDecisions((p) => ({
         ...p,
         [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
@@ -876,68 +903,106 @@ export default function ApprovalManagementPage() {
 
       <div className="usb-livery-stripe h-1 rounded-full mb-5" aria-hidden />
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
         <KpiCard label="Pending Approvals" value={counts.pending}        sub="awaiting action"   icon={Clock}       tone="warning" />
         <KpiCard label="Approved Today"    value={counts.approvedToday}  sub="processed today"   icon={Check}       tone="success" />
         <KpiCard label="Rejected Today"    value={counts.rejectedToday}  sub="processed today"   icon={XIcon}       tone="red"     />
-        <KpiCard
-          label="Value Pending"
-          value={`৳ ${counts.valuePending.toLocaleString()}`}
-          sub="across PRs & POs"
-          icon={ShieldCheck}
-          tone="navy"
-        />
       </div>
 
       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as Category | "all")}>
-        <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
-          <TabsList className="h-auto bg-muted p-1 flex flex-wrap gap-1">
-            <TabsTrigger value="all" className="data-[state=active]:bg-card data-[state=active]:shadow-sm gap-1.5 text-xs h-7">
-              <BadgeCheck className="h-3.5 w-3.5" />
-              All
-              <Badge variant="outline" className="ml-1 h-4 px-1 text-[10px] tabular-nums">
-                {counts.pending}
-              </Badge>
-            </TabsTrigger>
-            {CATEGORIES.map((c) => {
-              const Icon = c.icon;
-              const n = c.key === "Dispatch" ? dispatchPendingCount : (counts.pendingByCat.get(c.key) ?? 0);
-              return (
-                <TabsTrigger
-                  key={c.key}
-                  value={c.key}
-                  className="data-[state=active]:bg-card data-[state=active]:shadow-sm gap-1.5 text-xs h-7"
-                >
-                  <Icon className="h-3.5 w-3.5" />
-                  {c.label}
-                  {n > 0 && (
-                    <Badge
-                      variant="outline"
-                      className={cn(
-                        "ml-1 h-4 px-1 text-[10px] tabular-nums",
-                        "bg-warning/15 text-warning-foreground border-warning/40",
-                      )}
-                    >
-                      {n}
-                    </Badge>
-                  )}
-                </TabsTrigger>
-              );
-            })}
-          </TabsList>
-
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-            <Input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search ref, requester, summary..."
-              className="pl-8 h-8 w-72"
-            />
+        {activeTab === "all" ? (
+          /* ── Overview — category cards grouped by business section ────────── */
+          <div className="space-y-6 mb-2">
+            {APPROVAL_SECTIONS.map((section) => (
+              <div key={section.label}>
+                <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3">
+                  {section.label}
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
+                  {section.keys.map((key) => {
+                    const c = CATEGORY_BY_KEY.get(key)!;
+                    const Icon = c.icon;
+                    const n = key === "Dispatch" ? dispatchPendingCount : (counts.pendingByCat.get(key) ?? 0);
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => setActiveTab(key)}
+                        className="group flex items-center gap-3 rounded-lg border border-border bg-card px-3 py-3 text-left shadow-sm transition-colors hover:border-primary/40 hover:bg-muted/40"
+                      >
+                        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-primary/10 text-primary">
+                          <Icon className="h-4 w-4" />
+                        </span>
+                        <span className="min-w-0 flex-1 text-sm font-medium text-foreground leading-tight">
+                          {c.label}
+                        </span>
+                        <span
+                          className={cn(
+                            "grid h-6 min-w-[1.5rem] shrink-0 place-items-center rounded-full px-1.5 text-xs font-semibold tabular-nums text-white",
+                            n > 0 ? "bg-rose-500" : "bg-emerald-500",
+                          )}
+                        >
+                          {n}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
           </div>
-        </div>
+        ) : (
+          /* ── Category detail — back + date range + search above the queue ──── */
+          <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+            <Button variant="outline" size="sm" className="h-8 gap-1.5 text-xs" onClick={() => setActiveTab("all")}>
+              <ArrowLeft className="h-3.5 w-3.5" /> All Approvals
+            </Button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
+                <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
+                <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">From</Label>
+                <Input
+                  type="date"
+                  value={dateFrom}
+                  max={dateTo || undefined}
+                  onChange={(e) => setDateFrom(e.target.value)}
+                  className="h-7 w-[140px] border-0 shadow-none px-1 focus-visible:ring-0"
+                />
+                <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">To</Label>
+                <Input
+                  type="date"
+                  value={dateTo}
+                  min={dateFrom || undefined}
+                  onChange={(e) => setDateTo(e.target.value)}
+                  className="h-7 w-[140px] border-0 shadow-none px-1 focus-visible:ring-0"
+                />
+              </div>
+              {(dateFrom || dateTo) && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 px-2 text-xs text-muted-foreground"
+                  onClick={() => { setDateFrom(""); setDateTo(""); }}
+                  aria-label="Clear date range"
+                >
+                  <XIcon className="h-3.5 w-3.5 mr-1" /> Date
+                </Button>
+              )}
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                <Input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search ref, requester, summary..."
+                  className="pl-8 h-8 w-72"
+                />
+              </div>
+            </div>
+          </div>
+        )}
 
-        {/* Pending list */}
+        {/* Pending list — only in category detail; the overview shows the grid. */}
+        {activeTab !== "all" && (
         <TabsContent value={activeTab} className="mt-0 space-y-4">
 
           {/* ── Dispatch subtab ─────────────────────────────────────────────── */}
@@ -1002,7 +1067,7 @@ export default function ApprovalManagementPage() {
             <CardContent className="pt-5">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold uppercase tracking-wider">
-                  Pending — {activeTab === "all" ? "All Categories" : activeTab}
+                  Pending — {activeTab}
                 </h3>
                 <span className="text-xs text-muted-foreground">{pendingItems.length} item{pendingItems.length === 1 ? "" : "s"}</span>
               </div>
@@ -1059,7 +1124,6 @@ export default function ApprovalManagementPage() {
                           />
                         </TableHead>
                         <TableHead className="text-xs uppercase tracking-wider">Ref / Title</TableHead>
-                        {activeTab === "all" && <TableHead className="text-xs uppercase tracking-wider">Category</TableHead>}
                         <TableHead className="text-xs uppercase tracking-wider">Requested By</TableHead>
                         <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
                         <TableHead className="text-xs uppercase tracking-wider text-right">Amount / Items</TableHead>
@@ -1068,7 +1132,6 @@ export default function ApprovalManagementPage() {
                     </TableHeader>
                     <TableBody>
                       {pendingItems.map((it) => {
-                        const Icon = categoryIcon(it.category);
                         return (
                           <TableRow key={it.id} className={cn("hover:bg-muted/30", selected.has(it.id) && "bg-primary/[0.04]")}>
                             <TableCell className="w-9">
@@ -1090,13 +1153,6 @@ export default function ApprovalManagementPage() {
                                 <div className="text-[11px] text-muted-foreground mt-0.5 line-clamp-1">{it.summary}</div>
                               </button>
                             </TableCell>
-                            {activeTab === "all" && (
-                              <TableCell>
-                                <Badge variant="outline" className="font-normal text-[10px]">
-                                  <Icon className="h-2.5 w-2.5 mr-1" /> {it.category}
-                                </Badge>
-                              </TableCell>
-                            )}
                             <TableCell className="text-xs">{it.requestedBy}</TableCell>
                             <TableCell className="text-xs text-muted-foreground tabular-nums">{it.requestedAt}</TableCell>
                             <TableCell className="text-right text-xs tabular-nums">
@@ -1211,6 +1267,7 @@ export default function ApprovalManagementPage() {
             </CardContent>
           </Card></>)}
         </TabsContent>
+        )}
       </Tabs>
 
       {/* ── Dispatch detail modal ──────────────────────────────────────────── */}
@@ -1441,8 +1498,8 @@ export default function ApprovalManagementPage() {
                 <div className="text-sm leading-relaxed">{detailItem.summary}</div>
               </div>
 
-              {/* Order Management — flight legs in this order */}
-              {detailItem.category === "Order Management" && (() => {
+              {/* Flight / Crew orders — flight legs in this order */}
+              {(detailItem.category === "Flight Orders" || detailItem.category === "Crew Orders") && (() => {
                 const legs = flightOrders.filter((o) => o.orderNo === detailItem.refId);
                 if (legs.length === 0) return null;
                 return (
