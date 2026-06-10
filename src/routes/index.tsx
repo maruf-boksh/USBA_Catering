@@ -20,7 +20,7 @@ import { useRole } from "@/lib/roles";
 import { useAccess, canElement } from "@/lib/access-control";
 import {
   flights, productionOrders, purchaseOrders, qcChecks,
-  seedFlightOrders, inventory, inventoryValue,
+  seedFlightOrders, inventory, inventoryValue, meals,
 } from "@/lib/sample-data";
 import { useWorkflow } from "@/lib/workflow-store";
 import { useFlightOrders } from "@/lib/flight-orders-store";
@@ -222,7 +222,7 @@ function useDashboardKpis(period: Period, range?: DateRange) {
     trendTitle: isCustom
       ? `Meal Production Trend (${range!.from || "…"} → ${range!.to || "…"})`
       : (isWeek || isWindow) ? "Meal Production Trend (Last 7 Days)" : "Meal Production Trend (Today)",
-    sectionMix: computeSectionMix(producedTotal),
+    sectionMix: computeSectionMix(productionEntryRecords),
     activeFlights: pickActiveFlights(liveFlightOrders),
     activityFeed: buildActivityFeed({
       wfRequisitions, productionEntryRecords, transferNotes,
@@ -283,24 +283,35 @@ function groupActiveByOrder(rows: ReturnType<typeof pickActiveFlights>, maxOrder
 }
 
 // Production Mix donut data — splits the day's produced meals across the four
-// kitchen sections so the donut center stays equal to the "Meals Prepared" KPI
-// and the slices match the GM dashboard design:
-//   Hot Kitchen 41% · Cold Kitchen 34% · Veg Section 16% · Special Meal 9%.
+// kitchen sections by each meal's real attributes (no fixed ratios). Quantities
+// come from the actual production-entry records, so the slices sum to the same
+// produced total shown in the donut center ("Meals Prepared").
 // CHART_COLORS maps by index → red · dark-red · amber · ink.
-function computeSectionMix(total: number): { name: string; v: number }[] {
-  const sections = [
-    { name: "Hot Kitchen",  w: 0.41 },
-    { name: "Cold Kitchen", w: 0.34 },
-    { name: "Veg Section",  w: 0.16 },
-    { name: "Special Meal", w: 0.09 },
-  ];
-  let allocated = 0;
-  return sections.map((s, i) => {
-    // Last slice takes the remainder so the parts always sum to `total` exactly.
-    const v = i === sections.length - 1 ? Math.max(0, total - allocated) : Math.round(total * s.w);
-    allocated += v;
-    return { name: s.name, v };
-  });
+const MIX_SECTIONS = ["Hot Kitchen", "Cold Kitchen", "Veg Section", "Special Meal"] as const;
+
+// Route a produced meal to its kitchen section using the meal's own attributes,
+// mirroring how the kitchen organizes production: Special-category meals →
+// Special Meal; vegetarian (VGML) menus → Veg Section; otherwise by Hot/Cold
+// category. Unknown meals fall back to Hot Kitchen.
+function mealSection(name: string): (typeof MIX_SECTIONS)[number] {
+  const m = meals.find((x) => x.name === name);
+  if (!m) return "Hot Kitchen";
+  if (m.category === "Special") return "Special Meal";
+  if (m.menuStandard === "VGML") return "Veg Section";
+  if (m.category === "Cold") return "Cold Kitchen";
+  return "Hot Kitchen";
+}
+
+function computeSectionMix(
+  records: { bom: string; outputItemName?: string; producedQty: number }[],
+): { name: string; v: number }[] {
+  const totals: Record<string, number> = {
+    "Hot Kitchen": 0, "Cold Kitchen": 0, "Veg Section": 0, "Special Meal": 0,
+  };
+  for (const r of records) {
+    totals[mealSection(r.outputItemName ?? r.bom)] += r.producedQty;
+  }
+  return MIX_SECTIONS.map((name) => ({ name, v: totals[name] }));
 }
 
 function buildActivityFeed({
@@ -521,8 +532,10 @@ function ProductionMixDonut({ data }: { data: { name: string; v: number }[] }) {
       </div>
 
       <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "8px 18px", marginTop: 18 }}>
-        {segs.map((s, i) => (
-          <span key={i} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "var(--ink, #1a0204)" }}>
+        {/* Only list sections that actually produced something — empty sections
+            (0 meals) are omitted rather than shown at 0%. */}
+        {segs.filter((s) => s.v > 0).map((s) => (
+          <span key={s.name} style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "var(--ink, #1a0204)" }}>
             <span style={{ width: 10, height: 10, borderRadius: 3, flexShrink: 0, background: s.color }} />
             {s.name}
             <span style={{ color: "var(--muted-foreground, #6b6b72)", fontVariantNumeric: "tabular-nums" }}>
