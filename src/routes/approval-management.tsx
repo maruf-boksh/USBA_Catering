@@ -108,6 +108,12 @@ const SEED: ApprovalItem[] = [
       { name: "Meal Box", qty: 5000, uom: "pcs" },
       { name: "Aluminum Tray", qty: 3000, uom: "pcs" },
     ] },
+  { id: "AP-1004", category: "Purchase Requisition", refId: "PR-ASSET-001", title: "Catering equipment — trolleys & oven racks", requestedBy: "M. Karim",   requestedAt: "2026-06-10 09:30", summary: "Full Size Meal Trolley 4 Pcs, Half Size Bar Trolley 2 Pcs, Standard Oven Rack 6 Pcs", amount: 662000, itemsCount: 3, status: "Pending",
+    lines: [
+      { name: "Full Size Meal Trolley", qty: 4, uom: "Pcs", note: "৳ 85,000/Pcs" },
+      { name: "Half Size Bar Trolley",  qty: 2, uom: "Pcs", note: "৳ 55,000/Pcs" },
+      { name: "Standard Oven Rack",     qty: 6, uom: "Pcs", note: "৳ 32,000/Pcs" },
+    ] },
   { id: "AP-1003", category: "Purchase Requisition", refId: "PR-2026-005", title: "Beverage & water",                        requestedBy: "T. Islam",   requestedAt: "2026-05-18 14:45", summary: "Mineral Water 250ml — 12000 bottles",                    amount:  98000, itemsCount: 1, status: "Approved",  processedBy: "R. Hossain", processedAt: "2026-05-18 16:00",
     lines: [
       { name: "Mineral Water 250ml", qty: 12000, uom: "Bottle" },
@@ -204,6 +210,7 @@ export default function ApprovalManagementPage() {
     addTransferNote, addRequisition,
     mrpRuns, updateMrpRun,
     dispatchApprovals, updateDispatchApproval,
+    wfPurchaseOrders, updatePurchaseOrder,
   } = useWorkflow();
   const flightOrders = useFlightOrders();
 
@@ -403,9 +410,33 @@ export default function ApprovalManagementPage() {
       });
   }, [stockAdjDecisions]);
 
+  // Project workflow-store POs with "Pending Approval" status into the approval queue.
+  // Approving here sets the PO to "Approved" in the workflow store so Receive Items picks it up.
+  const wfPoItems: ApprovalItem[] = useMemo(() => {
+    return wfPurchaseOrders
+      .filter(po => po.status === "Pending Approval")
+      .map(po => ({
+        id: `WFPO-AP-${po.id}`,
+        category: "Purchase Order" as Category,
+        refId: po.id,
+        title: `${po.vendor} — ${po.items} item${po.items === 1 ? "" : "s"}`,
+        requestedBy: "Procurement",
+        requestedAt: po.date,
+        summary: po.lineItems?.map(l => `${l.name} ${l.qty} ${l.uom}`).join(", ")
+          ?? `${po.items} items · Req: ${po.requisitionRef}`,
+        amount: po.amount > 0 ? po.amount : undefined,
+        itemsCount: po.items,
+        status: "Pending" as ApprovalStatus,
+        lines: po.lineItems?.map(l => ({
+          name: l.name, qty: l.qty, uom: l.uom,
+          note: l.unitPrice > 0 ? `৳ ${l.unitPrice.toLocaleString()}/${l.uom}` : undefined,
+        })),
+      }));
+  }, [wfPurchaseOrders]);
+
   const allItems = useMemo(
-    () => [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...items],
-    [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, items],
+    () => [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...items],
+    [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, items],
   );
 
   const counts = useMemo(() => {
@@ -588,6 +619,11 @@ export default function ApprovalManagementPage() {
       if (!silent) toast.success(`${it.refId} approved.`);
       return;
     }
+    if (it.id.startsWith("WFPO-AP-")) {
+      updatePurchaseOrder(it.refId, { status: "Approved" });
+      if (!silent) toast.success(`${it.refId} approved — ready for receiving.`);
+      return;
+    }
     setItems((p) =>
       p.map((x) =>
         x.id === it.id
@@ -637,6 +673,8 @@ export default function ApprovalManagementPage() {
         ...p,
         [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
+    } else if (it.id.startsWith("WFPO-AP-")) {
+      updatePurchaseOrder(it.refId, { status: "Rejected", rejectionReason: reason });
     } else {
       setItems((p) =>
         p.map((x) =>
@@ -811,6 +849,8 @@ export default function ApprovalManagementPage() {
         ...p,
         [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
+    } else if (detailItem.id.startsWith("WFPO-AP-")) {
+      updatePurchaseOrder(detailItem.refId, { status: "Rejected", rejectionReason: reason });
     } else {
       setItems((p) =>
         p.map((x) =>

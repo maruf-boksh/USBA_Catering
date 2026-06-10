@@ -475,6 +475,22 @@ export const requisitions = [
     date: "2025-11-05 12:05",
     note: "Fresh produce requisition for immediate kitchen stock restock.",
   },
+  // ── Asset procurement flow seed ───────────────────────────────────────────────
+  {
+    id: "REQ-ASSET-001",
+    source: "Fleet Operations",
+    reference: "PR-ASSET-001",
+    items: 3,
+    status: "Pending Accounts",
+    requestedBy: "M. Karim",
+    date: "2026-06-10 09:30",
+    note: "Asset procurement — catering equipment (trolleys & oven racks) for airline service. Ref: PR-ASSET-001.",
+    demandItems: [
+      { id: "AST-CTR-TROL-FS",  name: "Full Size Meal Trolley", qty: 4, uom: "Pcs" },
+      { id: "AST-CTR-TROL-HS",  name: "Half Size Bar Trolley",  qty: 2, uom: "Pcs" },
+      { id: "AST-CTR-RACK-STD", name: "Standard Oven Rack",     qty: 6, uom: "Pcs" },
+    ],
+  },
 ];
 
 export const hygieneChecks = [
@@ -554,6 +570,9 @@ export const vendors = [
   { id: "V-003", name: "Aqua Pure BD", category: "Beverage", rating: 4.5, orders: 64, onTime: "94%" },
   { id: "V-004", name: "Spice World", category: "Spices", rating: 4.3, orders: 38, onTime: "89%" },
   { id: "V-005", name: "Royal Bakery Supplies", category: "Bakery", rating: 4.6, orders: 72, onTime: "92%" },
+  { id: "V-006", name: "Samsung Electronics BD", category: "Equipment/Assets", rating: 4.5, orders: 12, onTime: "95%" },
+  { id: "V-007", name: "Sony Corporation BD", category: "Equipment/Assets", rating: 4.4, orders: 8, onTime: "93%" },
+  { id: "V-008", name: "Other Supplier", category: "Equipment/Assets", rating: 0, orders: 0, onTime: "—" },
 ];
 
 export const assets = [
@@ -681,7 +700,7 @@ export type EquipmentAsset = {
   lastMaintenance: string;
   nextMaintenance: string;
   status: "In Service" | "In Maintenance" | "Damaged" | "Retired" | "New" | "Used";
-  poNumber?: string;
+  grnNumber?: string;
   purchaseDate?: string;
   supplierName?: string;
   attachments?: EquipmentAttachment[];
@@ -698,6 +717,28 @@ export const equipmentAssets: EquipmentAsset[] = [
   { id: "EQP-C-002", name: "Insulated Beverage Box",  category: "Hot Box",       serialNo: "HB-401",  rfidTag: "RF-HB0401", location: "BG-401",        lastMaintenance: "2026-02-28", nextMaintenance: "2026-08-28", status: "In Service" },
   { id: "EQP-G-001", name: "Galley Insert (Half)",    category: "Galley Insert", serialNo: "GI-501",  rfidTag: "RF-GI0501", location: "Hot Kitchen",   lastMaintenance: "2026-04-12", nextMaintenance: "2026-10-12", status: "In Service" },
   { id: "EQP-TR-01", name: "Cabin Service Tray",      category: "Tray",          serialNo: "CT-601",  rfidTag: "RF-CT0601", location: "Cold Kitchen",  lastMaintenance: "2026-04-20", nextMaintenance: "2026-10-20", status: "In Service" },
+];
+
+export type EquipmentGrn = {
+  id: string;
+  date: string;
+  poRef: string;
+  vendor: string;
+  description: string;
+  qty: number;
+  uom: string;
+  receivedBy: string;
+  status: "Accepted" | "Partial" | "Rejected";
+};
+
+export const equipmentGrns: EquipmentGrn[] = [
+  { id: "EGRN-001", date: "2026-05-10", poRef: "EPO-2026-0101", vendor: "Driessen Catering Equipment", description: "Full Size Meal Trolley",  qty: 4, uom: "Pcs", receivedBy: "M. Karim",  status: "Accepted" },
+  { id: "EGRN-002", date: "2026-05-10", poRef: "EPO-2026-0101", vendor: "Driessen Catering Equipment", description: "Half Size Bar Trolley",   qty: 2, uom: "Pcs", receivedBy: "M. Karim",  status: "Accepted" },
+  { id: "EGRN-003", date: "2026-04-15", poRef: "EPO-2026-0089", vendor: "Zodiac Aerospace Galley",     description: "Standard Oven Rack",      qty: 6, uom: "Pcs", receivedBy: "S. Ahmed",  status: "Accepted" },
+  { id: "EGRN-004", date: "2026-04-15", poRef: "EPO-2026-0089", vendor: "Zodiac Aerospace Galley",     description: "Wide Oven Rack",          qty: 3, uom: "Pcs", receivedBy: "S. Ahmed",  status: "Partial"  },
+  { id: "EGRN-005", date: "2026-03-20", poRef: "EPO-2026-0072", vendor: "ATA Equipment Ltd",           description: "Galley Insert (Half)",    qty: 8, uom: "Pcs", receivedBy: "F. Begum",  status: "Accepted" },
+  { id: "EGRN-006", date: "2026-03-20", poRef: "EPO-2026-0072", vendor: "ATA Equipment Ltd",           description: "Insulated Hot Box",       qty: 4, uom: "Pcs", receivedBy: "F. Begum",  status: "Accepted" },
+  { id: "EGRN-007", date: "2026-06-10", poRef: "EPO-2026-0115", vendor: "LSG Sky Chefs Supply",        description: "Cabin Service Tray",      qty: 12, uom: "Pcs", receivedBy: "M. Karim", status: "Accepted" },
 ];
 
 export type EquipmentReturn = {
@@ -1633,7 +1674,7 @@ export type ItemMaster = {
   id: string;
   code: string;
   name: string;
-  itemType: "Raw Material" | "Packaging" | "Consumable" | "Finished Good" | "Semi-Finished Good";
+  itemType: "Raw Material" | "Packaging" | "Consumable" | "Finished Good" | "Semi-Finished Good" | "Asset";
   category: string;
   subCategory: string;
   uom: string;
@@ -1688,7 +1729,7 @@ export type AltUom = {
 };
 
 export const ITEM_TYPES = [
-  "Raw Material", "Packaging", "Consumable", "Finished Good", "Semi-Finished Good",
+  "Raw Material", "Packaging", "Consumable", "Finished Good", "Semi-Finished Good", "Asset",
 ] as const;
 
 export const ITEM_CATEGORIES = [
@@ -1697,7 +1738,16 @@ export const ITEM_CATEGORIES = [
 ] as const;
 
 export const ITEM_SUB_CATEGORIES = ["Fresh", "Frozen", "Dry", "Liquid"] as const;
-export const ITEM_UOMS = ["Kg", "Gm", "Litre", "ML", "Piece", "Pack", "Bottle"] as const;
+
+/** Category presets for the "Asset" item type (Item Configuration → Create Item). */
+export const ASSET_CATEGORIES = ["Catering", "Electronic Devices"] as const;
+
+/** Sub-category presets per Asset category. "Other" supports dynamic additions via "+ Add new". */
+export const ASSET_SUB_CATEGORIES: Record<string, readonly string[]> = {
+  "Catering": ["Chiller", "Fridge", "Trolley", "Other"],
+  "Electronic Devices": ["Laptop", "Accessories", "Software", "Other"],
+};
+export const ITEM_UOMS = ["Kg", "Gm", "Litre", "ML", "Piece", "Pack", "Bottle", "Unit"] as const;
 export const ITEM_STORAGE_OPTIONS = ["Dry", "Cold", "Frozen"] as const;
 
 /** Curated list of common Alt UOM labels — picked from the Item Profile DDL. */
@@ -1879,6 +1929,16 @@ const RAW_ITEMS: Array<Omit<ItemMaster, "id">> = [
   { code: "FG-BV-COLA",   name: "Soft Drink (Cola)",     itemType: "Finished Good", category: "Beverage",  subCategory: "Liquid", uom: "Bottle",status: "Active" },
   { code: "FG-BV-COFB",   name: "Coffee (Black)",        itemType: "Finished Good", category: "Beverage",  subCategory: "Liquid", uom: "Piece", status: "Active" },
   { code: "FG-BV-TEAM",   name: "Tea (Milk)",            itemType: "Finished Good", category: "Beverage",  subCategory: "Liquid", uom: "Piece", status: "Active" },
+
+  // ── Asset · Catering Equipment
+  { code: "AST-CTR-TROL-FS",  name: "Full Size Meal Trolley",  itemType: "Asset", category: "Catering", subCategory: "Trolley", uom: "Piece", status: "Active", costPrice: 85000 },
+  { code: "AST-CTR-TROL-HS",  name: "Half Size Bar Trolley",   itemType: "Asset", category: "Catering", subCategory: "Trolley", uom: "Piece", status: "Active", costPrice: 55000 },
+  { code: "AST-CTR-RACK-STD", name: "Standard Oven Rack",      itemType: "Asset", category: "Catering", subCategory: "Other",   uom: "Piece", status: "Active", costPrice: 32000 },
+  { code: "AST-CTR-RACK-WID", name: "Wide Oven Rack",          itemType: "Asset", category: "Catering", subCategory: "Other",   uom: "Piece", status: "Active", costPrice: 38000 },
+  { code: "AST-CTR-GALY-HLF", name: "Galley Insert (Half)",    itemType: "Asset", category: "Catering", subCategory: "Other",   uom: "Piece", status: "Active", costPrice: 28000 },
+  { code: "AST-CTR-HOTBOX",   name: "Insulated Hot Box",       itemType: "Asset", category: "Catering", subCategory: "Other",   uom: "Piece", status: "Active", costPrice: 22000 },
+  { code: "AST-CTR-TRAY-CAB", name: "Cabin Service Tray",      itemType: "Asset", category: "Catering", subCategory: "Other",   uom: "Piece", status: "Active", costPrice: 4500  },
+  { code: "AST-CTR-CONT-ML",  name: "Meal Tray Container",     itemType: "Asset", category: "Catering", subCategory: "Other",   uom: "Piece", status: "Active", costPrice: 18000 },
 ];
 
 // Fallback cost-price tiers used to backfill items that lack an explicit price.
@@ -2196,3 +2256,9 @@ export const warehousesByOffice = (officeId: string) =>
   warehouses.filter((w) => w.officeId === officeId);
 export const activeWarehousesByOffice = (officeId: string) =>
   activeWarehouses.filter((w) => w.officeId === officeId);
+
+/** Session-local registry for ad-hoc Office/Warehouse entries created via the
+ *  "Other" → dynamic entry option on Item Configuration → Create Item.
+ *  Additive only — the predefined office/warehouse lists above are untouched. */
+export const customOfficesRegistry: Office[] = [];
+export const customWarehousesRegistry: Warehouse[] = [];

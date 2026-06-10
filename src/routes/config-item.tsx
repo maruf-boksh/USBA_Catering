@@ -28,12 +28,16 @@ import {
   ITEM_TYPES,
   ITEM_CATEGORIES,
   ITEM_SUB_CATEGORIES,
+  ASSET_CATEGORIES,
+  ASSET_SUB_CATEGORIES,
   ITEM_UOMS,
   ALT_UOM_OPTIONS,
   activeOffices,
   offices as ALL_OFFICES,
   activeWarehousesByOffice,
   warehouses as ALL_WAREHOUSES,
+  customOfficesRegistry,
+  customWarehousesRegistry,
   bomForItemCode,
   BOM_REQUIRED_ITEM_TYPES,
   getAllocationMethodForMaster,
@@ -47,6 +51,8 @@ import {
   type ItemMaster,
   type AllocationMethod,
   type AltUom,
+  type Office,
+  type Warehouse,
 } from "@/lib/sample-data";
 
 type ItemRow = ItemMaster;
@@ -592,9 +598,13 @@ function ItemList({
       key: "warehouseId" as keyof ItemRow,
       header: "Office / Warehouse",
       render: (r) => {
-        const wh = r.warehouseId ? ALL_WAREHOUSES.find((w) => w.id === r.warehouseId) : undefined;
+        const wh = r.warehouseId
+          ? ALL_WAREHOUSES.find((w) => w.id === r.warehouseId) ?? customWarehousesRegistry.find((w) => w.id === r.warehouseId)
+          : undefined;
         const officeId = r.officeId ?? wh?.officeId;
-        const off = officeId ? ALL_OFFICES.find((o) => o.id === officeId) : undefined;
+        const off = officeId
+          ? ALL_OFFICES.find((o) => o.id === officeId) ?? customOfficesRegistry.find((o) => o.id === officeId)
+          : undefined;
         if (!off && !wh) return <span className="text-muted-foreground text-xs">—</span>;
         return (
           <div className="text-xs leading-tight">
@@ -865,19 +875,71 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
   const [subCategory, setSubCategory] = useState("");
   const [uom, setUom] = useState<string>(UOMS[0]);
 
+  // Item Type is editable: users can add a new one inline via "+ Add new…",
+  // same dynamic pattern as Category / Sub Category below.
+  const [itemTypeOptions, setItemTypeOptions] = useState<string[]>([...ITEM_TYPES]);
+  const [addingItemType, setAddingItemType] = useState(false);
+  const [newItemType, setNewItemType] = useState("");
+
+  const isAsset = itemType === "Asset";
+
   // Category / Sub Category are editable: users can add a new one inline via the
   // "+ Add new…" option. Options seed from the master list and grow per session.
   const [categoryOptions, setCategoryOptions] = useState<string[]>([...CATEGORIES]);
   const [subCategoryOptions, setSubCategoryOptions] = useState<string[]>([...SUB_CATEGORIES]);
+
+  // "Asset" item type uses its own Category → Sub Category presets (Catering /
+  // Electronic Devices). "+ Add new" extends this map so new categories and
+  // sub-categories stay dynamic, same as the general item flow above.
+  const [assetCategoryMap, setAssetCategoryMap] = useState<Record<string, string[]>>(() => {
+    const map: Record<string, string[]> = {};
+    ASSET_CATEGORIES.forEach((c) => { map[c] = [...(ASSET_SUB_CATEGORIES[c] ?? [])]; });
+    return map;
+  });
+
   const [addingCategory, setAddingCategory] = useState(false);
   const [newCategory, setNewCategory] = useState("");
   const [addingSubCategory, setAddingSubCategory] = useState(false);
   const [newSubCategory, setNewSubCategory] = useState("");
 
+  const activeCategoryOptions = isAsset ? Object.keys(assetCategoryMap) : categoryOptions;
+  const activeSubCategoryOptions = isAsset ? (assetCategoryMap[category] ?? []) : subCategoryOptions;
+
+  const handleItemTypeChange = (next: string) => {
+    if (next === ADD_NEW) { setAddingItemType(true); return; }
+    setItemType(next);
+    // Asset uses a different Category/Sub Category preset — reset the selection on switch.
+    if ((next === "Asset") !== isAsset) {
+      setCategory("");
+      setSubCategory("");
+    }
+  };
+
+  const commitNewItemType = () => {
+    const val = newItemType.trim();
+    if (!val) { toast.error("Enter an item type name."); return; }
+    if (!itemTypeOptions.some((t) => t.toLowerCase() === val.toLowerCase())) {
+      setItemTypeOptions((prev) => [...prev, val]);
+      toast.success(`Item type "${val}" added.`);
+    }
+    handleItemTypeChange(val);
+    setNewItemType("");
+    setAddingItemType(false);
+  };
+
+  const handleCategoryChange = (next: string) => {
+    if (next === ADD_NEW) { setAddingCategory(true); return; }
+    setCategory(next);
+    if (isAsset && !(assetCategoryMap[next] ?? []).includes(subCategory)) setSubCategory("");
+  };
+
   const commitNewCategory = () => {
     const val = newCategory.trim();
     if (!val) { toast.error("Enter a category name."); return; }
-    if (!categoryOptions.some((c) => c.toLowerCase() === val.toLowerCase())) {
+    if (isAsset) {
+      setAssetCategoryMap((prev) => (prev[val] ? prev : { ...prev, [val]: [] }));
+      setSubCategory("");
+    } else if (!categoryOptions.some((c) => c.toLowerCase() === val.toLowerCase())) {
       setCategoryOptions((prev) => [...prev, val]);
       toast.success(`Category "${val}" added.`);
     }
@@ -888,7 +950,14 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
   const commitNewSubCategory = () => {
     const val = newSubCategory.trim();
     if (!val) { toast.error("Enter a sub category name."); return; }
-    if (!subCategoryOptions.some((s) => s.toLowerCase() === val.toLowerCase())) {
+    if (isAsset) {
+      if (!category) { toast.error("Select a category first."); return; }
+      setAssetCategoryMap((prev) => {
+        const existing = prev[category] ?? [];
+        if (existing.some((s) => s.toLowerCase() === val.toLowerCase())) return prev;
+        return { ...prev, [category]: [...existing, val] };
+      });
+    } else if (!subCategoryOptions.some((s) => s.toLowerCase() === val.toLowerCase())) {
       setSubCategoryOptions((prev) => [...prev, val]);
       toast.success(`Sub category "${val}" added.`);
     }
@@ -915,17 +984,85 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
   const [warehouseId, setWarehouseId] = useState("");
   const [binLocation, setBinLocation] = useState("");
 
-  const warehouseOptions = useMemo(
-    () => (officeId ? activeWarehousesByOffice(officeId) : []),
-    [officeId],
+  // Office / Warehouse — "Other" reveals a dynamic text entry to add a new
+  // office, and (once an office is selected) a matching dynamic entry for its
+  // warehouse. Additive only: the predefined office/warehouse lists keep
+  // working through the normal selects.
+  const OTHER_OFFICE = "__other_office__";
+  const OTHER_WAREHOUSE = "__other_warehouse__";
+  const [customOffices, setCustomOffices] = useState<Office[]>([]);
+  const [addingOffice, setAddingOffice] = useState(false);
+  const [newOfficeName, setNewOfficeName] = useState("");
+  const [customWarehouses, setCustomWarehouses] = useState<Warehouse[]>([]);
+  const [addingWarehouse, setAddingWarehouse] = useState(false);
+  const [newWarehouseName, setNewWarehouseName] = useState("");
+
+  const officeOptions = useMemo(
+    () => [...activeOffices, ...customOffices],
+    [customOffices],
   );
 
+  const warehouseOptions = useMemo(() => {
+    if (!officeId) return [];
+    return [...activeWarehousesByOffice(officeId), ...customWarehouses.filter((w) => w.officeId === officeId)];
+  }, [officeId, customWarehouses]);
+
   const handleOfficeChange = (next: string) => {
+    if (next === OTHER_OFFICE) { setAddingOffice(true); return; }
     setOfficeId(next);
     // Drop the warehouse selection if it no longer belongs to the new office.
-    if (warehouseId && !ALL_WAREHOUSES.some((w) => w.id === warehouseId && w.officeId === next)) {
+    if (warehouseId && ![...ALL_WAREHOUSES, ...customWarehouses].some((w) => w.id === warehouseId && w.officeId === next)) {
       setWarehouseId("");
     }
+  };
+
+  const commitNewOffice = () => {
+    const val = newOfficeName.trim();
+    if (!val) { toast.error("Enter an office name."); return; }
+    const existing = officeOptions.find((o) => o.name.toLowerCase() === val.toLowerCase());
+    if (existing) {
+      handleOfficeChange(existing.id);
+    } else {
+      const office: Office = {
+        id: `OFF-CUSTOM-${Date.now()}`,
+        code: val.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 12) || "OTHER",
+        name: val, companyId: "", address: "—", city: "—", manager: "—", phone: "—", status: "Active",
+      };
+      setCustomOffices((prev) => [...prev, office]);
+      customOfficesRegistry.push(office);
+      setOfficeId(office.id);
+      setWarehouseId("");
+      toast.success(`Office "${val}" added.`);
+    }
+    setNewOfficeName("");
+    setAddingOffice(false);
+  };
+
+  const handleWarehouseChange = (next: string) => {
+    if (next === OTHER_WAREHOUSE) { setAddingWarehouse(true); return; }
+    setWarehouseId(next);
+  };
+
+  const commitNewWarehouse = () => {
+    const val = newWarehouseName.trim();
+    if (!val) { toast.error("Enter a warehouse name."); return; }
+    if (!officeId) { toast.error("Select an office first."); return; }
+    const existing = warehouseOptions.find((w) => w.name.toLowerCase() === val.toLowerCase());
+    if (existing) {
+      setWarehouseId(existing.id);
+    } else {
+      const warehouse: Warehouse = {
+        id: `WH-CUSTOM-${Date.now()}`,
+        code: val.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 12) || "OTHER",
+        name: val, officeId, type: "Warehouse", address: "—", city: "—", manager: "—", phone: "—", status: "Active",
+      };
+      setCustomWarehouses((prev) => [...prev, warehouse]);
+      customWarehousesRegistry.push(warehouse);
+      setWarehouseId(warehouse.id);
+      toast.success(`Warehouse "${val}" added.`);
+    }
+    setNewWarehouseName("");
+    setAddingWarehouse(false);
   };
   // Allocation method: "Auto" lets the smart default kick in based on item type/category.
   const [allocationChoice, setAllocationChoice] = useState<"Auto" | AllocationMethod>("Auto");
@@ -1032,9 +1169,24 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item Type</Label>
-            <select value={itemType} onChange={(e) => setItemType(e.target.value)} className={selectCls}>
-              {ITEM_TYPES.map((t) => <option key={t}>{t}</option>)}
+            <select value={itemType} onChange={(e) => handleItemTypeChange(e.target.value)} className={selectCls}>
+              {itemTypeOptions.map((t) => <option key={t}>{t}</option>)}
+              <option value={ADD_NEW}>+ Add new item type…</option>
             </select>
+            {addingItemType && (
+              <div className="mt-2 flex items-center gap-2">
+                <Input
+                  autoFocus
+                  value={newItemType}
+                  onChange={(e) => setNewItemType(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewItemType(); } }}
+                  placeholder="New item type name"
+                  className="h-9"
+                />
+                <Button type="button" size="sm" onClick={commitNewItemType}>Add</Button>
+                <Button type="button" size="sm" variant="outline" onClick={() => { setAddingItemType(false); setNewItemType(""); }}>Cancel</Button>
+              </div>
+            )}
             {requiresBom && (
               <div
                 className={cn(
@@ -1068,11 +1220,11 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Category</Label>
             <select
               value={category}
-              onChange={(e) => { e.target.value === ADD_NEW ? setAddingCategory(true) : setCategory(e.target.value); }}
+              onChange={(e) => handleCategoryChange(e.target.value)}
               className={selectCls}
             >
               <option value="">Select category</option>
-              {categoryOptions.map((c) => <option key={c}>{c}</option>)}
+              {activeCategoryOptions.map((c) => <option key={c}>{c}</option>)}
               <option value={ADD_NEW}>+ Add new category…</option>
             </select>
             {addingCategory && (
@@ -1095,10 +1247,11 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
             <select
               value={subCategory}
               onChange={(e) => { e.target.value === ADD_NEW ? setAddingSubCategory(true) : setSubCategory(e.target.value); }}
+              disabled={isAsset && !category}
               className={selectCls}
             >
-              <option value="">Select sub category</option>
-              {subCategoryOptions.map((s) => <option key={s}>{s}</option>)}
+              <option value="">{isAsset && !category ? "Select category first" : "Select sub category"}</option>
+              {activeSubCategoryOptions.map((s) => <option key={s}>{s}</option>)}
               <option value={ADD_NEW}>+ Add new sub category…</option>
             </select>
             {addingSubCategory && (
@@ -1262,18 +1415,33 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
               className={selectCls}
             >
               <option value="">Select office…</option>
-              {activeOffices.map((o) => (
+              {officeOptions.map((o) => (
                 <option key={o.id} value={o.id}>
                   {o.code} — {o.name}
                 </option>
               ))}
+              <option value={OTHER_OFFICE}>Other (add new office)…</option>
             </select>
+            {addingOffice && (
+              <div className="mt-2 flex items-center gap-2">
+                <Input
+                  autoFocus
+                  value={newOfficeName}
+                  onChange={(e) => setNewOfficeName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewOffice(); } }}
+                  placeholder="New office name"
+                  className="h-9"
+                />
+                <Button type="button" size="sm" onClick={commitNewOffice}>Add</Button>
+                <Button type="button" size="sm" variant="outline" onClick={() => { setAddingOffice(false); setNewOfficeName(""); }}>Cancel</Button>
+              </div>
+            )}
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Warehouse</Label>
             <select
               value={warehouseId}
-              onChange={(e) => setWarehouseId(e.target.value)}
+              onChange={(e) => handleWarehouseChange(e.target.value)}
               disabled={!officeId}
               className={selectCls}
             >
@@ -1285,7 +1453,22 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
                   {w.code} — {w.name}
                 </option>
               ))}
+              {officeId && <option value={OTHER_WAREHOUSE}>Other (add new warehouse)…</option>}
             </select>
+            {addingWarehouse && (
+              <div className="mt-2 flex items-center gap-2">
+                <Input
+                  autoFocus
+                  value={newWarehouseName}
+                  onChange={(e) => setNewWarehouseName(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewWarehouse(); } }}
+                  placeholder="New warehouse name"
+                  className="h-9"
+                />
+                <Button type="button" size="sm" onClick={commitNewWarehouse}>Add</Button>
+                <Button type="button" size="sm" variant="outline" onClick={() => { setAddingWarehouse(false); setNewWarehouseName(""); }}>Cancel</Button>
+              </div>
+            )}
           </div>
           <div className="md:col-span-2 -mt-1 text-[11px] text-muted-foreground">
             Default office + warehouse for this item. Used to group stock and prefill location pickers.

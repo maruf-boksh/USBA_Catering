@@ -19,7 +19,7 @@ import { useWorkflow, type WfPurchaseOrder, type WfRequisition } from "@/lib/wor
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import { useArrivalFlash } from "@/lib/arrival-flash";
 
-type POLineRow = { id: string; name: string; qty: number; uom: string; unitPrice: number };
+type POLineRow = { id: string; name: string; qty: number; uom: string; unitPrice: number; prefilled?: boolean };
 
 export default function ProcurementPage() {
   useArrivalFlash();
@@ -42,7 +42,11 @@ export default function ProcurementPage() {
 
   const openPODialog = (req: WfRequisition) => {
     setSelectedReq(req);
-    setPoVendor(vendors[0]?.name ?? "");
+    const isAsset = req.source === "Fleet Operations";
+    const availVendors = isAsset
+      ? vendors.filter(v => v.category === "Equipment/Assets")
+      : vendors.filter(v => v.category !== "Equipment/Assets");
+    setPoVendor(availVendors[0]?.name ?? vendors[0]?.name ?? "");
     setPoDeliveryDate("");
     setPoNotes("");
     setPoOfficeId(req.officeId ?? "OFF-001");
@@ -55,6 +59,7 @@ export default function ProcurementPage() {
         qty: item.qty,
         uom: item.uom,
         unitPrice: 0,
+        prefilled: true,
       }))
     );
     setPoDialogOpen(true);
@@ -295,7 +300,10 @@ export default function ProcurementPage() {
                 onChange={(e) => setPoVendor(e.target.value)}
                 className="w-full mt-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
               >
-                {vendors.map(v => <option key={v.id} value={v.name}>{v.name} ({v.category})</option>)}
+                {(selectedReq?.source === "Fleet Operations"
+                ? vendors.filter(v => v.category === "Equipment/Assets")
+                : vendors.filter(v => v.category !== "Equipment/Assets")
+              ).map(v => <option key={v.id} value={v.name}>{v.name} ({v.category})</option>)}
               </select>
             </div>
             <div>
@@ -343,19 +351,25 @@ export default function ProcurementPage() {
                   ) : poLines.map(line => (
                     <tr key={line.id} className="border-t border-border/50">
                       <td className="p-2">
-                        <select
-                          value={line.name}
-                          onChange={(e) => pickItem(line.id, e.target.value)}
-                          className="w-full h-7 rounded-md border border-input bg-background px-2 text-xs"
-                        >
-                          <option value="">Select item…</option>
-                          {activeItems.slice(0, 100).map((it) => (
-                            <option key={it.id} value={it.name}>{it.name}</option>
-                          ))}
-                          {line.name && !activeItems.some(i => i.name === line.name) && (
-                            <option value={line.name}>{line.name}</option>
-                          )}
-                        </select>
+                        {line.prefilled && line.name ? (
+                          <div className="px-2 py-1 text-xs font-medium bg-muted/50 rounded-md border border-input truncate">
+                            {line.name}
+                          </div>
+                        ) : (
+                          <select
+                            value={line.name}
+                            onChange={(e) => pickItem(line.id, e.target.value)}
+                            className="w-full h-7 rounded-md border border-input bg-background px-2 text-xs"
+                          >
+                            <option value="">Select item…</option>
+                            {activeItems.slice(0, 100).map((it) => (
+                              <option key={it.id} value={it.name}>{it.name}</option>
+                            ))}
+                            {line.name && !activeItems.some(i => i.name === line.name) && (
+                              <option value={line.name}>{line.name}</option>
+                            )}
+                          </select>
+                        )}
                       </td>
                       <td className="p-2">
                         <Input

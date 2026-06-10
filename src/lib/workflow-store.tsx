@@ -335,19 +335,23 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   );
 
   const [wfRequisitions, setWfRequisitions] = useState<WfRequisition[]>(
-    seedReqs.map(r => ({
-      id: r.id,
-      reference: r.reference,
-      requestedBy: r.requestedBy,
-      source: r.source,
-      date: r.date,
-      status: r.status as WfReqStatus,
-      items: r.items,
-      note: r.note,
-      demandRef: r.reference,
-      officeId: "OFF-001",
-      warehouseId: "WH-001",
-    }))
+    seedReqs.map(r => {
+      const extra = r as { demandItems?: WfDemandItem[] };
+      return {
+        id: r.id,
+        reference: r.reference,
+        requestedBy: r.requestedBy,
+        source: r.source,
+        date: r.date,
+        status: r.status as WfReqStatus,
+        items: r.items,
+        note: r.note,
+        demandRef: r.reference,
+        officeId: "OFF-001",
+        warehouseId: "WH-001",
+        ...(extra.demandItems ? { demandItems: extra.demandItems } : {}),
+      };
+    })
   );
 
   const [wfPurchaseOrders, setWfPOs] = useState<WfPurchaseOrder[]>(

@@ -5,7 +5,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   ScanBarcode, Wrench, CheckCircle2, AlertOctagon, Undo2, ShieldAlert, Activity, Plane,
 } from "lucide-react";
-import { equipmentAssets, equipmentReturns, damageReports } from "@/lib/sample-data";
+import { equipmentAssets as SEED_ASSETS, equipmentReturns, damageReports } from "@/lib/sample-data";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import {
   ResponsiveContainer, PieChart, Pie, Cell, Tooltip, Legend,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -38,6 +39,7 @@ const CONDITION_BADGE: Record<string, string> = {
 };
 
 export default function AirlineEquipmentsOverviewPage() {
+  const [equipmentAssets] = usePersistedState("airline-equipments-assets", SEED_ASSETS);
   const today = new Date();
 
   const stats = useMemo(() => {

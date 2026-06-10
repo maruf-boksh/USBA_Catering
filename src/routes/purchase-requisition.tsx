@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -54,7 +54,10 @@ const ITEM_MASTER = activeItems.map((i) => ({
   name: i.name,
   uom: i.uom,
   description: `${i.code} · ${i.category}${i.subCategory ? ` · ${i.subCategory}` : ""}`,
+  itemType: i.itemType,
 }));
+
+type ItemTypeFilter = "All" | "Production" | "Asset";
 
 // ── Bridge: convert workflow-store WfRequisition (e.g. MRP-generated) into the
 // local PurchaseRequisition shape so they show up in this module's list. The
@@ -333,6 +336,9 @@ function PurchaseRequisitionCreate({
   const [justification, setJustification] = useState(prefill?.justification ?? "");
 
   // Line state
+  const [itemTypeFilter, setItemTypeFilter] = useState<ItemTypeFilter>("All");
+  const [itemSearch, setItemSearch] = useState("");
+  const [showItemDrop, setShowItemDrop] = useState(false);
   const [itemName, setItemName] = useState("");
   const [description, setDescription] = useState("");
   const [qty, setQty] = useState("");
@@ -353,8 +359,22 @@ function PurchaseRequisitionCreate({
 
   const totalAmount = lines.reduce((s, l) => s + l.qty * l.rate, 0);
 
+  const filteredItemMaster = useMemo(
+    () => ITEM_MASTER.filter((i) => {
+      if (itemTypeFilter === "Asset" && i.itemType !== "Asset") return false;
+      if (itemTypeFilter === "Production" && i.itemType === "Asset") return false;
+      return true;
+    }),
+    [itemTypeFilter],
+  );
+
+  const visibleItems = itemSearch.trim()
+    ? filteredItemMaster.filter((i) => i.name.toLowerCase().includes(itemSearch.trim().toLowerCase()))
+    : filteredItemMaster;
+
   const addLine = () => {
     if (!itemName.trim()) { toast.error("Item name is required."); return; }
+    if (!ITEM_MASTER.find((i) => i.name === itemName.trim())) { toast.error("Select a valid item from the list."); return; }
     const qtyN = Number(qty);
     if (!qtyN || qtyN <= 0) { toast.error("Quantity must be greater than zero."); return; }
     const rateN = Number(rate);
@@ -371,6 +391,7 @@ function PurchaseRequisitionCreate({
       },
     ]);
     setItemName("");
+    setItemSearch("");
     setDescription("");
     setQty("");
     setRate("");
@@ -508,29 +529,63 @@ function PurchaseRequisitionCreate({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
-            <div className="md:col-span-3">
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-                Item <span className="text-destructive">*</span>
-              </Label>
+            <div className="md:col-span-2">
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item Type</Label>
               <select
-                value={itemName}
+                value={itemTypeFilter}
                 onChange={(e) => {
-                  const name = e.target.value;
-                  setItemName(name);
-                  const m = ITEM_MASTER.find((i) => i.name === name);
-                  if (m) {
-                    setUom(m.uom);
-                    if (!description.trim()) setDescription(m.description);
-                  }
+                  setItemTypeFilter(e.target.value as ItemTypeFilter);
+                  setItemName("");
+                  setItemSearch("");
+                  setDescription("");
                 }}
                 className={selectCls}
               >
-                <option value="">Select item…</option>
-                {ITEM_MASTER.map((i) => <option key={i.name} value={i.name}>{i.name}</option>)}
+                <option value="All">All</option>
+                <option value="Production">Production</option>
+                <option value="Asset">Asset</option>
               </select>
             </div>
 
-            <div className="md:col-span-3">
+            <div className="md:col-span-3 relative">
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+                Item <span className="text-destructive">*</span>
+              </Label>
+              <input
+                value={itemName || itemSearch}
+                onFocus={() => { setItemSearch(""); setShowItemDrop(true); }}
+                onChange={(e) => { setItemSearch(e.target.value); setItemName(""); setShowItemDrop(true); }}
+                onBlur={() => setShowItemDrop(false)}
+                placeholder="Type to search item…"
+                className={selectCls + " mt-1"}
+              />
+              {showItemDrop && (
+                <div className="absolute z-50 left-0 right-0 top-full mt-1 max-h-52 overflow-y-auto rounded-md border border-input bg-background shadow-md">
+                  {visibleItems.length === 0 ? (
+                    <div className="px-3 py-2 text-sm text-muted-foreground">No items found.</div>
+                  ) : (
+                    visibleItems.map((i) => (
+                      <div
+                        key={i.name}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => {
+                          setItemName(i.name);
+                          setItemSearch("");
+                          setShowItemDrop(false);
+                          setUom(i.uom);
+                          setDescription(i.description);
+                        }}
+                        className="px-3 py-2 text-sm cursor-pointer hover:bg-accent hover:text-accent-foreground"
+                      >
+                        {i.name}
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="md:col-span-2">
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">
                 Description
               </Label>
@@ -568,7 +623,7 @@ function PurchaseRequisitionCreate({
               </select>
             </div>
 
-            <div className="md:col-span-2">
+            <div className="md:col-span-1">
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">
                 Est. Rate
               </Label>
@@ -795,11 +850,27 @@ function RequisitionEditDialog({
   const [lines, setLines] = useState<PRLineItem[]>([]);
 
   // Draft-line state (the "add new" row at the bottom of the table)
+  const [itemTypeFilter, setItemTypeFilter] = useState<ItemTypeFilter>("All");
+  const [itemSearch, setItemSearch] = useState("");
+  const [showItemDrop, setShowItemDrop] = useState(false);
   const [itemName, setItemName] = useState("");
   const [description, setDescription] = useState("");
   const [qty, setQty] = useState("");
   const [uom, setUom] = useState(UOMS[0]);
   const [rate, setRate] = useState("");
+
+  const filteredItemMaster = useMemo(
+    () => ITEM_MASTER.filter((i) => {
+      if (itemTypeFilter === "Asset" && i.itemType !== "Asset") return false;
+      if (itemTypeFilter === "Production" && i.itemType === "Asset") return false;
+      return true;
+    }),
+    [itemTypeFilter],
+  );
+
+  const visibleItems = itemSearch.trim()
+    ? filteredItemMaster.filter((i) => i.name.toLowerCase().includes(itemSearch.trim().toLowerCase()))
+    : filteredItemMaster;
 
   // Reseed local state every time the dialog opens with a new requisition.
   useEffect(() => {
@@ -807,8 +878,9 @@ function RequisitionEditDialog({
     setPriority(requisition.priority);
     setJustification(requisition.justification);
     setLines(requisition.lines.map((l) => ({ ...l })));
-    setItemName(""); setDescription(""); setQty(""); setRate("");
-    setUom(UOMS[0]);
+    setItemName(""); setItemSearch(""); setDescription(""); setQty(""); setRate("");
+    setUom(UOMS[0]); setShowItemDrop(false);
+    setItemTypeFilter("All");
   }, [requisition]);
 
   if (!requisition) return null;
@@ -817,6 +889,7 @@ function RequisitionEditDialog({
 
   const addLine = () => {
     if (!itemName.trim()) { toast.error("Pick an item to add."); return; }
+    if (!ITEM_MASTER.find((i) => i.name === itemName.trim())) { toast.error("Select a valid item from the list."); return; }
     const qtyN = Number(qty);
     if (!qtyN || qtyN <= 0) { toast.error("Quantity must be greater than zero."); return; }
     const rateN = Number(rate);
@@ -835,7 +908,7 @@ function RequisitionEditDialog({
         rate: rateN,
       },
     ]);
-    setItemName(""); setDescription(""); setQty(""); setRate("");
+    setItemName(""); setItemSearch(""); setDescription(""); setQty(""); setRate("");
   };
 
   const updateLine = (id: string, patch: Partial<PRLineItem>) =>
@@ -895,30 +968,63 @@ function RequisitionEditDialog({
               Add Item
             </div>
             <div className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end">
-              <div className="md:col-span-4">
-                <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Item</Label>
+              <div className="md:col-span-2">
+                <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Item Type</Label>
                 <select
-                  value={itemName}
+                  value={itemTypeFilter}
                   onChange={(e) => {
-                    const name = e.target.value;
-                    setItemName(name);
-                    const m = ITEM_MASTER.find((i) => i.name === name);
-                    if (m) {
-                      setUom(m.uom);
-                      if (!description.trim()) setDescription(m.description);
-                    }
+                    setItemTypeFilter(e.target.value as ItemTypeFilter);
+                    setItemName("");
+                    setItemSearch("");
+                    setDescription("");
                   }}
                   className={selectCls}
                 >
-                  <option value="">Select item…</option>
-                  {ITEM_MASTER.map((i) => <option key={i.name} value={i.name}>{i.name}</option>)}
+                  <option value="All">All</option>
+                  <option value="Production">Production</option>
+                  <option value="Asset">Asset</option>
                 </select>
               </div>
-              <div className="md:col-span-3">
+              <div className="md:col-span-4 relative">
+                <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Item</Label>
+                <input
+                  value={itemName || itemSearch}
+                  onFocus={() => { setItemSearch(""); setShowItemDrop(true); }}
+                  onChange={(e) => { setItemSearch(e.target.value); setItemName(""); setShowItemDrop(true); }}
+                  onBlur={() => setShowItemDrop(false)}
+                  placeholder="Type to search item…"
+                  className={selectCls + " mt-1"}
+                />
+                {showItemDrop && (
+                  <div className="absolute z-50 left-0 right-0 top-full mt-1 max-h-52 overflow-y-auto rounded-md border border-input bg-background shadow-md">
+                    {visibleItems.length === 0 ? (
+                      <div className="px-3 py-2 text-sm text-muted-foreground">No items found.</div>
+                    ) : (
+                      visibleItems.map((i) => (
+                        <div
+                          key={i.name}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => {
+                            setItemName(i.name);
+                            setItemSearch("");
+                            setShowItemDrop(false);
+                            setUom(i.uom);
+                            setDescription(i.description);
+                          }}
+                          className="px-3 py-2 text-sm cursor-pointer hover:bg-accent hover:text-accent-foreground"
+                        >
+                          {i.name}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="md:col-span-2">
                 <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Description</Label>
                 <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Spec / brand" className="mt-1" />
               </div>
-              <div className="md:col-span-2">
+              <div className="md:col-span-1">
                 <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Qty</Label>
                 <Input type="number" min={0} value={qty} onChange={(e) => setQty(e.target.value)} className="mt-1" />
               </div>

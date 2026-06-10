@@ -13,14 +13,15 @@ import {
 } from "@/components/ui/table";
 import {
   Plus, ArrowLeft, Save, Boxes, Wrench, ShieldAlert, ScanBarcode, Truck, Eye,
-  Paperclip, X, FileText,
+  Paperclip, X, FileText, Check, ChevronRight,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
   equipmentAssets as SEED_ASSETS,
-  purchaseOrders,
+  equipmentGrns,
   type EquipmentCategory, type EquipmentAsset, type EquipmentAttachment,
 } from "@/lib/sample-data";
+import { useWorkflow } from "@/lib/workflow-store";
 import { cn } from "@/lib/utils";
 
 const CATEGORIES: EquipmentCategory[] = [
@@ -41,6 +42,52 @@ type AttachmentEntry = {
 
 const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+const ASSET_WORKFLOW_STAGES = [
+  "Asset Configuration",
+  "Purchase Requisition",
+  "Purchase Order",
+  "Purchased",
+  "Received (GRN)",
+  "Register as Asset",
+] as const;
+
+function WorkflowStepper() {
+  const activeIdx = ASSET_WORKFLOW_STAGES.length - 1;
+  return (
+    <div className="flex items-center flex-wrap gap-y-2 mb-6 p-3 bg-muted/30 rounded-lg border border-border">
+      {ASSET_WORKFLOW_STAGES.map((stage, i) => {
+        const done = i < activeIdx;
+        const active = i === activeIdx;
+        return (
+          <div key={stage} className="flex items-center">
+            <div className={cn(
+              "flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium whitespace-nowrap transition-colors",
+              done && "bg-primary/10 text-primary",
+              active && "bg-primary text-primary-foreground shadow-sm",
+              !done && !active && "text-muted-foreground",
+            )}>
+              <span className={cn(
+                "w-4 h-4 rounded-full flex items-center justify-center shrink-0",
+                done && "bg-primary text-primary-foreground",
+                active && "bg-white/25 text-primary-foreground",
+                !done && !active && "bg-muted text-muted-foreground",
+              )}>
+                {done
+                  ? <Check className="h-2.5 w-2.5" strokeWidth={3} />
+                  : <span className="text-[9px] font-bold">{i + 1}</span>}
+              </span>
+              {stage}
+            </div>
+            {i < ASSET_WORKFLOW_STAGES.length - 1 && (
+              <ChevronRight className={cn("h-3.5 w-3.5 mx-0.5 shrink-0", i < activeIdx ? "text-primary/50" : "text-muted-foreground/30")} />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function EquipmentAssetsPage() {
   const [view, setView] = useState<"list" | "create">("list");
@@ -128,7 +175,7 @@ function AssetViewModal({ asset, onClose }: { asset: EquipmentAsset; onClose: ()
               <Field label="Category" value={asset.category} />
               <Field label="Serial No." value={asset.serialNo} mono />
               <Field label="Status" value={asset.status} />
-              <Field label="PO Number" value={asset.poNumber} mono />
+              <Field label="GRN Number" value={asset.grnNumber} mono />
               <Field label="Purchase Date" value={asset.purchaseDate} />
               <Field label="Supplier" value={asset.supplierName} />
             </div>
@@ -198,7 +245,7 @@ function AssetList({ assets }: { assets: EquipmentAsset[] }) {
       if (q && !a.name.toLowerCase().includes(q) && !a.id.toLowerCase().includes(q)
         && !(a.rfidTag ?? "").toLowerCase().includes(q)
         && !a.serialNo.toLowerCase().includes(q)
-        && !(a.poNumber ?? "").toLowerCase().includes(q)
+        && !(a.grnNumber ?? "").toLowerCase().includes(q)
         && !(a.supplierName ?? "").toLowerCase().includes(q)) return false;
       return true;
     });
@@ -232,7 +279,7 @@ function AssetList({ assets }: { assets: EquipmentAsset[] }) {
               <Input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Search by asset id, name, serial, PO or supplier…"
+                placeholder="Search by asset id, name, serial, GRN or supplier…"
                 className="h-9"
               />
             </div>
@@ -267,7 +314,7 @@ function AssetList({ assets }: { assets: EquipmentAsset[] }) {
               <TableHead className="text-xs uppercase tracking-wider">Asset Name</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Category</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Serial No.</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">PO #</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">GRN #</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Purchase Date</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Supplier</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Status</TableHead>
@@ -292,8 +339,8 @@ function AssetList({ assets }: { assets: EquipmentAsset[] }) {
                   </TableCell>
                   <TableCell className="font-mono text-[11px] text-muted-foreground">{a.serialNo}</TableCell>
                   <TableCell className="font-mono text-[11px]">
-                    {a.poNumber
-                      ? <span className="text-primary">{a.poNumber}</span>
+                    {a.grnNumber
+                      ? <span className="text-primary">{a.grnNumber}</span>
                       : <span className="text-muted-foreground">—</span>}
                   </TableCell>
                   <TableCell className="tabular-nums text-xs">
@@ -325,34 +372,35 @@ function AssetList({ assets }: { assets: EquipmentAsset[] }) {
 
 function AssetCreate({ nextId, onSave }: { nextId: string; onSave: (a: EquipmentAsset) => void }) {
   const today = new Date().toISOString().slice(0, 10);
+  const { grns: wfGrns } = useWorkflow();
 
   const [name, setName] = useState("");
   const [category, setCategory] = useState<EquipmentCategory | "Other">("Trolley");
   const [customCategory, setCustomCategory] = useState("");
   const [status, setStatus] = useState<RegisterStatus>("New");
   const [serialNo, setSerialNo] = useState("");
-  const [poNumber, setPoNumber] = useState("");
+  const [grnNumber, setGrnNumber] = useState("");
   const [purchaseDate, setPurchaseDate] = useState(today);
   const [supplierName, setSupplierName] = useState("");
   const [attachments, setAttachments] = useState<AttachmentEntry[]>([
     { uid: "att-1", label: "Purchase Invoice", fileName: "", fileRef: null },
   ]);
 
-  const posForDate = useMemo(
-    () => (purchaseDate ? purchaseOrders.filter((po) => po.date === purchaseDate) : []),
-    [purchaseDate],
-  );
-
-  const handleDateChange = (date: string) => {
-    setPurchaseDate(date);
-    setPoNumber("");
-    setSupplierName("");
-  };
-
-  const handlePoSelect = (poId: string) => {
-    setPoNumber(poId);
-    const po = purchaseOrders.find((p) => p.id === poId);
-    setSupplierName(po ? po.vendor : "");
+  const handleGrnSelect = (grnId: string) => {
+    setGrnNumber(grnId);
+    const staticGrn = equipmentGrns.find((g) => g.id === grnId);
+    if (staticGrn) {
+      setSupplierName(staticGrn.vendor);
+      setPurchaseDate(staticGrn.date);
+      return;
+    }
+    const wfGrn = wfGrns.find((g) => g.id === grnId);
+    if (wfGrn) {
+      setSupplierName(wfGrn.vendor);
+      setPurchaseDate(wfGrn.date.slice(0, 10));
+    } else {
+      setSupplierName("");
+    }
   };
 
   const addAttachment = () => {
@@ -391,7 +439,7 @@ function AssetCreate({ nextId, onSave }: { nextId: string; onSave: (a: Equipment
       lastMaintenance: "",
       nextMaintenance: "",
       status: status as EquipmentAsset["status"],
-      poNumber: poNumber.trim() || undefined,
+      grnNumber: grnNumber.trim() || undefined,
       purchaseDate,
       supplierName: supplierName.trim() || undefined,
       attachments: savedAttachments.length ? savedAttachments : undefined,
@@ -449,27 +497,27 @@ function AssetCreate({ nextId, onSave }: { nextId: string; onSave: (a: Equipment
 
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Purchase Date *</Label>
-            <Input type="date" value={purchaseDate} onChange={(e) => handleDateChange(e.target.value)} className="mt-1 tabular-nums" />
+            <Input type="date" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} className="mt-1 tabular-nums" />
           </div>
 
           <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">PO Number</Label>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">GRN Number</Label>
             <select
-              value={poNumber}
-              onChange={(e) => handlePoSelect(e.target.value)}
+              value={grnNumber}
+              onChange={(e) => handleGrnSelect(e.target.value)}
               className={selectCls}
-              disabled={!purchaseDate}
             >
-              {posForDate.length === 0 ? (
-                <option value="">{purchaseDate ? "No POs found for this date" : "Select a purchase date first"}</option>
-              ) : (
-                <>
-                  <option value="">Select PO…</option>
-                  {posForDate.map((po) => (
-                    <option key={po.id} value={po.id}>{po.id} — {po.vendor}</option>
-                  ))}
-                </>
-              )}
+              <option value="">Select GRN…</option>
+              {equipmentGrns.map((grn) => (
+                <option key={grn.id} value={grn.id}>
+                  {grn.id} — {grn.description} ({grn.vendor})
+                </option>
+              ))}
+              {wfGrns.map((grn) => (
+                <option key={grn.id} value={grn.id}>
+                  {grn.id} — {grn.lines[0]?.name ?? grn.poRef} ({grn.vendor})
+                </option>
+              ))}
             </select>
           </div>
 
@@ -478,7 +526,7 @@ function AssetCreate({ nextId, onSave }: { nextId: string; onSave: (a: Equipment
             <Input
               value={supplierName}
               onChange={(e) => setSupplierName(e.target.value)}
-              placeholder="Auto-filled on PO selection"
+              placeholder="Auto-filled on GRN selection"
               className="mt-1"
             />
           </div>

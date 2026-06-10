@@ -17,7 +17,8 @@ import {
   getAllocationMethod,
   isBatchTrackedForInventory, findItemProfileFor,
   subscribeAllocationMethod, getAllocationVersion,
-  type BatchLot, type AllocationMethod,
+  equipmentAssets as EQP_SEED,
+  type BatchLot, type AllocationMethod, type EquipmentAsset,
 } from "@/lib/sample-data";
 import { KpiCard } from "@/components/common/KpiCard";
 import { getItemStockByWarehouse } from "@/lib/inventory-stock";
@@ -128,6 +129,7 @@ export default function Inventory() {
       };
     }),
   );
+  const [equipmentAssets] = usePersistedState<EquipmentAsset[]>("airline-equipments-assets", EQP_SEED);
   const [newItemOpen, setNewItemOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
@@ -344,6 +346,34 @@ export default function Inventory() {
   }, [items]);
   const displayCode = (it: Item) => codeByItemId.get(it.id) ?? it.id;
 
+  // Equipment assets that completed the full procurement-GRN flow projected as
+  // read-only inventory rows so they appear in Stock Overview and are searchable
+  // by GRN number. Stored batch uses the GRN line-1 format so both "GRN-XXXXX"
+  // and "GRN-XXXXX-L1" searches match via the DataTable .includes() check.
+  const assetInventoryRows = useMemo<Item[]>(() =>
+    equipmentAssets
+      .filter(a => !!a.grnNumber)
+      .map(a => ({
+        id: `ASSET-${a.id}`,
+        name: a.name,
+        category: a.category as string,
+        uom: "Unit",
+        stock: 1,
+        reorder: 0,
+        batch: (a.grnNumber ?? "") + "-L1",
+        expiry: "—",
+        storage: "Dry",
+        status: "OK" as const,
+        batches: [],
+        officeId: "OFF-001",
+        warehouseId: "WH-001",
+        itemType: "Equipment",
+        threshold: 0,
+        subCategory: "",
+      })),
+    [equipmentAssets],
+  );
+
   // Item Details ledger modal.
   const [ledgerOpen, setLedgerOpen] = useState(false);
   const [ledgerItem, setLedgerItem] = useState<Item | null>(null);
@@ -449,6 +479,16 @@ export default function Inventory() {
   ];
 
   const filteredItems = items.filter((i) => {
+    if (filterOffice && i.officeId !== filterOffice) return false;
+    if (filterWarehouse && i.warehouseId !== filterWarehouse) return false;
+    if (filterType && effType(i) !== filterType) return false;
+    if (filterCategory && effCategory(i) !== filterCategory) return false;
+    if (filterSubCategory && effSubCategory(i) !== filterSubCategory) return false;
+    if (filterStatus && i.status !== filterStatus) return false;
+    return true;
+  });
+
+  const filteredAssetRows = assetInventoryRows.filter(i => {
     if (filterOffice && i.officeId !== filterOffice) return false;
     if (filterWarehouse && i.warehouseId !== filterWarehouse) return false;
     if (filterType && effType(i) !== filterType) return false;
@@ -567,9 +607,9 @@ export default function Inventory() {
       <div data-arrival-id="inv-alerts">
       <DataTable
         title="inventory"
-        data={filteredItems}
+        data={[...filteredItems, ...filteredAssetRows]}
         columns={cols}
-        searchKeys={["name", "category", "status"]}
+        searchKeys={["name", "category", "status", "batch"]}
         selectable={false}
         actions={(row) => (
           <div className="flex items-center gap-1">
