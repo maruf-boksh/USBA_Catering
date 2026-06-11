@@ -29,6 +29,10 @@ import {
   type FlightOrderRow, type MealSlot, type ItemMaster,
 } from "@/lib/sample-data";
 import { getItemStock } from "@/lib/inventory-stock";
+import {
+  useProductionBasisSettings, effectiveBasis, productionQtyForBasis,
+  PRODUCTION_BASIS_LABEL, type ProductionBasis,
+} from "@/lib/production-basis-settings";
 import { useFlightOrders, updateFlightOrdersWhere } from "@/lib/flight-orders-store";
 import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-settings";
 import { Fragment } from "react";
@@ -46,6 +50,7 @@ import {
   DAYS,
   gmOrderSummary,
   mealCards,
+  loadMealPlanningConfig,
   type FlightType,
   type MealCard,
 } from "@/lib/meal-planning-data";
@@ -1158,9 +1163,9 @@ function slugifyItem(name: string) {
     .slice(0, 24);
 }
 
-function extractMealPlanItems(): MealPlanPickItem[] {
+function extractMealPlanItems(cards: MealCard[] = mealCards): MealPlanPickItem[] {
   const map = new Map<string, MealPlanPickItem>();
-  for (const meal of mealCards) {
+  for (const meal of cards) {
     const ftLabel = meal.flightType.join(" / ");
     for (const ch of meal.choices) {
       for (const it of ch.items) {
@@ -1222,8 +1227,6 @@ function extractMealPlanItems(): MealPlanPickItem[] {
     return a.name.localeCompare(b.name);
   });
 }
-
-const MEAL_PLAN_ITEMS = extractMealPlanItems();
 
 type AggregatedMaterial = RecipeItem & { reqQty: number };
 
@@ -2156,11 +2159,15 @@ function MealPlanningDetailsDialog({
   const requirements = useMemo(() => computeOrderRequirements(ordersForDate), [ordersForDate]);
   const orderDays = useMemo(() => new Set(requirements.map((r) => r.day)), [requirements]);
 
+  // Latest configured menus from the Meal Planning page (falls back to seed).
+  // Re-read whenever the dialog opens so menu edits flow through live.
+  const planCards = useMemo(() => loadMealPlanningConfig(), [open]);
+
   const itemByCode = useMemo(() => {
     const m = new Map<string, MealPlanPickItem>();
-    for (const it of MEAL_PLAN_ITEMS) m.set(it.code, it);
+    for (const it of extractMealPlanItems(planCards)) m.set(it.code, it);
     return m;
-  }, []);
+  }, [planCards]);
 
   const handleSelect = (payload: { code: string; computedQty: number; breakdown: string; item?: MealPlanPickItem }) => {
     // Roster-derived specials aren't in the static catalog, so accept a
@@ -2189,7 +2196,7 @@ function MealPlanningDetailsDialog({
 
   const byDay = useMemo(() => {
     const groups = new Map<string, MealCard[]>();
-    for (const m of mealCards) {
+    for (const m of planCards) {
       if (!orderDays.has(m.day as (typeof DAYS)[number])) continue;
       if (!groups.has(m.day)) groups.set(m.day, []);
       groups.get(m.day)!.push(m);
@@ -2197,7 +2204,7 @@ function MealPlanningDetailsDialog({
     return Array.from(groups.entries()).sort(
       ([a], [b]) => DAYS.indexOf(a as (typeof DAYS)[number]) - DAYS.indexOf(b as (typeof DAYS)[number]),
     );
-  }, [orderDays]);
+  }, [orderDays, planCards]);
 
   // Flatten every choice + enabled special-meal item across all displayed
   // meal cards, attaching the computed qty. Items with qty <= 0 are dropped.
@@ -2292,11 +2299,20 @@ function MealPlanningDetailsDialog({
   const [reviewOpen, setReviewOpen] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState<Set<number>>(new Set());
 
+  // Configured default + per-item overrides for how production qty is sized.
+  const basisSettings = useProductionBasisSettings();
+  // Per-run basis tweaks, keyed by row index. Seeded from config on open; lets
+  // the user flip a row's basis for THIS run without changing the saved config.
+  const [rowBasis, setRowBasis] = useState<Record<number, ProductionBasis>>({});
+  const basisForRow = (i: number, name: string): ProductionBasis =>
+    rowBasis[i] ?? effectiveBasis(basisSettings, name);
+
   const stockFor = (name: string) =>
     inventory.find((i) => i.name.toLowerCase() === name.toLowerCase());
 
   const openReview = () => {
     setSelectedIdx(new Set(availableItems.map((_, i) => i)));
+    setRowBasis({});
     setReviewOpen(true);
   };
   const toggleIdx = (i: number) =>
@@ -2309,7 +2325,18 @@ function MealPlanningDetailsDialog({
   const toggleAll = () =>
     setSelectedIdx(allSelected ? new Set() : new Set(availableItems.map((_, i) => i)));
   const confirmReview = () => {
-    const chosen = availableItems.filter((_, i) => selectedIdx.has(i));
+    // Re-size each selected item's qty by its effective basis: "required" keeps
+    // the full demand; "shortfall" produces only what stock can't cover. The
+    // resized computedQty flows through to the Production Order and its MRP.
+    const chosen = availableItems
+      .map((it, i) => ({ it, i }))
+      .filter(({ i }) => selectedIdx.has(i))
+      .map(({ it, i }) => {
+        const req = it.computedQty ?? 0;
+        const stock = getItemStock(it.name);
+        const qty = productionQtyForBasis(basisForRow(i, it.name), req, stock);
+        return { ...it, computedQty: qty };
+      });
     if (chosen.length === 0) return;
     setReviewOpen(false);
     onBulkCreate(chosen);
@@ -2478,13 +2505,15 @@ function MealPlanningDetailsDialog({
 
     {/* Review step — current stock vs required production qty, item-wise */}
     <Dialog open={reviewOpen} onOpenChange={setReviewOpen}>
-      <DialogContent className="max-w-3xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
+      <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
         <DialogHeader className="px-6 pt-6 pb-4 border-b border-border">
           <DialogTitle>Create Production Orders — Review</DialogTitle>
           <p className="text-sm text-muted-foreground mt-1">
             Current stock vs required production quantity for {date}. Select the items to produce —
             only selected items become Production Orders; the Demand Request &amp; Purchase Requisition
-            flow runs as usual on them.
+            flow runs as usual on them. <span className="text-foreground">Produce Qty</span> follows each
+            item's basis (default {PRODUCTION_BASIS_LABEL[basisSettings.default]}, configurable on the
+            Production Basis page); flip it per row below for this run only.
           </p>
         </DialogHeader>
 
@@ -2509,6 +2538,8 @@ function MealPlanningDetailsDialog({
                     <TableHead className="text-xs uppercase tracking-wider text-right">Current Stock</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider text-right">Required Qty</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider text-right">Shortfall</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-center">Basis</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right">Produce Qty</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -2518,6 +2549,8 @@ function MealPlanningDetailsDialog({
                     const uom = inv?.uom ?? "";
                     const req = it.computedQty ?? 0;
                     const shortfall = Math.max(0, req - stock);
+                    const basis = basisForRow(i, it.name);
+                    const produceQty = productionQtyForBasis(basis, req, stock);
                     const checked = selectedIdx.has(i);
                     return (
                       <TableRow
@@ -2550,6 +2583,36 @@ function MealPlanningDetailsDialog({
                           {shortfall > 0
                             ? <span className="text-destructive font-medium">{shortfall.toLocaleString()}</span>
                             : <span className="text-success">0</span>}
+                        </TableCell>
+                        <TableCell onClick={(e) => e.stopPropagation()}>
+                          <div className="flex justify-center">
+                            <div className="inline-flex rounded-md border border-border overflow-hidden">
+                              {(["required", "shortfall"] as ProductionBasis[]).map((b) => (
+                                <button
+                                  key={b}
+                                  type="button"
+                                  onClick={() => setRowBasis((prev) => ({ ...prev, [i]: b }))}
+                                  className={cn(
+                                    "h-7 px-2 text-[11px] font-medium transition-colors whitespace-nowrap",
+                                    basis === b
+                                      ? "bg-primary text-primary-foreground"
+                                      : "bg-transparent text-muted-foreground hover:bg-muted/50",
+                                  )}
+                                  title={b === "required"
+                                    ? "Produce the full required qty"
+                                    : "Produce only the shortfall (required − stock)"}
+                                >
+                                  {b === "required" ? "Required" : "Shortfall"}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right text-sm tabular-nums font-semibold">
+                          {produceQty.toLocaleString()}
+                          {produceQty === 0 && (
+                            <div className="text-[10px] font-normal text-muted-foreground">nothing to produce</div>
+                          )}
                         </TableCell>
                       </TableRow>
                     );

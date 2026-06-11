@@ -13,6 +13,8 @@ import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useMealSlots } from "@/lib/meal-slot-settings";
 import { resolveItemProfile } from "@/lib/item-profiles";
+import { usePersistedState } from "@/lib/use-persisted-state";
+import { MEAL_PLAN_CONFIG_KEY } from "@/lib/meal-planning-data";
 
 // Resolve a meal item's serving weight/kcal. The Item Profile (config-item) is
 // the source of truth when configured; the static FOOD_ITEMS/DESSERT_ITEMS entry
@@ -467,7 +469,9 @@ export default function MealPlanning() {
   };
   const location = useLocation();
   const backUrl = (location.state as { backUrl?: string } | null)?.backUrl ?? null;
-  const [meals, setMeals] = useState<MealCard[]>(getSampleMeals());
+  // Persisted so the configured menus survive a reload and feed the Production
+  // Order "Meal Plan" tab (read via loadMealPlanningConfig). Drop-in for useState.
+  const [meals, setMeals] = usePersistedState<MealCard[]>(MEAL_PLAN_CONFIG_KEY, getSampleMeals());
   const [selectedDay, setSelectedDay] = useState(DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]);
   const today = DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1];
   const [createModalOpen, setCreateModalOpen] = useState(false);

@@ -411,6 +411,11 @@ const SRC: Record<string, Group> = {
     actions: [["action-defaults", "Defaults"], ["action-add-meal", "Add Meal"], ["action-save", "Save"]],
     fields: [["field-meal-name", "Meal Name"], ["field-start-hour", "Start Hour"], ["field-end-hour", "End Hour"]],
   },
+  "/config-production-basis": {
+    columns: [["col:item", "Item"], ["col:basis", "Basis"], ["col:actions", "Actions"]],
+    actions: [["action-reset", "Reset"], ["action-add-override", "Add Override"]],
+    fields: [["field-default-basis", "Default basis"], ["field-item", "Item"], ["field-produce-by", "Produce by"]],
+  },
 };
 
 const KIND_ORDER: { key: keyof Group; kind: ElementKind }[] = [

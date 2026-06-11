@@ -54,6 +54,7 @@ import ConfigWarehousePage from "@/routes/config-warehouse";
 import ConfigPricePage from "@/routes/config-price";
 import ConfigApprovalPage from "@/routes/config-approval";
 import ConfigMealSlotsPage from "@/routes/config-meal-slots";
+import ConfigProductionBasisPage from "@/routes/config-production-basis";
 import ConfigAccessControlPage from "@/routes/config-access-control";
 import ConfigAccessControlPermissionsPage from "@/routes/config-access-control-permissions";
 import ReportBuilderPage from "@/routes/report-builder";
@@ -131,6 +132,7 @@ export function App() {
             <Route path="/config-price" element={<ConfigPricePage />} />
             <Route path="/config-approval" element={<ConfigApprovalPage />} />
             <Route path="/config-meal-slots" element={<ConfigMealSlotsPage />} />
+            <Route path="/config-production-basis" element={<ConfigProductionBasisPage />} />
             <Route path="/config-access-control" element={<ConfigAccessControlPage />} />
             <Route path="/config-access-control/permissions" element={<ConfigAccessControlPermissionsPage />} />
             <Route path="/report-builder" element={<ReportBuilderPage />} />

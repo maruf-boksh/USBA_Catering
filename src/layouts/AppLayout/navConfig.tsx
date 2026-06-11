@@ -246,6 +246,7 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/config-price',      label: 'Price Setup',      icon: I(BadgeDollarSign) },
       { key: '/config-approval',   label: 'Approval Setup',   icon: I(GitBranch) },
       { key: '/config-meal-slots', label: 'Meal Config',       icon: I(Clock) },
+      { key: '/config-production-basis', label: 'Production Basis', icon: I(Scale) },
       { key: '/config-access-control', label: 'User Access Control', icon: I(ShieldCheck) },
     ],
   },

@@ -26,15 +26,111 @@ function splitDelta(sub: string): { delta?: string; dir?: 'up' | 'down'; rest: s
   return { rest: sub };
 }
 
+// Aurora variant — soft white card with a pastel icon chip and a delta pill,
+// matching the reference dashboard aesthetic (violet primary + pastel accents).
+// Opt-in via variant="aurora" so other pages keep the default brand-red card.
+const AURORA: Record<string, { chipBg: string; fg: string }> = {
+  violet:  { chipBg: '#ede9fe', fg: '#7c3aed' },
+  blue:    { chipBg: '#e0f2fe', fg: '#0284c7' },
+  green:   { chipBg: '#dcfce7', fg: '#16a34a' },
+  amber:   { chipBg: '#fef3c7', fg: '#d97706' },
+  rose:    { chipBg: '#ffe4e6', fg: '#e11d48' },
+  teal:    { chipBg: '#ccfbf1', fg: '#0d9488' },
+  indigo:  { chipBg: '#e0e7ff', fg: '#4f46e5' },
+  fuchsia: { chipBg: '#fae8ff', fg: '#c026d3' },
+};
+
 export function KpiCard({
-  label, value, sub, icon, tone = 'navy',
+  label, value, sub, icon, tone = 'navy', variant = 'default',
 }: {
   label: string;
   value: string | number;
   sub?: string;
   icon: React.ElementType;
-  tone?: keyof typeof TONE;
+  tone?: string;
+  variant?: 'default' | 'aurora';
 }) {
+  const [hover, setHover] = React.useState(false);
+
+  if (variant === 'aurora') {
+    const a = AURORA[tone] ?? AURORA.violet;
+    const valueStr = String(value);
+    const curMatch = valueStr.match(/^(৳\s*)(.*)$/);
+    const footer = sub ? splitDelta(sub) : null;
+    const up = footer?.dir !== 'down';
+
+    return (
+      <div
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        style={{
+          background: '#fff',
+          border: '1px solid #eef0f4',
+          borderRadius: 18,
+          padding: '17px 19px 16px',
+          boxShadow: hover
+            ? '0 2px 4px rgba(16,24,40,.05), 0 22px 48px -28px rgba(16,24,40,.32)'
+            : '0 1px 2px rgba(16,24,40,.04), 0 14px 34px -26px rgba(16,24,40,.26)',
+          transform: hover ? 'translateY(-2px)' : 'none',
+          transition: 'box-shadow 180ms ease, transform 180ms ease',
+          height: '100%',
+        }}
+      >
+        {/* top row: pastel icon chip + delta pill */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <div style={{
+            width: 38, height: 38, borderRadius: 12,
+            display: 'grid', placeItems: 'center', flexShrink: 0,
+            color: a.fg, background: a.chipBg,
+          }}>
+            {React.createElement(icon, { style: { width: 18, height: 18 } })}
+          </div>
+          {footer?.delta && (
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+              padding: '3px 9px', borderRadius: 999, fontSize: 11.5, fontWeight: 600,
+              color: up ? '#15803d' : '#b91c1c',
+              background: up ? '#dcfce7' : '#fee2e2',
+            }}>
+              <span style={{ fontSize: 12, lineHeight: 1 }}>{up ? '↑' : '↓'}</span>
+              {footer.delta.replace(/^[-−+]/, '')}
+            </span>
+          )}
+        </div>
+
+        {/* label */}
+        <div style={{
+          fontSize: 11, fontWeight: 600, letterSpacing: '0.08em',
+          textTransform: 'uppercase', color: '#8a8f98', marginTop: 15,
+        }}>
+          {label}
+        </div>
+
+        {/* number */}
+        <div style={{
+          fontWeight: 700, fontSize: 29, lineHeight: 1.05,
+          letterSpacing: '-0.02em', marginTop: 5, color: '#101828',
+        }}>
+          {curMatch ? (
+            <>
+              <span style={{ fontSize: 18, fontWeight: 600, color: '#8a8f98', marginRight: 1 }}>
+                {curMatch[1].trim()}
+              </span>
+              {curMatch[2]}
+            </>
+          ) : valueStr}
+        </div>
+
+        {/* sub line (delta stripped — it's shown in the pill above) */}
+        {footer && (footer.delta ? footer.rest : footer.rest) && (
+          <div style={{ fontSize: 12, color: '#8a8f98', marginTop: 6 }}>
+            {footer.delta ? footer.rest : footer.rest}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   const t = TONE[tone] ?? TONE.navy;
 
   // Render a leading currency glyph (৳) smaller, like the mockup's `.cur` span.

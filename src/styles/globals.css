@@ -1384,6 +1384,65 @@ html[data-theme="dark"] .ant-drawer .ant-drawer-header {
 
 }
 
+/* ── Mobile / tablet: sidebar becomes an off-canvas drawer ─────────────────
+   On desktop the sidebar is a docked column. At ≤1023px it slides off-canvas
+   and is summoned by the hamburger (data-mobile-nav="open" on the shell), with
+   a tap-to-dismiss backdrop. The main column then reclaims the full width. */
+@media (max-width: 1023px) {
+  .app-layout-shell .sb-sider.ant-layout-sider {
+    position: fixed !important;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    height: 100vh !important;
+    z-index: 1100;
+    transform: translateX(-100%);
+    transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 0 48px rgba(0, 0, 0, 0.28);
+  }
+  .app-layout-shell[data-mobile-nav="open"] .sb-sider.ant-layout-sider {
+    transform: translateX(0);
+  }
+  .app-nav-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    z-index: 1090;
+    animation: app-backdrop-in 0.2s ease;
+  }
+  @keyframes app-backdrop-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  /* Drawer reclaim: main column is the only in-flow child now → full width. */
+  .app-main-shell {
+    width: 100% !important;
+    min-width: 0;
+  }
+  .app-content-shell {
+    padding: 14px 14px;
+  }
+}
+
+/* ── Phones: trim the topbar so it never overflows ─────────────────────── */
+@media (max-width: 600px) {
+  .app-content-shell {
+    padding: 12px 10px;
+  }
+  .app-topbar-optional {
+    display: none !important;
+  }
+  .app-topbar-divider {
+    display: none !important;
+  }
+  .app-global-search {
+    width: min(40vw, 150px) !important;
+  }
+  .app-topbar-right {
+    gap: 4px !important;
+  }
+}
+
 /* ============================================================
    Typography Utilities
    ============================================================ */

@@ -228,7 +228,7 @@ export const mealCards: MealCard[] = [
     id: "meal-7",
     day: "Thursday",
     mealType: "Lunch",
-    flightType: ["Domestic"],
+    flightType: ["International", "Domestic"],
     forType: "Crew",
     choices: [
       { label: "CHOICE 1", percentage: 60, items: [
@@ -251,4 +251,66 @@ export const mealCards: MealCard[] = [
     servingTime: { start: "12:00", end: "14:30" },
     totalKcal: 580,
   },
+  {
+    id: "meal-8",
+    day: "Thursday",
+    mealType: "Lunch",
+    flightType: ["International", "Domestic"],
+    forType: "Passengers",
+    choices: [
+      { label: "CHOICE 1", percentage: 60, items: [
+        { name: "Steamed Rice", weight: 180, calories: 220 },
+        { name: "Grilled Chicken", weight: 120, calories: 200 },
+        { name: "Mixed Veg Curry", weight: 50, calories: 80 },
+      ]},
+      { label: "CHOICE 2", percentage: 40, items: [
+        { name: "Vegetable Biryani", weight: 200, calories: 320 },
+        { name: "Fish Curry", weight: 100, calories: 160 },
+        { name: "Raita", weight: 50, calories: 50 },
+      ]},
+    ],
+    specialMeals: [
+      { type: "VGML", portions: 5, enabled: true, items: [
+        { name: "Vegetable Biryani", weight: 200, calories: 320 },
+        { name: "Mixed Veg Curry", weight: 60, calories: 90 },
+        { name: "Raita", weight: 50, calories: 50 },
+      ]},
+      { type: "CHML", portions: "As per demand", enabled: true, items: [
+        { name: "Steamed Rice, Grilled Chicken, Seasonal Fruit", weight: 250, calories: 430 },
+      ]},
+    ],
+    dessert: { name: "Fruit Custard", weight: 70, calories: 190 },
+    servingTime: { start: "12:00", end: "14:30" },
+    totalKcal: 620,
+  },
 ];
+
+// ─── Live Meal-Planning config bridge ────────────────────────────────────────
+// The Meal Planning page persists its configured menus under this key (via
+// usePersistedState, so the on-disk key is "harvest-data-v1:" + KEY). Downstream
+// consumers (e.g. the Production Order "Meal Plan" tab) read the latest config
+// through loadMealPlanningConfig() so menu edits flow through without a reload.
+export const MEAL_PLAN_CONFIG_KEY = "meal-planning-config";
+
+/**
+ * Latest meal-planning configuration, merged over the static seed: any day the
+ * planner has configured fully overrides the seed for that day; days not yet
+ * configured fall back to the seed templates. Returns the seed verbatim when
+ * nothing has been persisted yet (or storage is unavailable).
+ */
+export function loadMealPlanningConfig(): MealCard[] {
+  let persisted: MealCard[] | null = null;
+  try {
+    const raw = window.localStorage.getItem("harvest-data-v1:" + MEAL_PLAN_CONFIG_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as MealCard[];
+      if (Array.isArray(parsed) && parsed.length > 0) persisted = parsed;
+    }
+  } catch {
+    /* storage unavailable / corrupt — fall back to seed */
+  }
+  if (!persisted) return mealCards;
+  const configuredDays = new Set(persisted.map((m) => m.day));
+  const seedForOtherDays = mealCards.filter((m) => !configuredDays.has(m.day));
+  return [...persisted, ...seedForOtherDays];
+}

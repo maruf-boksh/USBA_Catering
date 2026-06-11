@@ -20,7 +20,7 @@ import { useRole } from "@/lib/roles";
 import { useAccess, canElement } from "@/lib/access-control";
 import {
   flights, productionOrders, purchaseOrders, qcChecks,
-  seedFlightOrders, inventory, inventoryValue, meals,
+  seedFlightOrders, inventory, inventoryValue, warehouses,
 } from "@/lib/sample-data";
 import { useWorkflow } from "@/lib/workflow-store";
 import { useFlightOrders } from "@/lib/flight-orders-store";
@@ -222,7 +222,7 @@ function useDashboardKpis(period: Period, range?: DateRange) {
     trendTitle: isCustom
       ? `Meal Production Trend (${range!.from || "…"} → ${range!.to || "…"})`
       : (isWeek || isWindow) ? "Meal Production Trend (Last 7 Days)" : "Meal Production Trend (Today)",
-    sectionMix: computeSectionMix(productionEntryRecords),
+    sectionMix: computeWarehouseMix(productionEntryRecords),
     activeFlights: pickActiveFlights(liveFlightOrders),
     activityFeed: buildActivityFeed({
       wfRequisitions, productionEntryRecords, transferNotes,
@@ -282,36 +282,22 @@ function groupActiveByOrder(rows: ReturnType<typeof pickActiveFlights>, maxOrder
   return Array.from(map.entries()).slice(0, maxOrders);
 }
 
-// Production Mix donut data — splits the day's produced meals across the four
-// kitchen sections by each meal's real attributes (no fixed ratios). Quantities
-// come from the actual production-entry records, so the slices sum to the same
-// produced total shown in the donut center ("Meals Prepared").
-// CHART_COLORS maps by index → red · dark-red · amber · ink.
-const MIX_SECTIONS = ["Hot Kitchen", "Cold Kitchen", "Veg Section", "Special Meal"] as const;
-
-// Route a produced meal to its kitchen section using the meal's own attributes,
-// mirroring how the kitchen organizes production: Special-category meals →
-// Special Meal; vegetarian (VGML) menus → Veg Section; otherwise by Hot/Cold
-// category. Unknown meals fall back to Hot Kitchen.
-function mealSection(name: string): (typeof MIX_SECTIONS)[number] {
-  const m = meals.find((x) => x.name === name);
-  if (!m) return "Hot Kitchen";
-  if (m.category === "Special") return "Special Meal";
-  if (m.menuStandard === "VGML") return "Veg Section";
-  if (m.category === "Cold") return "Cold Kitchen";
-  return "Hot Kitchen";
-}
-
-function computeSectionMix(
-  records: { bom: string; outputItemName?: string; producedQty: number }[],
+// Production Mix donut data — splits the day's produced meals across the
+// warehouses / kitchens that produced them. Each production-entry record carries
+// the warehouse it was produced in, so the slices sum to the same produced total
+// shown in the donut center ("Meals Prepared"). CHART_COLORS maps by index.
+function computeWarehouseMix(
+  records: { warehouseId: string; producedQty: number }[],
 ): { name: string; v: number }[] {
-  const totals: Record<string, number> = {
-    "Hot Kitchen": 0, "Cold Kitchen": 0, "Veg Section": 0, "Special Meal": 0,
-  };
+  const totals = new Map<string, number>();
   for (const r of records) {
-    totals[mealSection(r.outputItemName ?? r.bom)] += r.producedQty;
+    const name = warehouses.find((w) => w.id === r.warehouseId)?.name ?? r.warehouseId ?? "Unassigned";
+    totals.set(name, (totals.get(name) ?? 0) + r.producedQty);
   }
-  return MIX_SECTIONS.map((name) => ({ name, v: totals[name] }));
+  // Largest share first so the legend reads top-down by volume.
+  return [...totals.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, v]) => ({ name, v }));
 }
 
 function buildActivityFeed({
@@ -418,6 +404,9 @@ function PanelCard({
   highlight?: string;
   children: ReactNode;
 }) {
+  const [linkHover, setLinkHover] = useState(false);
+  // Trailing "→" is rendered as an animated icon, so strip it from the label.
+  const cleanLabel = (linkLabel ?? 'Open').replace(/\s*→\s*$/, '');
   return (
     <div style={{
       background: '#ffffff',
@@ -444,9 +433,26 @@ function PanelCard({
           <Link
             to={link}
             onClick={() => highlight && flagArrival(highlight)}
-            style={{ fontSize: 12.5, fontWeight: 600, color: '#E10101', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0 }}
+            onMouseEnter={() => setLinkHover(true)}
+            onMouseLeave={() => setLinkHover(false)}
+            style={{
+              fontSize: 12.5, fontWeight: 600,
+              color: '#6d28d9',
+              background: linkHover ? '#e6e0fb' : '#f3f0fe',
+              textDecoration: 'none',
+              display: 'inline-flex', alignItems: 'center', gap: 5,
+              padding: '6px 13px', borderRadius: 999,
+              border: '1px solid #e6e0fb',
+              transition: 'background 150ms ease, border-color 150ms ease',
+              flexShrink: 0, whiteSpace: 'nowrap',
+            }}
           >
-            {linkLabel ?? 'Open →'}
+            {cleanLabel}
+            <span style={{
+              display: 'inline-block', lineHeight: 1,
+              transition: 'transform 160ms ease',
+              transform: linkHover ? 'translateX(3px)' : 'none',
+            }}>→</span>
           </Link>
         )}
       </div>
@@ -730,22 +736,22 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {showKpi("kpi-flights") && (
         <KpiLink to="/order-management" highlight="active-orders" ids={data.kpis.flights.ids}>
-          <KpiCard label="Flights Today"   value={data.kpis.flights.value}   sub={data.kpis.flights.sub}   icon={RocketOutlined}            tone="navy"    />
+          <KpiCard label="Flights Today"   value={data.kpis.flights.value}   sub={data.kpis.flights.sub}   icon={RocketOutlined}            tone="violet" variant="aurora" />
         </KpiLink>
         )}
         {showKpi("kpi-meals") && (
         <KpiLink to="/production-entry" highlight="production-list" ids={data.kpis.meals.ids}>
-          <KpiCard label="Meals Prepared"  value={data.kpis.meals.value}     sub={data.kpis.meals.sub}     icon={CoffeeOutlined}            tone="success" />
+          <KpiCard label="Meals Prepared"  value={data.kpis.meals.value}     sub={data.kpis.meals.sub}     icon={CoffeeOutlined}            tone="green" variant="aurora" />
         </KpiLink>
         )}
         {showKpi("kpi-delayed") && (
         <KpiLink to="/order-management" ord={data.kpis.delayed.ord} highlight="active-orders" ids={data.kpis.delayed.ids}>
-          <KpiCard label="Delayed Flights" value={data.kpis.delayed.value}   sub={data.kpis.delayed.sub}   icon={WarningOutlined}           tone="warning" />
+          <KpiCard label="Delayed Flights" value={data.kpis.delayed.value}   sub={data.kpis.delayed.sub}   icon={WarningOutlined}           tone="amber" variant="aurora" />
         </KpiLink>
         )}
         {showKpi("kpi-qc") && (
         <KpiLink to="/cooking-temp" highlight="qc-issues" ids={data.kpis.qcIssues.ids}>
-          <KpiCard label="QC Issues"       value={data.kpis.qcIssues.value}  sub={data.kpis.qcIssues.sub}  icon={SafetyCertificateOutlined} tone="red"     />
+          <KpiCard label="QC Issues"       value={data.kpis.qcIssues.value}  sub={data.kpis.qcIssues.sub}  icon={SafetyCertificateOutlined} tone="rose" variant="aurora" />
         </KpiLink>
         )}
       </div>
@@ -753,22 +759,22 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-3">
         {showKpi("kpi-pos") && (
         <KpiLink to="/procurement" highlight="po-list" ids={data.kpis.pendingPOs.ids}>
-          <KpiCard label="Pending POs"      value={data.kpis.pendingPOs.value} sub={data.kpis.pendingPOs.sub} icon={ShoppingCartOutlined} tone="info"    />
+          <KpiCard label="Pending POs"      value={data.kpis.pendingPOs.value} sub={data.kpis.pendingPOs.sub} icon={ShoppingCartOutlined} tone="blue" variant="aurora" />
         </KpiLink>
         )}
         {showKpi("kpi-inv") && (
         <KpiLink to="/inventory" highlight="inv-alerts" ids={data.kpis.invAlerts.ids}>
-          <KpiCard label="Inventory Alerts" value={data.kpis.invAlerts.value}  sub={data.kpis.invAlerts.sub}  icon={InboxOutlined}        tone="warning" />
+          <KpiCard label="Inventory Alerts" value={data.kpis.invAlerts.value}  sub={data.kpis.invAlerts.sub}  icon={InboxOutlined}        tone="teal" variant="aurora" />
         </KpiLink>
         )}
         {showKpi("kpi-dispatch") && (
         <KpiLink to="/dispatch" highlight="dispatch-list" ids={data.kpis.dispatch.ids}>
-          <KpiCard label="Dispatch Active"  value={data.kpis.dispatch.value}   sub={data.kpis.dispatch.sub}   icon={CarOutlined}          tone="success" />
+          <KpiCard label="Dispatch Active"  value={data.kpis.dispatch.value}   sub={data.kpis.dispatch.sub}   icon={CarOutlined}          tone="indigo" variant="aurora" />
         </KpiLink>
         )}
         {showKpi("kpi-cost") && (
         <KpiLink to="/inventory" highlight="inv-value">
-          <KpiCard label="Stock Value"      value={data.kpis.dailyCost.value}  sub={data.kpis.dailyCost.sub}  icon={DollarOutlined}       tone="ink"     />
+          <KpiCard label="Stock Value"      value={data.kpis.dailyCost.value}  sub={data.kpis.dailyCost.sub}  icon={DollarOutlined}       tone="fuchsia" variant="aurora" />
         </KpiLink>
         )}
       </div>

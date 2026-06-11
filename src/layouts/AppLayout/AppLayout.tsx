@@ -39,6 +39,23 @@ const { Header, Content } = Layout;
 const PINNED_STORAGE_KEY = 'harvest-catering.pinned-pages';
 const PINNED_LIMIT = 6;
 
+// Tracks whether the viewport is in the mobile/tablet range where the sidebar
+// becomes an off-canvas drawer instead of a docked column.
+function useIsMobile(query = '(max-width: 1023px)'): boolean {
+  const [matches, setMatches] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia(query).matches,
+  );
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const mq = window.matchMedia(query);
+    const onChange = () => setMatches(mq.matches);
+    onChange();
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, [query]);
+  return matches;
+}
+
 function parseStoredKeys(raw: string | null, validKeys: Set<string>, limit: number): string[] {
   if (!raw) return [];
   try {
@@ -152,6 +169,10 @@ interface AppLayoutProps {
 export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+  const isMobile = useIsMobile();
+  // On mobile the sidebar is an off-canvas drawer toggled by the hamburger;
+  // on desktop the hamburger toggles the docked-column collapse.
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const { role, setRole } = useRole();
@@ -161,6 +182,17 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
   const selectedKey = useMemo(() => resolveSelectedNavKey(location.pathname), [location.pathname]);
 
   const breadcrumb = useBreadcrumb(location.pathname);
+
+  // Close the mobile drawer whenever the route changes (e.g. after tapping a nav item).
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname]);
+
+  // Hamburger: toggles the drawer on mobile, the docked collapse on desktop.
+  const handleNavToggle = () => {
+    if (isMobile) setMobileNavOpen((o) => !o);
+    else setCollapsed((c) => !c);
+  };
 
   const [pinnedKeys, setPinnedKeys] = useState<string[]>(() => {
     if (typeof window === 'undefined') return [];
@@ -230,14 +262,21 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
   };
 
   return (
-    <Layout className="app-layout-shell" style={{ height: '100vh', overflow: 'hidden' }}>
+    <Layout
+      className="app-layout-shell"
+      data-mobile-nav={isMobile && mobileNavOpen ? 'open' : 'closed'}
+      style={{ height: '100vh', overflow: 'hidden' }}
+    >
       <AppSidebar
-        collapsed={collapsed}
+        collapsed={isMobile ? false : collapsed}
         onCollapsedChange={setCollapsed}
         selectedKey={selectedKey}
         pinnedItems={pinnedMeta}
         onUnpin={handleUnpin}
       />
+      {isMobile && mobileNavOpen && (
+        <div className="app-nav-backdrop" onClick={() => setMobileNavOpen(false)} aria-hidden />
+      )}
 
       <Layout className="app-main-shell" style={{ overflow: 'hidden', minWidth: 0 }}>
         <Header className="app-topbar-shell" style={{ height: 64, lineHeight: '64px', padding: '10px 16px', flexShrink: 0, zIndex: 10 }}>
@@ -247,8 +286,8 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
                 type="text"
                 size="small"
                 className="app-topbar-toggle"
-                icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-                onClick={() => setCollapsed(c => !c)}
+                icon={(isMobile ? !mobileNavOpen : collapsed) ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                onClick={handleNavToggle}
               />
               {breadcrumb && breadcrumb.length > 0 && (
                 <Breadcrumb
@@ -291,7 +330,7 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
                   <Button
                     type="text"
                     size="small"
-                    className="app-topbar-icon-button"
+                    className="app-topbar-icon-button app-topbar-optional"
                     icon={<BgColorsOutlined style={{ fontSize: 17 }} />}
                   />
                 </Tooltip>
@@ -301,7 +340,7 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
                 <Button
                   type="text"
                   size="small"
-                  className="app-topbar-icon-button"
+                  className="app-topbar-icon-button app-topbar-optional"
                   icon={<QuestionCircleOutlined style={{ fontSize: 17 }} />}
                 />
               </Tooltip>
