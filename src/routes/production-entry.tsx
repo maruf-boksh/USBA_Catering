@@ -1,4 +1,4 @@
-import { useNavigate, useLocation } from "react-router-dom";
+import { useNavigate, useLocation, useSearchParams } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -430,6 +430,9 @@ type MealOrderConfirmation = {
 export default function ProductionEntryPage() {
   useArrivalFlash();
   const location = useLocation();
+  const [searchParams] = useSearchParams();
+  // PRO id deep-linked from Dispatch — used to page-jump + flash the row.
+  const flashPro = searchParams.get("pro") ?? undefined;
   const mealOrderConfirmation = (location.state as { mealOrderConfirmation?: MealOrderConfirmation } | null)?.mealOrderConfirmation ?? null;
   const forwardedMeals = (location.state as { forwardedMeals?: MealCard[]; forwardedDay?: string } | null)?.forwardedMeals ?? null;
   const forwardedDay = (location.state as { forwardedDay?: string } | null)?.forwardedDay ?? null;
@@ -1103,6 +1106,7 @@ export default function ProductionEntryPage() {
               searchKeys={["id", "bom", "outputItemName", "status"]}
               selectable={false}
               actions={(r) => <ProductionEntryRowMenu entry={r} />}
+              flashRowId={flashPro}
             />
           </div>
         </>
@@ -2283,7 +2287,40 @@ function MealPlanningDetailsDialog({
         }
       }
     }
-    return out;
+
+    // Split combo items — some meals (e.g. the CHML combo) are stored as a single
+    // item whose name lists several dishes comma-separated. Each dish must be its
+    // own Production Order, so expand them into one component item per dish (same
+    // qty — one combo unit yields one of each).
+    const expanded: MealPlanPickItem[] = [];
+    for (const it of out) {
+      const parts = it.name.split(",").map((s) => s.trim()).filter(Boolean);
+      if (parts.length <= 1) { expanded.push(it); continue; }
+      for (const partName of parts) {
+        expanded.push({ ...it, name: partName, code: `MP-${slugifyItem(partName)}` });
+      }
+    }
+
+    // Collapse duplicates — the same dish can surface from several meal cards /
+    // choices for the day (e.g. Plain Polao in two flight-type cards), or from a
+    // combo split above. Combine them into one row with summed qty so each dish
+    // becomes a single Production Order rather than repeating. Keyed by dish + day
+    // + meal + kind so genuinely distinct contexts (e.g. a Choice vs a Special of
+    // the same dish) stay apart.
+    const merged = new Map<string, MealPlanPickItem>();
+    for (const it of expanded) {
+      const key = `${it.code}|${it.day}|${it.mealType}|${it.kind}`;
+      const existing = merged.get(key);
+      if (existing) {
+        existing.computedQty = (existing.computedQty ?? 0) + (it.computedQty ?? 0);
+        if (it.qtyBreakdown && existing.qtyBreakdown && !existing.qtyBreakdown.includes(it.qtyBreakdown)) {
+          existing.qtyBreakdown = `${existing.qtyBreakdown}; ${it.qtyBreakdown}`;
+        }
+      } else {
+        merged.set(key, { ...it });
+      }
+    }
+    return Array.from(merged.values());
   }, [byDay, requirements, itemByCode, orderedSpecialsByDay]);
 
   const totalPax = ordersForDate.reduce((s, o) => s + o.pax, 0);

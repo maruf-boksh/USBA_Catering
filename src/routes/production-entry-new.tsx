@@ -57,6 +57,48 @@ export default function ProductionEntryPage() {
 
   const totalProduced = filteredRecords.reduce((s, r) => s + r.producedQty, 0);
 
+  // ── Bulk "Log All" — save every fulfillable order to the Entry page at once ──
+  // Each fulfillable order (Approved / In Preparation) with a remaining qty gets
+  // one production entry for its full remaining amount, crediting the order and
+  // advancing its status (→ In Preparation / Ready for QC).
+  const [logAllOpen, setLogAllOpen] = useState(false);
+  const logAllTargets = useMemo(
+    () =>
+      fulfillableOrders
+        .map((o) => ({ order: o, remaining: Math.max(0, (o.orderQty ?? o.producedQty) - o.producedQty) }))
+        .filter((t) => t.remaining > 0),
+    [fulfillableOrders],
+  );
+  const logAllTotal = logAllTargets.reduce((s, t) => s + t.remaining, 0);
+
+  const handleLogAll = () => {
+    if (logAllTargets.length === 0) return;
+    const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+    let seq = productionEntryRecords.length + 47;
+    for (const { order, remaining } of logAllTargets) {
+      addProductionEntryRecord({
+        id: `PE-2026-${String(seq).padStart(6, "0")}`,
+        date: stamp,
+        productionOrderId: order.id,
+        bom: order.bom,
+        outputItemName: order.outputItemName,
+        outputItemCode: order.outputItemCode,
+        producedQty: remaining,
+        batchNo: `B-${order.id.slice(-6)}`,
+        shift: "Morning",
+        producedBy: PRODUCERS[0],
+        officeId: order.officeId ?? "OFF-001",
+        warehouseId: order.warehouseId ?? "WH-003",
+        remarks: "Bulk-logged via Log All",
+      });
+      seq += 1;
+    }
+    setLogAllOpen(false);
+    toast.success(
+      `Logged ${logAllTargets.length} production ${logAllTargets.length === 1 ? "entry" : "entries"} · ${logAllTotal.toLocaleString()} units across all fulfillable orders.`,
+    );
+  };
+
   const cols: Column<WfProductionEntryRecord>[] = [
     { key: "id", header: "Entry No", render: (r) => <span className="font-mono text-xs">{r.id}</span> },
     { key: "date", header: "Date", render: (r) => <span className="tabular-nums text-xs">{r.date}</span> },
@@ -108,16 +150,28 @@ export default function ProductionEntryPage() {
         title="Production Entry"
         subtitle="Log actual production runs against an approved Production Order — quantity rolls up to the order's Produced Qty"
         actions={
-          <Button
-            variant={view === "create" ? "outline" : "default"}
-            onClick={() => setView(view === "create" ? "list" : "create")}
-          >
-            {view === "create" ? (
-              <><ArrowLeft className="h-4 w-4 mr-1" /> Back</>
-            ) : (
-              <><Plus className="h-4 w-4 mr-1" /> Create Entry</>
+          <div className="flex items-center gap-2">
+            {view === "list" && (
+              <Button
+                variant="outline"
+                onClick={() => setLogAllOpen(true)}
+                disabled={logAllTargets.length === 0}
+                title={logAllTargets.length === 0 ? "No fulfillable orders to log" : "Log every fulfillable order's remaining qty in one go"}
+              >
+                <Save className="h-4 w-4 mr-1" /> Log All ({logAllTargets.length})
+              </Button>
             )}
-          </Button>
+            <Button
+              variant={view === "create" ? "outline" : "default"}
+              onClick={() => setView(view === "create" ? "list" : "create")}
+            >
+              {view === "create" ? (
+                <><ArrowLeft className="h-4 w-4 mr-1" /> Back</>
+              ) : (
+                <><Plus className="h-4 w-4 mr-1" /> Create Entry</>
+              )}
+            </Button>
+          </div>
         }
       />
 
@@ -173,6 +227,46 @@ export default function ProductionEntryPage() {
         entry={viewEntry}
         onOpenChange={(open) => { if (!open) setViewEntry(null); }}
       />
+
+      {/* Bulk Log-All confirmation */}
+      <Dialog open={logAllOpen} onOpenChange={setLogAllOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Save className="h-5 w-5 text-primary" /> Log all production orders
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <p className="text-muted-foreground">
+              This logs a production entry for every fulfillable order at its full remaining quantity —
+              crediting each order's Produced Qty and advancing its status.
+            </p>
+            <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs space-y-1">
+              <div className="flex justify-between"><span className="text-muted-foreground">Orders</span><span className="font-semibold tabular-nums">{logAllTargets.length}</span></div>
+              <div className="flex justify-between"><span className="text-muted-foreground">Total units to produce</span><span className="font-semibold tabular-nums">{logAllTotal.toLocaleString()}</span></div>
+            </div>
+            {logAllTargets.length > 0 && (
+              <div className="max-h-40 overflow-y-auto rounded-md border border-border divide-y divide-border text-xs">
+                {logAllTargets.map(({ order, remaining }) => (
+                  <div key={order.id} className="flex items-center justify-between px-3 py-1.5">
+                    <span className="truncate">
+                      <span className="font-mono text-primary">{order.id}</span>{" "}
+                      <span className="text-muted-foreground">· {order.outputItemName ?? order.bom}</span>
+                    </span>
+                    <span className="tabular-nums font-medium shrink-0 ml-2">{remaining.toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setLogAllOpen(false)}>Cancel</Button>
+            <Button onClick={handleLogAll} disabled={logAllTargets.length === 0}>
+              <Save className="h-4 w-4 mr-1.5" /> Log {logAllTargets.length} {logAllTargets.length === 1 ? "Order" : "Orders"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

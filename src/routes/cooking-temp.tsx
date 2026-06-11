@@ -90,6 +90,7 @@ export default function CookingTemp() {
 
   // QC sign-off dialog
   const [qcOpen, setQcOpen] = useState(false);
+  const [qcAllOpen, setQcAllOpen] = useState(false); // bulk "record test for all pending QC"
   const [qcTarget, setQcTarget] = useState<WfProductionEntry | null>(null);
   const [qcTemp, setQcTemp] = useState(75);
   const [qcMeasured, setQcMeasured] = useState(0);
@@ -183,6 +184,65 @@ export default function CookingTemp() {
     setQcOpen(false);
     setFailJustOpen(false);
     setFailReason("");
+  };
+
+  // Bulk: record a passing QC test for EVERY pending-QC batch at once. Each batch
+  // gets a cooking-temp log (measured = its standard, sensory Pass), its order is
+  // marked Completed, and its produced qty is added to inventory.
+  const recordAllQc = () => {
+    if (pendingQC.length === 0) return;
+    const now = new Date();
+    const dateStr = now.toLocaleDateString("en-GB");
+    const timeStr = now.toLocaleTimeString("en-GB");
+    const stamp = now.toISOString().slice(0, 16).replace("T", " ");
+    const checkedByFull = `${CURRENT_USER} (${role}), ${dateStr}, ${timeStr}`;
+    const base = Date.now();
+    const newRecords: T[] = [];
+    const deltas: Parameters<typeof applyStockDeltas>[0] = [];
+
+    pendingQC.forEach((entry, i) => {
+      const itemName = entry.outputItemName ?? entry.bom;
+      const stdTemp = itemConfigs[itemName]?.standardTemp ?? 75;
+      const logId = `CT-${base + i}`;
+      newRecords.push({
+        id: logId,
+        batch: entry.id,
+        item: itemName,
+        cookingTime: "—",
+        standardTemp: `≥${stdTemp}°C`,
+        standardTempMin: stdTemp,
+        measuredTemp: stdTemp,
+        cookedBy: "Kitchen Staff",
+        sensoryPass: true,
+        checkedBy: checkedByFull,
+        date: now.toISOString().slice(0, 10),
+        failReason: undefined,
+        checkedAt: stamp,
+      } as T);
+      updateProductionEntryStatus(entry.id, "Completed", {
+        qcLogId: logId,
+        qcPassedAt: stamp,
+        qcCheckedBy: `${CURRENT_USER} (${role})`,
+        completedAt: stamp,
+        inventoryAdded: true,
+      });
+      deltas.push({
+        itemId: entry.outputItemCode ?? entry.outputItemName ?? entry.id,
+        delta: entry.producedQty,
+        date: entry.date,
+        reference: entry.id,
+        officeId: entry.officeId,
+        warehouseId: entry.warehouseId,
+        label: "Production",
+      });
+    });
+
+    setRecords((curr) => [...newRecords, ...curr]);
+    applyStockDeltas(deltas);
+    const count = pendingQC.length;
+    const units = pendingQC.reduce((s, e) => s + e.producedQty, 0);
+    setQcAllOpen(false);
+    toast.success(`${count} batch${count === 1 ? "" : "es"} passed QC — ${units.toLocaleString()} units added to inventory.`);
   };
 
   const saveItemConfig = () => {
@@ -427,6 +487,17 @@ export default function CookingTemp() {
               </p>
             </div>
             <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setQcAllOpen(true)}
+                disabled={pendingQC.length === 0}
+                title="Record a passing QC test for every pending batch at once"
+              >
+                <ClipboardCheck className="h-4 w-4 mr-1.5" /> Record Test — All ({pendingQC.length})
+              </Button>
+              <Button onClick={() => { setMMobileTab("qc"); setMScreen(1); setMobileOpen(true); }}>
+                <Smartphone className="h-4 w-4 mr-1.5" /> Mobile App View
+              </Button>
               <Badge variant="outline" className="bg-warning/15 text-warning-foreground border-warning/40">
                 {pendingQC.length} pending
               </Badge>
@@ -466,6 +537,49 @@ export default function CookingTemp() {
           )}
         </CardContent>
       </Card>
+
+      {/* Bulk record-test confirmation */}
+      <Dialog open={qcAllOpen} onOpenChange={setQcAllOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ClipboardCheck className="h-5 w-5 text-primary" /> Record test for all pending QC
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <p className="text-muted-foreground">
+              This records a <span className="font-medium text-foreground">passing</span> QC test for every batch
+              awaiting sign-off — each is marked Completed and its produced quantity is added to inventory.
+            </p>
+            <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs space-y-1">
+              <div className="flex justify-between"><span className="text-muted-foreground">Batches</span><span className="font-semibold tabular-nums">{pendingQC.length}</span></div>
+              <div className="flex justify-between"><span className="text-muted-foreground">Total units to inventory</span><span className="font-semibold tabular-nums">{pendingQC.reduce((s, e) => s + e.producedQty, 0).toLocaleString()}</span></div>
+            </div>
+            {pendingQC.length > 0 && (
+              <div className="max-h-40 overflow-y-auto rounded-md border border-border divide-y divide-border text-xs">
+                {pendingQC.map((e) => (
+                  <div key={e.id} className="flex items-center justify-between px-3 py-1.5">
+                    <span className="truncate">
+                      <span className="font-mono text-primary">{e.id}</span>{" "}
+                      <span className="text-muted-foreground">· {e.outputItemName ?? e.bom}</span>
+                    </span>
+                    <span className="tabular-nums font-medium shrink-0 ml-2">{e.producedQty.toLocaleString()}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="text-[11px] text-muted-foreground">
+              For individual temperature/sensory entry or to fail a batch, use the per-batch <span className="font-medium">Record Test</span> button instead.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setQcAllOpen(false)}>Cancel</Button>
+            <Button onClick={recordAllQc} disabled={pendingQC.length === 0}>
+              <ClipboardCheck className="h-4 w-4 mr-1.5" /> Pass {pendingQC.length} {pendingQC.length === 1 ? "Batch" : "Batches"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3 mb-3">

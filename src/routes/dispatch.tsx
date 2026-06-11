@@ -9,6 +9,9 @@ import {
   CheckCircle2, ThermometerSun, PlaneLanding, User, Clock,
 } from "lucide-react";
 import { flights, meals } from "@/lib/sample-data";
+import {
+  dayFromDate, parseMealQty, resolveCrewDish, resolveSpecialDish,
+} from "@/lib/meal-planning-data";
 import { useFlightOrders, type FlightOrder } from "@/lib/flight-orders-store";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -20,7 +23,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { useArrivalFlash } from "@/lib/arrival-flash";
+import { useArrivalFlash, flagArrival } from "@/lib/arrival-flash";
 import { useWorkflow } from "@/lib/workflow-store";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -39,6 +42,34 @@ type DispatchDetail = {
 type PaxLine = { itemName: string; percent: number; qty: number };
 type CrewMealLine = { type: string; qty: string };
 type DynamicItem = { id: string; name: string; qty: string };
+
+// One row of the dispatch's Production Status — a meal tagged by audience and
+// linked to its production order. PAX, Crew and Special all flow through this.
+// A combined dispatch bundles two legs (outbound + return), so each line also
+// carries which leg (flight/sector/direction) it belongs to.
+type ProdAudience = "PAX" | "Crew" | "Special";
+type LegDirection = "Outbound" | "Return";
+type ProductionLine = {
+  audience: ProdAudience;
+  meal: string;                 // resolved dish name
+  label: string;                // display label (crew/special prefix the period/code)
+  needQty: number;
+  proId: string | null;
+  producedQty: number | null;
+  status: string;
+  ready: boolean;               // has a Completed (QC-passed) production order
+  blocks: boolean;              // prevents dispatch until resolved
+  legFlight: string;            // flight number this line belongs to
+  legSector: string;            // sector (e.g. "SIN → DAC")
+  legDirection: LegDirection;
+};
+
+// "SIN → DAC" / "SIN-DAC" → "DAC → SIN" — used to spot the reverse-sector leg.
+function reverseSector(sector: string): string {
+  const parts = sector.split(/→|—|–|-/).map((s) => s.trim()).filter(Boolean);
+  if (parts.length !== 2) return sector;
+  return `${parts[1]} → ${parts[0]}`;
+}
 
 type FlightSection = {
   flightNo: string; sector: string;
@@ -436,6 +467,14 @@ export default function Dispatch() {
   const [configCrewMeals, setConfigCrewMeals]       = useState<CfgCrewMeal[]>([{ id: "c1", type: "Breakfast", qty: "" }]);
   const [configSpecialMeals, setConfigSpecialMeals] = useState<CfgSpecialMeal[]>([]);
   const [configAdditional, setConfigAdditional]     = useState<CfgAdditional[]>([]);
+  // When the selected flight is part of a round trip, bundle its return leg into
+  // the same dispatch sheet (one combined record covering both sectors). The
+  // return leg's meals are seeded on flight-pick and stay editable, just like the
+  // primary leg's.
+  const [includeReturn, setIncludeReturn]           = useState(true);
+  const [returnPaxLines, setReturnPaxLines]         = useState<CfgPaxLine[]>([]);
+  const [returnCrewMeals, setReturnCrewMeals]       = useState<CfgCrewMeal[]>([]);
+  const [returnSpecialMeals, setReturnSpecialMeals] = useState<CfgSpecialMeal[]>([]);
 
   // ── View / trail modal ──────────────────────────────────────────────────────
   const [viewRecord, setViewRecord] = useState<DispatchRecord | null>(null);
@@ -489,12 +528,54 @@ export default function Dispatch() {
     [selectedOrder, configFlight]
   );
 
+  // The return leg of an order's round trip: the other leg of the same Order #
+  // with the opposite direction. Prefer the one whose sector is the exact reverse
+  // of the selected sector; else the first opposite-direction leg.
+  const findReturnLeg = (order: FlightOrder | null | undefined): FlightOrder | null => {
+    if (!order?.orderNo) return null;
+    const opp: LegDirection = order.direction === "Return" ? "Outbound" : "Return";
+    const legs = flightOrders.filter(
+      (o) => o.orderNo === order.orderNo && o.flight !== order.flight && o.direction === opp,
+    );
+    if (legs.length === 0) return null;
+    const rev = reverseSector(order.sector);
+    return legs.find((o) => o.sector === rev) ?? legs[0];
+  };
+  const returnOrder = useMemo<FlightOrder | null>(
+    () => findReturnLeg(selectedOrder),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedOrder, flightOrders],
+  );
+
+  // Derive a leg's meals (PAX split 60/40, crew headcount, special roster) the
+  // same way auto-load does — used to fill the return leg without extra input.
+  const deriveMeals = (order: FlightOrder) => {
+    const pax = order.pax;
+    const lead = Math.round(pax * 0.6);
+    let paxLines: CfgPaxLine[] = [];
+    if (paxMenu.length >= 2) {
+      paxLines = [
+        { id: "rp1", itemName: paxMenu[0].name, percent: 60, qty: lead },
+        { id: "rp2", itemName: paxMenu[1].name, percent: 40, qty: pax - lead },
+      ];
+    } else if (paxMenu.length === 1) {
+      paxLines = [{ id: "rp1", itemName: paxMenu[0].name, percent: 60, qty: pax }];
+    }
+    const crewMeals: CfgCrewMeal[] = [{ id: "rc1", type: "Lunch", qty: String(order.crew) }];
+    const byCode = new Map<string, number>();
+    for (const e of order.specialMealRoster ?? []) byCode.set(e.mealCode, (byCode.get(e.mealCode) ?? 0) + 1);
+    let specialMeals: CfgSpecialMeal[] = [...byCode.entries()].map(([type, qty], i) => ({ id: `rs${i}`, type, qty: String(qty) }));
+    if (specialMeals.length === 0 && order.specialMeals > 0) specialMeals = [{ id: "rs0", type: "VGML", qty: String(order.specialMeals) }];
+    return { paxLines, crewMeals, specialMeals };
+  };
+
   // Select a flight → auto-load the rest of the form from Order Management
   // (ETD, sector, PAX, crew, special-meal roster) and Meal Planning (the PAX
   // main-meal menu, split across the passenger count). The user only picks the
   // flight; everything below is filled in and remains editable.
   const autoLoadFromFlight = (flightNo: string) => {
     setConfigFlight(flightNo);
+    setIncludeReturn(true); // default to bundling the return leg on each new pick
     if (!flightNo) return;
     const order =
       flightOrders.find((o) => o.flight === flightNo && (!configDate || o.date === configDate)) ??
@@ -529,44 +610,125 @@ export default function Dispatch() {
       special = [{ id: "s0", type: "VGML", qty: String(order.specialMeals) }];
     }
     setConfigSpecialMeals(special);
+
+    // Seed the return leg's meals (editable) when this order has a paired return.
+    const retLeg = findReturnLeg(order);
+    if (retLeg) {
+      const d = deriveMeals(retLeg);
+      setReturnPaxLines(d.paxLines);
+      setReturnCrewMeals(d.crewMeals);
+      setReturnSpecialMeals(d.specialMeals);
+    } else {
+      setReturnPaxLines([]); setReturnCrewMeals([]); setReturnSpecialMeals([]);
+    }
   };
 
-  // Special-meal dropdown options: the standard set plus any code the auto-load
-  // pulled from a flight's roster (e.g. AVML, FPML) so it renders selected.
-  const specialMealOptions = useMemo(
-    () => [...new Set([...SPECIAL_MEAL_TYPES, ...configSpecialMeals.map((m) => m.type)])],
-    [configSpecialMeals],
-  );
-
-  // Production Entry linkup — for the meals auto-loaded onto the selected flight,
-  // surface the matching production order (produced qty + status) from the
-  // Production Entry workflow store. This is what shows once production is done.
-  const productionForSelected = useMemo(() => {
+  // Production Entry linkup — every meal under this dispatch (PAX, Crew and
+  // Special) is tagged with its own production order, so one dispatch bundles
+  // multiple orders/productions. PAX lines name their dish directly; crew and
+  // special lines are auto-mapped to a representative dish (period/code → Meal
+  // Planning) so they too carry a PRO number.
+  const productionLines = useMemo<ProductionLine[]>(() => {
     if (!configFlight) return [];
-    return configPaxLines
-      .filter((l) => l.itemName)
-      .map((l) => {
-        const matches = productionEntries.filter((e) => (e.outputItemName ?? e.bom) === l.itemName);
-        // A meal is dispatch-ready only when it has a QC-passed (Completed)
-        // production order. Prefer showing that one; otherwise show the latest
-        // in-progress order so the user sees why it's blocked.
-        const completed = matches.find((e) => e.status === "Completed");
-        const pe = completed ?? matches[0];
-        return {
-          meal: l.itemName,
-          needQty: l.qty,
-          proId: pe?.id ?? null,
-          producedQty: pe?.producedQty ?? null,
-          status: pe?.status ?? "Not in production",
-          ready: !!completed,
-        };
-      });
-  }, [configFlight, configPaxLines, productionEntries]);
+    const day = dayFromDate(configDate);
 
-  // Dispatch validation: every PAX meal must be produced & QC-passed first.
-  const productionReady =
-    productionForSelected.length > 0 && productionForSelected.every((p) => p.ready);
-  const blockingMeals = productionForSelected.filter((p) => !p.ready).map((p) => p.meal);
+    // Link a dish to its production order: prefer a QC-passed (Completed) order;
+    // else show the latest in-progress one so the block reason is visible.
+    const linkPro = (dish: string) => {
+      const matches = productionEntries.filter((e) => (e.outputItemName ?? e.bom) === dish);
+      const completed = matches.find((e) => e.status === "Completed");
+      const pe = completed ?? matches[0];
+      return {
+        proId: pe?.id ?? null,
+        producedQty: pe?.producedQty ?? null,
+        status: pe?.status ?? "Not in production",
+        completed: !!completed,
+        hasPro: !!pe,
+      };
+    };
+
+    type Leg = { legFlight: string; legSector: string; legDirection: LegDirection };
+
+    // Build the PAX/Crew/Special production lines for one leg, tagged with that
+    // leg's flight/sector/direction. Every line must be Completed to dispatch.
+    const buildLines = (
+      leg: Leg, paxLines: CfgPaxLine[], crewMeals: CfgCrewMeal[], specialMeals: CfgSpecialMeal[],
+    ): ProductionLine[] => {
+      const out: ProductionLine[] = [];
+      for (const l of paxLines.filter((l) => l.itemName)) {
+        const link = linkPro(l.itemName);
+        out.push({
+          audience: "PAX", meal: l.itemName, label: l.itemName, needQty: Number(l.qty) || 0,
+          proId: link.proId, producedQty: link.producedQty, status: link.status,
+          ready: link.completed, blocks: !link.completed, ...leg,
+        });
+      }
+      for (const m of crewMeals) {
+        const dish = resolveCrewDish(m.type, day);
+        if (!dish) continue;
+        const link = linkPro(dish);
+        out.push({
+          audience: "Crew", meal: dish, label: `${m.type} · ${dish}`, needQty: parseMealQty(m.qty),
+          proId: link.proId, producedQty: link.producedQty, status: link.status,
+          ready: link.completed, blocks: !link.completed, ...leg,
+        });
+      }
+      for (const m of specialMeals) {
+        const dish = resolveSpecialDish(m.type, day);
+        if (!dish) continue;
+        const link = linkPro(dish);
+        out.push({
+          audience: "Special", meal: dish, label: `${m.type} · ${dish}`, needQty: parseMealQty(m.qty),
+          proId: link.proId, producedQty: link.producedQty, status: link.status,
+          ready: link.completed, blocks: !link.completed, ...leg,
+        });
+      }
+      return out;
+    };
+
+    const lines: ProductionLine[] = [];
+    // Selected (primary) leg — from the editable config.
+    lines.push(...buildLines(
+      { legFlight: configFlight, legSector: selectedSector, legDirection: selectedOrder?.direction ?? "Outbound" },
+      configPaxLines, configCrewMeals, configSpecialMeals,
+    ));
+    // Return leg — from its editable meal state, bundled into the same dispatch.
+    if (includeReturn && returnOrder) {
+      lines.push(...buildLines(
+        { legFlight: returnOrder.flight, legSector: returnOrder.sector, legDirection: returnOrder.direction },
+        returnPaxLines, returnCrewMeals, returnSpecialMeals,
+      ));
+    }
+    // Always list Outbound lines before Return (stable — keeps audience order).
+    lines.sort((a, b) => (a.legDirection === "Outbound" ? 0 : 1) - (b.legDirection === "Outbound" ? 0 : 1));
+    return lines;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configFlight, configDate, configPaxLines, configCrewMeals, configSpecialMeals, productionEntries, includeReturn, returnOrder, returnPaxLines, returnCrewMeals, returnSpecialMeals, selectedSector, selectedOrder]);
+
+  // Dispatch validation: EVERY meal under the dispatch — PAX, Crew and Special —
+  // must have a Completed (QC-passed) production order. Any line that isn't
+  // completed disables the Save & Create Dispatch button. (PAX presence required.)
+  const paxLineCount = productionLines.filter((l) => l.audience === "PAX").length;
+  const productionReady = paxLineCount > 0 && productionLines.every((l) => !l.blocks);
+  const blockingMeals = productionLines.filter((l) => l.blocks).map((l) => l.label);
+
+  // Combined dispatch summary — per-leg and grand totals across outbound + return.
+  const legTotals = (o: FlightOrder) => ({
+    pax: o.pax, crew: o.crew, special: o.specialMeals, meals: o.pax + o.crew + o.specialMeals,
+  });
+  const summaryLegs = ([
+    selectedOrder ? { order: selectedOrder, totals: legTotals(selectedOrder) } : null,
+    includeReturn && returnOrder ? { order: returnOrder, totals: legTotals(returnOrder) } : null,
+  ].filter(Boolean) as { order: FlightOrder; totals: ReturnType<typeof legTotals> }[])
+    // Always show Outbound before Return.
+    .sort((a, b) => (a.order.direction === "Outbound" ? 0 : 1) - (b.order.direction === "Outbound" ? 0 : 1));
+  const grandTotals = summaryLegs.reduce(
+    (acc, l) => ({
+      pax: acc.pax + l.totals.pax, crew: acc.crew + l.totals.crew,
+      special: acc.special + l.totals.special, meals: acc.meals + l.totals.meals,
+    }),
+    { pax: 0, crew: 0, special: 0, meals: 0 },
+  );
 
   // ── Packaging derived ───────────────────────────────────────────────────────
 
@@ -742,6 +904,9 @@ export default function Dispatch() {
     ]);
     setConfigCrewMeals([{ id: "c1", type: "Breakfast", qty: "" }]);
     setConfigSpecialMeals([]);
+    setReturnPaxLines([]);
+    setReturnCrewMeals([]);
+    setReturnSpecialMeals([]);
   };
 
   const resetConfig = () => {
@@ -795,6 +960,10 @@ export default function Dispatch() {
     if (!configDepTime) { toast.error("Please select a departure time."); return; }
     if (!configFlight)  { toast.error("Please select a flight."); return; }
     if (configuredFlights.has(configFlight)) { toast.error(`${configFlight} is already configured for dispatch.`); return; }
+    if (includeReturn && returnOrder && configuredFlights.has(returnOrder.flight)) {
+      toast.error(`Return leg ${returnOrder.flight} is already configured — untick "Dispatch the return sector together" to dispatch ${configFlight} alone.`);
+      return;
+    }
     if (!productionReady) {
       toast.error(`Cannot dispatch — not yet produced & QC-passed: ${blockingMeals.join(", ")}.`);
       return;
@@ -804,70 +973,114 @@ export default function Dispatch() {
     const dateStr = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
     const timeStr = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: true });
 
-    const specialByCode = (code: string) =>
-      configSpecialMeals.filter((m) => m.type === code).reduce((acc, m) => acc + (Number(m.qty) || 0), 0);
-
-    const newSection: FlightSection = {
-      flightNo: configFlight,
-      sector: selectedSector,
-      paxLines: configPaxLines.map(({ itemName, percent, qty }) => ({ itemName, percent, qty })),
-      vgml: specialByCode("VGML"),
-      chml: specialByCode("CHML"),
-      spml: specialByCode("SPML"),
-      crewMeals: configCrewMeals.map(({ type, qty }) => ({ type, qty })),
-      pastry: 0,
-      childMealsPastry: 0,
+    // The legs going on this one combined dispatch sheet: the selected flight,
+    // plus its return leg when bundled (one record covers both sectors).
+    type LegConfig = {
+      flight: string; sector: string; order: FlightOrder | null;
+      paxLines: CfgPaxLine[]; crewMeals: CfgCrewMeal[]; specialMeals: CfgSpecialMeal[];
     };
+    const legConfigs: LegConfig[] = [
+      { flight: configFlight, sector: selectedSector, order: selectedOrder ?? null,
+        paxLines: configPaxLines, crewMeals: configCrewMeals, specialMeals: configSpecialMeals },
+    ];
+    if (includeReturn && returnOrder) {
+      legConfigs.push({
+        flight: returnOrder.flight, sector: returnOrder.sector, order: returnOrder,
+        paxLines: returnPaxLines, crewMeals: returnCrewMeals, specialMeals: returnSpecialMeals,
+      });
+    }
+    // Outbound leg first in the saved sections / packaging rows / flight list.
+    legConfigs.sort((a, b) =>
+      (a.order?.direction === "Outbound" ? 0 : 1) - (b.order?.direction === "Outbound" ? 0 : 1));
 
-    const hotTotal = configPaxLines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
+    const sectionFor = (leg: LegConfig): FlightSection => {
+      const byCode = (code: string) =>
+        leg.specialMeals.filter((m) => m.type === code).reduce((acc, m) => acc + (Number(m.qty) || 0), 0);
+      return {
+        flightNo: leg.flight,
+        sector: leg.sector,
+        paxLines: leg.paxLines.map(({ itemName, percent, qty }) => ({ itemName, percent, qty })),
+        vgml: byCode("VGML"),
+        chml: byCode("CHML"),
+        spml: byCode("SPML"),
+        crewMeals: leg.crewMeals.map(({ type, qty }) => ({ type, qty })),
+        pastry: 0,
+        childMealsPastry: 0,
+      };
+    };
+    const newSections = legConfigs.map(sectionFor);
+
+    const hotTotal = legConfigs.reduce(
+      (s, leg) => s + leg.paxLines.reduce((a, l) => a + (Number(l.qty) || 0), 0), 0,
+    );
     const existingRec = records.find((r) => r.date === configDate && r.depTime === configDepTime);
     const recId = existingRec ? existingRec.id : `DSP-${Date.now().toString().slice(-4)}`;
 
-    // Build packaging rows for this flight from the configured meals so the new
-    // dispatch shows up in the main packaging/dispatch list. Each row is linked
-    // back to its dispatch record (dspRef), the flight order (orderNo) and — when
-    // the meal matches a production order — the Production Entry (productionOrderId).
+    // Build packaging rows per leg so the dispatch shows in the packaging/dispatch
+    // list. Each row links back to its dispatch record (dspRef), the flight order
+    // (orderNo) and — when the meal matches a production order — the PRO.
     const proFor = (mealName: string) =>
       productionEntries.find((e) => (e.outputItemName ?? e.bom) === mealName)?.id;
-    const newPackagingRows: PackagingRow[] = [
-      ...configPaxLines
+    // Crew period → a packaging meal-type bucket (PackagingRow has no "Crew").
+    const crewMealType = (period: string): PackagingRow["mealType"] => {
+      const p = period.toLowerCase();
+      if (p.includes("breakfast")) return "Breakfast";
+      if (p.includes("dinner")) return "Dinner";
+      if (p.includes("lunch")) return "Lunch";
+      return "Snack";
+    };
+    const dispatchDay = dayFromDate(configDate);
+    const stamp = Date.now();
+    const rowsForLeg = (leg: LegConfig, legIdx: number): PackagingRow[] => [
+      ...leg.paxLines
         .filter((l) => l.itemName && (Number(l.qty) || 0) > 0)
         .map((l, i) => {
           const meta = mealMeta(l.itemName);
           return {
-            id: `PRD-${Date.now()}-${i}`,
-            date: configDate,
-            depTime: configDepTime,
-            flight: configFlight,
-            mealType: meta.mealType,
-            mealName: l.itemName,
-            qty: Number(l.qty) || 0,
-            section: meta.section,
-            packagingStatus: "Ready for Packaging" as PackagingStatus,
-            dspRef: recId,
-            orderNo: selectedOrder?.orderNo,
-            productionOrderId: proFor(l.itemName),
+            id: `PRD-${stamp}-L${legIdx}-${i}`,
+            date: configDate, depTime: configDepTime, flight: leg.flight,
+            mealType: meta.mealType, mealName: l.itemName, qty: Number(l.qty) || 0,
+            section: meta.section, packagingStatus: "Ready for Packaging" as PackagingStatus,
+            dspRef: recId, orderNo: leg.order?.orderNo, productionOrderId: proFor(l.itemName),
           };
         }),
-      ...configSpecialMeals
+      ...leg.crewMeals
+        .filter((m) => parseMealQty(m.qty) > 0)
+        .map((m, i) => {
+          const dish = resolveCrewDish(m.type, dispatchDay);
+          return {
+            id: `PRD-${stamp}-L${legIdx}-C${i}`,
+            date: configDate, depTime: configDepTime, flight: leg.flight,
+            mealType: crewMealType(m.type),
+            mealName: dish ? `${dish} (Crew ${m.type})` : `Crew ${m.type}`,
+            qty: parseMealQty(m.qty), section: "Crew Meal",
+            packagingStatus: "Ready for Packaging" as PackagingStatus,
+            dspRef: recId, orderNo: leg.order?.orderNo,
+            productionOrderId: dish ? proFor(dish) : undefined,
+          };
+        }),
+      ...leg.specialMeals
         .filter((m) => (Number(m.qty) || 0) > 0)
-        .map((m, i) => ({
-          id: `PRD-${Date.now()}-S${i}`,
-          date: configDate,
-          depTime: configDepTime,
-          flight: configFlight,
-          mealType: "Special" as PackagingRow["mealType"],
-          mealName: m.type,
-          qty: Number(m.qty) || 0,
-          section: "Special Meal",
-          packagingStatus: "Ready for Packaging" as PackagingStatus,
-          dspRef: recId,
-          orderNo: selectedOrder?.orderNo,
-        })),
+        .map((m, i) => {
+          const dish = resolveSpecialDish(m.type, dispatchDay);
+          return {
+            id: `PRD-${stamp}-L${legIdx}-S${i}`,
+            date: configDate, depTime: configDepTime, flight: leg.flight,
+            mealType: "Special" as PackagingRow["mealType"], mealName: m.type,
+            qty: Number(m.qty) || 0, section: "Special Meal",
+            packagingStatus: "Ready for Packaging" as PackagingStatus,
+            dspRef: recId, orderNo: leg.order?.orderNo,
+            productionOrderId: dish ? proFor(dish) : undefined,
+          };
+        }),
     ];
+    const newPackagingRows: PackagingRow[] = legConfigs.flatMap((leg, idx) => rowsForLeg(leg, idx));
     if (newPackagingRows.length > 0) {
       setPackagingRows((prev) => [...newPackagingRows, ...prev]);
     }
+
+    const legFlights = legConfigs.map((l) => l.flight);
+    const legLabel = legFlights.join(" + ");
 
     if (existingRec) {
       setRecords((prev) =>
@@ -875,8 +1088,8 @@ export default function Dispatch() {
           r.id === existingRec.id
             ? {
                 ...r,
-                flightNos: [...r.flightNos, configFlight],
-                sections: [...r.sections, newSection],
+                flightNos: [...r.flightNos, ...legFlights],
+                sections: [...r.sections, ...newSections],
                 detail: {
                   ...r.detail,
                   flightKitchen: {
@@ -890,14 +1103,14 @@ export default function Dispatch() {
             : r
         )
       );
-      toast.success(`${configFlight} added to dispatch ${existingRec.id} (dep ${configDepTime}).`);
+      toast.success(`${legLabel} added to dispatch ${existingRec.id} (dep ${configDepTime}).`);
     } else {
       const newRec: DispatchRecord = {
         id: recId,
         date: configDate,
         depTime: configDepTime,
         kitchenName: "Flight Kitchen A",
-        flightNos: [configFlight],
+        flightNos: legFlights,
         status: "Preparing",
         trail: [{ status: "Preparing", by: "System", date: dateStr, time: timeStr }],
         detail: {
@@ -906,14 +1119,18 @@ export default function Dispatch() {
           amenities: configAdditional.filter((a) => a.name).map((a) => ({ label: a.name, qty: Number(a.qty) || 0 })),
           foodSafety: { result: "—", checkedBy: "—", date: "—", time: "—" },
         },
-        sections: [newSection],
+        sections: newSections,
         dynamicItems: configAdditional.map((a) => ({ id: a.id, name: a.name, qty: a.qty })),
       };
       setRecords((prev) => [...prev, newRec]);
-      toast.success(`Dispatch configured for ${configFlight} departing ${configDepTime}.`);
+      toast.success(
+        legFlights.length > 1
+          ? `Combined dispatch configured for ${legLabel} (outbound + return) departing ${configDepTime}.`
+          : `Dispatch configured for ${legLabel} departing ${configDepTime}.`,
+      );
     }
 
-    setConfiguredFlights((prev) => new Set([...prev, configFlight]));
+    setConfiguredFlights((prev) => new Set([...prev, ...legFlights]));
     setConfigOpen(false);
     resetConfig();
   };
@@ -1180,6 +1397,157 @@ export default function Dispatch() {
     setTimeout(() => win.print(), 250);
   };
 
+  // Leg header — direction-coded (Outbound = emerald, Return = amber) so the
+  // badge colour always matches the label.
+  const legHeader = (flight: string, sector: string, direction: LegDirection) => (
+    <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-slate-600">
+      <span className={`px-1.5 py-0.5 rounded text-[10px] ${direction === "Return" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
+        {direction}
+      </span>
+      {flight} · {sector}
+    </div>
+  );
+
+  // PAX / Crew / Special meal-entry sections for one leg. Rendered once for the
+  // selected flight, and again for the return leg when the round trip is bundled.
+  type SetFn<T> = (updater: (prev: T[]) => T[]) => void;
+  const renderMealSections = (
+    paxLines: CfgPaxLine[], setPaxLines: SetFn<CfgPaxLine>,
+    crewMeals: CfgCrewMeal[], setCrewMeals: SetFn<CfgCrewMeal>,
+    specialMeals: CfgSpecialMeal[], setSpecialMeals: SetFn<CfgSpecialMeal>,
+  ) => {
+    const specialOpts = [...new Set([...SPECIAL_MEAL_TYPES, ...specialMeals.map((m) => m.type)])];
+    return (
+      <>
+        {/* PAX Main Meal */}
+        <div>
+          <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2">PAX Main Meal</div>
+          <table className="w-full text-xs border border-slate-200 rounded-md overflow-hidden">
+            <thead className="bg-slate-50 border-b border-slate-200">
+              <tr>
+                <th className="p-2 text-left font-semibold">Item Name</th>
+                <th className="p-2 text-center font-semibold w-28">%</th>
+                <th className="p-2 text-center font-semibold w-24">QTY</th>
+                <th className="p-2 w-8"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {paxLines.map((line, i) => (
+                <tr key={line.id} className={i > 0 ? "border-t border-slate-200" : ""}>
+                  <td className="p-1.5">
+                    <select
+                      value={line.itemName}
+                      onChange={(e) => setPaxLines((prev) => prev.map((l) => l.id === line.id ? { ...l, itemName: e.target.value } : l))}
+                      className="h-8 w-full rounded border border-input bg-background px-2 text-xs"
+                    >
+                      <option value="">— Select —</option>
+                      {paxMenu.map((m) => <option key={m.id} value={m.name}>{m.name}</option>)}
+                    </select>
+                  </td>
+                  <td className="p-1.5">
+                    <select
+                      value={line.percent}
+                      onChange={(e) => setPaxLines((prev) => prev.map((l) => l.id === line.id ? { ...l, percent: Number(e.target.value) } : l))}
+                      className="h-8 w-full rounded border border-input bg-background px-2 text-xs text-center"
+                    >
+                      {[30, 40, 50, 60, 70].map((v) => <option key={v} value={v}>{v}%</option>)}
+                    </select>
+                  </td>
+                  <td className="p-1.5">
+                    <Input
+                      type="number" min={0}
+                      value={line.qty || ""}
+                      onChange={(e) => setPaxLines((prev) => prev.map((l) => l.id === line.id ? { ...l, qty: Number(e.target.value) } : l))}
+                      className="h-8 text-xs text-center"
+                    />
+                  </td>
+                  <td className="p-1.5 text-center">
+                    {paxLines.length > 1 && (
+                      <button onClick={() => setPaxLines((prev) => prev.filter((l) => l.id !== line.id))} className="text-red-500 hover:text-red-700 text-base leading-none">×</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              <tr className="border-t-2 border-slate-300 bg-slate-50/80">
+                <td className="p-2 font-bold text-xs" colSpan={2}>Total Hot Meal</td>
+                <td className="p-2 text-center font-bold text-slate-800">{paxLines.reduce((s, l) => s + (Number(l.qty) || 0), 0)}</td>
+                <td></td>
+              </tr>
+            </tbody>
+          </table>
+          <Button variant="outline" size="sm" className="mt-2 text-xs no-brand"
+            onClick={() => setPaxLines((prev) => [...prev, { id: `p${Date.now()}`, itemName: "", percent: 40, qty: 0 }])}>
+            + Add Meal Option
+          </Button>
+        </div>
+
+        {/* Crew Meals */}
+        <div>
+          <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2">Crew Meals</div>
+          <div className="space-y-2">
+            {crewMeals.map((meal) => (
+              <div key={meal.id} className="flex items-center gap-2">
+                <select
+                  value={meal.type}
+                  onChange={(e) => setCrewMeals((prev) => prev.map((m) => m.id === meal.id ? { ...m, type: e.target.value } : m))}
+                  className="h-8 flex-1 rounded border border-input bg-background px-2 text-sm"
+                >
+                  {CREW_MEAL_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <Input
+                  value={meal.qty}
+                  onChange={(e) => setCrewMeals((prev) => prev.map((m) => m.id === meal.id ? { ...m, qty: e.target.value } : m))}
+                  placeholder="e.g. 12+1"
+                  className="h-8 w-28 text-sm"
+                />
+                {crewMeals.length > 1 && (
+                  <button onClick={() => setCrewMeals((prev) => prev.filter((m) => m.id !== meal.id))} className="text-red-500 hover:text-red-700 text-lg leading-none">×</button>
+                )}
+              </div>
+            ))}
+            <Button variant="outline" size="sm" className="text-xs no-brand"
+              onClick={() => setCrewMeals((prev) => [...prev, { id: `c${Date.now()}`, type: "Lunch", qty: "" }])}>
+              + Add More
+            </Button>
+          </div>
+        </div>
+
+        {/* Special Meals */}
+        <div>
+          <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2">Special Meals</div>
+          <div className="space-y-2">
+            {specialMeals.length === 0 && (
+              <p className="text-xs text-muted-foreground">No special meals added.</p>
+            )}
+            {specialMeals.map((meal) => (
+              <div key={meal.id} className="flex items-center gap-2">
+                <select
+                  value={meal.type}
+                  onChange={(e) => setSpecialMeals((prev) => prev.map((m) => m.id === meal.id ? { ...m, type: e.target.value } : m))}
+                  className="h-8 flex-1 rounded border border-input bg-background px-2 text-sm"
+                >
+                  {specialOpts.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <Input
+                  type="number" min={0}
+                  value={meal.qty}
+                  onChange={(e) => setSpecialMeals((prev) => prev.map((m) => m.id === meal.id ? { ...m, qty: e.target.value } : m))}
+                  placeholder="Qty"
+                  className="h-8 w-24 text-sm text-center"
+                />
+                <button onClick={() => setSpecialMeals((prev) => prev.filter((m) => m.id !== meal.id))} className="text-red-500 hover:text-red-700 text-lg leading-none">×</button>
+              </div>
+            ))}
+            <Button variant="outline" size="sm" className="text-xs no-brand"
+              onClick={() => setSpecialMeals((prev) => [...prev, { id: `s${Date.now()}`, type: "VGML", qty: "" }])}>
+              + Add Special Meal
+            </Button>
+          </div>
+        </div>
+      </>
+    );
+  };
+
   // ── Render ───────────────────────────────────────────────────────────────────
 
   return (
@@ -1245,18 +1613,14 @@ export default function Dispatch() {
       {/* ── PRD Packaging Table ──────────────────────────────────────────────── */}
       <div data-arrival-id="dispatch-list" className="rounded-lg border border-border bg-card shadow-sm mb-6 overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm min-w-[1100px]">
+          <table className="w-full text-sm min-w-[820px]">
             <thead className="bg-muted/50 border-b border-border">
               <tr>
                 <th className="p-3 text-left font-semibold">Dispatch ID</th>
                 <th className="p-3 text-left font-semibold">Flight</th>
                 <th className="p-3 text-left font-semibold">Order</th>
                 <th className="p-3 text-left font-semibold">Dep Time</th>
-                <th className="p-3 text-left font-semibold">Production</th>
-                <th className="p-3 text-left font-semibold">Meal Type</th>
-                <th className="p-3 text-left font-semibold">Meal Name</th>
-                <th className="p-3 text-right font-semibold">Qty</th>
-                <th className="p-3 text-left font-semibold">Warehouse</th>
+                <th className="p-3 text-center font-semibold">Meals</th>
                 <th className="p-3 text-left font-semibold">Status</th>
                 <th className="p-3 text-left font-semibold">Food Safety & QC</th>
                 <th className="p-3 text-left font-semibold">Actions</th>
@@ -1266,19 +1630,17 @@ export default function Dispatch() {
             {groupedPRDs.length === 0 ? (
               <tbody>
                 <tr>
-                  <td colSpan={12} className="p-10 text-center text-muted-foreground text-sm">
+                  <td colSpan={8} className="p-10 text-center text-muted-foreground text-sm">
                     No packaging orders match the selected filters.
                   </td>
                 </tr>
               </tbody>
             ) : (
               groupedPRDs.map((timeGroup) => {
-                const totalTimeRows = timeGroup.flightGroups.reduce((sum, fg) => sum + fg.rows.length, 0);
-                let timeDepRendered = false;
+                const flightCount = timeGroup.flightGroups.length;
                 return (
                   <tbody key={timeGroup.depTime}>
-                    {timeGroup.flightGroups.flatMap((flightGroup, fgIdx) => {
-                      const flightRowSpan = flightGroup.rows.length;
+                    {timeGroup.flightGroups.map((flightGroup, fgIdx) => {
                       // A completed Dispatch Monitoring entry (qcClearedFlights)
                       // clears the flight for dispatch, overriding local QC state.
                       const monitoredAt = qcClearedFlights[flightGroup.flight];
@@ -1295,199 +1657,162 @@ export default function Dispatch() {
                         (r) => r.packagingStatus === "Packaging Done" || r.packagingStatus === "Ready for Dispatch"
                       );
                       const flightStatus = getFlightStatus(flightGroup.rows, flightQCState);
-                      const isLastFlightGroup = fgIdx === timeGroup.flightGroups.length - 1;
-                      return flightGroup.rows.map((row, rIdx) => {
-                        const isFirstInFlight = rIdx === 0;
-                        const isFirstInTime = isFirstInFlight && !timeDepRendered;
-                        if (isFirstInTime) timeDepRendered = true;
-                        const isAbsoluteLast = isLastFlightGroup && rIdx === flightGroup.rows.length - 1;
-                        // Merge the Order cell across consecutive rows that share
-                        // the same order number (within this flight group). Rows
-                        // without an order number are never merged.
-                        const isFirstInOrder =
-                          !row.orderNo ||
-                          rIdx === 0 ||
-                          flightGroup.rows[rIdx - 1].orderNo !== row.orderNo;
-                        let orderRowSpan = 1;
-                        if (row.orderNo && isFirstInOrder) {
-                          for (
-                            let k = rIdx + 1;
-                            k < flightGroup.rows.length && flightGroup.rows[k].orderNo === row.orderNo;
-                            k++
-                          ) {
-                            orderRowSpan++;
-                          }
-                        }
-                        return (
-                          <tr
-                            key={row.id}
-                            data-arrival-row-id={row.id}
-                            className={`hover:bg-muted/20 ${isAbsoluteLast ? "border-b-2 border-border" : "border-b border-border/50"}`}
-                          >
-                            {isFirstInFlight && (
-                              <td rowSpan={flightRowSpan} className="p-3 align-middle border-r border-border/20">
-                                {(() => {
-                                  const dspId = flightGroup.rows.find((r) => r.dspRef)?.dspRef;
-                                  if (!dspId) return <span className="text-xs text-muted-foreground">—</span>;
-                                  const hasRecord = records.some((rec) => rec.id === dspId);
-                                  return hasRecord ? (
-                                    <button
-                                      type="button"
-                                      className="text-xs font-mono font-semibold text-primary hover:underline whitespace-nowrap"
-                                      title="View dispatch details"
-                                      onClick={() => setViewRecord(records.find((rec) => rec.id === dspId)!)}
-                                    >
-                                      {dspId}
-                                    </button>
-                                  ) : (
-                                    <span className="text-xs font-mono font-semibold text-foreground whitespace-nowrap">{dspId}</span>
-                                  );
-                                })()}
-                              </td>
+                      const isFirstInTime = fgIdx === 0;
+                      const isAbsoluteLast = fgIdx === flightCount - 1;
+                      // One row per flight now — the per-meal production breakdown
+                      // lives in the View dialog (Eye / Meals cell), not the list.
+                      const dspId = flightGroup.rows.find((r) => r.dspRef)?.dspRef;
+                      const dspHasRecord = !!dspId && records.some((rec) => rec.id === dspId);
+                      const orderNos = [...new Set(flightGroup.rows.map((r) => r.orderNo).filter(Boolean))] as string[];
+                      const mealCount = flightGroup.rows.length;
+                      const totalQty = flightGroup.rows.reduce((s, r) => s + r.qty, 0);
+                      return (
+                        <tr
+                          key={`${flightGroup.flight}-${dspId ?? fgIdx}`}
+                          data-arrival-row-id={flightGroup.rows[0]?.id}
+                          className={`hover:bg-muted/20 ${isAbsoluteLast ? "border-b-2 border-border" : "border-b border-border/50"}`}
+                        >
+                          <td className="p-3 align-middle border-r border-border/20">
+                            {!dspId ? (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            ) : dspHasRecord ? (
+                              <button
+                                type="button"
+                                className="text-xs font-mono font-semibold text-primary hover:underline whitespace-nowrap"
+                                title="View dispatch details"
+                                onClick={() => setViewRecord(records.find((rec) => rec.id === dspId)!)}
+                              >
+                                {dspId}
+                              </button>
+                            ) : (
+                              <span className="text-xs font-mono font-semibold text-foreground whitespace-nowrap">{dspId}</span>
                             )}
-                            {isFirstInFlight && (
-                              <td rowSpan={flightRowSpan} className="p-3 font-semibold text-sm align-middle border-r border-border/20 whitespace-nowrap">
-                                {flightGroup.flight}
-                              </td>
-                            )}
-                            {isFirstInOrder && (
-                              <td rowSpan={orderRowSpan} className="p-3 align-middle border-r border-border/20">
-                                {row.orderNo ? (
+                          </td>
+                          <td className="p-3 font-semibold text-sm align-middle border-r border-border/20 whitespace-nowrap">
+                            {flightGroup.flight}
+                          </td>
+                          <td className="p-3 align-middle border-r border-border/20">
+                            {orderNos.length === 0 ? (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            ) : (
+                              <div className="flex flex-wrap gap-1">
+                                {orderNos.map((on) => (
                                   <button
+                                    key={on}
                                     type="button"
                                     className="text-xs font-mono font-semibold text-primary hover:underline whitespace-nowrap"
                                     title="Open Order Management"
-                                    onClick={() => navigate(`/order-management?ord=${row.orderNo}`)}
+                                    onClick={() => navigate(`/order-management?ord=${on}`)}
                                   >
-                                    {row.orderNo}
+                                    {on}
                                   </button>
-                                ) : (
-                                  <span className="text-xs text-muted-foreground">—</span>
-                                )}
-                              </td>
+                                ))}
+                              </div>
                             )}
-                            {isFirstInTime && (
-                              <td rowSpan={totalTimeRows} className="p-3 text-sm text-muted-foreground align-middle font-medium border-r border-border/40 bg-slate-50/60 whitespace-nowrap">
-                                {timeGroup.depTime}
-                              </td>
-                            )}
-                            <td className="p-3 align-middle">
-                              {row.productionOrderId ? (
-                                <button
-                                  type="button"
-                                  className="text-xs font-mono font-medium text-primary hover:underline whitespace-nowrap"
-                                  title="Open Production Order"
-                                  onClick={() => navigate(`/production-entry?pro=${row.productionOrderId}`)}
-                                >
-                                  {row.productionOrderId}
-                                </button>
-                              ) : (
-                                <span className="text-xs text-muted-foreground">—</span>
-                              )}
+                          </td>
+                          {isFirstInTime && (
+                            <td rowSpan={flightCount} className="p-3 text-sm text-muted-foreground align-middle font-medium border-r border-border/40 bg-slate-50/60 whitespace-nowrap">
+                              {timeGroup.depTime}
                             </td>
-                            <td className="p-3">
-                              <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${MEAL_TYPE_BADGE[row.mealType] ?? "bg-muted text-foreground"}`}>
-                                {row.mealType}
+                          )}
+                          <td className="p-3 align-middle text-center">
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline whitespace-nowrap"
+                              title="View meal breakdown"
+                              onClick={() => setViewPackagingRow(flightGroup.rows[0])}
+                            >
+                              <Eye className="h-3 w-3" /> {mealCount} item{mealCount === 1 ? "" : "s"} · {totalQty.toLocaleString()}
+                            </button>
+                          </td>
+                          <td className="p-3 align-middle border-l border-border/20">
+                            <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${FLIGHT_STATUS_BADGE[flightStatus] ?? "bg-muted text-muted-foreground"}`}>
+                              {flightStatus}
+                            </span>
+                          </td>
+                          <td className="p-3 align-middle border-l border-border/20">
+                            {flightQCState === "done" ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold cursor-default" style={{ backgroundColor: "#42F527", color: "#166534" }}
+                                title={`QC checked at ${flightQCData?.qcCheckedAt ?? ""}`}>
+                                <ShieldCheck className="h-3 w-3" /> QC Done
                               </span>
-                            </td>
-                            <td className="p-3 text-sm">{row.mealName}</td>
-                            <td className="p-3 text-right font-medium">{row.qty}</td>
-                            <td className="p-3 text-sm text-muted-foreground">{row.section}</td>
-                            {isFirstInFlight && (
-                              <td rowSpan={flightRowSpan} className="p-3 align-middle border-l border-border/20">
-                                <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${FLIGHT_STATUS_BADGE[flightStatus] ?? "bg-muted text-muted-foreground"}`}>
-                                  {flightStatus}
-                                </span>
-                              </td>
+                            ) : flightQCState === "in-progress" ? (
+                              <Button size="sm"
+                                className="h-7 px-3 text-xs shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white border-0"
+                                onClick={() => handleQCAction(flightGroup.flight)}>
+                                <ShieldCheck className="h-3 w-3 mr-1" /> QC Passed
+                              </Button>
+                            ) : allPackagingDone ? (
+                              <Button size="sm"
+                                className="h-7 px-3 text-xs shrink-0 bg-violet-600 hover:bg-violet-700 text-white border-0"
+                                onClick={() => handleInitiateQC(flightGroup.flight)}>
+                                <ShieldCheck className="h-3 w-3 mr-1" /> Initiate QC
+                              </Button>
+                            ) : (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600 border border-slate-200">Pending</span>
                             )}
-                            {isFirstInFlight && (
-                              <td rowSpan={flightRowSpan} className="p-3 align-middle border-l border-border/20">
-                                {flightQCState === "done" ? (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold cursor-default" style={{ backgroundColor: "#42F527", color: "#166534" }}
-                                    title={`QC checked at ${flightQCData?.qcCheckedAt ?? ""}`}>
-                                    <ShieldCheck className="h-3 w-3" /> QC Done
-                                  </span>
-                                ) : flightQCState === "in-progress" ? (
-                                  <Button size="sm"
-                                    className="h-7 px-3 text-xs shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white border-0"
-                                    onClick={() => handleQCAction(flightGroup.flight)}>
-                                    <ShieldCheck className="h-3 w-3 mr-1" /> QC Passed
+                          </td>
+                          <td className="p-3 align-middle border-l border-border/20">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <Button
+                                size="icon"
+                                title="View"
+                                aria-label="View"
+                                className="h-7 w-7 bg-navy text-navy-foreground hover:opacity-90 shrink-0"
+                                onClick={() => setViewPackagingRow(flightGroup.rows[0])}
+                              >
+                                <Eye className="h-3.5 w-3.5" />
+                              </Button>
+                              {flightQCState !== "done" && flightGroup.rows.some((r) => r.packagingStatus === "Ready for Packaging") && (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-7 px-3 text-xs shrink-0"
+                                  onClick={() => setMaterialsRow(flightGroup.rows.find((r) => r.packagingStatus === "Ready for Packaging")!)}
+                                >
+                                  <Package className="h-3 w-3 mr-1" /> Initiate Packaging
+                                </Button>
+                              )}
+                              {flightQCState === "done" && flightStatus !== "Dispatched" && (
+                                <Button
+                                  size="sm"
+                                  className="h-7 px-3 text-xs shrink-0 bg-gradient-to-r from-teal-500 to-cyan-600 text-white hover:from-teal-600 hover:to-cyan-700 border-0 shadow-sm"
+                                  onClick={() => openWarningForFlightGroup(flightGroup)}
+                                >
+                                  <Truck className="h-3 w-3 mr-1" /> Initiate Dispatch
+                                </Button>
+                              )}
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0">
+                                    <MoreHorizontal className="h-4 w-4" />
                                   </Button>
-                                ) : allPackagingDone ? (
-                                  <Button size="sm"
-                                    className="h-7 px-3 text-xs shrink-0 bg-violet-600 hover:bg-violet-700 text-white border-0"
-                                    onClick={() => handleInitiateQC(flightGroup.flight)}>
-                                    <ShieldCheck className="h-3 w-3 mr-1" /> Initiate QC
-                                  </Button>
-                                ) : (
-                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600 border border-slate-200">Pending</span>
-                                )}
-                              </td>
-                            )}
-                            {isFirstInFlight && (
-                              <td rowSpan={flightRowSpan} className="p-3 align-middle border-l border-border/20">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <Button
-                                    size="icon"
-                                    title="View"
-                                    aria-label="View"
-                                    className="h-7 w-7 bg-navy text-navy-foreground hover:opacity-90 shrink-0"
-                                    onClick={() => setViewPackagingRow(flightGroup.rows[0])}
-                                  >
-                                    <Eye className="h-3.5 w-3.5" />
-                                  </Button>
-                                  {flightQCState !== "done" && flightGroup.rows.some((r) => r.packagingStatus === "Ready for Packaging") && (
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      className="h-7 px-3 text-xs shrink-0"
-                                      onClick={() => setMaterialsRow(flightGroup.rows.find((r) => r.packagingStatus === "Ready for Packaging")!)}
-                                    >
-                                      <Package className="h-3 w-3 mr-1" /> Initiate Packaging
-                                    </Button>
-                                  )}
-                                  {flightQCState === "done" && flightStatus !== "Dispatched" && (
-                                    <Button
-                                      size="sm"
-                                      className="h-7 px-3 text-xs shrink-0 bg-gradient-to-r from-teal-500 to-cyan-600 text-white hover:from-teal-600 hover:to-cyan-700 border-0 shadow-sm"
-                                      onClick={() => openWarningForFlightGroup(flightGroup)}
-                                    >
-                                      <Truck className="h-3 w-3 mr-1" /> Initiate Dispatch
-                                    </Button>
-                                  )}
-                                  <DropdownMenu>
-                                    <DropdownMenuTrigger asChild>
-                                      <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0">
-                                        <MoreHorizontal className="h-4 w-4" />
-                                      </Button>
-                                    </DropdownMenuTrigger>
-                                    <DropdownMenuContent align="end" className="w-52">
-                                      {flightGroup.rows.some((r) => r.packagingStatus === "Packaging In Progress") && (
-                                        <>
-                                          <DropdownMenuItem onClick={() => {
-                                            const ids = new Set(flightGroup.rows.filter((r) => r.packagingStatus === "Packaging In Progress").map((r) => r.id));
-                                            setPackagingRows((prev) => prev.map((r) => ids.has(r.id) ? { ...r, packagingStatus: "Packaging Done" as PackagingStatus } : r));
-                                            toast.success(`Packaging done for flight ${flightGroup.flight}.`);
-                                          }}>
-                                            <CheckCircle2 className="h-4 w-4 mr-2" /> Mark Packaging Done
-                                          </DropdownMenuItem>
-                                          <DropdownMenuSeparator />
-                                        </>
-                                      )}
-                                      <DropdownMenuItem onClick={() => toast.info(`Print Label for ${flightGroup.flight}`)}>
-                                        Print Label
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end" className="w-52">
+                                  {flightGroup.rows.some((r) => r.packagingStatus === "Packaging In Progress") && (
+                                    <>
+                                      <DropdownMenuItem onClick={() => {
+                                        const ids = new Set(flightGroup.rows.filter((r) => r.packagingStatus === "Packaging In Progress").map((r) => r.id));
+                                        setPackagingRows((prev) => prev.map((r) => ids.has(r.id) ? { ...r, packagingStatus: "Packaging Done" as PackagingStatus } : r));
+                                        toast.success(`Packaging done for flight ${flightGroup.flight}.`);
+                                      }}>
+                                        <CheckCircle2 className="h-4 w-4 mr-2" /> Mark Packaging Done
                                       </DropdownMenuItem>
-                                      <DropdownMenuItem onClick={() => setQcReport({ flight: flightGroup.flight, qcState: flightQCState, checkedAt: flightQCData?.qcCheckedAt })}>
-                                        View QC Report
-                                      </DropdownMenuItem>
-                                    </DropdownMenuContent>
-                                  </DropdownMenu>
-                                </div>
-                              </td>
-                            )}
-                          </tr>
-                        );
-                      });
+                                      <DropdownMenuSeparator />
+                                    </>
+                                  )}
+                                  <DropdownMenuItem onClick={() => toast.info(`Print Label for ${flightGroup.flight}`)}>
+                                    Print Label
+                                  </DropdownMenuItem>
+                                  <DropdownMenuItem onClick={() => setQcReport({ flight: flightGroup.flight, qcState: flightQCState, checkedAt: flightQCData?.qcCheckedAt })}>
+                                    View QC Report
+                                  </DropdownMenuItem>
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </td>
+                        </tr>
+                      );
                     })}
                   </tbody>
                 );
@@ -1852,13 +2177,74 @@ export default function Dispatch() {
               </div>
             )}
 
-            {/* Production Entry linkup — produced meals for the selected flight */}
-            {configFlight && productionForSelected.length > 0 && (
+            {/* Return-sector bundling — when the order has a paired return leg */}
+            {selectedOrder && returnOrder && (
+              <label className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50/60 p-3 text-xs cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 accent-primary"
+                  checked={includeReturn}
+                  onChange={(e) => setIncludeReturn(e.target.checked)}
+                />
+                <span className="text-slate-700">
+                  <span className="font-semibold">Dispatch the return sector together</span> — {returnOrder.flight} · {returnOrder.sector} · ETD {returnOrder.etd} · {returnOrder.pax} pax / {returnOrder.crew} crew.
+                  Both legs go on one dispatch sheet with a combined summary.
+                </span>
+              </label>
+            )}
+
+            {/* Combined dispatch summary — outbound + return totals */}
+            {configFlight && summaryLegs.length > 1 && (
+              <div>
+                <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2">Dispatch Summary — Outbound + Return</div>
+                <table className="w-full text-xs border border-slate-200 rounded-md overflow-hidden">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr>
+                      <th className="p-2 text-left font-semibold">Leg</th>
+                      <th className="p-2 text-center font-semibold w-20">PAX</th>
+                      <th className="p-2 text-center font-semibold w-20">Crew</th>
+                      <th className="p-2 text-center font-semibold w-20">Special</th>
+                      <th className="p-2 text-center font-semibold w-28">Total Meals</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {summaryLegs.map((l) => (
+                      <tr key={l.order.id} className="border-t border-slate-100">
+                        <td className="p-2">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide mr-1.5 ${l.order.direction === "Return" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
+                            {l.order.direction}
+                          </span>
+                          <span className="font-medium text-slate-700">{l.order.flight} · {l.order.sector}</span>
+                        </td>
+                        <td className="p-2 text-center tabular-nums">{l.totals.pax}</td>
+                        <td className="p-2 text-center tabular-nums">{l.totals.crew}</td>
+                        <td className="p-2 text-center tabular-nums">{l.totals.special}</td>
+                        <td className="p-2 text-center tabular-nums font-medium">{l.totals.meals}</td>
+                      </tr>
+                    ))}
+                    <tr className="border-t-2 border-slate-300 bg-slate-50/80 font-bold text-slate-800">
+                      <td className="p-2">Total (both sectors)</td>
+                      <td className="p-2 text-center tabular-nums">{grandTotals.pax}</td>
+                      <td className="p-2 text-center tabular-nums">{grandTotals.crew}</td>
+                      <td className="p-2 text-center tabular-nums">{grandTotals.special}</td>
+                      <td className="p-2 text-center tabular-nums">{grandTotals.meals}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Production Entry linkup — produced meals for the selected flight.
+                One dispatch bundles multiple orders/productions: PAX, Crew and
+                Special each carry their own PRO number, tagged by audience. */}
+            {configFlight && productionLines.length > 0 && (
               <div>
                 <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2">Production Status</div>
                 <table className="w-full text-xs border border-slate-200 rounded-md overflow-hidden">
                   <thead className="bg-slate-50 border-b border-slate-200">
                     <tr>
+                      {summaryLegs.length > 1 && <th className="p-2 text-left font-semibold w-28">Leg</th>}
+                      <th className="p-2 text-left font-semibold w-20">For</th>
                       <th className="p-2 text-left font-semibold">Production Order</th>
                       <th className="p-2 text-left font-semibold">Meal</th>
                       <th className="p-2 text-center font-semibold w-24">Required</th>
@@ -1867,14 +2253,29 @@ export default function Dispatch() {
                     </tr>
                   </thead>
                   <tbody>
-                    {productionForSelected.map((p) => (
-                      <tr key={p.meal} className="border-t border-slate-100">
+                    {productionLines.map((p, idx) => (
+                      <tr key={`${p.legFlight}-${p.audience}-${p.meal}-${idx}`} className="border-t border-slate-100">
+                        {summaryLegs.length > 1 && (
+                          <td className="p-2">
+                            <div className="font-medium text-slate-700">{p.legFlight}</div>
+                            <div className="text-[10px] text-muted-foreground">{p.legDirection}</div>
+                          </td>
+                        )}
+                        <td className="p-2">
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide ${p.audience === "PAX" ? "bg-indigo-100 text-indigo-700" : p.audience === "Crew" ? "bg-purple-100 text-purple-700" : "bg-teal-100 text-teal-700"}`}>
+                            {p.audience}
+                          </span>
+                        </td>
                         <td className="p-2">
                           {p.proId ? (
                             <button
                               type="button"
                               className="font-mono font-semibold text-primary hover:underline"
-                              onClick={() => navigate(`/production-entry?pro=${p.proId}`)}
+                              title="Open Production Order"
+                              onClick={() => {
+                                flagArrival({ target: "production-list", ids: [p.proId!] });
+                                navigate(`/production-entry?pro=${encodeURIComponent(p.proId!)}`);
+                              }}
                             >
                               {p.proId}
                             </button>
@@ -1882,7 +2283,7 @@ export default function Dispatch() {
                             <span className="text-muted-foreground">—</span>
                           )}
                         </td>
-                        <td className="p-2">{p.meal}</td>
+                        <td className="p-2">{p.label}</td>
                         <td className="p-2 text-center tabular-nums font-medium">{p.needQty}</td>
                         <td className="p-2 text-center tabular-nums text-muted-foreground">{p.producedQty ?? "—"}</td>
                         <td className="p-2">
@@ -1902,131 +2303,42 @@ export default function Dispatch() {
               </div>
             )}
 
-            {/* PAX Main Meal */}
-            <div>
-              <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2">PAX Main Meal</div>
-              <table className="w-full text-xs border border-slate-200 rounded-md overflow-hidden">
-                <thead className="bg-slate-50 border-b border-slate-200">
-                  <tr>
-                    <th className="p-2 text-left font-semibold">Item Name</th>
-                    <th className="p-2 text-center font-semibold w-28">%</th>
-                    <th className="p-2 text-center font-semibold w-24">QTY</th>
-                    <th className="p-2 w-8"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {configPaxLines.map((line, i) => (
-                    <tr key={line.id} className={i > 0 ? "border-t border-slate-200" : ""}>
-                      <td className="p-1.5">
-                        <select
-                          value={line.itemName}
-                          onChange={(e) => setConfigPaxLines((prev) => prev.map((l) => l.id === line.id ? { ...l, itemName: e.target.value } : l))}
-                          className="h-8 w-full rounded border border-input bg-background px-2 text-xs"
-                        >
-                          <option value="">— Select —</option>
-                          {paxMenu.map((m) => <option key={m.id} value={m.name}>{m.name}</option>)}
-                        </select>
-                      </td>
-                      <td className="p-1.5">
-                        <select
-                          value={line.percent}
-                          onChange={(e) => setConfigPaxLines((prev) => prev.map((l) => l.id === line.id ? { ...l, percent: Number(e.target.value) } : l))}
-                          className="h-8 w-full rounded border border-input bg-background px-2 text-xs text-center"
-                        >
-                          {[30, 40, 50, 60, 70].map((v) => <option key={v} value={v}>{v}%</option>)}
-                        </select>
-                      </td>
-                      <td className="p-1.5">
-                        <Input
-                          type="number" min={0}
-                          value={line.qty || ""}
-                          onChange={(e) => setConfigPaxLines((prev) => prev.map((l) => l.id === line.id ? { ...l, qty: Number(e.target.value) } : l))}
-                          className="h-8 text-xs text-center"
-                        />
-                      </td>
-                      <td className="p-1.5 text-center">
-                        {configPaxLines.length > 1 && (
-                          <button onClick={() => setConfigPaxLines((prev) => prev.filter((l) => l.id !== line.id))} className="text-red-500 hover:text-red-700 text-base leading-none">×</button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                  <tr className="border-t-2 border-slate-300 bg-slate-50/80">
-                    <td className="p-2 font-bold text-xs" colSpan={2}>Total Hot Meal</td>
-                    <td className="p-2 text-center font-bold text-slate-800">{configPaxLines.reduce((s, l) => s + (Number(l.qty) || 0), 0)}</td>
-                    <td></td>
-                  </tr>
-                </tbody>
-              </table>
-              <Button variant="outline" size="sm" className="mt-2 text-xs no-brand"
-                onClick={() => setConfigPaxLines((prev) => [...prev, { id: `p${Date.now()}`, itemName: "", percent: 40, qty: 0 }])}>
-                + Add Meal Option
-              </Button>
-            </div>
-
-            {/* Crew Meals */}
-            <div>
-              <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2">Crew Meals</div>
-              <div className="space-y-2">
-                {configCrewMeals.map((meal) => (
-                  <div key={meal.id} className="flex items-center gap-2">
-                    <select
-                      value={meal.type}
-                      onChange={(e) => setConfigCrewMeals((prev) => prev.map((m) => m.id === meal.id ? { ...m, type: e.target.value } : m))}
-                      className="h-8 flex-1 rounded border border-input bg-background px-2 text-sm"
-                    >
-                      {CREW_MEAL_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                    </select>
-                    <Input
-                      value={meal.qty}
-                      onChange={(e) => setConfigCrewMeals((prev) => prev.map((m) => m.id === meal.id ? { ...m, qty: e.target.value } : m))}
-                      placeholder="e.g. 12+1"
-                      className="h-8 w-28 text-sm"
-                    />
-                    {configCrewMeals.length > 1 && (
-                      <button onClick={() => setConfigCrewMeals((prev) => prev.filter((m) => m.id !== meal.id))} className="text-red-500 hover:text-red-700 text-lg leading-none">×</button>
+            {/* Meals — selected leg, plus the return leg when the round trip is
+                bundled. Each leg is wrapped with its own direction-coded header
+                and editable PAX/Crew/Special sections. */}
+            {includeReturn && returnOrder ? (
+              [
+                {
+                  flight: configFlight, sector: selectedSector, direction: selectedOrder?.direction ?? "Outbound",
+                  paxLines: configPaxLines, setPaxLines: setConfigPaxLines,
+                  crewMeals: configCrewMeals, setCrewMeals: setConfigCrewMeals,
+                  specialMeals: configSpecialMeals, setSpecialMeals: setConfigSpecialMeals,
+                },
+                {
+                  flight: returnOrder.flight, sector: returnOrder.sector, direction: returnOrder.direction,
+                  paxLines: returnPaxLines, setPaxLines: setReturnPaxLines,
+                  crewMeals: returnCrewMeals, setCrewMeals: setReturnCrewMeals,
+                  specialMeals: returnSpecialMeals, setSpecialMeals: setReturnSpecialMeals,
+                },
+              ]
+                .sort((a, b) => (a.direction === "Outbound" ? 0 : 1) - (b.direction === "Outbound" ? 0 : 1))
+                .map((leg, idx) => (
+                  <div key={leg.flight} className={idx === 0 ? "space-y-6" : "space-y-6 border-t border-dashed border-slate-300 pt-6"}>
+                    {legHeader(leg.flight, leg.sector, leg.direction)}
+                    {renderMealSections(
+                      leg.paxLines, leg.setPaxLines,
+                      leg.crewMeals, leg.setCrewMeals,
+                      leg.specialMeals, leg.setSpecialMeals,
                     )}
                   </div>
-                ))}
-                <Button variant="outline" size="sm" className="text-xs no-brand"
-                  onClick={() => setConfigCrewMeals((prev) => [...prev, { id: `c${Date.now()}`, type: "Lunch", qty: "" }])}>
-                  + Add More
-                </Button>
-              </div>
-            </div>
-
-            {/* Special Meals */}
-            <div>
-              <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2">Special Meals</div>
-              <div className="space-y-2">
-                {configSpecialMeals.length === 0 && (
-                  <p className="text-xs text-muted-foreground">No special meals added.</p>
-                )}
-                {configSpecialMeals.map((meal) => (
-                  <div key={meal.id} className="flex items-center gap-2">
-                    <select
-                      value={meal.type}
-                      onChange={(e) => setConfigSpecialMeals((prev) => prev.map((m) => m.id === meal.id ? { ...m, type: e.target.value } : m))}
-                      className="h-8 flex-1 rounded border border-input bg-background px-2 text-sm"
-                    >
-                      {specialMealOptions.map((t) => <option key={t} value={t}>{t}</option>)}
-                    </select>
-                    <Input
-                      type="number" min={0}
-                      value={meal.qty}
-                      onChange={(e) => setConfigSpecialMeals((prev) => prev.map((m) => m.id === meal.id ? { ...m, qty: e.target.value } : m))}
-                      placeholder="Qty"
-                      className="h-8 w-24 text-sm text-center"
-                    />
-                    <button onClick={() => setConfigSpecialMeals((prev) => prev.filter((m) => m.id !== meal.id))} className="text-red-500 hover:text-red-700 text-lg leading-none">×</button>
-                  </div>
-                ))}
-                <Button variant="outline" size="sm" className="text-xs no-brand"
-                  onClick={() => setConfigSpecialMeals((prev) => [...prev, { id: `s${Date.now()}`, type: "VGML", qty: "" }])}>
-                  + Add Special Meal
-                </Button>
-              </div>
-            </div>
+                ))
+            ) : (
+              renderMealSections(
+                configPaxLines, setConfigPaxLines,
+                configCrewMeals, setConfigCrewMeals,
+                configSpecialMeals, setConfigSpecialMeals,
+              )
+            )}
 
             {/* Additional Items */}
             <div>

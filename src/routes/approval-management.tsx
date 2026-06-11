@@ -74,8 +74,8 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
 const APPROVAL_SECTIONS: { label: string; keys: Category[] }[] = [
   { label: "Operations Approval",     keys: ["Flight Orders", "Crew Orders"] },
   { label: "Dispatch Approval",       keys: ["Dispatch"] },
-  { label: "Procurement Approval",    keys: ["Demand Request", "Request for Quotation", "Quotation", "Purchase Requisition", "Purchase Order", "Goods Receipt"] },
-  { label: "Inventory Approval",      keys: ["Transfer Request", "Stock Adjustment"] },
+  { label: "Procurement Approval",    keys: ["Request for Quotation", "Quotation", "Purchase Requisition", "Purchase Order", "Goods Receipt"] },
+  { label: "Inventory Approval",      keys: ["Demand Request", "Transfer Request", "Stock Adjustment"] },
   { label: "Production Approval",     keys: ["Production Order", "Bill of Materials"] },
   { label: "Administration Approval", keys: ["User Account"] },
 ];
@@ -167,11 +167,8 @@ const SEED: ApprovalItem[] = [
       { name: "Meal Box", qty: 500, uom: "pcs" },
     ] },
 
-  // Production Order
-  { id: "AP-1501", category: "Production Order",     refId: "PRO-2026-000031", title: "Chicken Biryani batch",                 requestedBy: "N. Hossen",  requestedAt: "2026-05-19 13:15", summary: "280 portions — ready for QC sign-off",                    itemsCount: 1, status: "Pending",
-    lines: [
-      { name: "Chicken Biryani", qty: 280, uom: "portions", note: "BOM-001 · ready for QC sign-off" },
-    ] },
+  // Production Order approvals are projected live from the workflow store
+  // (production orders awaiting release) — see `productionItems` below.
 
   // Bill of Materials
   { id: "AP-1601", category: "Bill of Materials",    refId: "BOM-007",     title: "New BOM — Vegetable Cutlet",              requestedBy: "S. Ahmed",   requestedAt: "2026-05-18 16:40", summary: "Draft v1.0 with 8 materials, ready to publish",          itemsCount: 8, status: "Pending",
@@ -225,6 +222,7 @@ export default function ApprovalManagementPage() {
     mrpRuns, updateMrpRun,
     dispatchApprovals, updateDispatchApproval,
     wfPurchaseOrders, updatePurchaseOrder,
+    productionEntries, updateProductionEntryStatus,
   } = useWorkflow();
   const flightOrders = useFlightOrders();
 
@@ -249,6 +247,12 @@ export default function ApprovalManagementPage() {
   // Stock Adjustment approve/reject decisions made here. Approve also flips the
   // adjustment's status to "Approved" in the persisted Stock Adjustment table.
   const [stockAdjDecisions, setStockAdjDecisions] = useState<
+    Record<string, { status: ApprovalStatus; by: string; at: string; reason?: string }>
+  >({});
+  // Production Order approve/reject decisions. Approve releases the order to
+  // production (status "Approved") in the workflow store; reject is recorded
+  // here (production orders have no Rejected status in their store flow).
+  const [productionDecisions, setProductionDecisions] = useState<
     Record<string, { status: ApprovalStatus; by: string; at: string; reason?: string }>
   >({});
   const [activeTab, setActiveTab] = useState<Category | "all">(
@@ -456,9 +460,37 @@ export default function ApprovalManagementPage() {
       }));
   }, [wfPurchaseOrders]);
 
+  // Project workflow-store production orders awaiting approval into the queue.
+  // A freshly created order sits at "Pending" until released; approving here
+  // sets it to "Approved" in the store (reflected on the Production Order list).
+  const productionItems: ApprovalItem[] = useMemo(() => {
+    return productionEntries
+      .filter((e) => e.status === "Pending" || productionDecisions[e.id])
+      .map((e) => {
+        const decision = productionDecisions[e.id];
+        const item = e.outputItemName ?? e.bom;
+        const qty = e.orderQty ?? 0;
+        return {
+          id: `PRO-AP-${e.id}`,
+          category: "Production Order" as Category,
+          refId: e.id,
+          title: `${item} — production order`,
+          requestedBy: "Production",
+          requestedAt: e.date,
+          summary: `${qty.toLocaleString()} portion${qty === 1 ? "" : "s"} · BOM ${e.bom}`,
+          itemsCount: 1,
+          status: decision ? decision.status : "Pending",
+          processedBy: decision?.by,
+          processedAt: decision?.at,
+          rejectionReason: decision?.reason,
+          lines: [{ name: item, qty, uom: "portions", note: `BOM ${e.bom}` }],
+        };
+      });
+  }, [productionEntries, productionDecisions]);
+
   const allItems = useMemo(
-    () => [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...items],
-    [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, items],
+    () => [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...items],
+    [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, items],
   );
 
   const counts = useMemo(() => {
@@ -644,6 +676,15 @@ export default function ApprovalManagementPage() {
       if (!silent) toast.success(`${it.refId} approved.`);
       return;
     }
+    if (it.category === "Production Order" && it.id.startsWith("PRO-AP-")) {
+      updateProductionEntryStatus(it.refId, "Approved");
+      setProductionDecisions((p) => ({
+        ...p,
+        [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
+      }));
+      if (!silent) toast.success(`${it.refId} approved — released to production.`);
+      return;
+    }
     if (it.id.startsWith("WFPO-AP-")) {
       updatePurchaseOrder(it.refId, { status: "Approved" });
       if (!silent) toast.success(`${it.refId} approved — ready for receiving.`);
@@ -695,6 +736,11 @@ export default function ApprovalManagementPage() {
     } else if (it.category === "Stock Adjustment") {
       setStockAdjustmentStatus(it.refId, "Rejected");
       setStockAdjDecisions((p) => ({
+        ...p,
+        [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+      }));
+    } else if (it.category === "Production Order" && it.id.startsWith("PRO-AP-")) {
+      setProductionDecisions((p) => ({
         ...p,
         [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
@@ -873,6 +919,11 @@ export default function ApprovalManagementPage() {
     } else if (detailItem.category === "Stock Adjustment") {
       setStockAdjustmentStatus(detailItem.refId, "Rejected");
       setStockAdjDecisions((p) => ({
+        ...p,
+        [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+      }));
+    } else if (detailItem.category === "Production Order" && detailItem.id.startsWith("PRO-AP-")) {
+      setProductionDecisions((p) => ({
         ...p,
         [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));

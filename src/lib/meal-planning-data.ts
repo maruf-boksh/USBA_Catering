@@ -314,3 +314,60 @@ export function loadMealPlanningConfig(): MealCard[] {
   const seedForOtherDays = mealCards.filter((m) => !configuredDays.has(m.day));
   return [...persisted, ...seedForOtherDays];
 }
+
+// ── Dispatch helpers: resolve crew / special meals to producible dishes ───────
+// Dispatch captures crew meals as a meal-period + headcount and special meals as
+// a code + qty — neither names a dish. To tag each with its own production order,
+// we map them to a representative dish from the Meal Planning config.
+
+/** Weekday name ("Monday"…"Sunday") for an ISO date string; "" when unparseable. */
+export function dayFromDate(dateStr: string): string {
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return "";
+  const idx = d.getDay() === 0 ? 6 : d.getDay() - 1; // Mon=0 … Sun=6
+  return DAYS[idx];
+}
+
+/** Sum a meal-qty string like "12+1" or "16" (crew rosters use "pax+extra"). */
+export function parseMealQty(raw: string | number): number {
+  if (typeof raw === "number") return raw;
+  if (!raw) return 0;
+  return String(raw).split("+").reduce((s, p) => s + (Number(p.trim()) || 0), 0);
+}
+
+/**
+ * Representative crew dish for a meal-period: the lead choice's main item of the
+ * Crew (forType "Crew") card whose mealType matches — preferring the given day,
+ * else any day. Returns null when no crew card serves that period.
+ */
+export function resolveCrewDish(
+  period: string,
+  day: string,
+  cards: MealCard[] = loadMealPlanningConfig(),
+): string | null {
+  const crew = cards.filter(
+    (c) => c.forType === "Crew" && c.mealType.toLowerCase() === period.toLowerCase(),
+  );
+  if (crew.length === 0) return null;
+  const card = crew.find((c) => c.day === day) ?? crew[0];
+  return card.choices[0]?.items[0]?.name ?? null;
+}
+
+/**
+ * Representative special-meal dish for a special code: the first item of the
+ * matching specialMeals entry across all cards — preferring the given day, else
+ * the first card carrying that code. Returns null when the code isn't planned.
+ */
+export function resolveSpecialDish(
+  code: string,
+  day: string,
+  cards: MealCard[] = loadMealPlanningConfig(),
+): string | null {
+  const matches = cards
+    .map((c) => ({ day: c.day, sp: c.specialMeals.find((s) => s.type.toLowerCase() === code.toLowerCase()) }))
+    .filter((x) => x.sp);
+  if (matches.length === 0) return null;
+  const pick = matches.find((x) => x.day === day) ?? matches[0];
+  return pick.sp?.items[0]?.name ?? null;
+}
