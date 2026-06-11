@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Table, Input, Button } from "antd";
 import type { TableColumnType } from "antd";
 import { SearchOutlined, DownloadOutlined } from "@ant-design/icons";
@@ -33,6 +33,7 @@ export function DataTable<T extends { id: string }>({
   pageSize = 8,
   title,
   selectable = true,
+  flashRowId,
 }: {
   columns: Column<T>[];
   data: T[];
@@ -41,9 +42,13 @@ export function DataTable<T extends { id: string }>({
   pageSize?: number;
   title?: string;
   selectable?: boolean;
+  /** When set, the table jumps to the page holding this row id so a deep-link
+   *  arrival highlight (see arrival-flash) can find and flash it. */
+  flashRowId?: string;
 }) {
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
+  const [page, setPage] = useState(1);
 
   // ── Per-role column visibility (applies to every page using DataTable) ──────
   const { role } = useRole();
@@ -72,6 +77,18 @@ export function DataTable<T extends { id: string }>({
       searchKeys.some((k) => String(r[k] ?? "").toLowerCase().includes(ql)),
     );
   }, [data, q, searchKeys]);
+
+  // Deep-link arrival: jump once to the page that holds the flash target so the
+  // arrival-flash highlight can locate the row in the DOM. Runs per target id.
+  const jumpedFor = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!flashRowId || jumpedFor.current === flashRowId) return;
+    const idx = filtered.findIndex((r) => r.id === flashRowId);
+    if (idx >= 0) {
+      setPage(Math.floor(idx / pageSize) + 1);
+      jumpedFor.current = flashRowId;
+    }
+  }, [flashRowId, filtered, pageSize]);
 
   // Translate our Column<T> shape to Ant's TableColumnType<T>.
   // We deliberately strip `text-right` from column-level classNames so number
@@ -189,6 +206,8 @@ export function DataTable<T extends { id: string }>({
         dataSource={filtered}
         size="small"
         pagination={{
+          current: page,
+          onChange: (p) => setPage(p),
           pageSize,
           showSizeChanger: false,
           showTotal: (total, range) => `Showing ${range[0]}–${range[1]} of ${total}`,

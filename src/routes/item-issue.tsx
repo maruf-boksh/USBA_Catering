@@ -664,6 +664,22 @@ function CreateIssueDialog({
     setIssuedMap((prev) => ({ ...prev, [id]: value }));
   };
 
+  // Fill every requested line with the most that can be issued — the requested
+  // qty, capped at the source warehouse's on-hand so no line goes over stock.
+  const issueAll = () => {
+    const ids = selectedDemand ? selectedDemand.items.map((i) => i.id) : manualIds;
+    setIssuedMap((prev) => {
+      const next = { ...prev };
+      for (const id of ids) {
+        const inv = inventory.find((x) => x.id === id);
+        if (!inv) continue;
+        const target = Math.min(requestedFor(id), availableIn(inv.name));
+        next[id] = String(target);
+      }
+      return next;
+    });
+  };
+
   // Rows shown in the table — depends on mode
   const visibleItems = useMemo(() => {
     let pool;
@@ -908,12 +924,26 @@ function CreateIssueDialog({
             </div>
           )}
 
-          <div className="text-xs text-muted-foreground">
-            {summary.issuedItems} item{summary.issuedItems !== 1 ? "s" : ""} ready · Issued total <span className="font-semibold text-foreground tabular-nums">{summary.totalIssued}</span> · Remaining <span className="font-semibold text-foreground tabular-nums">{summary.totalRemaining}</span>
-            {stockErrors.length > 0 && (
-              <span className="text-destructive font-medium">
-                {" "}· {stockErrors.length} over stock
-              </span>
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-xs text-muted-foreground">
+              {summary.issuedItems} item{summary.issuedItems !== 1 ? "s" : ""} ready · Issued total <span className="font-semibold text-foreground tabular-nums">{summary.totalIssued}</span> · Remaining <span className="font-semibold text-foreground tabular-nums">{summary.totalRemaining}</span>
+              {stockErrors.length > 0 && (
+                <span className="text-destructive font-medium">
+                  {" "}· {stockErrors.length} over stock
+                </span>
+              )}
+            </div>
+            {visibleItems.length > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 shrink-0"
+                onClick={issueAll}
+                title="Fill every line with the requested qty, capped at available stock"
+              >
+                <PackageCheck className="h-3.5 w-3.5 mr-1.5" /> Issue All
+              </Button>
             )}
           </div>
         </div>

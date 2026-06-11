@@ -428,6 +428,11 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     { id: "PRO-2026-000022", date: "2026-05-08", bom: "Continental Breakfast", outputItemName: "Continental Breakfast", orderQty: 220, producedQty: 220, status: "Completed",      qcCheckedBy: "T. Islam",     qcPassedAt: "2026-05-08 09:40", completedAt: "2026-05-08 09:42", inventoryAdded: true, officeId: "OFF-001", warehouseId: "WH-003" },
     { id: "PRO-2026-000019", date: "2026-05-05", bom: "Grilled Salmon",        outputItemName: "Grilled Salmon",       orderQty: 130, producedQty: 130, status: "Completed",      qcCheckedBy: "Hygiene Lead", qcPassedAt: "2026-05-05 12:30", completedAt: "2026-05-05 12:31", inventoryAdded: true, officeId: "OFF-001", warehouseId: "WH-004" },
     { id: "PRO-2026-000016", date: "2026-05-02", bom: "Hindu Meal Special",    outputItemName: "Hindu Meal Special",   orderQty:  80, producedQty:   0, status: "Pending",         officeId: "OFF-001", warehouseId: "WH-003" },
+    // Crew & special-meal production orders — these are the separate, audience-
+    // tagged orders that a dispatch bundles alongside the PAX meals (the dispatch
+    // auto-maps crew "Lunch" → "Plain Rice" and special "VGML" → "Vegetable Biryani").
+    { id: "PRO-2026-000027", date: "2026-05-11", bom: "Plain Rice",            outputItemName: "Plain Rice",           orderQty: 180, producedQty: 180, status: "Completed",      qcCheckedBy: "F. Begum",     qcPassedAt: "2026-05-11 11:10", completedAt: "2026-05-11 11:12", inventoryAdded: true, officeId: "OFF-001", warehouseId: "WH-003" },
+    { id: "PRO-2026-000026", date: "2026-05-11", bom: "Vegetable Biryani",     outputItemName: "Vegetable Biryani",    orderQty: 120, producedQty: 120, status: "Completed",      qcCheckedBy: "T. Islam",     qcPassedAt: "2026-05-11 11:25", completedAt: "2026-05-11 11:27", inventoryAdded: true, officeId: "OFF-001", warehouseId: "WH-003" },
   ];
   // Seed the movements ledger with the IN side already implied by the completed
   // (inventory-added) production entries, so the Inventory report's In Qty
