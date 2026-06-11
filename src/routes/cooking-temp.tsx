@@ -427,9 +427,6 @@ export default function CookingTemp() {
               </p>
             </div>
             <div className="flex items-center gap-2">
-              <Button onClick={() => { setMMobileTab("qc"); setMScreen(1); setMobileOpen(true); }}>
-                <Smartphone className="h-4 w-4 mr-1.5" /> Mobile App View
-              </Button>
               <Badge variant="outline" className="bg-warning/15 text-warning-foreground border-warning/40">
                 {pendingQC.length} pending
               </Badge>

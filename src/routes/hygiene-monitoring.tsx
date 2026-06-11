@@ -420,9 +420,6 @@ export default function HygieneMonitoring() {
         subtitle="USBA-FSH-DFSHM-01 — Record checklist status for each time slot per day"
         actions={
           <div className="flex gap-2 flex-wrap items-center">
-            <Button onClick={() => { setMMobileTab("checklist"); setMScreen(1); setMobileOpen(true); }}>
-              <Smartphone className="h-4 w-4 mr-1.5" /> Mobile App View
-            </Button>
             {!isSubmitted && (
               <Button
                 size="sm"

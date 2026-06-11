@@ -685,12 +685,6 @@ export default function DispatchMonitoring() {
             subtitle="Cold chain integrity & vehicle hygiene verification per flight dispatch · USBA-FSH-PDM-01"
           />
         </div>
-        <Button
-          className="shrink-0 mt-2"
-          onClick={() => setMobileOpen(true)}
-        >
-          <Smartphone className="h-4 w-4 mr-1.5" /> Mobile App View
-        </Button>
       </div>
       <p className="text-xs text-muted-foreground mb-5 -mt-1">Baunia Catering → Airport Catering</p>
 

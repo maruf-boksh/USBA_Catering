@@ -6,8 +6,9 @@ import type { MenuProps } from 'antd';
 import { useRole } from '@/lib/roles';
 import { useAllRoles, useAccess, canViewPage } from '@/lib/access-control';
 import { Lock } from 'lucide-react';
+import { MobileApp } from '@/mobile/MobileApp';
 import {
-  MenuFoldOutlined,
+  MenuFoldOutlined, MobileOutlined,
   MenuUnfoldOutlined,
   BellOutlined,
   BgColorsOutlined,
@@ -169,6 +170,7 @@ interface AppLayoutProps {
 export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
+  const [mobileAppOpen, setMobileAppOpen] = useState(false);
   const isMobile = useIsMobile();
   // On mobile the sidebar is an off-canvas drawer toggled by the hamburger;
   // on desktop the hamburger toggles the docked-column collapse.
@@ -313,6 +315,31 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
               >
                 {isCurrentPagePinned ? 'Pinned' : 'Pin'}
               </Button>
+
+              <button
+                onClick={() => setMobileAppOpen(true)}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '0 14px',
+                  height: 28,
+                  background: 'rgba(255,255,255,0.18)',
+                  border: '1px solid rgba(255,255,255,0.55)',
+                  borderRadius: 6,
+                  color: '#fff',
+                  fontSize: 13,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  boxShadow: '0 1px 4px rgba(0,0,0,0.12)',
+                  backdropFilter: 'blur(4px)',
+                  letterSpacing: '0.01em',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                <MobileOutlined style={{ fontSize: 14 }} />
+                Mobile App View
+              </button>
             </div>
 
             <div className="app-topbar-right">
@@ -418,6 +445,8 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
         </Content>
         <TabBar menuItems={MENU_ITEMS} />
       </Layout>
+
+      {mobileAppOpen && <MobileApp onClose={() => setMobileAppOpen(false)} />}
     </Layout>
   );
 }
