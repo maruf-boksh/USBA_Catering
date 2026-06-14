@@ -6,7 +6,7 @@ import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Plus, ThermometerSun, ShieldCheck, AlertOctagon, ClipboardCheck, Factory, Check, X as XIcon, PackageCheck, Eye, ChevronLeft, Trash2, Settings2, Smartphone, Clock } from "lucide-react";
+import { Plus, ThermometerSun, ShieldCheck, AlertOctagon, ClipboardCheck, Factory, Check, X as XIcon, PackageCheck, Eye, ChevronLeft, Trash2, Settings2, Clock } from "lucide-react";
 import { cookingTempLogs } from "@/lib/sample-data";
 import { KpiCard } from "@/components/common/KpiCard";
 import { toast } from "sonner";
@@ -96,6 +96,8 @@ export default function CookingTemp() {
   const [qcMeasured, setQcMeasured] = useState(0);
   const [qcCookedBy, setQcCookedBy] = useState("");
   const [qcBatchNo, setQcBatchNo] = useState("");
+  // Per-batch inputs for the combined "Record Test — All" form (keyed by entry id).
+  const [qcAllRows, setQcAllRows] = useState<Record<string, { measured: number | ""; cookedBy: string }>>({});
 
   // Fail justification panel
   const [failJustOpen, setFailJustOpen] = useState(false);
@@ -186,11 +188,34 @@ export default function CookingTemp() {
     setFailReason("");
   };
 
-  // Bulk: record a passing QC test for EVERY pending-QC batch at once. Each batch
-  // gets a cooking-temp log (measured = its standard, sensory Pass), its order is
-  // marked Completed, and its produced qty is added to inventory.
+  // Open the combined "Record Test — All" form, seeding one empty input row per
+  // pending batch (measured °C + chef), mirroring the single Record Test inputs.
+  const openQcAll = () => {
+    const seed: Record<string, { measured: number | ""; cookedBy: string }> = {};
+    pendingQC.forEach((e) => { seed[e.id] = { measured: "", cookedBy: "" }; });
+    setQcAllRows(seed);
+    setQcAllOpen(true);
+  };
+
+  // Standard temp resolved for an entry (saved config, else HACCP default 75°C).
+  const stdTempFor = (entry: WfProductionEntry) =>
+    itemConfigs[entry.outputItemName ?? entry.bom]?.standardTemp ?? 75;
+
+  // Bulk: record a QC test for EVERY pending-QC batch from the per-row inputs.
+  // Each batch is judged against its standard like the single test — passing
+  // batches are Completed and their qty added to inventory; batches measuring
+  // below standard are sent back to In Preparation with a HACCP reason.
   const recordAllQc = () => {
     if (pendingQC.length === 0) return;
+    // Validate every row has a measured temp and a chef (same rules as single).
+    for (const entry of pendingQC) {
+      const row = qcAllRows[entry.id];
+      if (!row || row.measured === "" || isNaN(Number(row.measured))) {
+        toast.error(`Enter measured °C for ${entry.id}.`); return;
+      }
+      if (!row.cookedBy) { toast.error(`Select who cooked ${entry.id}.`); return; }
+    }
+
     const now = new Date();
     const dateStr = now.toLocaleDateString("en-GB");
     const timeStr = now.toLocaleTimeString("en-GB");
@@ -199,10 +224,14 @@ export default function CookingTemp() {
     const base = Date.now();
     const newRecords: T[] = [];
     const deltas: Parameters<typeof applyStockDeltas>[0] = [];
+    let passCount = 0, failCount = 0, units = 0;
 
     pendingQC.forEach((entry, i) => {
       const itemName = entry.outputItemName ?? entry.bom;
-      const stdTemp = itemConfigs[itemName]?.standardTemp ?? 75;
+      const stdTemp = stdTempFor(entry);
+      const row = qcAllRows[entry.id];
+      const measured = Number(row.measured);
+      const passed = measured >= stdTemp;
       const logId = `CT-${base + i}`;
       newRecords.push({
         id: logId,
@@ -211,38 +240,49 @@ export default function CookingTemp() {
         cookingTime: "—",
         standardTemp: `≥${stdTemp}°C`,
         standardTempMin: stdTemp,
-        measuredTemp: stdTemp,
-        cookedBy: "Kitchen Staff",
-        sensoryPass: true,
+        measuredTemp: measured,
+        cookedBy: row.cookedBy,
+        sensoryPass: passed,
         checkedBy: checkedByFull,
         date: now.toISOString().slice(0, 10),
-        failReason: undefined,
+        failReason: passed ? undefined : `Measured ${measured}°C below HACCP standard of ≥${stdTemp}°C.`,
         checkedAt: stamp,
       } as T);
-      updateProductionEntryStatus(entry.id, "Completed", {
-        qcLogId: logId,
-        qcPassedAt: stamp,
-        qcCheckedBy: `${CURRENT_USER} (${role})`,
-        completedAt: stamp,
-        inventoryAdded: true,
-      });
-      deltas.push({
-        itemId: entry.outputItemCode ?? entry.outputItemName ?? entry.id,
-        delta: entry.producedQty,
-        date: entry.date,
-        reference: entry.id,
-        officeId: entry.officeId,
-        warehouseId: entry.warehouseId,
-        label: "Production",
-      });
+      if (passed) {
+        updateProductionEntryStatus(entry.id, "Completed", {
+          qcLogId: logId,
+          qcPassedAt: stamp,
+          qcCheckedBy: `${CURRENT_USER} (${role})`,
+          completedAt: stamp,
+          inventoryAdded: true,
+        });
+        deltas.push({
+          itemId: entry.outputItemCode ?? entry.outputItemName ?? entry.id,
+          delta: entry.producedQty,
+          date: entry.date,
+          reference: entry.id,
+          officeId: entry.officeId,
+          warehouseId: entry.warehouseId,
+          label: "Production",
+        });
+        passCount += 1;
+        units += entry.producedQty;
+      } else {
+        updateProductionEntryStatus(entry.id, "In Preparation");
+        failCount += 1;
+      }
     });
 
     setRecords((curr) => [...newRecords, ...curr]);
-    applyStockDeltas(deltas);
-    const count = pendingQC.length;
-    const units = pendingQC.reduce((s, e) => s + e.producedQty, 0);
+    if (deltas.length) applyStockDeltas(deltas);
     setQcAllOpen(false);
-    toast.success(`${count} batch${count === 1 ? "" : "es"} passed QC — ${units.toLocaleString()} units added to inventory.`);
+    if (passCount && failCount) {
+      toast.success(`${passCount} passed (${units.toLocaleString()} units to inventory) · ${failCount} sent back.`);
+    } else if (failCount) {
+      toast.error(`${failCount} batch${failCount === 1 ? "" : "es"} below standard — sent back to In Preparation.`);
+    } else {
+      toast.success(`${passCount} batch${passCount === 1 ? "" : "es"} passed QC — ${units.toLocaleString()} units added to inventory.`);
+    }
   };
 
   const saveItemConfig = () => {
@@ -489,14 +529,11 @@ export default function CookingTemp() {
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
-                onClick={() => setQcAllOpen(true)}
+                onClick={openQcAll}
                 disabled={pendingQC.length === 0}
-                title="Record a passing QC test for every pending batch at once"
+                title="Record a QC test for every pending batch in one combined form"
               >
                 <ClipboardCheck className="h-4 w-4 mr-1.5" /> Record Test — All ({pendingQC.length})
-              </Button>
-              <Button onClick={() => { setMMobileTab("qc"); setMScreen(1); setMobileOpen(true); }}>
-                <Smartphone className="h-4 w-4 mr-1.5" /> Mobile App View
               </Button>
               <Badge variant="outline" className="bg-warning/15 text-warning-foreground border-warning/40">
                 {pendingQC.length} pending
@@ -538,44 +575,127 @@ export default function CookingTemp() {
         </CardContent>
       </Card>
 
-      {/* Bulk record-test confirmation */}
+      {/* Bulk record-test — combined per-batch input form */}
       <Dialog open={qcAllOpen} onOpenChange={setQcAllOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <ClipboardCheck className="h-5 w-5 text-primary" /> Record test for all pending QC
+              <ClipboardCheck className="h-5 w-5 text-primary" /> Record Test — All Pending QC
             </DialogTitle>
+            <DialogDescription>
+              Enter measured temperature and the chef for each batch, same as a single Record Test.
+              Batches meeting their standard are completed and added to inventory; any measuring below
+              standard are sent back to In Preparation.
+            </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3 text-sm">
-            <p className="text-muted-foreground">
-              This records a <span className="font-medium text-foreground">passing</span> QC test for every batch
-              awaiting sign-off — each is marked Completed and its produced quantity is added to inventory.
-            </p>
-            <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs space-y-1">
-              <div className="flex justify-between"><span className="text-muted-foreground">Batches</span><span className="font-semibold tabular-nums">{pendingQC.length}</span></div>
-              <div className="flex justify-between"><span className="text-muted-foreground">Total units to inventory</span><span className="font-semibold tabular-nums">{pendingQC.reduce((s, e) => s + e.producedQty, 0).toLocaleString()}</span></div>
-            </div>
-            {pendingQC.length > 0 && (
-              <div className="max-h-40 overflow-y-auto rounded-md border border-border divide-y divide-border text-xs">
-                {pendingQC.map((e) => (
-                  <div key={e.id} className="flex items-center justify-between px-3 py-1.5">
-                    <span className="truncate">
-                      <span className="font-mono text-primary">{e.id}</span>{" "}
-                      <span className="text-muted-foreground">· {e.outputItemName ?? e.bom}</span>
-                    </span>
-                    <span className="tabular-nums font-medium shrink-0 ml-2">{e.producedQty.toLocaleString()}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-            <p className="text-[11px] text-muted-foreground">
-              For individual temperature/sensory entry or to fail a batch, use the per-batch <span className="font-medium">Record Test</span> button instead.
-            </p>
+
+          {/* Apply chef to all — convenience for one cook covering the batch run */}
+          <div className="flex items-center gap-2">
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground shrink-0">Cooked by — apply to all</Label>
+            <select
+              value=""
+              onChange={(e) => {
+                const chef = e.target.value;
+                if (!chef) return;
+                setQcAllRows((prev) => {
+                  const next = { ...prev };
+                  pendingQC.forEach((p) => { next[p.id] = { ...next[p.id], cookedBy: chef }; });
+                  return next;
+                });
+              }}
+              className="h-8 rounded-md border border-input bg-background px-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <option value="">— Select chef —</option>
+              {CHEFS.map((chef) => (<option key={chef} value={chef}>{chef}</option>))}
+            </select>
           </div>
+
+          {/* Per-batch input table */}
+          <div className="rounded-md border border-border overflow-hidden">
+            <div className="grid grid-cols-[1.6fr_0.7fr_0.7fr_0.9fr_1.1fr_0.6fr] gap-2 bg-muted/40 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+              <div>Batch / Item</div>
+              <div className="text-right">Qty</div>
+              <div className="text-center">Std °C</div>
+              <div className="text-center">Measured °C</div>
+              <div>Cooked By</div>
+              <div className="text-center">Result</div>
+            </div>
+            <div className="divide-y divide-border max-h-[44vh] overflow-y-auto">
+              {pendingQC.map((entry) => {
+                const std = stdTempFor(entry);
+                const row = qcAllRows[entry.id] ?? { measured: "", cookedBy: "" };
+                const hasMeasured = row.measured !== "" && !isNaN(Number(row.measured));
+                const passed = hasMeasured && Number(row.measured) >= std;
+                return (
+                  <div key={entry.id} className="grid grid-cols-[1.6fr_0.7fr_0.7fr_0.9fr_1.1fr_0.6fr] gap-2 px-3 py-2 items-center text-sm">
+                    <div className="min-w-0">
+                      <div className="font-mono text-xs text-primary truncate">{entry.id}</div>
+                      <div className="text-xs text-muted-foreground truncate">{entry.outputItemName ?? entry.bom}</div>
+                    </div>
+                    <div className="text-right tabular-nums">{entry.producedQty.toLocaleString()}</div>
+                    <div className="text-center tabular-nums text-muted-foreground">≥{std}</div>
+                    <div>
+                      <Input
+                        type="number"
+                        value={row.measured}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setQcAllRows((prev) => ({ ...prev, [entry.id]: { ...row, measured: v === "" ? "" : Number(v) } }));
+                        }}
+                        className="h-8 tabular-nums text-center"
+                        placeholder="°C"
+                      />
+                    </div>
+                    <div>
+                      <select
+                        value={row.cookedBy}
+                        onChange={(e) => setQcAllRows((prev) => ({ ...prev, [entry.id]: { ...row, cookedBy: e.target.value } }))}
+                        className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      >
+                        <option value="">— Chef —</option>
+                        {CHEFS.map((chef) => (<option key={chef} value={chef}>{chef}</option>))}
+                      </select>
+                    </div>
+                    <div className="text-center">
+                      {!hasMeasured ? (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      ) : (
+                        <Badge variant="outline" className={passed
+                          ? "bg-success/15 text-success border-success/40"
+                          : "bg-destructive/15 text-destructive border-destructive/40"}>
+                          {passed ? "Pass" : "Fail"}
+                        </Badge>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Live summary of what the current inputs will do */}
+          {(() => {
+            let willPass = 0, willFail = 0, unitsIn = 0;
+            pendingQC.forEach((entry) => {
+              const row = qcAllRows[entry.id];
+              if (!row || row.measured === "" || isNaN(Number(row.measured))) return;
+              if (Number(row.measured) >= stdTempFor(entry)) { willPass += 1; unitsIn += entry.producedQty; }
+              else willFail += 1;
+            });
+            return (
+              <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-xs flex flex-wrap gap-x-6 gap-y-1">
+                <span className="text-muted-foreground">Batches: <span className="font-semibold text-foreground tabular-nums">{pendingQC.length}</span></span>
+                <span className="text-success">Will pass: <span className="font-semibold tabular-nums">{willPass}</span></span>
+                <span className="text-destructive">Will fail: <span className="font-semibold tabular-nums">{willFail}</span></span>
+                <span className="text-muted-foreground">Units to inventory: <span className="font-semibold text-foreground tabular-nums">{unitsIn.toLocaleString()}</span></span>
+              </div>
+            );
+          })()}
+
           <DialogFooter>
             <Button variant="outline" onClick={() => setQcAllOpen(false)}>Cancel</Button>
             <Button onClick={recordAllQc} disabled={pendingQC.length === 0}>
-              <ClipboardCheck className="h-4 w-4 mr-1.5" /> Pass {pendingQC.length} {pendingQC.length === 1 ? "Batch" : "Batches"}
+              <ClipboardCheck className="h-4 w-4 mr-1.5" /> Record {pendingQC.length} {pendingQC.length === 1 ? "Batch" : "Batches"}
             </Button>
           </DialogFooter>
         </DialogContent>

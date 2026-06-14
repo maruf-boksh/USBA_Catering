@@ -323,25 +323,29 @@ export default function ApprovalManagementPage() {
   // so the queue stays focused. One pass over the (large) order list keeps it
   // cheap even with thousands of legs.
   const flightOrderItems: ApprovalItem[] = useMemo(() => {
-    const byOrder = new Map<string, FlightOrder[]>();
+    // Group by Order # AND type — a flight order and its crew order can now share
+    // a number, but each is its own approval card. Decision key = `${orderNo}__${type}`.
+    const byOrder = new Map<string, { orderNo: string; type: "flight" | "crew"; legs: FlightOrder[] }>();
     for (const o of flightOrders) {
-      const list = byOrder.get(o.orderNo);
-      if (list) list.push(o);
-      else byOrder.set(o.orderNo, [o]);
+      const type = o.orderType === "crew" ? "crew" : "flight";
+      const key = `${o.orderNo}__${type}`;
+      const g = byOrder.get(key);
+      if (g) g.legs.push(o);
+      else byOrder.set(key, { orderNo: o.orderNo, type, legs: [o] });
     }
     const result: ApprovalItem[] = [];
-    for (const [orderNo, legs] of byOrder) {
-      const decision = foDecisions[orderNo];
+    for (const [key, { orderNo, type, legs }] of byOrder) {
+      const decision = foDecisions[key];
       const hasPending = legs.some((l) => l.status === "Pending");
       if (!hasPending && !decision) continue;
-      const isCrew = legs.some((l) => l.orderType === "crew");
+      const isCrew = type === "crew";
       const airlines = Array.from(new Set(legs.map((l) => l.airline)));
       const totalPax = legs.reduce((s, l) => s + (l.pax ?? 0), 0);
       const totalCrew = legs.reduce((s, l) => s + (l.crew ?? 0), 0);
       const flightList = legs.map((l) => l.flight).slice(0, 4).join(", ");
       const more = legs.length > 4 ? ` +${legs.length - 4} more` : "";
       result.push({
-        id: `FO-AP-${orderNo}`,
+        id: `FO-AP-${key}`,
         category: isCrew ? "Crew Orders" : "Flight Orders",
         refId: orderNo,
         title: `${isCrew ? "Crew meal order" : "Flight order"} — ${legs.length} flight${legs.length === 1 ? "" : "s"}`,
@@ -668,13 +672,14 @@ export default function ApprovalManagementPage() {
       return;
     }
     if (it.category === "Flight Orders" || it.category === "Crew Orders") {
+      const t = it.category === "Crew Orders" ? "crew" : "flight";
       const moved = updateFlightOrdersWhere(
-        (o) => o.orderNo === it.refId && o.status === "Pending",
+        (o) => o.orderNo === it.refId && (o.orderType === "crew" ? "crew" : "flight") === t && o.status === "Pending",
         { status: "Approved" },
       );
       setFoDecisions((p) => ({
         ...p,
-        [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
+        [`${it.refId}__${t}`]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
       }));
       if (!silent) toast.success(`${it.refId} approved — ${moved} flight${moved === 1 ? "" : "s"} moved to Approved.`);
       return;
@@ -756,9 +761,10 @@ export default function ApprovalManagementPage() {
         rejectionReason: reason,
       });
     } else if (it.category === "Flight Orders" || it.category === "Crew Orders") {
+      const t = it.category === "Crew Orders" ? "crew" : "flight";
       setFoDecisions((p) => ({
         ...p,
-        [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+        [`${it.refId}__${t}`]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
     } else if (it.category === "Request for Quotation") {
       setRfqStatus(it.refId, "Rejected");
@@ -946,9 +952,10 @@ export default function ApprovalManagementPage() {
         rejectionReason: reason,
       });
     } else if (detailItem.category === "Flight Orders" || detailItem.category === "Crew Orders") {
+      const t = detailItem.category === "Crew Orders" ? "crew" : "flight";
       setFoDecisions((p) => ({
         ...p,
-        [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+        [`${detailItem.refId}__${t}`]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
     } else if (detailItem.category === "Request for Quotation") {
       setRfqStatus(detailItem.refId, "Rejected");
