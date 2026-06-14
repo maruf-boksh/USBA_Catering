@@ -1436,6 +1436,9 @@ export type SpecialMealEntry = {
   passengerName: string;
   seat: string;
   mealCode: string; // matches SPECIAL_MEAL_CODES.code
+  /** Who the special meal is for. Crew specials aren't tied to a named person
+   *  (no PNR/seat) — any crew member can take them. Defaults to Passenger. */
+  audience?: "Passenger" | "Crew";
 };
 
 // Each row is ONE flight. Multiple rows can share an `orderNo` — that's how

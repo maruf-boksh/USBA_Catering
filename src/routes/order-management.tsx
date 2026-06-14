@@ -159,6 +159,7 @@ type SpecialMealUpload = {
   passengerName: string;
   seat: string;
   mealCode: string;
+  audience: "Passenger" | "Crew";
 };
 
 // ── CSV parsing for the bulk-upload templates ───────────────────────────────
@@ -222,6 +223,7 @@ function parseFlightCsv(text: string): ParsedRow[] {
     const to = pick(rec, "to");
     const sector = pick(rec, "sector") || (from && to ? `${from} → ${to}` : "");
     const pax = Number(pick(rec, "pax")) || 0;
+    const crew = Number(pick(rec, "no of crew", "crew")) || 0;
     const specialMeals = Number(pick(rec, "special meals", "special meal")) || 0;
     const scopeRaw = pick(rec, "scope").toLowerCase();
     const type: "Domestic" | "International" = scopeRaw.startsWith("int")
@@ -239,6 +241,7 @@ function parseFlightCsv(text: string): ParsedRow[] {
       sector,
       etd: pick(rec, "etd"),
       pax,
+      crew,
       specialMeals,
       valid: !!flight && !!sector && pax > 0,
       type,
@@ -259,6 +262,8 @@ function parseSpecialCsv(text: string): SpecialMealUpload[] {
       passengerName: pick(rec, "passenger name", "name"),
       seat: pick(rec, "seat"),
       mealCode: pick(rec, "meal code", "code").toUpperCase(),
+      // Optional "Audience"/"For" column — "crew" → Crew, anything else Passenger.
+      audience: /crew/i.test(pick(rec, "audience", "for", "type")) ? "Crew" as const : "Passenger" as const,
     }))
     .filter((r) => r.flight && r.mealCode);
 }
@@ -410,6 +415,24 @@ export default function OrderManagementPage() {
     }
     if (moved > 0) toast.success(`${orderNo} — advanced ${moved} ${moved === 1 ? "flight" : "flights"}.`);
     else toast.info(`${orderNo} is already Completed.`);
+  };
+
+  // Resolve the Order # for a manually-created crew order: reuse the flight
+  // order's number for the same date + flights so a flight and its crew order
+  // share one Order #. Falls back to a fresh sequential number when there's no
+  // unambiguous matching flight order.
+  const resolveCrewOrderNo = (date: string, legFlights: string[]): string => {
+    const flightSet = new Set(legFlights);
+    const flightOf = (o: FlightOrder) => (o.orderType ?? "flight") !== "crew";
+    const byFlight = new Set(
+      orders.filter((o) => flightOf(o) && o.date === date && flightSet.has(o.flight)).map((o) => o.orderNo),
+    );
+    if (byFlight.size === 1) return [...byFlight][0];
+    const byDate = new Set(
+      orders.filter((o) => flightOf(o) && o.date === date).map((o) => o.orderNo),
+    );
+    if (byDate.size === 1) return [...byDate][0];
+    return `ORD-${Math.max(3410, ...orders.map((o) => Number(o.orderNo.split("-").pop()) || 0)) + 1}`;
   };
 
   const dayAfterComputed = useMemo(() => {
@@ -758,10 +781,7 @@ export default function OrderManagementPage() {
       {view === "crew-create" && (
         <CrewMealCreate
           onSave={addOrder}
-          nextOrderNo={`ORD-${(Math.max(
-            3410,
-            ...orders.map((o) => Number(o.orderNo.split("-").pop()) || 0),
-          )) + 1}`}
+          resolveOrderNo={resolveCrewOrderNo}
           nextRowSeq={orders.length + 1}
         />
       )}
@@ -770,6 +790,7 @@ export default function OrderManagementPage() {
           onPersistOrders={addOrdersBulk}
           orderNoSeed={Math.max(3410, ...orders.map((o) => Number(o.orderNo.split("-").pop()) || 0))}
           existingOrders={orders}
+          onUpdateCrew={(legId, crew) => updateFlightOrder(legId, { crew })}
           onAttachRoster={(legId, roster) => updateFlightOrder(legId, { specialMealRoster: roster })}
           onOrderConfirmed={(data) => setConfirmedOrder(data)}
         />
@@ -778,6 +799,7 @@ export default function OrderManagementPage() {
       <FlightOrderDetailsDialog
         order={selectedOrder}
         legs={selectedLegs}
+        allOrders={orders}
         onAdvanceLeg={advanceStatus}
         onAdvanceOrder={advanceOrderStatus}
         onClose={() => setSelectedOrder(null)}
@@ -1882,6 +1904,10 @@ function EditOrderLegDialog({
                 <Input type="number" min={0} value={draft.pax} onChange={(e) => set("pax", Number(e.target.value))} className="mt-1 h-9" />
               </div>
               <div>
+                <Label className="text-xs text-muted-foreground">No of Crew</Label>
+                <Input type="number" min={0} value={draft.crew} onChange={(e) => set("crew", Number(e.target.value))} className="mt-1 h-9" />
+              </div>
+              <div>
                 <Label className="text-xs text-muted-foreground">Special Meals</Label>
                 <Input type="number" min={0} value={draft.specialMeals} onChange={(e) => set("specialMeals", Number(e.target.value))} className="mt-1 h-9" />
               </div>
@@ -1905,6 +1931,7 @@ type LegDraft = {
   sector: string;
   etd: string;
   pax: number;
+  crew: number;
   specialMeals: number;
   status: FlightOrderStatus;
   direction: FlightDirection;
@@ -1933,6 +1960,7 @@ function OrderCreate({
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [etd, setEtd] = useState("");
   const [pax, setPax] = useState("");
+  const [crew, setCrew] = useState("");
   const [direction, setDirection] = useState<FlightDirection>("Outbound");
   const [roster, setRoster] = useState<SpecialMealEntry[]>([]);
   const [bulkPaste, setBulkPaste] = useState("");
@@ -1957,7 +1985,7 @@ function OrderCreate({
 
   const resetForm = () => {
     setFlight(""); setFrom(""); setTo("");
-    setEtd(""); setPax("");
+    setEtd(""); setPax(""); setCrew("");
     setDirection("Outbound");
     setRoster([]);
     setBulkPaste("");
@@ -1986,10 +2014,11 @@ function OrderCreate({
     lines.forEach((line) => {
       const parts = line.split(/[,\t]/).map((p) => p.trim());
       if (parts.length < 4) { skipped += 1; return; }
-      const [pnr, passengerName, seat, mealCode] = parts;
+      const [pnr, passengerName, seat, mealCode, audienceRaw] = parts;
       const code = mealCode.toUpperCase();
       if (!validCodes.has(code)) { skipped += 1; return; }
-      parsed.push({ id: nextRosterId(), pnr, passengerName, seat, mealCode: code });
+      const audience = /crew/i.test(audienceRaw ?? "") ? "Crew" as const : "Passenger" as const;
+      parsed.push({ id: nextRosterId(), pnr, passengerName, seat, mealCode: code, audience });
     });
     if (parsed.length === 0) {
       toast.error("No valid rows. Format: PNR, Name, Seat, Code (one per line).");
@@ -2007,8 +2036,11 @@ function OrderCreate({
     if (from === to) { toast.error("From and To must be different airports."); return; }
     const paxNum = Number(pax);
     if (!paxNum || paxNum <= 0) { toast.error("PAX must be greater than zero."); return; }
-    // Drop any roster rows the user left blank
-    const cleanRoster = roster.filter((r) => r.pnr.trim() && r.passengerName.trim() && r.seat.trim() && r.mealCode);
+    // Drop blank rows. Crew specials need only a meal code (no PNR/seat);
+    // passenger rows still need the full identity.
+    const cleanRoster = roster.filter((r) =>
+      r.mealCode && (r.audience === "Crew" || (r.pnr.trim() && r.passengerName.trim() && r.seat.trim())),
+    );
     setLegs((prev) => [
       ...prev,
       {
@@ -2016,6 +2048,7 @@ function OrderCreate({
         sector: `${from} → ${to}`,
         etd: etd || "—",
         pax: paxNum,
+        crew: Math.max(0, Number(crew) || 0),
         specialMeals: cleanRoster.length,
         status: "Pending",
         direction,
@@ -2042,7 +2075,7 @@ function OrderCreate({
       date,
       etd: l.etd,
       pax: l.pax,
-      crew: 16,
+      crew: l.crew,
       specialMeals: l.specialMeals,
       status: l.status,
       direction: l.direction,
@@ -2202,6 +2235,20 @@ function OrderCreate({
 
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+              No of Crew
+            </Label>
+            <Input
+              type="number"
+              min={0}
+              value={crew}
+              onChange={(e) => setCrew(e.target.value)}
+              placeholder="0"
+              className="mt-1"
+            />
+          </div>
+
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
               Special Meals
             </Label>
             <div className="mt-1 h-9 rounded-md border border-input bg-muted/40 px-3 flex items-center justify-between text-sm">
@@ -2278,7 +2325,7 @@ function OrderCreate({
                 Paste from spreadsheet — one passenger per line
               </Label>
               <p className="text-[10px] text-muted-foreground mt-0.5 mb-1.5 font-mono">
-                PNR, Passenger Name, Seat, Meal Code   (comma or tab separated)
+                PNR, Passenger Name, Seat, Meal Code, [Audience]   (comma/tab separated · Audience optional: "Crew" for crew specials)
               </p>
               <textarea
                 value={bulkPaste}
@@ -2303,6 +2350,7 @@ function OrderCreate({
               <TableHeader className="bg-muted/40">
                 <TableRow>
                   <TableHead className="w-10 text-[10px] uppercase tracking-wider">SL</TableHead>
+                  <TableHead className="text-[10px] uppercase tracking-wider w-28">For</TableHead>
                   <TableHead className="text-[10px] uppercase tracking-wider w-32">PNR</TableHead>
                   <TableHead className="text-[10px] uppercase tracking-wider">Passenger Name</TableHead>
                   <TableHead className="text-[10px] uppercase tracking-wider w-20">Seat</TableHead>
@@ -2313,7 +2361,7 @@ function OrderCreate({
               <TableBody>
                 {roster.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="text-center text-xs text-muted-foreground py-6">
+                    <TableCell colSpan={7} className="text-center text-xs text-muted-foreground py-6">
                       No special meals on this flight. Click <strong className="text-foreground">+ Add Passenger</strong> or <strong className="text-foreground">Bulk Paste</strong> to attach a manifest.
                     </TableCell>
                   </TableRow>
@@ -2324,10 +2372,21 @@ function OrderCreate({
                       <TableRow key={r.id}>
                         <TableCell className="text-xs tabular-nums text-muted-foreground">{i + 1}</TableCell>
                         <TableCell>
+                          <select
+                            value={r.audience ?? "Passenger"}
+                            onChange={(e) => updateRosterRow(r.id, { audience: e.target.value as "Passenger" | "Crew" })}
+                            className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                          >
+                            <option value="Passenger">Passenger</option>
+                            <option value="Crew">Crew</option>
+                          </select>
+                        </TableCell>
+                        <TableCell>
                           <Input
                             value={r.pnr}
                             onChange={(e) => updateRosterRow(r.id, { pnr: e.target.value.toUpperCase() })}
-                            placeholder="09QIBQ"
+                            placeholder={r.audience === "Crew" ? "—" : "09QIBQ"}
+                            disabled={r.audience === "Crew"}
                             className="h-8 font-mono text-xs"
                           />
                         </TableCell>
@@ -2335,7 +2394,8 @@ function OrderCreate({
                           <Input
                             value={r.passengerName}
                             onChange={(e) => updateRosterRow(r.id, { passengerName: e.target.value })}
-                            placeholder="PASSENGER NAME"
+                            placeholder={r.audience === "Crew" ? "Any crew member" : "PASSENGER NAME"}
+                            disabled={r.audience === "Crew"}
                             className="h-8 text-xs"
                           />
                         </TableCell>
@@ -2343,7 +2403,8 @@ function OrderCreate({
                           <Input
                             value={r.seat}
                             onChange={(e) => updateRosterRow(r.id, { seat: e.target.value.toUpperCase() })}
-                            placeholder="21A"
+                            placeholder={r.audience === "Crew" ? "—" : "21A"}
+                            disabled={r.audience === "Crew"}
                             className="h-8 font-mono text-xs"
                           />
                         </TableCell>
@@ -2460,10 +2521,12 @@ function OrderCreate({
 }
 
 function CrewMealCreate({
-  onSave, nextOrderNo, nextRowSeq,
+  onSave, resolveOrderNo, nextRowSeq,
 }: {
   onSave: (legs: FlightOrder[]) => void;
-  nextOrderNo: string;
+  /** Resolve the Order # for the crew order from its date + flights — reuses the
+   *  matching flight order's number so a flight and its crew order share one #. */
+  resolveOrderNo: (date: string, flights: string[]) => string;
   nextRowSeq: number;
 }) {
   const today = new Date().toISOString().slice(0, 10);
@@ -2557,9 +2620,10 @@ function CrewMealCreate({
     // crew count needs to be captured per leg — read from each LegDraft entry.
     // Since LegDraft already covers status/etd/etc, append crew via a parallel
     // map by using the current `crew` input as a fallback when needed.
+    const orderNo = resolveOrderNo(date, legs.map((l) => l.flight));
     const rows: FlightOrder[] = legs.map((l, i) => ({
       id: `FO-${String(nextRowSeq + i).padStart(3, "0")}`,
-      orderNo: nextOrderNo,
+      orderNo,
       flight: l.flight,
       airline,
       sector: l.sector,
@@ -2574,7 +2638,7 @@ function CrewMealCreate({
       createdAt: Date.now(),
     }));
     onSave(rows);
-    toast.success(`${nextOrderNo} created with ${legs.length} ${legs.length === 1 ? "flight" : "flights"}.`);
+    toast.success(`${orderNo} created with ${legs.length} ${legs.length === 1 ? "flight" : "flights"} (shared with the flight order).`);
   };
 
   // Build groups for the in-form preview table (uses the user's current slots)
@@ -2821,7 +2885,7 @@ function CrewMealCreate({
                             return (
                               <TableRow key={originalIndex}>
                                 <TableCell className="tabular-nums text-xs">{originalIndex + 1}</TableCell>
-                                <TableCell className="font-mono text-xs text-primary">{nextOrderNo}</TableCell>
+                                <TableCell className="font-mono text-xs text-primary">{resolveOrderNo(date, legs.map((l) => l.flight))}</TableCell>
                                 <TableCell className="font-medium">
                                   <div className="flex items-center gap-1.5">
                                     {l.flight}
@@ -2908,7 +2972,7 @@ const BU_MEAL_TYPE_TIME: Record<string, string> = {
   Dinner: "07:00 PM – 10:00 PM",
 };
 
-function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRoster, onOrderConfirmed }: {
+function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew, onAttachRoster, onOrderConfirmed }: {
   /** Persists imported orders into the Order Management table without navigating away. */
   onPersistOrders: (orders: FlightOrder[]) => void;
   /** Highest existing order number — new bulk orders get sequential numbers above it. */
@@ -2916,6 +2980,9 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
   /** Flight orders already in the system — so a special-meal manifest can attach
    *  to flights that were imported/created earlier, not just this session's upload. */
   existingOrders: FlightOrder[];
+  /** Update an existing flight order's crew count (used when a crew upload merges
+   *  into a flight that already exists, instead of creating a separate crew row). */
+  onUpdateCrew: (legId: string, crew: number) => void;
   /** Attach a parsed roster to an existing order leg (by leg id). */
   onAttachRoster: (legId: string, roster: SpecialMealEntry[]) => void;
   onOrderConfirmed?: (data: MealOrderConfirmation) => void;
@@ -3089,7 +3156,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
       if (rows.length === 0) {
         toast.error("No special-meal rows found — check the file matches the Special Meals template.");
       } else {
-        toast.success(`Special meal manifest parsed — ${rows.length} passenger${rows.length === 1 ? "" : "s"}.`);
+        toast.success(`Special meal manifest parsed — ${rows.length} meal${rows.length === 1 ? "" : "s"}.`);
       }
       addLog(`Special meal manifest uploaded — ${rows.length} rows`);
     };
@@ -3114,15 +3181,15 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
     //    screen's roster bulk-paste accepts.
     //  • Crew Meals — crew-meal order fields from the Create Crew Meal screen
     //    (Scope, Flight, Airline, sector, Date, ETD, Meal Slot, No of Crew).
-    const FLIGHT_HEADERS = ["Scope", "Flight No", "Airline", "From", "To", "Date", "ETD", "Direction", "PAX", "Special Meals"];
+    const FLIGHT_HEADERS = ["Scope", "Flight No", "Airline", "From", "To", "Date", "ETD", "Direction", "PAX", "No of Crew", "Special Meals"];
     const TEMPLATES: Record<typeof kind, { fileName: string; label: string; headers: string[]; rows: (string | number)[][] }> = {
       dom: {
         fileName: "domestic-flights-template.csv",
         label: "Domestic flights",
         headers: FLIGHT_HEADERS,
         rows: [
-          ["Domestic", "BS-141", "US-Bangla", "DAC", "CXB", "2026-05-24", "08:15", "Outbound", 72, 4],
-          ["Domestic", "BS-203", "US-Bangla", "DAC", "CGP", "2026-05-24", "10:30", "Outbound", 88, 2],
+          ["Domestic", "BS-141", "US-Bangla", "DAC", "CXB", "2026-05-24", "08:15", "Outbound", 72, 4, 4],
+          ["Domestic", "BS-203", "US-Bangla", "DAC", "CGP", "2026-05-24", "10:30", "Outbound", 88, 4, 2],
         ],
       },
       intl: {
@@ -3130,19 +3197,23 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
         label: "International flights",
         headers: FLIGHT_HEADERS,
         rows: [
-          ["International", "BS-225", "US-Bangla", "DAC", "DXB", "2026-05-24", "12:30", "Outbound", 174, 14],
-          ["International", "BS-307", "US-Bangla", "DAC", "KUL", "2026-05-24", "23:50", "Outbound", 282, 18],
+          ["International", "BS-225", "US-Bangla", "DAC", "DXB", "2026-05-24", "12:30", "Outbound", 174, 14, 14],
+          ["International", "BS-307", "US-Bangla", "DAC", "KUL", "2026-05-24", "23:50", "Outbound", 282, 16, 18],
         ],
       },
       special: {
         fileName: "special-meals-template.csv",
         label: "Special meals",
-        headers: ["Flight No", "Date", "PNR", "Passenger Name", "Seat", "Meal Code"],
+        // "Audience" is optional — blank/"Passenger" = passenger special; "Crew" =
+        // crew special (no PNR/Name/Seat needed, just the Meal Code).
+        headers: ["Flight No", "Date", "PNR", "Passenger Name", "Seat", "Meal Code", "Audience"],
         rows: [
-          ["BS-225", "2026-05-24", "RT3M9P", "Karim Chowdhury", "3A", "CHML"],
-          ["BS-225", "2026-05-24", "LW6N2Q", "Sadia Islam", "22F", "VGML"],
-          ["BS-225", "2026-05-24", "HB5J7D", "Imran Hossain", "30C", "MOML"],
-          ["BS-141", "2026-05-24", "BS3X9K", "Rahim Uddin", "12C", "MOML"],
+          ["BS-225", "2026-05-24", "RT3M9P", "Karim Chowdhury", "3A", "CHML", "Passenger"],
+          ["BS-225", "2026-05-24", "LW6N2Q", "Sadia Islam", "22F", "VGML", "Passenger"],
+          ["BS-225", "2026-05-24", "HB5J7D", "Imran Hossain", "30C", "MOML", "Passenger"],
+          ["BS-141", "2026-05-24", "BS3X9K", "Rahim Uddin", "12C", "MOML", "Passenger"],
+          ["BS-225", "2026-05-24", "", "", "", "VGML", "Crew"],
+          ["BS-225", "2026-05-24", "", "", "", "MOML", "Crew"],
         ],
       },
       crew: {
@@ -3274,7 +3345,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
       const legIds = manifestStatus.get(k)?.legIds ?? [];
       const roster: SpecialMealEntry[] = entries.map((m, j) => ({
         id: `SM-ATT-${stamp}-${attached}-${j}`,
-        pnr: m.pnr, passengerName: m.passengerName, seat: m.seat, mealCode: m.mealCode,
+        pnr: m.pnr, passengerName: m.passengerName, seat: m.seat, mealCode: m.mealCode, audience: m.audience,
       }));
       for (const legId of legIds) onAttachRoster(legId, roster);
       attached += 1;
@@ -3314,11 +3385,15 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
       (byDate.get(d) ?? byDate.set(d, []).get(d)!).push(r);
     }
     const orders: FlightOrder[] = [];
+    // One Order # per date — and that date's crew order reuses the same number,
+    // so a flight and its crew order share one Order #.
+    const dateToOrderNo = new Map<string, string>();
     let orderIdx = 0;
     let legSeq = 0;
-    for (const [, rows] of byDate) {
+    for (const [date, rows] of byDate) {
       const orderNo = `ORD-${orderNoSeed + 1 + orderIdx}`;
       orderIdx += 1;
+      dateToOrderNo.set(date, orderNo);
       for (const r of rows) {
         const manifest = uploadedByFlight.get(flightKey(r.flight, r.date)) ?? [];
         const roster: SpecialMealEntry[] = manifest.map((m, j) => ({
@@ -3327,6 +3402,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
           passengerName: m.passengerName,
           seat: m.seat,
           mealCode: m.mealCode,
+          audience: m.audience,
         }));
         orders.push({
           id: `FO-IMP-${stamp}-${legSeq++}`,
@@ -3337,7 +3413,9 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
           date: r.date || today,
           etd: r.etd,
           pax: r.pax,
-          crew: r.type === "International" ? 14 : 4,
+          // Use the uploaded No of Crew when given; otherwise fall back to a
+          // type-based default (intl flights carry a larger cabin crew).
+          crew: r.crew && r.crew > 0 ? r.crew : (r.type === "International" ? 14 : 4),
           specialMeals: r.specialMeals,
           status: "Pending",
           direction: r.direction ?? "Outbound",
@@ -3347,18 +3425,51 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
         });
       }
     }
-    // Crew meals — grouped by date into their own crew orders (orderType "crew"),
-    // following the same one-order-per-date pattern as flight orders.
+    // Crew meals — merge into the matching flight order (same flight + date +
+    // direction) when one exists, so crew is a single number on the flight rather
+    // than a separate row. Only crew rows with NO matching flight become their own
+    // standalone crew order (orderType "crew"), grouped by date as before.
     const crewValid = crewDone ? crewParsed.filter((r) => r.valid) : [];
-    const crewByDate = new Map<string, ParsedRow[]>();
+    const crewKey = (flight: string, date: string | undefined, dir: FlightDirection | undefined) =>
+      `${flight}|${date || today}|${dir ?? "Outbound"}`;
+    // Flight orders to merge into: this batch's new flight orders + existing ones.
+    const batchFlightByKey = new Map<string, FlightOrder>();
+    for (const o of orders) {
+      if ((o.orderType ?? "flight") !== "crew") batchFlightByKey.set(crewKey(o.flight, o.date, o.direction), o);
+    }
+    const existingFlightByKey = new Map<string, FlightOrder>();
+    for (const o of existingOrders) {
+      if ((o.orderType ?? "flight") !== "crew") existingFlightByKey.set(crewKey(o.flight, o.date, o.direction), o);
+    }
+
+    const crewUpdatesExisting = new Map<string, number>(); // existing flight id → crew (latest wins)
+    const standaloneCrew: ParsedRow[] = [];
+    let mergedCount = 0;
     for (const r of crewValid) {
+      const k = crewKey(r.flight, r.date, r.direction);
+      const batchHit = batchFlightByKey.get(k);
+      if (batchHit) { batchHit.crew = r.crew ?? 0; mergedCount += 1; continue; }
+      const existHit = existingFlightByKey.get(k);
+      if (existHit) { crewUpdatesExisting.set(existHit.id, r.crew ?? 0); mergedCount += 1; continue; }
+      standaloneCrew.push(r);
+    }
+
+    // Standalone crew rows (no matching flight) → their own crew orders by date.
+    const standaloneByDate = new Map<string, ParsedRow[]>();
+    for (const r of standaloneCrew) {
       const d = r.date || today;
-      (crewByDate.get(d) ?? crewByDate.set(d, []).get(d)!).push(r);
+      (standaloneByDate.get(d) ?? standaloneByDate.set(d, []).get(d)!).push(r);
     }
     let crewOrderCount = 0;
-    for (const [, rows] of crewByDate) {
-      const orderNo = `ORD-${orderNoSeed + 1 + orderIdx}`;
-      orderIdx += 1;
+    for (const [date, rows] of standaloneByDate) {
+      // Reuse the flight order's number for the same date so the crew order
+      // shares the Order #. Mint a new one only if that date has no flight order.
+      let orderNo = dateToOrderNo.get(date);
+      if (!orderNo) {
+        orderNo = `ORD-${orderNoSeed + 1 + orderIdx}`;
+        orderIdx += 1;
+        dateToOrderNo.set(date, orderNo);
+      }
       crewOrderCount += 1;
       for (const r of rows) {
         orders.push({
@@ -3383,8 +3494,14 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
     setImportConfirmed(true);
     // Persist into the Order Management table immediately, with system Order Nos.
     onPersistOrders(orders);
+    // Apply crew merges onto flight orders that already existed in the store.
+    crewUpdatesExisting.forEach((crew, id) => onUpdateCrew(id, crew));
     const orderCount = orderIdx;
-    const crewNote = crewOrderCount > 0 ? ` (incl. ${crewOrderCount} crew order${crewOrderCount === 1 ? "" : "s"})` : "";
+    const crewBits = [
+      mergedCount > 0 ? `${mergedCount} crew merged` : "",
+      crewOrderCount > 0 ? `${crewOrderCount} crew order${crewOrderCount === 1 ? "" : "s"}` : "",
+    ].filter(Boolean).join(", ");
+    const crewNote = crewBits ? ` (incl. ${crewBits})` : "";
     addLog(`Imported ${orderCount} order${orderCount === 1 ? "" : "s"} (${orders.length} flights) into Order Management${crewNote}`);
     toast.success(`${orderCount} order${orderCount === 1 ? "" : "s"} (${orders.length} flights) added to Order Management${crewNote}.`);
   };
@@ -3923,7 +4040,9 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
                   Special Meals
                 </span>
                 <span className="text-xs text-muted-foreground">
-                  {specialRows.length} passenger{specialRows.length === 1 ? "" : "s"} · {uploadedByFlight.size} flight{uploadedByFlight.size === 1 ? "" : "s"} — attach to flights by Flight No + Date
+                  {specialRows.length} special meal{specialRows.length === 1 ? "" : "s"}
+                  {specialRows.some((r) => r.audience === "Crew") && ` (incl. ${specialRows.filter((r) => r.audience === "Crew").length} crew)`}
+                  {" "}· {uploadedByFlight.size} flight{uploadedByFlight.size === 1 ? "" : "s"} — attach to flights by Flight No + Date
                 </span>
               </div>
               {attachableKeys.length > 0 && (
@@ -3949,7 +4068,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
                     <Table>
                       <TableHeader className="bg-muted/40">
                         <TableRow className="bg-emerald-50/60 border-b border-emerald-200/60 hover:bg-emerald-50/60">
-                          <TableHead colSpan={5} className="py-2">
+                          <TableHead colSpan={6} className="py-2">
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="inline-flex items-center rounded-[7px] bg-[#2a2528] px-[9px] py-1 text-xs font-bold tabular-nums text-white">{entries[0].flight}</span>
                               {fr?.direction && <DirectionBadge direction={fr.direction} />}
@@ -3972,6 +4091,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
                         </TableRow>
                         <TableRow>
                           <TableHead className="text-xs uppercase tracking-wider w-10">#</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider w-24">For</TableHead>
                           <TableHead className="text-xs uppercase tracking-wider">PNR</TableHead>
                           <TableHead className="text-xs uppercase tracking-wider">Passenger</TableHead>
                           <TableHead className="text-xs uppercase tracking-wider">Seat</TableHead>
@@ -3979,11 +4099,18 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {entries.map((e, i) => (
+                        {entries.map((e, i) => {
+                          const crew = e.audience === "Crew";
+                          return (
                           <TableRow key={`${key}-${i}`}>
                             <TableCell className="text-xs tabular-nums text-muted-foreground">{i + 1}</TableCell>
+                            <TableCell>
+                              <Badge variant="outline" className={cn("h-5 px-1.5 text-[10px]", crew ? "bg-purple-100 text-purple-700 border-purple-300" : "bg-slate-100 text-slate-600 border-slate-300")}>
+                                {crew ? "Crew" : "Passenger"}
+                              </Badge>
+                            </TableCell>
                             <TableCell className="font-mono text-xs">{e.pnr || "—"}</TableCell>
-                            <TableCell className="text-xs">{e.passengerName || "—"}</TableCell>
+                            <TableCell className="text-xs">{crew ? "Any crew member" : (e.passengerName || "—")}</TableCell>
                             <TableCell className="font-mono text-xs tabular-nums">{e.seat || "—"}</TableCell>
                             <TableCell>
                               <Badge variant="outline" className="h-5 px-1.5 text-[10px] font-mono" title={SPECIAL_MEAL_BY_CODE[e.mealCode]?.name ?? e.mealCode}>
@@ -3991,7 +4118,8 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
                               </Badge>
                             </TableCell>
                           </TableRow>
-                        ))}
+                          );
+                        })}
                       </TableBody>
                     </Table>
                   </div>
@@ -4013,7 +4141,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onAttachRost
               <CheckCircle2 className="h-4 w-4 text-success" />
             )}
             <span className="text-sm font-semibold">
-              Special Meals — {specialRows.length} passenger{specialRows.length === 1 ? "" : "s"} across {uploadedByFlight.size} flight{uploadedByFlight.size === 1 ? "" : "s"}
+              Special Meals — {specialRows.length} meal{specialRows.length === 1 ? "" : "s"} across {uploadedByFlight.size} flight{uploadedByFlight.size === 1 ? "" : "s"}
             </span>
           </div>
           {specialMealIssues.length > 0 ? (
@@ -5135,6 +5263,10 @@ function SpecialMealRosterPanel({ legs, level = "passenger" }: { legs: FlightOrd
   const allEntries = legs.flatMap((l) =>
     (l.specialMealRoster ?? []).map((e) => ({ ...e, flight: l.flight, sector: l.sector })),
   );
+  // Crew specials aren't tied to a person (no PNR/seat) — split them out so the
+  // passenger manifest stays a PNR table and crew shows as per-code counts.
+  const passengerEntries = allEntries.filter((e) => (e.audience ?? "Passenger") !== "Crew");
+  const crewEntries = allEntries.filter((e) => e.audience === "Crew");
   const plannedCount = legs.reduce((s, l) => s + l.specialMeals, 0);
   // Crew Meals tab passes "crew"; flight order surfaces use the default.
   const manifestLevel = level;
@@ -5153,33 +5285,45 @@ function SpecialMealRosterPanel({ legs, level = "passenger" }: { legs: FlightOrd
     );
   }
 
-  // Count per meal code across all legs
-  const counts = new Map<string, number>();
-  allEntries.forEach((e) => counts.set(e.mealCode, (counts.get(e.mealCode) ?? 0) + 1));
-  const summary = Array.from(counts.entries())
-    .map(([code, count]) => ({ code, count, meta: SPECIAL_MEAL_BY_CODE[code] }))
-    .filter((s) => s.meta)
-    .sort((a, b) => b.count - a.count);
+  // Count per meal code — passenger and crew tallied separately.
+  const tally = (entries: typeof allEntries) => {
+    const counts = new Map<string, number>();
+    entries.forEach((e) => counts.set(e.mealCode, (counts.get(e.mealCode) ?? 0) + 1));
+    return Array.from(counts.entries())
+      .map(([code, count]) => ({ code, count, meta: SPECIAL_MEAL_BY_CODE[code] }))
+      .filter((s) => s.meta)
+      .sort((a, b) => b.count - a.count);
+  };
+  const summary = tally(passengerEntries);
+  const crewSummary = tally(crewEntries);
+
+  const codeBadge = (s: { code: string; count: number; meta: typeof SPECIAL_MEAL_BY_CODE[string] }) => (
+    <Badge
+      key={s.code}
+      variant="outline"
+      className={cn("h-6 px-2 text-[11px] font-medium tabular-nums", SPECIAL_MEAL_CATEGORY_COLOR[s.meta.category])}
+      title={s.meta.name}
+    >
+      <span className="font-mono mr-1">{s.code}</span>
+      <span className="opacity-70">·</span>
+      <span className="ml-1">{s.count}</span>
+    </Badge>
+  );
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap gap-1.5">
-        {summary.map((s) => (
-          <Badge
-            key={s.code}
-            variant="outline"
-            className={cn(
-              "h-6 px-2 text-[11px] font-medium tabular-nums",
-              SPECIAL_MEAL_CATEGORY_COLOR[s.meta.category],
-            )}
-            title={s.meta.name}
-          >
-            <span className="font-mono mr-1">{s.code}</span>
-            <span className="opacity-70">·</span>
-            <span className="ml-1">{s.count}</span>
-          </Badge>
-        ))}
-      </div>
+      {summary.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">{summary.map(codeBadge)}</div>
+      )}
+      {crewEntries.length > 0 && (
+        <div className="rounded-md border border-purple-200 bg-purple-50/50 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wider font-semibold text-purple-700 mb-1.5">
+            Crew special meals · {crewEntries.length}
+          </div>
+          <div className="flex flex-wrap gap-1.5">{crewSummary.map(codeBadge)}</div>
+        </div>
+      )}
+      {passengerEntries.length > 0 && (
       <div className="border border-border rounded-md overflow-hidden max-h-[260px] overflow-y-auto">
         <Table>
           <TableHeader className="bg-muted/40 sticky top-0">
@@ -5195,7 +5339,7 @@ function SpecialMealRosterPanel({ legs, level = "passenger" }: { legs: FlightOrd
             </TableRow>
           </TableHeader>
           <TableBody>
-            {allEntries.map((e, i) => {
+            {passengerEntries.map((e, i) => {
               const meta = SPECIAL_MEAL_BY_CODE[e.mealCode];
               return (
                 <TableRow key={e.id} className="hover:bg-muted/30">
@@ -5224,15 +5368,17 @@ function SpecialMealRosterPanel({ legs, level = "passenger" }: { legs: FlightOrd
           </TableBody>
         </Table>
       </div>
+      )}
     </div>
   );
 }
 
 function FlightOrderDetailsDialog({
-  order, legs, onClose, onAdvanceLeg, onAdvanceOrder,
+  order, legs, allOrders = [], onClose, onAdvanceLeg, onAdvanceOrder,
 }: {
   order: FlightOrder | null;
   legs: FlightOrder[];
+  allOrders?: FlightOrder[];
   onClose: () => void;
   onAdvanceLeg: (rowId: string) => void;
   onAdvanceOrder: (orderNo: string) => void;
@@ -5266,6 +5412,7 @@ function FlightOrderDetailsDialog({
               <DetailRow label="ETD" value={leg.etd} />
               <DetailRow label="Passengers" value={leg.pax.toLocaleString()} />
               <DetailRow label="Special Meals" value={leg.specialMeals.toString()} />
+              <DetailRow label="Crew" value={(leg.crew ?? 0).toString()} />
             </div>
 
             <div className="flex items-center gap-2 rounded-md bg-muted/40 px-3 py-2">
@@ -5289,9 +5436,9 @@ function FlightOrderDetailsDialog({
             </div>
 
             <div className="rounded-md bg-muted/40 px-3 py-2 flex items-center justify-between">
-              <span className="text-xs text-muted-foreground">Total Meals (PAX + Special)</span>
+              <span className="text-xs text-muted-foreground">Total Meals (PAX + Crew + Special)</span>
               <span className="text-sm font-semibold text-foreground tabular-nums">
-                {(leg.pax + leg.specialMeals).toLocaleString()}
+                {(leg.pax + (leg.crew ?? 0) + leg.specialMeals).toLocaleString()}
               </span>
             </div>
           </div>

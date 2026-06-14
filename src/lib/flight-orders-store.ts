@@ -41,11 +41,78 @@ function saveAddedOrders() {
   }
 }
 
-const persistedAdded = loadAddedOrders();
+// One-time migration: align crew orders to share their date's flight Order #.
+// Data created before crew/flight shared a number kept separate Order #s; this
+// re-points each persisted crew order to the flight order's number for the same
+// date — but only when that date has a SINGLE distinct flight Order # (so the
+// match is unambiguous). Returns the same array reference when nothing changed.
+function migrateCrewOrderNos(added: FlightOrder[]): FlightOrder[] {
+  const flightNosByDate = new Map<string, Set<string>>();
+  for (const o of added) {
+    if ((o.orderType ?? "flight") === "crew") continue;
+    let set = flightNosByDate.get(o.date);
+    if (!set) { set = new Set(); flightNosByDate.set(o.date, set); }
+    set.add(o.orderNo);
+  }
+  let changed = false;
+  const next = added.map((o) => {
+    if (o.orderType !== "crew") return o;
+    const set = flightNosByDate.get(o.date);
+    if (set && set.size === 1) {
+      const target = [...set][0];
+      if (target !== o.orderNo) { changed = true; return { ...o, orderNo: target }; }
+    }
+    return o;
+  });
+  return changed ? next : added;
+}
+
+// One-time migration: fold crew orders into their matching flight order. A crew
+// order (orderType "crew") that shares a flight + date + direction with a flight
+// order is redundant now that flight orders carry their own crew count — so we
+// copy its crew onto the flight order (latest crew wins) and drop the crew row.
+// Crew orders with NO matching flight order are kept as-is (crew-only flights).
+function migrateCrewMerge(added: FlightOrder[]): FlightOrder[] {
+  const isFlight = (o: FlightOrder) => (o.orderType ?? "flight") !== "crew";
+  const key = (o: FlightOrder) => `${o.flight}|${o.date}|${o.direction}`;
+
+  const flightKeys = new Set<string>();
+  for (const o of added) if (isFlight(o)) flightKeys.add(key(o));
+
+  // Latest crew value per flight key, taken from crew orders that have a match.
+  const crewByKey = new Map<string, { crew: number; at: number }>();
+  for (const o of added) {
+    if (isFlight(o)) continue;
+    const k = key(o);
+    if (!flightKeys.has(k)) continue; // no match → leave it standalone
+    const at = o.createdAt ?? 0;
+    const prev = crewByKey.get(k);
+    if (!prev || at >= prev.at) crewByKey.set(k, { crew: o.crew ?? 0, at });
+  }
+  if (crewByKey.size === 0) return added;
+
+  const next: FlightOrder[] = [];
+  for (const o of added) {
+    if (isFlight(o)) {
+      const merged = crewByKey.get(key(o));
+      next.push(merged ? { ...o, crew: merged.crew } : o);
+    } else if (!flightKeys.has(key(o))) {
+      next.push(o); // standalone crew order — keep
+    }
+    // else: crew order merged into its flight order → drop
+  }
+  return next;
+}
+
+const rawAdded = loadAddedOrders();
+const persistedAdded = migrateCrewMerge(migrateCrewOrderNos(rawAdded));
 const addedIds = new Set<string>(persistedAdded.map((o) => o.id));
 // Persisted creates take precedence over (and sit above) the seed snapshot.
 let current: FlightOrder[] = [...persistedAdded, ...seedFlightOrders];
 const listeners = new Set<() => void>();
+// If the migration re-aligned any crew Order #, persist the aligned set so the
+// fix sticks across reloads (no-op when nothing changed).
+if (persistedAdded !== rawAdded) saveAddedOrders();
 
 function notify() {
   for (const l of listeners) l();

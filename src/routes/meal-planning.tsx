@@ -1,5 +1,5 @@
 import { useNavigate, useLocation } from "react-router-dom";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -14,7 +14,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useMealSlots } from "@/lib/meal-slot-settings";
 import { resolveItemProfile } from "@/lib/item-profiles";
 import { usePersistedState } from "@/lib/use-persisted-state";
-import { MEAL_PLAN_CONFIG_KEY } from "@/lib/meal-planning-data";
+import { MEAL_PLAN_CONFIG_KEY, mealCards as seedMealCards } from "@/lib/meal-planning-data";
 
 // Resolve a meal item's serving weight/kcal. The Item Profile (config-item) is
 // the source of truth when configured; the static FOOD_ITEMS/DESSERT_ITEMS entry
@@ -231,228 +231,14 @@ const DUMMY_TAG_MEALS: Record<string, { forType: string; servingTime: { start: s
   ],
 };
 
-// Sample data for current day
+// Full-week sample data. The page persists its own copy (MEAL_PLAN_CONFIG_KEY),
+// so the default seed must cover every weekday — otherwise days the user hasn't
+// configured render empty. We reuse the shared meal-planning seed (all days,
+// passengers + crew) and map it into this page's MealCard shape (adds the
+// createdDate the page tracks but the shared seed omits).
 function getSampleMeals(): MealCard[] {
-  const today = DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1];
-
-  return [
-    {
-      id: "meal-1",
-      day: today,
-      mealType: "Lunch",
-      flightType: ["International"],
-      forType: "Passengers",
-      choices: [
-        {
-          label: "CHOICE 1",
-          percentage: 60,
-          items: [
-            { name: "Plain Polao", weight: 180, calories: 240 },
-            { name: "Beef Rezala", weight: 100, calories: 150 },
-            { name: "Mug Dal Vuna", weight: 50, calories: 80 },
-          ],
-        },
-        {
-          label: "CHOICE 2",
-          percentage: 40,
-          items: [
-            { name: "Jeera Polao", weight: 180, calories: 245 },
-            { name: "Chicken Masala", weight: 100, calories: 155 },
-            { name: "Mixed Veg Curry", weight: 50, calories: 75 },
-          ],
-        },
-      ],
-      specialMeals: [
-        {
-          type: "VGML",
-          portions: 5,
-          items: [
-            { name: "Plain Polao", weight: 170, calories: 230 },
-            { name: "Mixed Veg Curry", weight: 70, calories: 90 },
-            { name: "Mug Dal Vuna", weight: 50, calories: 80 },
-          ],
-          enabled: true,
-        },
-        {
-          type: "CHML",
-          portions: "As per demand",
-          items: [
-            { name: "Plain Polao, Saffron Rice, Chicken Korma, Kitkat Chocolate", weight: 250, calories: 450 },
-          ],
-          enabled: true,
-        },
-      ],
-      dessert: { name: "Vanilla Pastry", weight: 60, calories: 180 },
-      servingTime: { start: "11:00", end: "14:00" },
-      totalKcal: 720,
-      createdDate: new Date().toISOString().split('T')[0],
-    },
-    {
-      id: "meal-2",
-      day: today,
-      mealType: "Breakfast",
-      flightType: ["International", "Domestic"],
-      forType: "Crew",
-      choices: [
-        {
-          label: "CHOICE 1",
-          percentage: 50,
-          items: [
-            { name: "Chicken Khichuri", weight: 250, calories: 280 },
-            { name: "Fried Egg", weight: 50, calories: 85 },
-          ],
-        },
-        {
-          label: "CHOICE 2",
-          percentage: 50,
-          items: [
-            { name: "Roti", weight: 80, calories: 120 },
-            { name: "Scrambled Egg", weight: 100, calories: 145 },
-            { name: "Mixed Veg Curry", weight: 50, calories: 75 },
-          ],
-        },
-      ],
-      specialMeals: [
-        {
-          type: "VGML",
-          portions: 1,
-          items: [
-            { name: "Roti", weight: 80, calories: 120 },
-            { name: "Mixed Veg", weight: 40, calories: 60 },
-            { name: "Mug Dal", weight: 30, calories: 50 },
-          ],
-          enabled: true,
-        },
-      ],
-      dessert: { name: "Yoghurt & Semolina", weight: 80, calories: 120 },
-      servingTime: { start: "07:00", end: "10:00" },
-      totalKcal: 480,
-      createdDate: new Date().toISOString().split('T')[0],
-    },
-    {
-      id: "meal-3",
-      day: today,
-      mealType: "Lunch",
-      flightType: ["International", "Domestic"],
-      forType: "Crew",
-      choices: [
-        {
-          label: "CHOICE 1",
-          percentage: 50,
-          items: [
-            { name: "Beef Biriyani", weight: 250, calories: 380 },
-            { name: "Chicken Kabab", weight: 50, calories: 120 },
-            { name: "Veg Tempura", weight: 30, calories: 90 },
-          ],
-        },
-        {
-          label: "CHOICE 2",
-          percentage: 50,
-          items: [
-            { name: "Mughlai Chicken", weight: 100, calories: 160 },
-            { name: "Veg Vajee", weight: 80, calories: 100 },
-            { name: "Garlic Bread", weight: 60, calories: 180 },
-          ],
-        },
-      ],
-      specialMeals: [
-        {
-          type: "VGML",
-          portions: 1,
-          items: [
-            { name: "Plain Polao", weight: 150, calories: 210 },
-            { name: "Mixed Veg", weight: 100, calories: 130 },
-            { name: "Potato Croquettes", weight: 40, calories: 160 },
-          ],
-          enabled: true,
-        },
-      ],
-      dessert: { name: "Firni & Vanilla Pastry", weight: 100, calories: 240 },
-      servingTime: { start: "11:00", end: "14:00" },
-      totalKcal: 640,
-      createdDate: new Date().toISOString().split('T')[0],
-    },
-    {
-      id: "meal-4",
-      day: today,
-      mealType: "Dinner",
-      flightType: ["International", "Domestic"],
-      forType: "Crew",
-      choices: [
-        {
-          label: "CHOICE 1",
-          percentage: 50,
-          items: [
-            { name: "Boiled Rice", weight: 180, calories: 210 },
-            { name: "Chicken Dopiaza", weight: 100, calories: 140 },
-            { name: "Dal Butter Fry", weight: 50, calories: 120 },
-          ],
-        },
-        {
-          label: "CHOICE 2",
-          percentage: 50,
-          items: [
-            { name: "Tandoori Chicken", weight: 100, calories: 160 },
-            { name: "Sauteed Veg", weight: 100, calories: 110 },
-            { name: "Kulcha", weight: 60, calories: 180 },
-          ],
-        },
-      ],
-      specialMeals: [
-        {
-          type: "VGML",
-          portions: 1,
-          items: [
-            { name: "Boiled Rice", weight: 150, calories: 170 },
-            { name: "Mixed Veg", weight: 100, calories: 130 },
-            { name: "Chana Dal", weight: 40, calories: 100 },
-          ],
-          enabled: true,
-        },
-      ],
-      dessert: { name: "Firni & Semolina", weight: 100, calories: 210 },
-      servingTime: { start: "19:00", end: "22:00" },
-      totalKcal: 590,
-      createdDate: new Date().toISOString().split('T')[0],
-    },
-    {
-      id: "meal-5",
-      day: today,
-      mealType: "Heavy Snacks",
-      flightType: ["International", "Domestic"],
-      forType: "Crew",
-      choices: [
-        {
-          label: "CHOICE 1",
-          percentage: 50,
-          items: [{ name: "Roll Sandwich with Chicken & Cheese", weight: 150, calories: 320 }],
-        },
-        {
-          label: "CHOICE 2",
-          percentage: 50,
-          items: [
-            { name: "Korean Fried Chicken", weight: 100, calories: 280 },
-            { name: "Potato Wedges", weight: 50, calories: 180 },
-          ],
-        },
-      ],
-      specialMeals: [
-        {
-          type: "VGML",
-          portions: 1,
-          items: [
-            { name: "Veg Frankie", weight: 80, calories: 200 },
-            { name: "Buttered Veg", weight: 30, calories: 60 },
-          ],
-          enabled: true,
-        },
-      ],
-      dessert: { name: "Firni & Vanilla Pastry", weight: 80, calories: 160 },
-      servingTime: { start: "16:00", end: "19:00" },
-      totalKcal: 410,
-      createdDate: new Date().toISOString().split('T')[0],
-    },
-  ];
+  const created = new Date().toISOString().split('T')[0];
+  return seedMealCards.map((m) => ({ ...m, createdDate: created }));
 }
 
 export default function MealPlanning() {
@@ -472,6 +258,16 @@ export default function MealPlanning() {
   // Persisted so the configured menus survive a reload and feed the Production
   // Order "Meal Plan" tab (read via loadMealPlanningConfig). Drop-in for useState.
   const [meals, setMeals] = usePersistedState<MealCard[]>(MEAL_PLAN_CONFIG_KEY, getSampleMeals());
+  // Backfill: older persisted state only held the day the app was first opened
+  // on (the previous single-day seed), leaving every other day empty. Add the
+  // seed cards for any day with no configured meals so the planner is complete.
+  // Idempotent — only fills days that are entirely empty, never touches the rest.
+  useEffect(() => {
+    const configuredDays = new Set(meals.map((m) => m.day));
+    const missing = getSampleMeals().filter((c) => !configuredDays.has(c.day));
+    if (missing.length) setMeals((prev) => [...prev, ...missing]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [selectedDay, setSelectedDay] = useState(DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]);
   const today = DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1];
   const [createModalOpen, setCreateModalOpen] = useState(false);

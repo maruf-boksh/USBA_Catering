@@ -534,8 +534,15 @@ export default function Dispatch() {
   const findReturnLeg = (order: FlightOrder | null | undefined): FlightOrder | null => {
     if (!order?.orderNo) return null;
     const opp: LegDirection = order.direction === "Return" ? "Outbound" : "Return";
+    // Crew orders can now share a flight order's Order #, so match the same
+    // order TYPE — a flight's return leg is a flight, never the crew order.
+    const orderKind = order.orderType ?? "flight";
     const legs = flightOrders.filter(
-      (o) => o.orderNo === order.orderNo && o.flight !== order.flight && o.direction === opp,
+      (o) =>
+        o.orderNo === order.orderNo &&
+        (o.orderType ?? "flight") === orderKind &&
+        o.flight !== order.flight &&
+        o.direction === opp,
     );
     if (legs.length === 0) return null;
     const rev = reverseSector(order.sector);
