@@ -170,6 +170,42 @@ export type WfDispatchApproval = {
   forwardedAt?: string;
 };
 
+// ── Maintenance approval workflow ─────────────────────────────────────────────
+export type WfMaintenanceApprovalStatus =
+  | "Logged"
+  | "Pending Approval"
+  | "Maintenance Approved"
+  | "Rejected"
+  | "Sent to Accounts"
+  | "Payment Approved"
+  | "Payment Rejected";
+
+export type WfMaintenanceApproval = {
+  id: string;
+  assetId: string;
+  assetName: string;
+  serviceDate: string;
+  nextDue: string;
+  workType: "Routine" | "Repair" | "Calibration" | "Inspection";
+  notes?: string;
+  submittedAt: string;
+  status: WfMaintenanceApprovalStatus;
+  approvedBy?: string;
+  approvedAt?: string;
+  rejectedBy?: string;
+  rejectedAt?: string;
+  rejectionReason?: string;
+  accountsHeadId?: string;
+  vendor?: string;
+  expenseCost?: number;
+  sentToAccountsAt?: string;
+  paymentApprovedBy?: string;
+  paymentApprovedAt?: string;
+  paymentRejectedBy?: string;
+  paymentRejectedAt?: string;
+  paymentRejectionReason?: string;
+};
+
 // ── Production Entry workflow ─────────────────────────────────────────────────
 export type WfProductionEntryStatus =
   | "Pending"
@@ -309,6 +345,10 @@ type WorkflowCtx = {
   dispatchApprovals: WfDispatchApproval[];
   addDispatchApproval: (entry: WfDispatchApproval) => void;
   updateDispatchApproval: (id: string, patch: Partial<WfDispatchApproval>) => void;
+
+  maintenanceApprovals: WfMaintenanceApproval[];
+  addMaintenanceApproval: (entry: WfMaintenanceApproval) => void;
+  updateMaintenanceApproval: (id: string, patch: Partial<WfMaintenanceApproval>) => void;
 };
 
 const WorkflowContext = createContext<WorkflowCtx>({
@@ -324,6 +364,7 @@ const WorkflowContext = createContext<WorkflowCtx>({
   mrpRuns: [], addMrpRun: () => {}, updateMrpRun: () => {},
   qcClearedFlights: {}, markFlightQcCleared: () => {},
   dispatchApprovals: [], addDispatchApproval: () => {}, updateDispatchApproval: () => {},
+  maintenanceApprovals: [], addMaintenanceApproval: () => {}, updateMaintenanceApproval: () => {},
 });
 
 // ── Provider ───────────────────────────────────────────────────────────────────
@@ -493,6 +534,19 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
   const [mrpRuns, setMrpRuns] = useState<WfMrpRun[]>([]);
   const [qcClearedFlights, setQcClearedFlights] = useState<Record<string, string>>({});
+  const [maintenanceApprovals, setMaintenanceApprovals] = useState<WfMaintenanceApproval[]>([
+    {
+      id: "MNT-7001",
+      assetId: "EQP-T-003",
+      assetName: "Full Size Meal Trolley",
+      serviceDate: "2026-06-01",
+      nextDue: "2026-12-01",
+      workType: "Routine",
+      notes: "Routine bi-annual maintenance check.",
+      submittedAt: "2026-06-01",
+      status: "Pending Approval",
+    },
+  ]);
   const [dispatchApprovals, setDispatchApprovals] = useState<WfDispatchApproval[]>([
     {
       id: "DSP-SEED-001",
@@ -570,6 +624,11 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       addDispatchApproval: (entry) => setDispatchApprovals(prev => [entry, ...prev]),
       updateDispatchApproval: (id, patch) =>
         setDispatchApprovals(prev => prev.map(e => e.id === id ? { ...e, ...patch } : e)),
+
+      maintenanceApprovals,
+      addMaintenanceApproval: (entry) => setMaintenanceApprovals(prev => [...prev, entry]),
+      updateMaintenanceApproval: (id, patch) =>
+        setMaintenanceApprovals(prev => prev.map(e => e.id === id ? { ...e, ...patch } : e)),
 
       productionEntryRecords,
       addProductionEntryRecord: (record) => {

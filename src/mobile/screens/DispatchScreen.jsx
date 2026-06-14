@@ -42,7 +42,7 @@ function DispatchDetail({ dispatch, onBack }) {
         {status !== 'dispatched' && (
           <button
             onClick={() => setStatus(status === 'pending' ? 'loading' : 'dispatched')}
-            style={{ width: '100%', padding: '13px 0', background: T.buttonGradient, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}
+            style={{ width: '100%', padding: '13px 0', background: T.statusApproved, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}
           >
             {status === 'pending' ? 'Start Loading' : 'Mark Dispatched'}
           </button>

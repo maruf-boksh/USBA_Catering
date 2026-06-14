@@ -78,7 +78,8 @@ export function SplashScreen({ onDone }) {
           {/* Airplane — entry arc then continuous float */}
           <div style={{ animation: 'planeEntry 0.75s cubic-bezier(0.22,1.4,0.36,1) 0.15s both' }}>
             <div style={{ animation: 'planeFloat 3.2s ease-in-out 0.9s infinite' }}>
-              <svg width="46" height="46" viewBox="0 0 24 24" fill="none">
+              {/* was: width="46" height="46" */}
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none">
                 <path
                   d="M21 16v-2l-8-5V3.5A1.5 1.5 0 0 0 11.5 2h0A1.5 1.5 0 0 0 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5L21 16z"
                   fill="white"
@@ -185,9 +186,10 @@ export function SplashScreen({ onDone }) {
           to   { transform: translate(0,    0)    rotate(0deg)  scale(1);    opacity: 1; }
         }
         @keyframes planeFloat {
-          0%, 100% { transform: translateY(0px)  rotate(0deg); }
-          30%      { transform: translateY(-5px) rotate(-4deg); }
-          65%      { transform: translateY(-1px) rotate(2deg);  }
+          /* was: 30% rotate(-4deg), 65% rotate(2deg) — removed tilt */
+          0%, 100% { transform: translateY(0px);  }
+          30%      { transform: translateY(-5px); }
+          65%      { transform: translateY(-1px); }
         }
         @keyframes textUp {
           from { transform: translateY(14px); opacity: 0; }
@@ -214,9 +216,10 @@ export function SplashScreen({ onDone }) {
           50%       { transform: scale(1.05); opacity: 1;   }
         }
         @keyframes flightTakeOff {
-          0%   { transform: translateY(0)     rotate(0deg);   opacity: 1; }
-          20%  { transform: translateY(-40px)  rotate(-8deg);  opacity: 1; }
-          100% { transform: translateY(-680px) rotate(-14deg); opacity: 0; }
+          /* was: 20% rotate(-8deg), 100% rotate(-14deg) — removed tilt */
+          0%   { transform: translateY(0);      opacity: 1; }
+          20%  { transform: translateY(-40px);  opacity: 1; }
+          100% { transform: translateY(-680px); opacity: 0; }
         }
       `}</style>
     </div>

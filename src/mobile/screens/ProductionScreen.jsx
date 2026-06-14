@@ -67,7 +67,7 @@ function OrderDetail({ order, onBack }) {
             {localStatus === 'in-progress' && (
               <button
                 onClick={() => setLocalStatus('completed')}
-                style={{ width: '100%', padding: '13px 0', background: T.buttonGradient, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}
+                style={{ width: '100%', padding: '13px 0', background: T.statusApproved, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}
               >
                 Mark Completed
               </button>

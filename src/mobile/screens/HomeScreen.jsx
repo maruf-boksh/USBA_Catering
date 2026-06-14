@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { T } from '../theme';
 import { KPICard } from '../components/KPICard';
-import { MOCK_KPIS, MOCK_FLIGHTS, MOCK_PRODUCTION_ORDERS, MOCK_QC_CHECKS, MOCK_DISPATCHES } from '../mockData';
+import { MOCK_FLIGHTS, MOCK_PRODUCTION_ORDERS, MOCK_QC_CHECKS, MOCK_DISPATCHES, MOCK_APPROVALS, MOCK_INVENTORY_ALERTS } from '../mockData';
 
 const STATUS_STYLE = {
   boarding:  { color: T.statusBoarding,  bg: T.statusBoardingBg  },
@@ -40,15 +40,27 @@ function FlightRow({ flight }) {
   );
 }
 
+// ── Computed KPIs — derived from mock data so values stay in sync ──────────────
+const totalFlights     = MOCK_FLIGHTS.length;
+const totalMeals       = MOCK_FLIGHTS.reduce((s, f) => s + f.meals, 0);
+const delayedFlights   = MOCK_FLIGHTS.filter(f => f.status === 'delayed').length;
+const delayedPax       = MOCK_FLIGHTS.filter(f => f.status === 'delayed').reduce((s, f) => s + f.pax, 0);
+const onTimeRate       = totalFlights > 0 ? Math.round(((totalFlights - delayedFlights) / totalFlights) * 100) : 100;
+const qcOpenIssues     = MOCK_QC_CHECKS.filter(c => c.result === 'open').length;
+const qcResolvedToday  = MOCK_QC_CHECKS.filter(c => c.result === 'pass').length;
+const pendingApprovals = MOCK_APPROVALS.filter(a => a.status === 'pending').length;
+const activeDispatches = MOCK_DISPATCHES.filter(d => d.status !== 'pending').length;
+const inventoryAlerts  = MOCK_INVENTORY_ALERTS.length;
+
 const KPI_ROWS = [
-  { label: 'Total Flights',     value: MOCK_KPIS.totalFlights,                          sub: 'Today',                             accent: T.statusInfo    },
-  { label: 'Total Meals',       value: MOCK_KPIS.totalMeals,                             sub: 'Scheduled',                         accent: T.statusApproved },
-  { label: 'Delayed Flights',   value: MOCK_KPIS.delayedFlights,                         sub: `${MOCK_KPIS.delayedPax} pax affected`, accent: T.statusDelayed  },
-  { label: 'On-Time Rate',      value: `${MOCK_KPIS.onTimeRate}%`,                       sub: 'Departures',                        accent: T.statusApproved },
-  { label: 'QC Open Issues',    value: MOCK_KPIS.qcOpenIssues,                           sub: `${MOCK_KPIS.qcResolvedToday} resolved today`, accent: T.primary },
-  { label: 'Pending Approvals', value: MOCK_KPIS.pendingApprovals,                       sub: 'Awaiting review',                   accent: T.statusPending  },
-  { label: 'Active Dispatches', value: MOCK_KPIS.activeDispatches,                       sub: 'In progress',                       accent: T.statusBoarding },
-  { label: 'Inventory Alerts',  value: MOCK_KPIS.inventoryAlerts,                        sub: 'Low stock items',                   accent: T.statusDelayed  },
+  { label: 'Total Flights',     value: totalFlights,                     sub: 'Today',                              accent: T.statusInfo,     route: 'orders'      },
+  { label: 'Total Meals',       value: totalMeals,                       sub: 'Scheduled',                          accent: T.statusApproved, route: 'meal-planning' },
+  { label: 'Delayed Flights',   value: delayedFlights,                   sub: `${delayedPax} pax affected`,         accent: T.statusDelayed,  route: 'orders'      },
+  { label: 'On-Time Rate',      value: `${onTimeRate}%`,                 sub: 'Departures',                         accent: T.statusApproved, route: 'orders'      },
+  { label: 'QC Open Issues',    value: qcOpenIssues,                     sub: `${qcResolvedToday} resolved today`,  accent: T.primary,        route: 'qc'          },
+  { label: 'Pending Approvals', value: pendingApprovals,                 sub: 'Awaiting review',                    accent: T.statusPending,  route: 'approvals'   },
+  { label: 'Active Dispatches', value: activeDispatches,                 sub: 'In progress',                        accent: T.statusBoarding, route: 'dispatch-mon' },
+  { label: 'Inventory Alerts',  value: inventoryAlerts,                  sub: 'Low stock items',                    accent: T.statusDelayed,  route: 'stock'       },
 ];
 
 // Pipeline step data derived from mock data
@@ -154,7 +166,7 @@ function PipelineStep({ step, onPress, isLast }) {
 export function HomeScreen({ nav }) {
   const [expanded, setExpanded] = useState(false);
   const visibleKPIs = expanded ? KPI_ROWS : KPI_ROWS.slice(0, 4);
-  const alertBadgeCount = MOCK_KPIS.pendingApprovals + MOCK_KPIS.inventoryAlerts;
+  const alertBadgeCount = pendingApprovals + inventoryAlerts;
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
@@ -220,6 +232,7 @@ export function HomeScreen({ nav }) {
                 value={kpi.value}
                 sub={kpi.sub}
                 accent={kpi.accent}
+                onPress={() => nav.navigate(kpi.route)}
               />
             ))}
           </div>
@@ -271,7 +284,7 @@ export function HomeScreen({ nav }) {
             </div>
             <div>
               <div style={{ fontSize: 13, fontWeight: 600, color: T.statusPending, fontFamily: T.fontBody }}>
-                {MOCK_KPIS.pendingApprovals} items awaiting your review
+                {pendingApprovals} items awaiting your review
               </div>
               <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
                 Purchase orders · Payments · Demands
@@ -303,7 +316,7 @@ export function HomeScreen({ nav }) {
             <FlightRow key={f.id} flight={f} />
           ))}
           <div style={{ paddingTop: 6, fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, textAlign: 'center' }}>
-            {MOCK_KPIS.totalFlights} flights total today
+            {totalFlights} flights total today
           </div>
         </div>
 

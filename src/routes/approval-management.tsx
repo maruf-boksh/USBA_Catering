@@ -20,7 +20,7 @@ import {
   FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, ArrowLeft, Layers, UserCog, Users,
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
   PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane, MailQuestion, PlaneLanding, PlaneTakeoff,
-  BadgeDollarSign,
+  BadgeDollarSign, Wrench,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -50,7 +50,8 @@ type Category =
   | "Production Order"
   | "Bill of Materials"
   | "User Account"
-  | "Dispatch";
+  | "Dispatch"
+  | "Maintenance";
 
 const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Flight Orders",        label: "Flight Orders",      icon: Plane           },
@@ -67,6 +68,7 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Bill of Materials",    label: "BOM",                icon: Layers          },
   { key: "User Account",         label: "Users",              icon: UserCog         },
   { key: "Dispatch",             label: "Dispatch",           icon: Truck           },
+  { key: "Maintenance",          label: "Maintenance",        icon: Wrench          },
 ];
 
 // Overview grid — categories grouped into business sections (mirrors the
@@ -78,6 +80,7 @@ const APPROVAL_SECTIONS: { label: string; keys: Category[] }[] = [
   { label: "Inventory Approval",      keys: ["Demand Request", "Transfer Request", "Stock Adjustment"] },
   { label: "Production Approval",     keys: ["Production Order", "Bill of Materials"] },
   { label: "Administration Approval", keys: ["User Account"] },
+  { label: "Asset Management Approval", keys: ["Maintenance"] },
 ];
 const CATEGORY_BY_KEY = new Map(CATEGORIES.map((c) => [c.key, c]));
 
@@ -223,6 +226,7 @@ export default function ApprovalManagementPage() {
     dispatchApprovals, updateDispatchApproval,
     wfPurchaseOrders, updatePurchaseOrder,
     productionEntries, updateProductionEntryStatus,
+    maintenanceApprovals, updateMaintenanceApproval,
   } = useWorkflow();
   const flightOrders = useFlightOrders();
 
@@ -488,9 +492,35 @@ export default function ApprovalManagementPage() {
       });
   }, [productionEntries, productionDecisions]);
 
+  // Project maintenance approvals that have been submitted (not "Logged") into the queue.
+  const maintenanceItems: ApprovalItem[] = useMemo(() => {
+    return maintenanceApprovals
+      .filter((e) => e.status !== "Logged")
+      .map((e) => {
+        const approvalStatus: ApprovalStatus =
+          e.status === "Pending Approval" ? "Pending"
+          : e.status === "Rejected"       ? "Rejected"
+          : "Approved";
+        return {
+          id: `MNT-AP-${e.id}`,
+          category: "Maintenance" as Category,
+          refId: e.id,
+          title: `Maintenance — ${e.assetName}`,
+          requestedBy: "Maintenance Dept.",
+          requestedAt: e.serviceDate,
+          summary: `${e.workType} · Service Date: ${e.serviceDate} · Next Due: ${e.nextDue}${e.notes ? " — " + e.notes : ""}`,
+          itemsCount: 1,
+          status: approvalStatus,
+          processedBy: e.approvedBy ?? e.rejectedBy,
+          processedAt: e.approvedAt ?? e.rejectedAt,
+          rejectionReason: e.rejectionReason,
+        };
+      });
+  }, [maintenanceApprovals]);
+
   const allItems = useMemo(
-    () => [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...items],
-    [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, items],
+    () => [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...items],
+    [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, items],
   );
 
   const counts = useMemo(() => {
@@ -690,6 +720,15 @@ export default function ApprovalManagementPage() {
       if (!silent) toast.success(`${it.refId} approved — ready for receiving.`);
       return;
     }
+    if (it.category === "Maintenance") {
+      updateMaintenanceApproval(it.refId, {
+        status: "Maintenance Approved",
+        approvedBy: `${role} (GM/Admin)`,
+        approvedAt: stamp(),
+      });
+      if (!silent) toast.success(`${it.refId} — Maintenance Approved.`);
+      return;
+    }
     setItems((p) =>
       p.map((x) =>
         x.id === it.id
@@ -746,6 +785,13 @@ export default function ApprovalManagementPage() {
       }));
     } else if (it.id.startsWith("WFPO-AP-")) {
       updatePurchaseOrder(it.refId, { status: "Rejected", rejectionReason: reason });
+    } else if (it.category === "Maintenance") {
+      updateMaintenanceApproval(it.refId, {
+        status: "Rejected",
+        rejectedBy: `${role} (GM/Admin)`,
+        rejectedAt: stamp(),
+        rejectionReason: reason,
+      });
     } else {
       setItems((p) =>
         p.map((x) =>
@@ -929,6 +975,13 @@ export default function ApprovalManagementPage() {
       }));
     } else if (detailItem.id.startsWith("WFPO-AP-")) {
       updatePurchaseOrder(detailItem.refId, { status: "Rejected", rejectionReason: reason });
+    } else if (detailItem.category === "Maintenance") {
+      updateMaintenanceApproval(detailItem.refId, {
+        status: "Rejected",
+        rejectedBy: `${role} (GM/Admin)`,
+        rejectedAt: stamp(),
+        rejectionReason: reason,
+      });
     } else {
       setItems((p) =>
         p.map((x) =>

@@ -57,7 +57,7 @@ function PrimaryBtn({ children, onClick, disabled, style }) {
   return (
     <button onClick={onClick} disabled={disabled} style={{
       width: '100%', padding: '13px', fontFamily: T.fontBody, fontSize: 14, fontWeight: 700,
-      color: '#fff', background: disabled ? T.textDisabled : T.buttonGradient,
+      color: '#fff', background: disabled ? T.textDisabled : T.statusApproved,
       border: 'none', borderRadius: T.radiusMd, cursor: disabled ? 'not-allowed' : 'pointer',
       ...style,
     }}>
@@ -377,10 +377,10 @@ export function DispatchMonScreen({ nav }) {
               {['Clean', 'Not Clean'].map(opt => (
                 <button key={opt} onClick={() => setMVehicleClean(opt)} style={{
                   flex: 1, padding: '10px 0', fontFamily: T.fontBody, fontSize: 13, fontWeight: 700,
-                  border: `1px solid ${mVehicleClean === opt ? T.primary : T.border}`,
+                  border: `1px solid ${mVehicleClean === opt ? (opt === 'Clean' ? T.statusApproved : T.primary) : T.border}`,
                   borderRadius: T.radiusMd, cursor: 'pointer',
-                  background: mVehicleClean === opt ? T.primaryLight : T.bgSubtle,
-                  color: mVehicleClean === opt ? T.primary : T.textSecondary,
+                  background: mVehicleClean === opt ? (opt === 'Clean' ? T.statusApproved : T.primary) : T.bgSubtle,
+                  color: mVehicleClean === opt ? '#fff' : T.textSecondary,
                 }}>
                   {opt === 'Clean' ? '✓ Clean' : 'Not Clean'}
                 </button>

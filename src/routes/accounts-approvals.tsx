@@ -8,9 +8,9 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { KpiCard } from "@/components/common/KpiCard";
 import { StatusBadge } from "@/components/common/StatusBadge";
-import { BadgeCheck, Clock, CheckCircle2, AlertTriangle, ShoppingCart } from "lucide-react";
+import { BadgeCheck, Clock, CheckCircle2, AlertTriangle, ShoppingCart, Wrench, Eye, X } from "lucide-react";
 import { toast } from "sonner";
-import { useWorkflow, type WfPurchaseOrder } from "@/lib/workflow-store";
+import { useWorkflow, type WfPurchaseOrder, type WfMaintenanceApproval } from "@/lib/workflow-store";
 
 type InvStatus = "Pending" | "Approved" | "Paid" | "Rejected";
 
@@ -80,7 +80,7 @@ function TableHead() {
 
 export default function PaymentApprovals() {
   const wf = useWorkflow();
-  const { wfPurchaseOrders, updatePOStatus, updateRequisitionStatus } = wf;
+  const { wfPurchaseOrders, updatePOStatus, updateRequisitionStatus, maintenanceApprovals, updateMaintenanceApproval } = wf;
 
   const [invoices, setInvoices] = usePersistedState<Invoice[]>("accounts-approvals-invoices", INITIAL_INVOICES);
   const [rejectOpen, setRejectOpen] = useState(false);
@@ -92,10 +92,54 @@ export default function PaymentApprovals() {
   const [selectedPO, setSelectedPO] = useState<WfPurchaseOrder | null>(null);
   const [poRejectReason, setPoRejectReason] = useState("");
 
+  // Maintenance payment dialogs
+  const [mntViewOpen, setMntViewOpen] = useState(false);
+  const [mntViewEntry, setMntViewEntry] = useState<WfMaintenanceApproval | null>(null);
+  const [mntRejectOpen, setMntRejectOpen] = useState(false);
+  const [mntRejectEntry, setMntRejectEntry] = useState<WfMaintenanceApproval | null>(null);
+  const [mntRejectReason, setMntRejectReason] = useState("");
+
   const pendingPOs = useMemo(
     () => wfPurchaseOrders.filter(p => p.status === "Pending Approval"),
     [wfPurchaseOrders]
   );
+
+  const maintenancePaymentEntries = useMemo(
+    () => maintenanceApprovals.filter(e =>
+      e.status === "Sent to Accounts" || e.status === "Payment Approved" || e.status === "Payment Rejected"
+    ),
+    [maintenanceApprovals]
+  );
+
+  const approveMnt = (entry: WfMaintenanceApproval) => {
+    updateMaintenanceApproval(entry.id, {
+      status: "Payment Approved",
+      paymentApprovedBy: "R. Hossain (Accounts)",
+      paymentApprovedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
+    });
+    toast.success(`${entry.id} — Payment Approved.`);
+  };
+
+  const openMntReject = (entry: WfMaintenanceApproval) => {
+    setMntRejectEntry(entry);
+    setMntRejectReason("");
+    setMntRejectOpen(true);
+  };
+
+  const confirmMntReject = () => {
+    if (!mntRejectEntry) return;
+    if (!mntRejectReason.trim()) { toast.error("Provide a justification for rejection."); return; }
+    updateMaintenanceApproval(mntRejectEntry.id, {
+      status: "Payment Rejected",
+      paymentRejectedBy: "R. Hossain (Accounts)",
+      paymentRejectedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
+      paymentRejectionReason: mntRejectReason.trim(),
+    });
+    toast.success(`${mntRejectEntry.id} — Payment Rejected.`);
+    setMntRejectOpen(false);
+    setMntRejectEntry(null);
+    setMntRejectReason("");
+  };
 
   const approvePO = (po: WfPurchaseOrder) => {
     updatePOStatus(po.id, "Issued to Vendor", { issuedToVendor: true });
@@ -178,6 +222,88 @@ export default function PaymentApprovals() {
           tone="red"
         />
       </div>
+
+      {/* Maintenance Payment Approvals */}
+      {maintenancePaymentEntries.length > 0 && (
+        <Card className="mb-6">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-semibold flex items-center gap-2">
+              <Wrench className="h-4 w-4 text-blue-500" />
+              Maintenance Payment Approvals
+              <span className="ml-1 px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs font-medium">
+                {maintenancePaymentEntries.length} item{maintenancePaymentEntries.length !== 1 ? "s" : ""}
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b bg-muted/50">
+                    {["MNT ID", "Asset", "Accounts Head ID", "Vendor", "Expense Cost (৳)", "Status", "Actions"].map(h => (
+                      <th key={h} className="p-3 text-left font-semibold text-sm">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {maintenancePaymentEntries.map(entry => (
+                    <tr key={entry.id} className="border-b hover:bg-muted/30">
+                      <td className="p-3 font-mono font-medium text-xs">{entry.id}</td>
+                      <td className="p-3">{entry.assetName}</td>
+                      <td className="p-3 font-mono text-xs text-muted-foreground">{entry.accountsHeadId ?? "—"}</td>
+                      <td className="p-3">{entry.vendor ?? "—"}</td>
+                      <td className="p-3 font-medium">
+                        {entry.expenseCost !== undefined ? `৳${entry.expenseCost.toLocaleString()}` : "—"}
+                      </td>
+                      <td className="p-3">
+                        <span className={`px-2 py-1 rounded text-xs font-medium ${statusColor(
+                          entry.status === "Payment Approved" ? "Approved"
+                          : entry.status === "Payment Rejected" ? "Rejected"
+                          : "Pending"
+                        )}`}>
+                          {entry.status}
+                        </span>
+                      </td>
+                      <td className="p-3">
+                        <div className="flex gap-1.5">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2 text-xs gap-1"
+                            onClick={() => { setMntViewEntry(entry); setMntViewOpen(true); }}
+                          >
+                            <Eye className="h-3 w-3" /> View
+                          </Button>
+                          {entry.status === "Sent to Accounts" && (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 px-2 text-xs text-success border-success/40 hover:bg-success/10"
+                                onClick={() => approveMnt(entry)}
+                              >
+                                Approve
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 px-2 text-xs text-destructive border-destructive/40 hover:bg-destructive/10"
+                                onClick={() => openMntReject(entry)}
+                              >
+                                Reject
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Purchase Orders Pending Approval */}
       {pendingPOs.length > 0 && (
@@ -318,6 +444,104 @@ export default function PaymentApprovals() {
           )}
         </CardContent>
       </Card>
+
+      {/* Maintenance View Dialog */}
+      <Dialog open={mntViewOpen} onOpenChange={(v) => { if (!v) setMntViewOpen(false); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Wrench className="h-4 w-4 text-primary" />
+              {mntViewEntry?.id} — Payment Detail
+            </DialogTitle>
+          </DialogHeader>
+          {mntViewEntry && (
+            <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Asset</p>
+                <p className="font-medium">{mntViewEntry.assetName}</p>
+                <p className="font-mono text-[10px] text-muted-foreground">{mntViewEntry.assetId}</p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Work Type</p>
+                <p>{mntViewEntry.workType}</p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Service Date</p>
+                <p className="tabular-nums">{mntViewEntry.serviceDate}</p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Next Due</p>
+                <p className="tabular-nums">{mntViewEntry.nextDue}</p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Accounts Head ID</p>
+                <p className="font-mono">{mntViewEntry.accountsHeadId ?? "—"}</p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Vendor</p>
+                <p>{mntViewEntry.vendor ?? "—"}</p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Expense Cost</p>
+                <p className="font-semibold tabular-nums text-primary">
+                  {mntViewEntry.expenseCost !== undefined ? `৳ ${mntViewEntry.expenseCost.toLocaleString()}` : "—"}
+                </p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Sent to Accounts</p>
+                <p className="tabular-nums">{mntViewEntry.sentToAccountsAt ?? "—"}</p>
+              </div>
+              {mntViewEntry.notes && (
+                <div className="col-span-2">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Notes</p>
+                  <p className="text-muted-foreground bg-muted/40 rounded px-3 py-2 border border-border">{mntViewEntry.notes}</p>
+                </div>
+              )}
+              {mntViewEntry.paymentRejectionReason && (
+                <div className="col-span-2">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5 text-destructive">Rejection Justification</p>
+                  <p className="text-destructive bg-destructive/5 rounded px-3 py-2 border border-destructive/20">{mntViewEntry.paymentRejectionReason}</p>
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setMntViewOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Maintenance Payment Reject Dialog */}
+      <Dialog open={mntRejectOpen} onOpenChange={(v) => { if (!v) { setMntRejectOpen(false); setMntRejectEntry(null); setMntRejectReason(""); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <X className="h-4 w-4 text-destructive" />
+              Reject Payment — {mntRejectEntry?.id}
+            </DialogTitle>
+          </DialogHeader>
+          {mntRejectEntry && (
+            <div className="text-sm text-muted-foreground mb-2">
+              <span className="font-medium text-foreground">{mntRejectEntry.assetName}</span>
+              {mntRejectEntry.expenseCost !== undefined && ` · ৳${mntRejectEntry.expenseCost.toLocaleString()}`}
+              {mntRejectEntry.vendor && ` · ${mntRejectEntry.vendor}`}
+            </div>
+          )}
+          <div>
+            <Label>Justification *</Label>
+            <Textarea
+              value={mntRejectReason}
+              onChange={e => setMntRejectReason(e.target.value)}
+              placeholder="Provide a justification for rejecting this payment"
+              rows={4}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setMntRejectOpen(false); setMntRejectEntry(null); setMntRejectReason(""); }}>Cancel</Button>
+            <Button variant="destructive" onClick={confirmMntReject} disabled={!mntRejectReason.trim()}>Confirm Reject</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* PO Reject Dialog */}
       <Dialog open={poRejectOpen} onOpenChange={setPoRejectOpen}>

@@ -111,7 +111,7 @@ export function CookingTempScreen({ nav }) {
               ✗ Fail
             </button>
             <button onClick={passQc}
-              style={{ flex: 2, padding: '13px 0', background: T.buttonGradient, border: 'none', borderRadius: T.radiusMd, fontSize: 13, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}>
+              style={{ flex: 2, padding: '13px 0', background: T.statusApproved, border: 'none', borderRadius: T.radiusMd, fontSize: 13, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}>
               ✓ Pass & Complete
             </button>
           </div>
