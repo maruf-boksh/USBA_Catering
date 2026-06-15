@@ -28,7 +28,7 @@ function makeRows() {
     id: `r-${i}`,
     item,
     values: Object.fromEntries(TIME_SLOTS.map(s => [s, '—'])),
-    remarks: '',
+    remarks: Object.fromEntries(TIME_SLOTS.map(s => [s, ''])),
   }));
 }
 
@@ -36,20 +36,54 @@ function cycleValue(v) {
   return v === '—' ? '✓' : v === '✓' ? '✗' : '—';
 }
 
+function parseSlotHour(slot) {
+  const m = slot.match(/^(\d+):00(AM|PM)$/);
+  if (!m) return -1;
+  let h = parseInt(m[1], 10);
+  if (m[2] === 'PM' && h !== 12) h += 12;
+  if (m[2] === 'AM' && h === 12) h = 0;
+  return h;
+}
+
+function isSlotPast(slot) {
+  return new Date().getHours() > parseSlotHour(slot);
+}
+
 const BTN_BACK = { background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: T.radiusFull, width: 32, height: 32, cursor: 'pointer', color: '#fff', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
 
-export function HygieneScreen({ nav }) {
-  const [tab, setTab]                   = useState('checklist');
-  const [screen, setScreen]             = useState('slots');
-  const [currentSlot, setCurrentSlot]   = useState('');
-  const [rows, setRows]                 = useState(makeRows);
-  const [savedSlots, setSavedSlots]     = useState({});
-  const [isSubmitted, setIsSubmitted]   = useState(false);
-  const [submittedLogs, setSubmittedLogs] = useState([]);
-  const [selectedLog, setSelectedLog]   = useState(null);
-  const [remarkErrors, setRemarkErrors] = useState(new Set());
+const LEGEND_ITEMS = [
+  { symbol: '✓', label: '1st click — Pass', color: T.statusApproved },
+  { symbol: '✗', label: '2nd click — Fail', color: T.statusRejected },
+  { symbol: '—', label: 'Not Checked',       color: T.textTertiary   },
+  { symbol: '🔒', label: 'Missed',            color: T.statusPending  },
+];
 
-  const allSlotsFinalized = TIME_SLOTS.every(s => savedSlots[s]);
+function LegendStrip() {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 14px', background: T.bgSurface, borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
+      {LEGEND_ITEMS.map(({ symbol, label, color }) => (
+        <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color, fontFamily: T.fontBody }}>{symbol}</span>
+          <span style={{ fontSize: 9, color: T.textTertiary, fontFamily: T.fontBody, whiteSpace: 'nowrap' }}>{label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function HygieneScreen({ nav }) {
+  const [tab, setTab]                     = useState('checklist');
+  const [screen, setScreen]               = useState('slots');
+  const [currentSlot, setCurrentSlot]     = useState('');
+  const [rows, setRows]                   = useState(makeRows);
+  const [savedSlots, setSavedSlots]       = useState({});
+  const [isSubmitted, setIsSubmitted]     = useState(false);
+  const [submittedLogs, setSubmittedLogs] = useState([]);
+  const [selectedLog, setSelectedLog]     = useState(null);
+  const [remarkErrors, setRemarkErrors]   = useState(new Set());
+
+  // A slot counts as finalised if it was saved OR it has already passed (Missed)
+  const allSlotsFinalized = TIME_SLOTS.every(s => savedSlots[s] || isSlotPast(s));
 
   const toggleValue = (rowId) => {
     if (savedSlots[currentSlot] || isSubmitted) return;
@@ -60,12 +94,12 @@ export function HygieneScreen({ nav }) {
   };
 
   const updateRemark = (rowId, val) => {
-    setRows(prev => prev.map(r => r.id === rowId ? { ...r, remarks: val } : r));
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, remarks: { ...r.remarks, [currentSlot]: val } } : r));
   };
 
   const saveSlot = () => {
     const errors = new Set();
-    rows.forEach(r => { if (r.values[currentSlot] === '✗' && !r.remarks.trim()) errors.add(r.id); });
+    rows.forEach(r => { if (r.values[currentSlot] === '✗' && !r.remarks[currentSlot]?.trim()) errors.add(r.id); });
     if (errors.size > 0) { setRemarkErrors(errors); return; }
     const now = new Date();
     const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
@@ -79,7 +113,16 @@ export function HygieneScreen({ nav }) {
     const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
     const failCount = rows.reduce((acc, r) =>
       acc + TIME_SLOTS.filter(s => r.values[s] === '✗').length, 0);
-    const failItems = rows.filter(r => TIME_SLOTS.some(s => r.values[s] === '✗')).map(r => r.item);
+    // Save item + justification remark together so log detail can show them
+    const failItems = rows
+      .filter(r => TIME_SLOTS.some(s => r.values[s] === '✗'))
+      .map(r => ({
+        item: r.item,
+        remarks: TIME_SLOTS
+          .filter(s => r.values[s] === '✗' && r.remarks[s]?.trim())
+          .map(s => r.remarks[s].trim())
+          .join('; '),
+      }));
     setSubmittedLogs(prev => [{
       id: `LOG-${Date.now()}`,
       date: new Date().toISOString().slice(0, 10),
@@ -88,6 +131,15 @@ export function HygieneScreen({ nav }) {
       failItems,
     }, ...prev]);
     setIsSubmitted(true);
+  };
+
+  const startNewChecklist = () => {
+    setRows(makeRows());
+    setSavedSlots({});
+    setIsSubmitted(false);
+    setRemarkErrors(new Set());
+    setScreen('slots');
+    setTab('checklist');
   };
 
   // ── Tab bar ────────────────────────────────────────────────────────────────
@@ -115,6 +167,7 @@ export function HygieneScreen({ nav }) {
             <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>Tap to toggle Pass / Fail</div>
           </div>
         </div>
+        <LegendStrip />
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 12px 16px' }}>
           {rows.map(row => {
             const v = row.values[currentSlot];
@@ -134,7 +187,7 @@ export function HygieneScreen({ nav }) {
                   </div>
                 </div>
                 {v === '✗' && (
-                  <input type="text" value={row.remarks} onChange={e => updateRemark(row.id, e.target.value)}
+                  <input type="text" value={row.remarks[currentSlot] || ''} onChange={e => updateRemark(row.id, e.target.value)}
                     placeholder="Remark required *"
                     style={{ marginTop: 8, width: '100%', boxSizing: 'border-box', border: `1px solid ${hasError ? T.statusRejected : T.statusRejected + '80'}`, borderRadius: T.radiusMd, padding: '6px 10px', fontSize: 11, fontFamily: T.fontBody, outline: 'none', background: T.statusRejectedBg, color: T.textPrimary }} />
                 )}
@@ -180,9 +233,14 @@ export function HygieneScreen({ nav }) {
           {selectedLog.failItems.length > 0 && (
             <div>
               <div style={{ fontSize: 11, fontWeight: 700, color: T.statusRejected, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Failed Items</div>
-              {selectedLog.failItems.map((item, i) => (
-                <div key={i} style={{ background: T.statusRejectedBg, border: `1px solid ${T.statusRejected + '30'}`, borderRadius: T.radiusMd, padding: '8px 12px', marginBottom: 6, fontSize: 12, color: T.statusRejected, fontFamily: T.fontBody }}>
-                  ✗ {item}
+              {selectedLog.failItems.map(({ item, remarks }, i) => (
+                <div key={i} style={{ background: T.statusRejectedBg, border: `1px solid ${T.statusRejected + '30'}`, borderRadius: T.radiusMd, padding: '10px 12px', marginBottom: 6, fontFamily: T.fontBody }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: T.statusRejected }}>✗ {item}</div>
+                  {remarks && (
+                    <div style={{ fontSize: 11, color: T.statusRejected, marginTop: 5, paddingTop: 5, borderTop: `1px solid ${T.statusRejected + '25'}`, opacity: 0.85, fontStyle: 'italic' }}>
+                      {remarks}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -213,27 +271,44 @@ export function HygieneScreen({ nav }) {
         {tab === 'checklist' && (
           <div style={{ padding: '8px 14px 16px' }}>
             {isSubmitted && (
-              <div style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved + '30'}`, borderRadius: T.radiusMd, padding: '10px 14px', marginTop: 8, marginBottom: 4, fontSize: 12, color: T.statusApproved, fontWeight: 700, fontFamily: T.fontBody }}>
-                ✅ Today's checklist submitted successfully.
-              </div>
+              <>
+                <div style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved + '30'}`, borderRadius: T.radiusMd, padding: '10px 14px', marginTop: 8, marginBottom: 10, fontSize: 12, color: T.statusApproved, fontWeight: 700, fontFamily: T.fontBody }}>
+                  ✅ Today's checklist submitted successfully.
+                </div>
+                <button
+                  onClick={startNewChecklist}
+                  style={{ width: '100%', padding: '13px 0', background: T.buttonGradient, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer', marginBottom: 4 }}
+                >
+                  New Checklist
+                </button>
+              </>
             )}
             <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: 12, marginBottom: 8 }}>Time Slots</div>
             {TIME_SLOTS.map(slot => {
-              const saved   = savedSlots[slot];
-              const isActive = !saved && !isSubmitted;
+              const saved    = savedSlots[slot];
+              const missed   = !saved && !isSubmitted && isSlotPast(slot);
+              const isActive = !saved && !isSubmitted && !missed;
               const passCount = rows.filter(r => r.values[slot] === '✓').length;
               const failCount = rows.filter(r => r.values[slot] === '✗').length;
               return (
                 <div key={slot}
                   onClick={() => isActive && (setCurrentSlot(slot), setScreen('record'))}
-                  style={{ background: saved ? T.statusApprovedBg : T.bgSurface, border: `1.5px solid ${saved ? T.statusApproved + '50' : T.border}`, borderRadius: T.radiusLg, padding: '12px 14px', marginBottom: 8, cursor: isActive ? 'pointer' : 'default', opacity: isSubmitted && !saved ? 0.5 : 1 }}>
+                  style={{
+                    background: saved ? T.statusApprovedBg : missed ? T.bgSubtle : T.bgSurface,
+                    border: `1.5px solid ${saved ? T.statusApproved + '50' : missed ? T.statusPending + '40' : T.border}`,
+                    borderRadius: T.radiusLg, padding: '12px 14px', marginBottom: 8,
+                    cursor: isActive ? 'pointer' : 'default',
+                    opacity: (isSubmitted && !saved && !missed) || missed ? 0.6 : 1,
+                  }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: 14, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{slot}</span>
+                    <span style={{ fontSize: 14, fontWeight: 700, color: missed ? T.textTertiary : T.textPrimary, fontFamily: T.fontBody }}>{slot}</span>
                     {saved
                       ? <span style={{ fontSize: 10, background: T.statusApproved, color: '#fff', borderRadius: T.radiusFull, padding: '2px 8px', fontWeight: 700, fontFamily: T.fontBody }}>✓ {saved}</span>
-                      : isActive
-                        ? <span style={{ fontSize: 10, background: T.primaryLight, color: T.primary, borderRadius: T.radiusFull, padding: '2px 8px', fontWeight: 700, fontFamily: T.fontBody }}>Tap to record →</span>
-                        : null}
+                      : missed
+                        ? <span style={{ fontSize: 10, background: T.statusPendingBg, color: T.statusPending, borderRadius: T.radiusFull, padding: '2px 8px', fontWeight: 700, fontFamily: T.fontBody }}>🔒 Missed</span>
+                        : isActive
+                          ? <span style={{ fontSize: 10, background: T.primaryLight, color: T.primary, borderRadius: T.radiusFull, padding: '2px 8px', fontWeight: 700, fontFamily: T.fontBody }}>Tap to record →</span>
+                          : null}
                   </div>
                   {saved && (
                     <div style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 3 }}>

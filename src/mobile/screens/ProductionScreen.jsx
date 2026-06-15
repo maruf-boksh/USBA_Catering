@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { T } from '../theme';
 import { MOCK_PRODUCTION_ORDERS, MOCK_KPIS } from '../mockData';
+import { qcStore } from '../qcStore';
 
 const STATUS_MAP = {
   completed:    { color: T.statusApproved,  bg: T.statusApprovedBg,  label: 'Completed'    },
@@ -26,6 +27,7 @@ function ProgressBar({ produced, qty }) {
 
 function OrderDetail({ order, onBack }) {
   const [localStatus, setLocalStatus] = useState(order.status);
+  const [forwardedToQC, setForwardedToQC] = useState(false);
   const s = STATUS_MAP[localStatus] || STATUS_MAP.pending;
 
   return (
@@ -74,9 +76,33 @@ function OrderDetail({ order, onBack }) {
             )}
           </div>
         )}
+
         {localStatus === 'completed' && (
-          <div style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: T.statusApproved, fontFamily: T.fontBody }}>Production Complete</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.statusApproved, fontFamily: T.fontBody }}>Production Complete ✓</div>
+            </div>
+            {!forwardedToQC ? (
+              <button
+                onClick={() => {
+                  qcStore.add({
+                    id: `QC-PROD-${order.id}`,
+                    item: order.item,
+                    flight: order.flight,
+                    section: order.section,
+                    qty: `${order.qty} units`,
+                  });
+                  setForwardedToQC(true);
+                }}
+                style={{ width: '100%', padding: '13px 0', background: T.statusInfo, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}
+              >
+                Forward to QC
+              </button>
+            ) : (
+              <div style={{ background: T.statusInfoBg, border: `1px solid ${T.statusInfo}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: T.statusInfo, fontFamily: T.fontBody }}>Forwarded to QC ✓</div>
+              </div>
+            )}
           </div>
         )}
       </div>

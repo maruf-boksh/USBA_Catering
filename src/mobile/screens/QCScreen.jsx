@@ -1,5 +1,7 @@
+import { useState, useEffect } from 'react';
 import { T } from '../theme';
 import { MOCK_QC_CHECKS } from '../mockData';
+import { qcStore } from '../qcStore';
 
 const RESULT_MAP = {
   pass: { color: T.statusApproved, bg: T.statusApprovedBg, label: 'Pass' },
@@ -7,115 +9,310 @@ const RESULT_MAP = {
   fail: { color: T.statusRejected, bg: T.statusRejectedBg, label: 'Fail' },
 };
 
-const passCount = MOCK_QC_CHECKS.filter(c => c.result === 'pass').length;
-const openCount = MOCK_QC_CHECKS.filter(c => c.result === 'open').length;
-const failCount = MOCK_QC_CHECKS.filter(c => c.result === 'fail').length;
-const passRate  = MOCK_QC_CHECKS.length > 0
-  ? Math.round((passCount / MOCK_QC_CHECKS.length) * 100)
-  : 0;
-
 const HUB_MODULES = [
-  {
-    screen:  'cooking-temp',
-    icon:    '🌡️',
-    label:   'Cooking Temperature',
-    sub:     'HACCP temp & sensory tests',
-    color:   T.statusInfo,
-    bg:      T.statusInfoBg,
-  },
-  {
-    screen:  'hygiene',
-    icon:    '🧹',
-    label:   'Hygiene Monitoring',
-    sub:     'Daily safety checklists',
-    color:   T.statusApproved,
-    bg:      T.statusApprovedBg,
-  },
+  { screen: 'cooking-temp', icon: '🌡️', label: 'Cooking Temperature', sub: 'HACCP temp & sensory tests', color: T.statusInfo,    bg: T.statusInfoBg    },
+  { screen: 'hygiene',      icon: '🧹', label: 'Hygiene Monitoring',  sub: 'Daily safety checklists',   color: T.statusApproved, bg: T.statusApprovedBg },
 ];
 
+const SENSORY_FIELDS = [
+  { key: 'appearance', label: 'Appearance' },
+  { key: 'aroma',      label: 'Aroma'      },
+  { key: 'taste',      label: 'Taste'      },
+  { key: 'texture',    label: 'Texture'    },
+];
+
+const SENSORY_OPTS = [
+  { val: 'good', label: 'Good', color: T.statusApproved, bg: T.statusApprovedBg },
+  { val: 'fair', label: 'Fair', color: T.statusPending,  bg: T.statusPendingBg  },
+  { val: 'poor', label: 'Poor', color: T.statusRejected, bg: T.statusRejectedBg },
+];
+
+const PRESET_SENSORY = { appearance: 'good', aroma: 'good', taste: 'good', texture: 'good' };
+const initForm = () => ({ appearance: '', aroma: '', taste: '', texture: '', overall: '', justification: '' });
+
+function initChecks() {
+  return MOCK_QC_CHECKS.map(c => ({
+    ...c,
+    sensory: c.result === 'pass' ? { ...PRESET_SENSORY } : null,
+    rejectionNote: null,
+  }));
+}
+
 export function QCScreen({ nav }) {
+  const [checks,      setChecks]      = useState(initChecks);
+  const [pendingQC,   setPendingQC]   = useState(() => qcStore.getBatches());
+  const [sensoryPage, setSensoryPage] = useState(null);
+  const [sForm,       setSForm]       = useState(initForm());
+
+  useEffect(() => qcStore.subscribe(setPendingQC), []);
+
+  const passCount = checks.filter(c => c.result === 'pass').length;
+  const openCount = checks.filter(c => c.result === 'open').length;
+  const passRate  = checks.length > 0 ? Math.round((passCount / checks.length) * 100) : 0;
+
+  const formComplete =
+    SENSORY_FIELDS.every(({ key }) => sForm[key] !== '') &&
+    sForm.overall !== '' &&
+    (sForm.overall !== 'fail' || sForm.justification.trim() !== '');
+
+  const handleSave = () => {
+    if (!sensoryPage || !formComplete) return;
+    const sensoryData = {
+      appearance: sForm.appearance,
+      aroma:      sForm.aroma,
+      taste:      sForm.taste,
+      texture:    sForm.texture,
+    };
+    const alreadyInLog = checks.some(c => c.id === sensoryPage.id);
+    if (alreadyInLog) {
+      setChecks(prev => prev.map(c => c.id === sensoryPage.id ? {
+        ...c,
+        result:        sForm.overall,
+        sensory:       sensoryData,
+        rejectionNote: sForm.overall === 'fail' ? sForm.justification : null,
+        issue:         sForm.overall === 'fail' ? sForm.justification : undefined,
+      } : c));
+    } else {
+      qcStore.remove(sensoryPage.id);
+      setChecks(prev => [...prev, {
+        id:            sensoryPage.id,
+        item:          sensoryPage.item,
+        flight:        sensoryPage.flight || '—',
+        result:        sForm.overall,
+        temp:          sensoryPage.temp || '—',
+        checkedBy:     'QC Inspector',
+        time:          new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }),
+        issue:         sForm.overall === 'fail' ? sForm.justification : undefined,
+        sensory:       sensoryData,
+        rejectionNote: sForm.overall === 'fail' ? sForm.justification : null,
+      }]);
+    }
+    setSensoryPage(null);
+    setSForm(initForm());
+  };
+
+  // ── Sensory page ──────────────────────────────────────────────────────────
+  if (sensoryPage) {
+    const isReadOnly = sensoryPage.result === 'pass';
+
+    if (isReadOnly) {
+      return (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
+          <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+            <button onClick={() => setSensoryPage(null)} style={{ background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: T.radiusFull, width: 32, height: 32, cursor: 'pointer', color: '#fff', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>←</button>
+            <div>
+              <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Sensory Record</div>
+              <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{sensoryPage.item}</div>
+            </div>
+          </div>
+          <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 24px' }}>
+            <div style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved}40`, borderRadius: T.radiusLg, padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+              <span style={{ fontSize: 24 }}>✅</span>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: T.statusApproved, fontFamily: T.fontBody }}>PASS</div>
+                <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>All sensory checks passed</div>
+              </div>
+            </div>
+
+            <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', marginBottom: 12, boxShadow: T.shadowSm }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Check Details</div>
+              {[
+                ['Item',        sensoryPage.item],
+                ['Flight',      sensoryPage.flight],
+                ['Temperature', sensoryPage.temp],
+                ['Checked By',  sensoryPage.checkedBy],
+                ['Time',        sensoryPage.time],
+              ].filter(([, v]) => v && v !== '—').map(([l, v], i) => (
+                <div key={l} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: i === 0 ? 0 : 9, paddingBottom: 9, borderTop: i === 0 ? 'none' : `1px solid ${T.border}` }}>
+                  <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{l}</span>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody }}>{v}</span>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', boxShadow: T.shadowSm }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Sensory Evaluation</div>
+              {SENSORY_FIELDS.map(({ key, label }, i) => {
+                const val = sensoryPage.sensory?.[key] || 'good';
+                const opt = SENSORY_OPTS.find(o => o.val === val) || SENSORY_OPTS[0];
+                return (
+                  <div key={key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: i === 0 ? 0 : 9, paddingBottom: 9, borderTop: i === 0 ? 'none' : `1px solid ${T.border}` }}>
+                    <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{label}</span>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: opt.color, background: opt.bg, padding: '2px 10px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>{opt.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Sensory test form (open / pending items)
+    return (
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
+        <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          <button onClick={() => { setSensoryPage(null); setSForm(initForm()); }} style={{ background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: T.radiusFull, width: 32, height: 32, cursor: 'pointer', color: '#fff', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>←</button>
+          <div>
+            <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Sensory Test</div>
+            <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{sensoryPage.item}</div>
+          </div>
+        </div>
+        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 24px' }}>
+
+          {/* Batch / item details */}
+          <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', marginBottom: 14, boxShadow: T.shadowSm }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Batch Details</div>
+            {[
+              ['Item',          sensoryPage.item],
+              sensoryPage.flight  && sensoryPage.flight !== '—'  ? ['Flight',  sensoryPage.flight]  : null,
+              sensoryPage.section ? ['Section', sensoryPage.section] : null,
+              sensoryPage.qty     ? ['Quantity', sensoryPage.qty]    : null,
+              sensoryPage.temp && sensoryPage.temp !== '—' ? ['Temp Recorded', sensoryPage.temp] : null,
+              sensoryPage.issue   ? ['Issue Noted', sensoryPage.issue] : null,
+            ].filter(Boolean).map(([l, v], i) => (
+              <div key={l} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: i === 0 ? 0 : 9, paddingBottom: 9, borderTop: i === 0 ? 'none' : `1px solid ${T.border}` }}>
+                <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{l}</span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: l === 'Issue Noted' ? T.primary : T.textPrimary, fontFamily: T.fontBody, maxWidth: '60%', textAlign: 'right' }}>{v}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* Sensory ratings */}
+          <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', marginBottom: 14, boxShadow: T.shadowSm }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 14 }}>Sensory Evaluation</div>
+            {SENSORY_FIELDS.map(({ key, label }, i) => (
+              <div key={key} style={{ marginBottom: i < SENSORY_FIELDS.length - 1 ? 14 : 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody, marginBottom: 8 }}>{label}</div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  {SENSORY_OPTS.map(opt => {
+                    const selected = sForm[key] === opt.val;
+                    return (
+                      <button
+                        key={opt.val}
+                        onClick={() => setSForm(f => ({ ...f, [key]: opt.val }))}
+                        style={{
+                          flex: 1, padding: '7px 0',
+                          background: selected ? opt.color : T.bgSubtle,
+                          border: `1px solid ${selected ? opt.color : T.border}`,
+                          borderRadius: T.radiusMd,
+                          fontSize: 12, fontWeight: 700,
+                          color: selected ? '#fff' : T.textTertiary,
+                          fontFamily: T.fontBody, cursor: 'pointer',
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Overall result */}
+          <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', marginBottom: 14, boxShadow: T.shadowSm }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12 }}>Overall Result</div>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button
+                onClick={() => setSForm(f => ({ ...f, overall: 'pass', justification: '' }))}
+                style={{
+                  flex: 1, padding: '12px 0',
+                  background: sForm.overall === 'pass' ? T.statusApproved : T.bgSubtle,
+                  border: `1px solid ${sForm.overall === 'pass' ? T.statusApproved : T.border}`,
+                  borderRadius: T.radiusMd,
+                  fontSize: 14, fontWeight: 700,
+                  color: sForm.overall === 'pass' ? '#fff' : T.textTertiary,
+                  fontFamily: T.fontBody, cursor: 'pointer',
+                }}
+              >
+                ✓ PASS
+              </button>
+              <button
+                onClick={() => setSForm(f => ({ ...f, overall: 'fail' }))}
+                style={{
+                  flex: 1, padding: '12px 0',
+                  background: sForm.overall === 'fail' ? T.statusRejected : T.bgSubtle,
+                  border: `1px solid ${sForm.overall === 'fail' ? T.statusRejected : T.border}`,
+                  borderRadius: T.radiusMd,
+                  fontSize: 14, fontWeight: 700,
+                  color: sForm.overall === 'fail' ? '#fff' : T.textTertiary,
+                  fontFamily: T.fontBody, cursor: 'pointer',
+                }}
+              >
+                ✗ FAIL
+              </button>
+            </div>
+          </div>
+
+          {/* Rejection justification — mandatory when FAIL */}
+          {sForm.overall === 'fail' && (
+            <div style={{ background: T.statusRejectedBg, border: `1px solid ${T.statusRejected}30`, borderRadius: T.radiusLg, padding: '14px 16px', marginBottom: 14 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: T.statusRejected, fontFamily: T.fontBody, marginBottom: 8 }}>
+                Rejection Justification *
+              </div>
+              <textarea
+                value={sForm.justification}
+                onChange={e => setSForm(f => ({ ...f, justification: e.target.value }))}
+                placeholder="Describe the reason for failing this sensory test..."
+                rows={3}
+                style={{
+                  width: '100%', boxSizing: 'border-box', resize: 'none',
+                  border: `1px solid ${T.statusRejected}50`, borderRadius: T.radiusMd,
+                  padding: '8px 10px', fontSize: 12, fontFamily: T.fontBody,
+                  background: T.bgSurface, color: T.textPrimary, outline: 'none',
+                }}
+              />
+            </div>
+          )}
+
+          <button
+            onClick={handleSave}
+            disabled={!formComplete}
+            style={{
+              width: '100%', padding: '13px 0',
+              background: formComplete ? T.statusApproved : T.textDisabled,
+              border: 'none', borderRadius: T.radiusMd,
+              fontSize: 14, fontWeight: 700, color: '#fff',
+              fontFamily: T.fontBody,
+              cursor: formComplete ? 'pointer' : 'not-allowed',
+            }}
+          >
+            Save & Record
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Main QC list view ─────────────────────────────────────────────────────
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
-
-      {/* Topbar — no back button, this is the tab root */}
       <div style={{ background: T.topbarGradient, padding: '12px 16px', flexShrink: 0 }}>
         <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Food Safety & QC</div>
-        <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>
-          Quality control hub
-        </div>
+        <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>Quality control hub</div>
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '10px 14px 16px' }}>
 
-        {/* ── Summary stats ── */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 7, marginBottom: 14 }}>
-          {[
-            ['Total',     MOCK_QC_CHECKS.length, T.textPrimary,   T.bgSurface],
-            ['Pass',      passCount,              T.statusApproved, T.statusApprovedBg],
-            ['Open',      openCount,              T.primary,        T.primaryLight],
-            ['Pass Rate', `${passRate}%`,         T.statusApproved, T.statusApprovedBg],
-          ].map(([label, value, color, bg]) => (
-            <div key={label} style={{
-              background: bg, border: `1px solid ${color}25`,
-              borderRadius: T.radiusMd, padding: '9px 8px',
-              textAlign: 'center',
-            }}>
-              <div style={{ fontSize: 17, fontWeight: 800, color, fontFamily: T.fontBody, lineHeight: 1 }}>{value}</div>
-              <div style={{ fontSize: 9,  fontWeight: 600, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 3, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</div>
-            </div>
-          ))}
-        </div>
-
-        {/* ── Module cards ── */}
-        <div style={{
-          fontSize: 11, fontWeight: 700, color: T.textTertiary,
-          fontFamily: T.fontBody, textTransform: 'uppercase',
-          letterSpacing: '0.07em', marginBottom: 8,
-        }}>
+        {/* Module cards */}
+        <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 8 }}>
           Record / Check
         </div>
-
         {HUB_MODULES.map(m => (
           <div
             key={m.screen}
             onClick={() => nav.navigate(m.screen)}
-            style={{
-              background: T.bgSurface,
-              border: `1px solid ${T.border}`,
-              borderRadius: T.radiusLg,
-              padding: '14px 14px',
-              marginBottom: 10,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 14,
-              cursor: 'pointer',
-              boxShadow: T.shadowSm,
-            }}
+            style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '14px 14px', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 14, cursor: 'pointer', boxShadow: T.shadowSm }}
           >
-            <div style={{
-              width: 48, height: 48,
-              borderRadius: T.radiusMd,
-              background: m.bg,
-              border: `1px solid ${m.color}30`,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 22, flexShrink: 0,
-            }}>
+            <div style={{ width: 48, height: 48, borderRadius: T.radiusMd, background: m.bg, border: `1px solid ${m.color}30`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0 }}>
               {m.icon}
             </div>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>
-                {m.label}
-              </div>
-              <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 3 }}>
-                {m.sub}
-              </div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{m.label}</div>
+              <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 3 }}>{m.sub}</div>
             </div>
-            <div style={{
-              width: 30, height: 30, borderRadius: T.radiusFull,
-              background: m.bg, border: `1px solid ${m.color}30`,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0,
-            }}>
+            <div style={{ width: 30, height: 30, borderRadius: T.radiusFull, background: m.bg, border: `1px solid ${m.color}30`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
               <svg width="10" height="12" viewBox="0 0 10 14" fill="none">
                 <path d="M1 1l8 6-8 6" stroke={m.color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
@@ -123,46 +320,78 @@ export function QCScreen({ nav }) {
           </div>
         ))}
 
-        {/* ── Today's QC log ── */}
-        <div style={{
-          fontSize: 11, fontWeight: 700, color: T.textTertiary,
-          fontFamily: T.fontBody, textTransform: 'uppercase',
-          letterSpacing: '0.07em', marginTop: 8, marginBottom: 8,
-        }}>
+        {/* Pending QC — batches forwarded from Production */}
+        {pendingQC.length > 0 && (
+          <>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.07em', marginTop: 8, marginBottom: 8 }}>
+              Pending QC
+            </div>
+            {pendingQC.map(batch => (
+              <div
+                key={batch.id}
+                onClick={() => { setSensoryPage({ ...batch, result: 'open' }); setSForm(initForm()); }}
+                style={{ background: T.bgSurface, border: `1.5px solid ${T.statusPending}`, borderRadius: T.radiusLg, padding: '12px 14px', marginBottom: 10, cursor: 'pointer', boxShadow: T.shadowSm }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{batch.item}</div>
+                    <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
+                      Flight {batch.flight} · {batch.section}
+                    </div>
+                    <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 1 }}>
+                      {batch.qty} · Forwarded from Production
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: T.statusPending, background: T.statusPendingBg, padding: '2px 8px', borderRadius: T.radiusFull, fontFamily: T.fontBody, flexShrink: 0 }}>Pending</span>
+                    <span style={{ fontSize: 14, color: T.textTertiary }}>›</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+
+        {/* Today's Checks */}
+        <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.07em', marginTop: 8, marginBottom: 8 }}>
           Today's Checks
         </div>
 
-        {MOCK_QC_CHECKS.map(check => {
+        {checks.map(check => {
           const r = RESULT_MAP[check.result] || RESULT_MAP.pass;
           return (
-            <div key={check.id} style={{
-              background: T.bgSurface,
-              border: `1px solid ${check.result === 'open' ? T.primary + '40' : T.border}`,
-              borderRadius: T.radiusLg,
-              padding: '12px 14px',
-              marginBottom: 8,
-              boxShadow: T.shadowSm,
-            }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+            <div
+              key={check.id}
+              onClick={() => {
+                setSensoryPage({ ...check });
+                if (check.result !== 'pass') setSForm(initForm());
+              }}
+              style={{
+                background: T.bgSurface,
+                border: `1.5px solid ${r.color}`,
+                borderRadius: T.radiusLg,
+                padding: '12px 14px',
+                marginBottom: 8,
+                boxShadow: T.shadowSm,
+                cursor: 'pointer',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: check.issue ? 8 : 0 }}>
                 <div style={{ flex: 1, paddingRight: 8 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{check.item}</div>
                   <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
                     Flight {check.flight} · {check.time} · {check.checkedBy}
                   </div>
                 </div>
-                <span style={{
-                  fontSize: 10, fontWeight: 700, color: r.color,
-                  background: r.bg, padding: '2px 8px',
-                  borderRadius: T.radiusFull, fontFamily: T.fontBody, flexShrink: 0,
-                }}>
-                  {r.label}
-                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: r.color, background: r.bg, padding: '2px 8px', borderRadius: T.radiusFull, fontFamily: T.fontBody, flexShrink: 0 }}>
+                    {r.label}
+                  </span>
+                  <span style={{ fontSize: 14, color: T.textTertiary }}>›</span>
+                </div>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <div style={{
-                  background: T.bgSubtle, borderRadius: T.radiusMd,
-                  padding: '4px 10px', display: 'flex', alignItems: 'center', gap: 6,
-                }}>
+                <div style={{ background: T.bgSubtle, borderRadius: T.radiusMd, padding: '4px 10px', display: 'flex', alignItems: 'center', gap: 6 }}>
                   <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>Temp:</span>
                   <span style={{ fontSize: 12, fontWeight: 700, color: check.result === 'open' ? T.primary : T.statusApproved, fontFamily: T.fontBody }}>
                     {check.temp}
