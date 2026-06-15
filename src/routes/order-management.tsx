@@ -952,7 +952,6 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                     <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider">Airline</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider w-20">ETD</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider text-right w-28">Spec. Meals</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider text-right w-28">No of Crew</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider w-20">Action</TableHead>
                   </TableRow>
@@ -974,7 +973,7 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                     return (
                       <Fragment key={slot.name}>
                         <TableRow className="bg-primary/5 border-t-2 border-t-primary/40 hover:bg-primary/10">
-                          <TableCell colSpan={7} className="py-2">
+                          <TableCell colSpan={6} className="py-2">
                             <span className="font-semibold text-primary uppercase tracking-wider text-xs">
                               {slot.name}
                             </span>
@@ -986,7 +985,7 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                         {Array.from(slotOrderGroups.entries()).map(([orderNo, legs]) => (
                           <Fragment key={`${slot.name}-${orderNo}`}>
                             <TableRow className="bg-muted/40 hover:bg-muted/50">
-                              <TableCell colSpan={7} className="pl-4 py-1.5">
+                              <TableCell colSpan={6} className="pl-4 py-1.5">
                                 <div className="flex items-center flex-wrap gap-2">
                                   <span className="font-mono text-sm font-semibold text-primary">{orderNo}</span>
                                   {legs.length > 1 && (
@@ -1012,20 +1011,6 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                                 <TableCell>{o.sector}</TableCell>
                                 <TableCell>{o.airline}</TableCell>
                                 <TableCell className="tabular-nums">{o.etd}</TableCell>
-                                <TableCell className="text-right tabular-nums">
-                                  {o.specialMeals > 0 ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => setMealDetailLeg(o)}
-                                      className="font-medium text-sky-700 underline decoration-dotted underline-offset-2 hover:text-sky-800 tabular-nums"
-                                      title="View special meal count & roster"
-                                    >
-                                      {o.specialMeals}
-                                    </button>
-                                  ) : (
-                                    <span className="text-muted-foreground/60">0</span>
-                                  )}
-                                </TableCell>
                                 <TableCell className="text-right tabular-nums font-semibold">{o.crew}</TableCell>
                                 <TableCell>
                                   <Button
@@ -1045,7 +1030,7 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                           </Fragment>
                         ))}
                         <TableRow className="bg-muted/30 font-semibold">
-                          <TableCell colSpan={5} className="text-right uppercase text-[10px] tracking-wider">
+                          <TableCell colSpan={4} className="text-right uppercase text-[10px] tracking-wider">
                             {slot.name} Total
                           </TableCell>
                           <TableCell className="text-right tabular-nums text-primary">{slotCrew}</TableCell>
@@ -2599,6 +2584,7 @@ function CrewMealCreate({
         sector: `${from} → ${to}`,
         etd,
         pax: Number(pax) || 0,
+        crew: crewNum,
         specialMeals: Number(specialMeals) || 0,
         status: "Pending",
         direction,

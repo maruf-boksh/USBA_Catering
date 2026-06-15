@@ -318,6 +318,8 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
 
               <button
                 onClick={() => setMobileAppOpen(true)}
+                className="app-topbar-mobileview"
+                title="Mobile App View"
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
@@ -335,10 +337,11 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
                   backdropFilter: 'blur(4px)',
                   letterSpacing: '0.01em',
                   whiteSpace: 'nowrap',
+                  flexShrink: 0,
                 }}
               >
                 <MobileOutlined style={{ fontSize: 14 }} />
-                Mobile App View
+                <span className="app-topbar-mobileview-label">Mobile App View</span>
               </button>
             </div>
 

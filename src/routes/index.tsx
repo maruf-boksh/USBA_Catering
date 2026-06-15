@@ -1146,9 +1146,9 @@ function CustomRangePicker({
   const showLabel = active && range ? `${range.from.slice(5)} → ${range.to.slice(5)}` : "Custom";
 
   const content = (
-    <div style={{ width: 280 }}>
+    <div style={{ width: "min(280px, calc(100vw - 32px))", maxWidth: "100%" }}>
       <div className="field-label" style={{ marginBottom: 8 }}>Custom Date Range</div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 8, marginBottom: 12 }}>
         <div>
           <div className="field-label" style={{ marginBottom: 4 }}>From</div>
           <Input

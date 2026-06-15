@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { useWorkflow, type WfProductionEntry } from "@/lib/workflow-store";
 import { flights as FLIGHT_BOARD, seedFlightOrders } from "@/lib/sample-data";
+import { useDispatchMonitoringSettings } from "@/lib/dispatch-monitoring-settings";
 import { toast } from "sonner";
 
 // ── Simplified flight list (same merge logic as dispatch-monitoring) ──────────
@@ -45,6 +46,7 @@ interface Props {
 
 export function GlobalMobileModal({ open, onClose }: Props) {
   const { productionEntries, updateProductionEntryStatus, applyStockDeltas } = useWorkflow();
+  const doc = useDispatchMonitoringSettings();
 
   // ── Top-level screen ────────────────────────────────────────────────────────
   const [screen, setScreen] = useState<MobileScreen>("login");
@@ -665,7 +667,7 @@ export function GlobalMobileModal({ open, onClose }: Props) {
                   </button>
                   <div>
                     <p className="text-white font-bold text-sm">Product Dispatch</p>
-                    <p className="text-amber-200 text-[10px]">Baunia Kitchen → Airport · USBA-FSH-PDM-01</p>
+                    <p className="text-amber-200 text-[10px]">{doc.originLabel} → {doc.destinationLabel} · {doc.documentCode}</p>
                   </div>
                 </div>
 
@@ -675,7 +677,7 @@ export function GlobalMobileModal({ open, onClose }: Props) {
                     <div className="p-4 space-y-3">
                       <div className="flex items-center justify-between">
                         <div>
-                          <p className="text-[10px] text-slate-400">Baunia Central Kitchen</p>
+                          <p className="text-[10px] text-slate-400">{doc.originName}</p>
                           <p className="font-bold text-slate-800 text-sm">Dispatch Entry</p>
                         </div>
                         <span className="text-[10px] bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-semibold">1 of 4</span>
@@ -837,7 +839,7 @@ export function GlobalMobileModal({ open, onClose }: Props) {
                   {dspSub === 4 && (
                     <div className="p-4 space-y-3">
                       <div className="flex items-center justify-between">
-                        <p className="text-[10px] text-slate-400">USBA-FSH-PDM-01</p>
+                        <p className="text-[10px] text-slate-400">{doc.documentCode}</p>
                         <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-semibold">Done</span>
                       </div>
                       <div className="flex flex-col items-center py-6">

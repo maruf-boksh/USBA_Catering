@@ -73,6 +73,8 @@ function reverseSector(sector: string): string {
 
 type FlightSection = {
   flightNo: string; sector: string;
+  /** Outbound/Return — set by buildFlightSection; optional on seed literals. */
+  direction?: LegDirection;
   paxLines: PaxLine[];
   vgml: number; chml: number; spml: number;
   crewMeals: CrewMealLine[];
@@ -712,12 +714,13 @@ export default function Dispatch() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [configFlight, configDate, configPaxLines, configCrewMeals, configSpecialMeals, productionEntries, includeReturn, returnOrder, returnPaxLines, returnCrewMeals, returnSpecialMeals, selectedSector, selectedOrder]);
 
-  // Dispatch validation: EVERY meal under the dispatch — PAX, Crew and Special —
-  // must have a Completed (QC-passed) production order. Any line that isn't
-  // completed disables the Save & Create Dispatch button. (PAX presence required.)
+  // Dispatch validation. Saving only needs a flight + at least one meal line.
+  // The "produced & QC-passed" check is a SOFT warning: if any meal isn't
+  // completed we surface it (here and on save) but still allow the dispatch.
   const paxLineCount = productionLines.filter((l) => l.audience === "PAX").length;
   const productionReady = paxLineCount > 0 && productionLines.every((l) => !l.blocks);
   const blockingMeals = productionLines.filter((l) => l.blocks).map((l) => l.label);
+  const canSave = !!configFlight && productionLines.length > 0;
 
   // Combined dispatch summary — per-leg and grand totals across outbound + return.
   const legTotals = (o: FlightOrder) => ({
@@ -872,18 +875,31 @@ export default function Dispatch() {
     navigate(`/dispatch-monitoring?flight=${encodeURIComponent(flight)}&mode=qc-only`);
   };
 
-  const openWarningForFlightGroup = (fg: FlightGroup) => {
-    const firstRow = fg.rows[0];
+  // Effective QC state for a flight: cleared by a Dispatch Monitoring record or an
+  // HoC approval counts as done; otherwise the local QC state.
+  const getQcState = (flight: string): QCState => {
+    if (qcClearedFlights[flight]) return "done";
+    if (dispatchApprovals.some((da) => da.flightId === flight && (da.stage === "hoc_approved" || da.stage === "forwarded_to_airport"))) return "done";
+    return flightQCStates.get(flight)?.qcState ?? "not-started";
+  };
+
+  // Combined dispatch for a round-trip run: opens ONE check sheet covering every
+  // leg (outbound + return) and dispatches them together. Used by the single
+  // "Initiate Dispatch" action that unlocks once ALL legs have passed QC.
+  const openWarningForDispatchRun = (runFgs: FlightGroup[]) => {
+    const allRows = runFgs.flatMap((fg) => fg.rows);
+    const firstRow = allRows[0];
     if (!firstRow) return;
     const dspRef = firstRow.dspRef;
     const existing = dspRef ? records.find((r) => r.id === dspRef) : undefined;
-    const totalQty = fg.rows.reduce((sum, r) => sum + r.qty, 0);
+    const flightNos = runFgs.map((fg) => fg.flight);
+    const totalQty = allRows.reduce((sum, r) => sum + r.qty, 0);
     const rec: DispatchRecord = existing ?? {
-      id: `DSP-${fg.flight}`,
+      id: dspRef ?? `DSP-${flightNos.join("+")}`,
       date: firstRow.date,
       depTime: firstRow.depTime,
       kitchenName: firstRow.section,
-      flightNos: [fg.flight],
+      flightNos,
       status: "Ready For Dispatch",
       trail: [],
       detail: {
@@ -895,10 +911,9 @@ export default function Dispatch() {
       sections: [],
       dynamicItems: [],
     };
-    // Always (re)build the section from live Order Management + Meal Planning
-    // data for this flight group, overriding any stale seed sections.
-    const builtSections = [buildFlightSection(fg.flight, fg.rows, firstRow.date)];
-    openWarning({ ...rec, sections: builtSections });
+    // Build a section per leg so the sheet (and dispatch) covers both sectors.
+    const builtSections = runFgs.map((fg) => buildFlightSection(fg.flight, fg.rows, firstRow.date));
+    openWarning({ ...rec, flightNos, sections: builtSections });
   };
 
   // ── Config helpers ──────────────────────────────────────────────────────────
@@ -971,9 +986,9 @@ export default function Dispatch() {
       toast.error(`Return leg ${returnOrder.flight} is already configured — untick "Dispatch the return sector together" to dispatch ${configFlight} alone.`);
       return;
     }
+    // Soft warning only — proceed even if some meals aren't produced/QC-passed.
     if (!productionReady) {
-      toast.error(`Cannot dispatch — not yet produced & QC-passed: ${blockingMeals.join(", ")}.`);
-      return;
+      toast.warning(`Dispatching with meals not yet produced & QC-passed: ${blockingMeals.join(", ")}.`);
     }
 
     const now = new Date();
@@ -1258,6 +1273,7 @@ export default function Dispatch() {
     return {
       flightNo: flight,
       sector: (order?.sector ?? "").replace(/\s*→\s*/g, "-"),
+      direction: (order?.direction as LegDirection) ?? "Outbound",
       paxLines,
       vgml, chml, spml,
       crewMeals,
@@ -1280,6 +1296,12 @@ export default function Dispatch() {
     // Build the sheet from live Order Management + Meal Planning data.
     const sheetSections = buildSectionsForRecord(rec);
 
+    // Production order numbers backing this dispatch (from its packaging rows).
+    const productionNos = [...new Set(
+      packagingRows.filter((r) => r.dspRef === rec.id).map((r) => r.productionOrderId).filter(Boolean),
+    )] as string[];
+    const productionNoStr = productionNos.length ? productionNos.join(", ") : "—";
+
     // Domestic endpoints — used to label the sheet International vs Domestic.
     const DOMESTIC = new Set(["DAC", "CGP", "CXB", "ZYL", "JSR", "BZL", "SPD", "RJH", "TKR", "CLA"]);
     const isIntl = sheetSections.some((s) =>
@@ -1298,9 +1320,11 @@ export default function Dispatch() {
       const crewRows = sec.crewMeals.length
         ? sec.crewMeals.map((cm) => `<tr><td>${esc(cm.type)}</td><td class="c">${esc(cm.qty)}</td></tr>`).join("")
         : `<tr><td class="muted" colspan="2">—</td></tr>`;
+      const dirLabel = sec.direction === "Return" ? "RETURN" : "OUTBOUND";
+      const dirClass = sec.direction === "Return" ? "dir-ret" : "dir-out";
       return `
         <div class="card">
-          <div class="card-hd"><b>FLT. NO.</b> ${esc(sec.flightNo)} &nbsp;&nbsp; <b>SECTOR</b> ${esc(sec.sector)}</div>
+          <div class="card-hd"><span class="dir ${dirClass}">${dirLabel}</span> <b>FLT. NO.</b> ${esc(sec.flightNo)} &nbsp;&nbsp; <b>SECTOR</b> ${esc(sec.sector)}</div>
           <div class="card-bd">
             <div class="cols">
               <div class="left">
@@ -1312,16 +1336,21 @@ export default function Dispatch() {
                     <tr class="tot"><td><b>Hot Meal Total</b></td><td></td><td class="c"><b>${hotTotal}</b></td></tr>
                   </tbody>
                 </table>
-                <div class="special">
-                  <span class="lbl">Special Meals</span>
-                  <span class="sm">VGML <b>${esc(sec.vgml)}</b></span>
-                  <span class="sm">CHML <b>${esc(sec.chml)}</b></span>
-                  <span class="sm">SPML <b>${esc(sec.spml)}</b></span>
-                </div>
-                <div class="pastry">
-                  <span>Pastry for ${esc(sec.flightNo)}: <b>${esc(sec.pastry)}</b></span>
-                  <span>Child Meals Pastry: <b>${esc(sec.childMealsPastry)}</b></span>
-                </div>
+                ${(() => {
+                  const sm = [
+                    sec.vgml > 0 ? `<span class="sm">VGML <b>${esc(sec.vgml)}</b></span>` : "",
+                    sec.chml > 0 ? `<span class="sm">CHML <b>${esc(sec.chml)}</b></span>` : "",
+                    sec.spml > 0 ? `<span class="sm">SPML <b>${esc(sec.spml)}</b></span>` : "",
+                  ].filter(Boolean);
+                  return sm.length ? `<div class="special"><span class="lbl">Special Meals</span>${sm.join("")}</div>` : "";
+                })()}
+                ${(() => {
+                  const pt = [
+                    sec.pastry > 0 ? `<span>Pastry for ${esc(sec.flightNo)}: <b>${esc(sec.pastry)}</b></span>` : "",
+                    sec.childMealsPastry > 0 ? `<span>Child Meals Pastry: <b>${esc(sec.childMealsPastry)}</b></span>` : "",
+                  ].filter(Boolean);
+                  return pt.length ? `<div class="pastry">${pt.join("")}</div>` : "";
+                })()}
               </div>
               <div class="right">
                 <h4>Crew Meal</h4>
@@ -1343,15 +1372,32 @@ export default function Dispatch() {
            </tbody></table></div></div>`
       : "";
 
+    // Per-leg dispatch summary (Outbound + Return) with a combined total across
+    // both sectors — mirrors the on-screen round-trip summary.
+    const legRow = (s: FlightSection) => {
+      const pax = s.paxLines.reduce((sum, l) => sum + (Number(l.qty) || 0), 0);
+      const crew = s.crewMeals.reduce((sum, c) => sum + (Number(c.qty) || 0), 0);
+      const special = (Number(s.vgml) || 0) + (Number(s.chml) || 0) + (Number(s.spml) || 0);
+      return { pax, crew, special, total: pax + crew + special, s };
+    };
+    const legRows = sheetSections.map(legRow);
+    const grand = legRows.reduce(
+      (a, r) => ({ pax: a.pax + r.pax, crew: a.crew + r.crew, special: a.special + r.special, total: a.total + r.total }),
+      { pax: 0, crew: 0, special: 0, total: 0 },
+    );
+    const summaryLabel = legRows.length > 1 ? "Dispatch Summary — Outbound + Return" : "Dispatch Summary";
+    const dash = (n: number) => (n > 0 ? String(n) : "—");
     const summaryHtml = `
-      <div class="card"><div class="card-hd light">Summary</div><div class="card-bd">
+      <div class="card"><div class="card-hd light">${summaryLabel}</div><div class="card-bd">
         <table class="grid">
-          <thead><tr><th>Flight</th><th class="c">PAX Meals</th><th class="c">Pastry</th><th class="c">Child Meals</th></tr></thead>
+          <thead><tr><th>Leg</th><th class="c">PAX</th><th class="c">Crew</th><th class="c">Special</th><th class="c">Total Meals</th></tr></thead>
           <tbody>
-            ${sheetSections.map((s) => {
-              const tot = s.paxLines.reduce((sum, l) => sum + (Number(l.qty) || 0), 0);
-              return `<tr><td><b>${esc(s.flightNo)}</b></td><td class="c">${tot}</td><td class="c">${esc(s.pastry)}</td><td class="c">${esc(s.childMealsPastry)}</td></tr>`;
+            ${legRows.map((r) => {
+              const dir = r.s.direction === "Return" ? "RETURN" : "OUTBOUND";
+              const dirClass = r.s.direction === "Return" ? "dir-ret" : "dir-out";
+              return `<tr><td><span class="dir ${dirClass}">${dir}</span> <b>${esc(r.s.flightNo)}</b> <span class="muted">${esc(r.s.sector)}</span></td><td class="c">${dash(r.pax)}</td><td class="c">${dash(r.crew)}</td><td class="c">${dash(r.special)}</td><td class="c"><b>${dash(r.total)}</b></td></tr>`;
             }).join("")}
+            ${legRows.length > 1 ? `<tr class="tot"><td><b>Total (both sectors)</b></td><td class="c"><b>${dash(grand.pax)}</b></td><td class="c"><b>${dash(grand.crew)}</b></td><td class="c"><b>${dash(grand.special)}</b></td><td class="c"><b>${dash(grand.total)}</b></td></tr>` : ""}
           </tbody>
         </table>
       </div></div>`;
@@ -1365,7 +1411,7 @@ export default function Dispatch() {
         .org h1 { margin: 0; font-size: 17px; letter-spacing: .05em; }
         .org .addr { color: #6b7280; font-size: 10px; margin-top: 2px; }
         .sheet-title { text-align: center; font-weight: 600; font-size: 13px; margin: 12px 0; padding: 10px 0; border-top: 1px solid #e5e7eb; }
-        .meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 16px; }
+        .meta { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
         .meta .box { border: 1px solid #e5e7eb; border-radius: 6px; padding: 6px 10px; }
         .meta .k { color: #6b7280; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
         .meta .v { font-weight: 600; font-size: 13px; margin-top: 2px; }
@@ -1385,12 +1431,16 @@ export default function Dispatch() {
         .special .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: #64748b; font-weight: 700; }
         .pastry { margin-top: 10px; display: flex; gap: 24px; flex-wrap: wrap; }
         .muted { color: #9ca3af; }
+        .dir { display: inline-block; font-size: 9px; font-weight: 700; letter-spacing: .05em; padding: 1px 6px; border-radius: 999px; margin-right: 6px; vertical-align: middle; }
+        .dir-out { background: #d1fae5; color: #047857; }
+        .dir-ret { background: #fef3c7; color: #b45309; }
         @media print { body { padding: 0.4in; } .card { break-inside: avoid; } }
       </style></head><body>
       <div class="org"><h1>US-BANGLA AIRLINES</h1><div class="addr">MADINA BHABAN, BAUNIA, BATTOLA, TURAG, DHAKA-1230</div></div>
       <div class="sheet-title">Meal Dispatch Check Sheet (${flightType})</div>
       <div class="meta">
         <div class="box"><div class="k">Dispatch By</div><div class="v">PRODUCTION</div></div>
+        <div class="box"><div class="k">Production No</div><div class="v">${esc(productionNoStr)}</div></div>
         <div class="box"><div class="k">Date</div><div class="v">${esc(rec.date)}</div></div>
         <div class="box"><div class="k">Flight Dept Time (LT)</div><div class="v">${esc(rec.depTime)}</div></div>
       </div>
@@ -1645,6 +1695,20 @@ export default function Dispatch() {
             ) : (
               groupedPRDs.map((timeGroup) => {
                 const flightCount = timeGroup.flightGroups.length;
+                // Round-trip grouping: consecutive legs that share a Dispatch ID
+                // (outbound + return of the same dispatch) are merged so the
+                // Dispatch ID / Order cells span both legs — one dispatch, two
+                // leg lines — while each leg keeps its own status / QC / actions.
+                const fgs = timeGroup.flightGroups;
+                const dspOf = (fg: FlightGroup) => fg.rows.find((r) => r.dspRef)?.dspRef;
+                const dispatchRunInfo = fgs.map((fg, i) => {
+                  const dsp = dspOf(fg);
+                  const prevDsp = i > 0 ? dspOf(fgs[i - 1]) : undefined;
+                  if (dsp && prevDsp === dsp) return { first: false, span: 0 };
+                  let span = 1;
+                  if (dsp) for (let j = i + 1; j < fgs.length && dspOf(fgs[j]) === dsp; j++) span++;
+                  return { first: true, span };
+                });
                 return (
                   <tbody key={timeGroup.depTime}>
                     {timeGroup.flightGroups.map((flightGroup, fgIdx) => {
@@ -1670,7 +1734,17 @@ export default function Dispatch() {
                       // lives in the View dialog (Eye / Meals cell), not the list.
                       const dspId = flightGroup.rows.find((r) => r.dspRef)?.dspRef;
                       const dspHasRecord = !!dspId && records.some((rec) => rec.id === dspId);
-                      const orderNos = [...new Set(flightGroup.rows.map((r) => r.orderNo).filter(Boolean))] as string[];
+                      const run = dispatchRunInfo[fgIdx];
+                      // Order numbers across all legs of this dispatch run (so the
+                      // merged Order cell covers both outbound + return).
+                      const runFgs = run.first ? fgs.slice(fgIdx, fgIdx + run.span) : [];
+                      const orderNos = [...new Set(runFgs.flatMap((fg) => fg.rows.map((r) => r.orderNo)).filter(Boolean))] as string[];
+                      const isRoundTrip = run.first && run.span > 1;
+                      // Combined dispatch gating: every leg of this dispatch must be
+                      // QC-done before the single Initiate Dispatch unlocks, and at
+                      // least one leg must still be undispatched.
+                      const allLegsQcDone = run.first && runFgs.every((fg) => getQcState(fg.flight) === "done");
+                      const runAnyNotDispatched = run.first && runFgs.some((fg) => getFlightStatus(fg.rows, getQcState(fg.flight)) !== "Dispatched");
                       const mealCount = flightGroup.rows.length;
                       const totalQty = flightGroup.rows.reduce((s, r) => s + r.qty, 0);
                       return (
@@ -1679,44 +1753,59 @@ export default function Dispatch() {
                           data-arrival-row-id={flightGroup.rows[0]?.id}
                           className={`hover:bg-muted/20 ${isAbsoluteLast ? "border-b-2 border-border" : "border-b border-border/50"}`}
                         >
-                          <td className="p-3 align-middle border-r border-border/20">
-                            {!dspId ? (
-                              <span className="text-xs text-muted-foreground">—</span>
-                            ) : dspHasRecord ? (
-                              <button
-                                type="button"
-                                className="text-xs font-mono font-semibold text-primary hover:underline whitespace-nowrap"
-                                title="View dispatch details"
-                                onClick={() => setViewRecord(records.find((rec) => rec.id === dspId)!)}
-                              >
-                                {dspId}
-                              </button>
-                            ) : (
-                              <span className="text-xs font-mono font-semibold text-foreground whitespace-nowrap">{dspId}</span>
-                            )}
-                          </td>
+                          {run.first && (
+                            <td rowSpan={run.span} className="p-3 align-middle border-r border-border/20">
+                              {!dspId ? (
+                                <span className="text-xs text-muted-foreground">—</span>
+                              ) : dspHasRecord ? (
+                                <button
+                                  type="button"
+                                  className="text-xs font-mono font-semibold text-primary hover:underline whitespace-nowrap"
+                                  title="View dispatch details"
+                                  onClick={() => setViewRecord(records.find((rec) => rec.id === dspId)!)}
+                                >
+                                  {dspId}
+                                </button>
+                              ) : (
+                                <span className="text-xs font-mono font-semibold text-foreground whitespace-nowrap">{dspId}</span>
+                              )}
+                              {isRoundTrip && (
+                                <span className="mt-1 block text-[10px] font-medium text-amber-600 whitespace-nowrap">Round trip · {run.span} legs</span>
+                              )}
+                            </td>
+                          )}
                           <td className="p-3 font-semibold text-sm align-middle border-r border-border/20 whitespace-nowrap">
-                            {flightGroup.flight}
+                            <span className="inline-flex items-center gap-1.5">
+                              {flightGroup.flight}
+                              {(() => {
+                                const dir = flightOrders.find((o) => o.flight === flightGroup.flight && o.orderType !== "crew")?.direction;
+                                return dir ? (
+                                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${dir === "Return" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>{dir}</span>
+                                ) : null;
+                              })()}
+                            </span>
                           </td>
-                          <td className="p-3 align-middle border-r border-border/20">
-                            {orderNos.length === 0 ? (
-                              <span className="text-xs text-muted-foreground">—</span>
-                            ) : (
-                              <div className="flex flex-wrap gap-1">
-                                {orderNos.map((on) => (
-                                  <button
-                                    key={on}
-                                    type="button"
-                                    className="text-xs font-mono font-semibold text-primary hover:underline whitespace-nowrap"
-                                    title="Open Order Management"
-                                    onClick={() => navigate(`/order-management?ord=${on}`)}
-                                  >
-                                    {on}
-                                  </button>
-                                ))}
-                              </div>
-                            )}
-                          </td>
+                          {run.first && (
+                            <td rowSpan={run.span} className="p-3 align-middle border-r border-border/20">
+                              {orderNos.length === 0 ? (
+                                <span className="text-xs text-muted-foreground">—</span>
+                              ) : (
+                                <div className="flex flex-wrap gap-1">
+                                  {orderNos.map((on) => (
+                                    <button
+                                      key={on}
+                                      type="button"
+                                      className="text-xs font-mono font-semibold text-primary hover:underline whitespace-nowrap"
+                                      title="Open Order Management"
+                                      onClick={() => navigate(`/order-management?ord=${on}`)}
+                                    >
+                                      {on}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </td>
+                          )}
                           {isFirstInTime && (
                             <td rowSpan={flightCount} className="p-3 text-sm text-muted-foreground align-middle font-medium border-r border-border/40 bg-slate-50/60 whitespace-nowrap">
                               {timeGroup.depTime}
@@ -1780,13 +1869,16 @@ export default function Dispatch() {
                                   <Package className="h-3 w-3 mr-1" /> Initiate Packaging
                                 </Button>
                               )}
-                              {flightQCState === "done" && flightStatus !== "Dispatched" && (
+                              {/* One combined Initiate Dispatch per dispatch — only
+                                  on the first leg, only once EVERY leg passed QC. */}
+                              {run.first && allLegsQcDone && runAnyNotDispatched && (
                                 <Button
                                   size="sm"
                                   className="h-7 px-3 text-xs shrink-0 bg-gradient-to-r from-teal-500 to-cyan-600 text-white hover:from-teal-600 hover:to-cyan-700 border-0 shadow-sm"
-                                  onClick={() => openWarningForFlightGroup(flightGroup)}
+                                  onClick={() => openWarningForDispatchRun(runFgs)}
+                                  title={isRoundTrip ? "Dispatch both outbound & return together" : "Initiate dispatch"}
                                 >
-                                  <Truck className="h-3 w-3 mr-1" /> Initiate Dispatch
+                                  <Truck className="h-3 w-3 mr-1" /> Initiate Dispatch{isRoundTrip ? " (Round Trip)" : ""}
                                 </Button>
                               )}
                               <DropdownMenu>
@@ -2305,7 +2397,7 @@ export default function Dispatch() {
                 {productionReady ? (
                   <p className="text-[11px] font-medium text-emerald-700 mt-1.5">✓ All meals produced &amp; QC-passed — ready to dispatch.</p>
                 ) : (
-                  <p className="text-[11px] font-medium text-rose-600 mt-1.5">⚠ Cannot dispatch — these meals are not yet produced &amp; QC-passed: {blockingMeals.join(", ")}. Complete production &amp; QC first.</p>
+                  <p className="text-[11px] font-medium text-amber-600 mt-1.5">⚠ Not yet produced &amp; QC-passed: {blockingMeals.join(", ")}. You can still dispatch, but completing production &amp; QC first is recommended.</p>
                 )}
               </div>
             )}
@@ -2386,8 +2478,8 @@ export default function Dispatch() {
 
           <div className="px-6 py-4 border-t shrink-0 flex justify-between gap-2">
             <Button variant="outline" className="no-brand" onClick={() => { setConfigOpen(false); resetConfig(); }}>Cancel</Button>
-            <Button onClick={handleConfigSave} disabled={!configFlight || !productionReady} title={!productionReady ? "Meals must be produced & QC-passed before dispatch" : undefined}>
-              Save &amp; Create Dispatch
+            <Button onClick={handleConfigSave} disabled={!canSave} title={!productionReady ? "Some meals aren't produced & QC-passed yet — you can still dispatch, with a warning" : undefined}>
+              Save
             </Button>
           </div>
         </DialogContent>
@@ -2462,21 +2554,44 @@ export default function Dispatch() {
                       <ChefHat className="h-3.5 w-3.5" /> Flight Kitchen
                       <span className="ml-auto font-semibold text-slate-700 normal-case tracking-normal">{mealsTotal.toLocaleString()} total meals</span>
                     </div>
-                    <div className="rounded-lg border border-border overflow-hidden">
-                      {linkedRows.length === 0 ? (
-                        <div className="px-3 py-2 text-sm text-muted-foreground">No linked packaging rows.</div>
-                      ) : (
-                        linkedRows.map((r, i) => (
-                          <div key={r.id} className={`flex items-center justify-between gap-3 px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
-                            <div className="min-w-0">
-                              <div className="text-slate-700 truncate">{r.mealName}</div>
-                              <div className="text-xs text-slate-400">{r.mealType} · {r.section}</div>
+                    {linkedRows.length === 0 ? (
+                      <div className="rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground">No linked packaging rows.</div>
+                    ) : (() => {
+                      // Group the meals per leg (Outbound / Return) so a round-trip
+                      // dispatch reads as one sheet with both sectors clearly split.
+                      const legGroups = viewRecord.flightNos
+                        .map((flight) => {
+                          const rows = linkedRows.filter((r) => r.flight === flight);
+                          const order = flightOrders.find((o) => o.flight === flight && o.orderType !== "crew");
+                          const direction: LegDirection = (order?.direction as LegDirection) ?? "Outbound";
+                          return { flight, direction, rows, subtotal: rows.reduce((s, r) => s + r.qty, 0) };
+                        })
+                        .filter((g) => g.rows.length > 0);
+                      return (
+                        <div className="space-y-3">
+                          {legGroups.map((g) => (
+                            <div key={g.flight} className="rounded-lg border border-border overflow-hidden">
+                              <div className="flex items-center justify-between gap-2 px-3 py-2 bg-muted/40 border-b border-border">
+                                <span className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                                  <span className={`px-1.5 py-0.5 rounded text-[10px] ${g.direction === "Return" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>{g.direction}</span>
+                                  {g.flight}
+                                </span>
+                                <span className="text-xs text-muted-foreground tabular-nums">{g.subtotal.toLocaleString()} meals</span>
+                              </div>
+                              {g.rows.map((r, i) => (
+                                <div key={r.id} className={`flex items-center justify-between gap-3 px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
+                                  <div className="min-w-0">
+                                    <div className="text-slate-700 truncate">{r.mealName}</div>
+                                    <div className="text-xs text-slate-400">{r.mealType} · {r.section}</div>
+                                  </div>
+                                  <span className="font-semibold shrink-0">{r.qty.toLocaleString()}</span>
+                                </div>
+                              ))}
                             </div>
-                            <span className="font-semibold shrink-0">{r.qty.toLocaleString()}</span>
-                          </div>
-                        ))
-                      )}
-                    </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   {bakeryTotal > 0 && (
@@ -2584,22 +2699,44 @@ export default function Dispatch() {
                 Meal Dispatch Check Sheet (International Flight)
               </div>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div>
-                <Label className="text-xs text-muted-foreground">Dispatch By</Label>
-                <div className="h-8 mt-1 rounded border border-input bg-slate-100 px-3 flex items-center text-sm font-semibold text-slate-700">
-                  PRODUCTION
+            {(() => {
+              // Production order numbers backing this dispatch — taken from the
+              // packaging rows linked to the record.
+              const productionNos = dispatchingRecord
+                ? ([...new Set(
+                    packagingRows
+                      .filter((r) => r.dspRef === dispatchingRecord.id)
+                      .map((r) => r.productionOrderId)
+                      .filter(Boolean),
+                  )] as string[])
+                : [];
+              return (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Dispatch By</Label>
+                    <div className="h-8 mt-1 rounded border border-input bg-slate-100 px-3 flex items-center text-sm font-semibold text-slate-700">
+                      PRODUCTION
+                    </div>
+                  </div>
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Production No</Label>
+                    <div className="min-h-8 mt-1 rounded border border-input bg-slate-100 px-3 py-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm font-mono text-slate-700">
+                      {productionNos.length
+                        ? productionNos.map((p) => <span key={p}>{p}</span>)
+                        : <span className="text-slate-400 font-sans">—</span>}
+                    </div>
+                  </div>
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Date</Label>
+                    <Input type="date" value={dispatchDate} onChange={(e) => setDispatchDate(e.target.value)} className="h-8 mt-1 text-sm" />
+                  </div>
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Flight Dept Time (LT)</Label>
+                    <Input value={flightDeptTime} onChange={(e) => setFlightDeptTime(e.target.value)} placeholder="10:00" className="h-8 mt-1 text-sm" />
+                  </div>
                 </div>
-              </div>
-              <div>
-                <Label className="text-xs text-muted-foreground">Date</Label>
-                <Input type="date" value={dispatchDate} onChange={(e) => setDispatchDate(e.target.value)} className="h-8 mt-1 text-sm" />
-              </div>
-              <div>
-                <Label className="text-xs text-muted-foreground">Flight Dept Time (LT)</Label>
-                <Input value={flightDeptTime} onChange={(e) => setFlightDeptTime(e.target.value)} placeholder="10:00" className="h-8 mt-1 text-sm" />
-              </div>
-            </div>
+              );
+            })()}
           </div>
 
           <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5 bg-white">
@@ -2651,28 +2788,43 @@ export default function Dispatch() {
                           </tbody>
                         </table>
 
-                        <div className="flex items-center gap-4 px-3 py-2 rounded border border-slate-200 bg-slate-50/60 flex-wrap">
-                          <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap">Special Meals</span>
-                          <div className="flex gap-3 flex-wrap">
-                            {([["VGML", "vgml"], ["CHML", "chml"], ["SPML", "spml"]] as const).map(([label, field]) => (
-                              <div key={label} className="flex items-center gap-1.5">
-                                <span className="text-xs font-semibold text-slate-600">{label}</span>
-                                <Input type="number" value={sec[field]} onChange={(e) => updateSection(sIdx, { [field]: Number(e.target.value) })} className="h-7 w-14 text-xs text-center" />
+                        {(() => {
+                          // Only surface special-meal codes that actually have a
+                          // quantity — zero codes are noise on the sheet.
+                          const specials = ([["VGML", "vgml"], ["CHML", "chml"], ["SPML", "spml"]] as const)
+                            .filter(([, field]) => (Number(sec[field]) || 0) > 0);
+                          if (specials.length === 0) return null;
+                          return (
+                            <div className="flex items-center gap-4 px-3 py-2 rounded border border-slate-200 bg-slate-50/60 flex-wrap">
+                              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap">Special Meals</span>
+                              <div className="flex gap-3 flex-wrap">
+                                {specials.map(([label, field]) => (
+                                  <div key={label} className="flex items-center gap-1.5">
+                                    <span className="text-xs font-semibold text-slate-600">{label}</span>
+                                    <Input type="number" value={sec[field] || ""} placeholder="0" onChange={(e) => updateSection(sIdx, { [field]: Number(e.target.value) })} className="h-7 w-14 text-xs text-center" />
+                                  </div>
+                                ))}
                               </div>
-                            ))}
-                          </div>
-                        </div>
+                            </div>
+                          );
+                        })()}
 
-                        <div className="flex gap-6 flex-wrap">
-                          <div className="flex items-center gap-2">
-                            <Label className="text-xs font-semibold text-slate-600 whitespace-nowrap">Pastry for {sec.flightNo}</Label>
-                            <Input type="number" value={sec.pastry} onChange={(e) => updateSection(sIdx, { pastry: Number(e.target.value) })} className="h-7 w-20 text-xs text-center" />
+                        {(sec.pastry > 0 || sec.childMealsPastry > 0) && (
+                          <div className="flex gap-6 flex-wrap">
+                            {sec.pastry > 0 && (
+                              <div className="flex items-center gap-2">
+                                <Label className="text-xs font-semibold text-slate-600 whitespace-nowrap">Pastry for {sec.flightNo}</Label>
+                                <Input type="number" value={sec.pastry} onChange={(e) => updateSection(sIdx, { pastry: Number(e.target.value) })} className="h-7 w-20 text-xs text-center" />
+                              </div>
+                            )}
+                            {sec.childMealsPastry > 0 && (
+                              <div className="flex items-center gap-2">
+                                <Label className="text-xs font-semibold text-slate-600 whitespace-nowrap">Child Meals Pastry</Label>
+                                <Input type="number" value={sec.childMealsPastry} onChange={(e) => updateSection(sIdx, { childMealsPastry: Number(e.target.value) })} className="h-7 w-20 text-xs text-center" />
+                              </div>
+                            )}
                           </div>
-                          <div className="flex items-center gap-2">
-                            <Label className="text-xs font-semibold text-slate-600 whitespace-nowrap">Child Meals Pastry</Label>
-                            <Input type="number" value={sec.childMealsPastry} onChange={(e) => updateSection(sIdx, { childMealsPastry: Number(e.target.value) })} className="h-7 w-20 text-xs text-center" />
-                          </div>
-                        </div>
+                        )}
                       </div>
 
                       <div>
@@ -2718,32 +2870,62 @@ export default function Dispatch() {
               </div>
             </div>
 
-            <div className="rounded-lg border border-slate-200 overflow-hidden">
-              <div className="bg-slate-100 border-b border-slate-200 px-4 py-2 text-[10px] font-bold text-slate-600 uppercase tracking-widest">Summary</div>
-              <table className="w-full text-xs">
-                <thead className="bg-slate-50 border-b border-slate-200">
-                  <tr>
-                    <th className="p-2.5 text-left font-semibold border-r border-slate-200">Flight</th>
-                    <th className="p-2.5 text-center font-semibold border-r border-slate-200">PAX Meals</th>
-                    <th className="p-2.5 text-center font-semibold border-r border-slate-200">Pastry</th>
-                    <th className="p-2.5 text-center font-semibold">Child Meals</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sections.map((s) => {
-                    const tot = s.paxLines.reduce((sum, l) => sum + (Number(l.qty) || 0), 0);
-                    return (
-                      <tr key={s.flightNo} className="border-t border-slate-200">
-                        <td className="p-2.5 font-semibold border-r border-slate-200">{s.flightNo}</td>
-                        <td className="p-2.5 text-center border-r border-slate-200">{tot}</td>
-                        <td className="p-2.5 text-center border-r border-slate-200">{s.pastry}</td>
-                        <td className="p-2.5 text-center">{s.childMealsPastry}</td>
+            {(() => {
+              // Only render optional summary columns that at least one leg uses —
+              // a column that's empty across every flight is dropped entirely.
+              const showSpecial = sections.some((s) => ((Number(s.vgml) || 0) + (Number(s.chml) || 0) + (Number(s.spml) || 0)) > 0);
+              const showPastry = sections.some((s) => (Number(s.pastry) || 0) > 0);
+              const showChild = sections.some((s) => (Number(s.childMealsPastry) || 0) > 0);
+              return (
+                <div className="rounded-lg border border-slate-200 overflow-hidden">
+                  <div className="bg-slate-100 border-b border-slate-200 px-4 py-2 text-[10px] font-bold text-slate-600 uppercase tracking-widest">Summary</div>
+                  <table className="w-full text-xs">
+                    <thead className="bg-slate-50 border-b border-slate-200">
+                      <tr>
+                        <th className="p-2.5 text-left font-semibold border-r border-slate-200">Flight</th>
+                        <th className="p-2.5 text-center font-semibold border-r border-slate-200">PAX Meals</th>
+                        {showSpecial && <th className="p-2.5 text-center font-semibold border-r border-slate-200">Special Meals</th>}
+                        {showPastry && <th className="p-2.5 text-center font-semibold border-r border-slate-200">Pastry</th>}
+                        {showChild && <th className="p-2.5 text-center font-semibold">Child Meals</th>}
                       </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                    </thead>
+                    <tbody>
+                      {sections.map((s) => {
+                        const tot = s.paxLines.reduce((sum, l) => sum + (Number(l.qty) || 0), 0);
+                        const special = (Number(s.vgml) || 0) + (Number(s.chml) || 0) + (Number(s.spml) || 0);
+                        return (
+                          <tr key={s.flightNo} className="border-t border-slate-200">
+                            <td className="p-2.5 font-semibold border-r border-slate-200">{s.flightNo}</td>
+                            <td className="p-2.5 text-center border-r border-slate-200">{tot || "—"}</td>
+                            {showSpecial && (
+                              <td className="p-2.5 text-center border-r border-slate-200">
+                                {special > 0 ? (
+                                  <>
+                                    <div className="font-medium">{special}</div>
+                                    {(() => {
+                                      const parts = [
+                                        s.vgml > 0 ? `VGML ${s.vgml}` : "",
+                                        s.chml > 0 ? `CHML ${s.chml}` : "",
+                                        s.spml > 0 ? `SPML ${s.spml}` : "",
+                                      ].filter(Boolean);
+                                      return <div className="text-[10px] text-slate-400">{parts.join(" · ")}</div>;
+                                    })()}
+                                  </>
+                                ) : (
+                                  <span className="text-slate-400">—</span>
+                                )}
+                              </td>
+                            )}
+                            {showPastry && <td className="p-2.5 text-center border-r border-slate-200">{s.pastry || "—"}</td>}
+                            {showChild && <td className="p-2.5 text-center">{s.childMealsPastry || "—"}</td>}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
 
             <div className="rounded-lg border border-amber-200 bg-amber-50/40 p-4">
               <p className="text-xs text-slate-600 leading-relaxed mb-3">
@@ -2768,7 +2950,7 @@ export default function Dispatch() {
                   className="bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-40"
                   onClick={handleDispatch}
                 >
-                  <Truck className="h-4 w-4 mr-1" /> Dispatch and Forward to Airport
+                  <Truck className="h-4 w-4 mr-1" /> Dispatch
                 </Button>
               )}
             </div>

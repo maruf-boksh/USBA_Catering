@@ -21,6 +21,7 @@ import {
 import { flights as FLIGHT_BOARD, seedFlightOrders } from "@/lib/sample-data";
 import { useRole } from "@/lib/roles";
 import { useWorkflow } from "@/lib/workflow-store";
+import { useDispatchMonitoringSettings } from "@/lib/dispatch-monitoring-settings";
 import { KpiCard } from "@/components/common/KpiCard";
 
 // Flight options for the dispatch-monitoring form. The operational flight board
@@ -88,6 +89,8 @@ type DispatchEntry = {
   approvedBy?: ApprovalLog;
   forwardedToAirportAt?: string;
   receivedBy: string; receivedDesignation: string; receivedAt: string; receivedRemarks: string;
+  /** Human-friendly dispatch number (e.g. DSP-0001), assigned on creation. */
+  dispatchNo?: string;
 };
 type FormState = {
   flightId: string; packagingDate: string; mealLines: MealLine[];
@@ -203,6 +206,7 @@ function Divider({ label, color = "blue" }: { label: string; color?: "blue" | "e
 // ── Main Component ───────────────────────────────────────────────────────────
 export default function DispatchMonitoring() {
   useRole();
+  const doc = useDispatchMonitoringSettings();
 
   const [entries, setEntries] = useState<DispatchEntry[]>(() => {
     try { const s = sessionStorage.getItem("dm_entries"); return s ? JSON.parse(s) : []; } catch { return []; }
@@ -211,6 +215,21 @@ export default function DispatchMonitoring() {
   const [editId, setEditId] = useState<string | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+
+  // Next sequential dispatch number (DSP-0001…), derived from existing entries so
+  // it survives deletions. The new-entry form previews it; saving persists it.
+  const nextDispatchNo = (() => {
+    const max = entries.reduce((m, e) => {
+      const n = parseInt(String(e.dispatchNo ?? "").replace(/\D/g, ""), 10);
+      return Number.isFinite(n) && n > m ? n : m;
+    }, 0);
+    return `DSP-${String(max + 1).padStart(4, "0")}`;
+  })();
+  // The number shown in the entry form header: an existing entry's own number
+  // when editing, otherwise the previewed next number.
+  const formDispatchNo = editId
+    ? (entries.find((e) => e.id === editId)?.dispatchNo ?? nextDispatchNo)
+    : nextDispatchNo;
   const [depTime, setDepTime] = useState("");
   const [form, setForm] = useState<FormState>({ ...EMPTY_FORM });
   const [errors, setErrors] = useState<Partial<Record<keyof FormState, string>>>({});
@@ -422,6 +441,7 @@ export default function DispatchMonitoring() {
       receivedAt: existing?.receivedAt ?? "",
       receivedRemarks: form.receiverRemarks,
       forwardedToAirportAt: existing?.forwardedToAirportAt,
+      dispatchNo: existing?.dispatchNo ?? nextDispatchNo,
     };
     if (editId) {
       setEntries((prev) => prev.map((e) => e.id === editId ? { ...e, ...base } : e));
@@ -486,6 +506,7 @@ export default function DispatchMonitoring() {
       receivedAt: existing?.receivedAt ?? "",
       receivedRemarks: form.receiverRemarks,
       forwardedToAirportAt: existing?.forwardedToAirportAt,
+      dispatchNo: existing?.dispatchNo ?? nextDispatchNo,
     };
     if (editId) {
       setEntries((prev) => prev.map((e) => e.id === editId ? { ...e, ...base } : e));
@@ -522,6 +543,7 @@ export default function DispatchMonitoring() {
       receivedAt: at,
       receivedRemarks: form.receiverRemarks,
       forwardedToAirportAt: existing?.forwardedToAirportAt,
+      dispatchNo: existing?.dispatchNo ?? nextDispatchNo,
     };
     if (editId) {
       setEntries((prev) => prev.map((e) => e.id === editId ? { ...e, ...base } : e));
@@ -540,7 +562,7 @@ export default function DispatchMonitoring() {
     setEntries((prev) =>
       prev.map((e) => e.id === editId ? { ...e, approvalStage: 4 as const, forwardedToAirportAt: at } : e)
     );
-    toast.success("Forwarded to Airport Catering");
+    toast.success(`Forwarded to ${doc.destinationLabel}`);
     resetForm();
   };
 
@@ -681,12 +703,12 @@ export default function DispatchMonitoring() {
       <div className="flex items-start justify-between gap-4">
         <div className="flex-1">
           <PageHeader
-            title="Daily Product Dispatch Monitoring"
-            subtitle="Cold chain integrity & vehicle hygiene verification per flight dispatch · USBA-FSH-PDM-01"
+            title={doc.title}
+            subtitle={`Cold chain integrity & vehicle hygiene verification per flight dispatch · ${doc.documentCode}`}
           />
         </div>
       </div>
-      <p className="text-xs text-muted-foreground mb-5 -mt-1">Baunia Catering → Airport Catering</p>
+      <p className="text-xs text-muted-foreground mb-5 -mt-1">{doc.originLabel} → {doc.destinationLabel}</p>
 
       {/* KPIs */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
@@ -725,7 +747,7 @@ export default function DispatchMonitoring() {
                     <td className="px-3 py-2 sticky left-0 z-10 bg-inherit font-semibold whitespace-nowrap text-blue-700">{flightNo(entry.flightId)}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{entry.packagingDate}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{entry.packagingDate}{entry.loadStartTime ? ` ${entry.loadStartTime}` : ""}</td>
-                    <td className="px-3 py-2 whitespace-nowrap text-slate-600">Baunia Catering Point</td>
+                    <td className="px-3 py-2 whitespace-nowrap text-slate-600">{doc.originLabel} Point</td>
                     <td className="px-3 py-2 whitespace-nowrap font-medium">{flightDest(entry.flightId)} Airport</td>
                     <td className="px-3 py-2 whitespace-nowrap">
                       {(() => { const s = dispatchStatusBadge(entry); return <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${s.cls}`}>{s.label}</span>; })()}
@@ -789,10 +811,10 @@ export default function DispatchMonitoring() {
                     <PlaneTakeoff className="h-5 w-5" />
                     <div>
                       <p className="font-bold text-sm">Catering Point Dispatch Entry</p>
-                      <p className="text-[11px] text-blue-200 mt-0.5">Baunia Central Kitchen</p>
+                      <p className="text-[11px] text-blue-200 mt-0.5">{doc.originName}</p>
                     </div>
                   </div>
-                  <span className="text-xs bg-blue-800/60 px-2.5 py-1 rounded-full">USBA-FSH-PDM-01</span>
+                  <span className="text-xs bg-blue-800/60 px-2.5 py-1 rounded-full">Dispatch No: {formDispatchNo}</span>
                 </div>
 
                 <div className={`p-5 space-y-4${isAirportReceiveMode ? " pointer-events-none opacity-60 select-none" : ""}`}>
@@ -1064,7 +1086,7 @@ export default function DispatchMonitoring() {
                     <PlaneLanding className="h-5 w-5" />
                     <div>
                       <p className="font-bold text-sm">Airport Point Receiving Entry</p>
-                      <p className="text-[11px] text-emerald-200 mt-0.5">Airport Catering Unit — Gate No. 08</p>
+                      <p className="text-[11px] text-emerald-200 mt-0.5">{doc.destinationName}</p>
                     </div>
                   </div>
                   <span className="text-xs bg-emerald-800/60 px-2.5 py-1 rounded-full">APT Verify</span>
@@ -1123,7 +1145,7 @@ export default function DispatchMonitoring() {
                   <Divider label="Receipt Log" color="emerald" />
                   <div className="rounded-lg bg-emerald-50/70 border border-emerald-200 p-3.5 space-y-3">
                     <p className="text-[11px] text-emerald-700 font-bold flex items-center gap-1.5">
-                      <PlaneLanding className="h-3.5 w-3.5" /> Received By (Airport Catering)
+                      <PlaneLanding className="h-3.5 w-3.5" /> Received By ({doc.destinationLabel})
                     </p>
                     <p className="text-[11px] text-slate-400 italic flex items-center gap-1">
                       <User className="h-3 w-3" /> Name &amp; designation auto-filled by system
@@ -1161,7 +1183,7 @@ export default function DispatchMonitoring() {
               {!isAirportReceiveMode && (
                 <Button className="bg-indigo-600 hover:bg-indigo-700 text-white px-8 shadow-md" onClick={saveEntry}>
                   <ShieldCheck className="h-4 w-4 mr-2" />
-                  {editId ? "Save Changes" : "Verify and Forward to Head Of Catering"}
+                  {editId ? "Save Changes" : "Save"}
                 </Button>
               )}
             </div>
@@ -1339,7 +1361,7 @@ export default function DispatchMonitoring() {
                         <div className={`rounded-lg border p-3 ${entry.receivedAt ? "border-emerald-200 bg-emerald-50/40" : "border-slate-200 bg-slate-50/40 opacity-50"}`}>
                           <div className="flex items-center gap-1.5 mb-1">
                             <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${entry.receivedAt ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
-                              ③ Received By (Airport Catering)
+                              ③ Received By ({doc.destinationLabel})
                             </span>
                           </div>
                           {entry.receivedAt ? (
@@ -1444,7 +1466,7 @@ export default function DispatchMonitoring() {
                     <div className="p-4 space-y-3">
                       <div className="flex items-center justify-between">
                         <div>
-                          <p className="text-[10px] text-slate-400">Baunia Central Kitchen · USBA-FSH-PDM-01</p>
+                          <p className="text-[10px] text-slate-400">{doc.originName} · {doc.documentCode}</p>
                           <p className="font-bold text-slate-800 text-sm">Dispatch Entry</p>
                         </div>
                         <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-semibold">1 of 4</span>
@@ -1642,7 +1664,7 @@ export default function DispatchMonitoring() {
                   {mScreen === 4 && (
                     <div className="p-4 space-y-3">
                       <div className="flex items-center justify-between">
-                        <p className="text-[10px] text-slate-400">USBA-FSH-PDM-01</p>
+                        <p className="text-[10px] text-slate-400">{doc.documentCode}</p>
                         <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-semibold">Done</span>
                       </div>
                       <div className="flex flex-col items-center py-6">
@@ -1701,7 +1723,7 @@ export default function DispatchMonitoring() {
                     <div className="p-4 space-y-3">
                       <div className="flex items-center justify-between">
                         <div>
-                          <p className="text-[10px] text-slate-400">Airport Catering Unit — Gate No. 08</p>
+                          <p className="text-[10px] text-slate-400">{doc.destinationName}</p>
                           <p className="font-bold text-slate-800 text-sm">Airport Receiving</p>
                         </div>
                         <span className="text-[10px] bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full font-semibold">1 of 3</span>

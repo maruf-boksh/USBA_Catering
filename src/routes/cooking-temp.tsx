@@ -547,29 +547,45 @@ export default function CookingTemp() {
             </div>
           ) : (
             <div className="space-y-2">
-              {pendingQC.map((p) => (
-                <div
-                  key={p.id}
-                  className="flex items-center justify-between rounded-md border border-border p-3 hover:bg-muted/30 transition-colors flex-wrap gap-3"
-                >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-mono text-xs text-foreground">{p.id}</span>
-                      <Badge variant="outline" className="text-[10px] font-normal">{p.bom}</Badge>
+              {pendingQC.map((p) => {
+                const std = stdTempFor(p);
+                return (
+                  <div
+                    key={p.id}
+                    className="flex items-center justify-between gap-4 rounded-lg border border-border bg-card p-3 hover:bg-muted/30 transition-colors flex-wrap"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                        <Factory className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-semibold truncate">{p.outputItemName ?? p.bom}</span>
+                          <Badge variant="outline" className="text-[10px] font-normal tabular-nums">
+                            × {p.producedQty.toLocaleString()}
+                          </Badge>
+                        </div>
+                        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground flex-wrap">
+                          <span className="font-mono">{p.id}</span>
+                          <span className="text-border">·</span>
+                          <span>{p.bom}</span>
+                          <span className="text-border">·</span>
+                          <span>Produced {p.date}</span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="mt-1 text-sm font-medium">
-                      {p.outputItemName ?? p.bom}
-                      <span className="ml-2 text-xs text-muted-foreground tabular-nums">
-                        × {p.producedQty.toLocaleString()}
-                      </span>
+                    <div className="flex items-center gap-4 shrink-0">
+                      <div className="hidden sm:flex flex-col items-end leading-tight">
+                        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Standard</span>
+                        <span className="text-sm font-semibold tabular-nums">≥{std}°C</span>
+                      </div>
+                      <Button size="sm" onClick={() => openQc(p)}>
+                        <ClipboardCheck className="h-3.5 w-3.5 mr-1.5" /> Record Test
+                      </Button>
                     </div>
-                    <div className="text-[11px] text-muted-foreground">Produced on {p.date}</div>
                   </div>
-                  <Button size="sm" onClick={() => openQc(p)}>
-                    <ClipboardCheck className="h-3.5 w-3.5 mr-1.5" /> Record Test
-                  </Button>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </CardContent>

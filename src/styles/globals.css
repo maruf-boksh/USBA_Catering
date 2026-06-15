@@ -1382,6 +1382,15 @@ html[data-theme="dark"] .ant-drawer .ant-drawer-header {
     width: min(44vw, 180px) !important;
   }
 
+  /* Collapse the "Mobile App View" button to icon-only so it stops pushing the
+     topbar past the viewport on phones. */
+  .app-topbar-mobileview {
+    padding: 0 8px !important;
+  }
+  .app-topbar-mobileview-label {
+    display: none;
+  }
+
 }
 
 /* ── Mobile / tablet: sidebar becomes an off-canvas drawer ─────────────────

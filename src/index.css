@@ -344,6 +344,9 @@
     align-items: center;
     justify-content: space-between;
     gap: 1rem;
+    /* On narrow screens let the actions block drop below the title instead of
+       squeezing it — pairs with .module-header__actions wrapping internally. */
+    flex-wrap: wrap;
     background-color: var(--color-card);
     border: 1px solid var(--color-border);
     border-radius: var(--radius-lg);
@@ -395,7 +398,11 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    flex-shrink: 0;
+    /* Wrap onto extra rows on narrow screens instead of overflowing the header
+       card. flex-shrink must NOT be 0 here or the block keeps its full content
+       width and spills past the viewport (e.g. the dashboard period toggles). */
+    flex-wrap: wrap;
+    min-width: 0;
 }
 
 /* Page shell — applied to the main content wrapper */
