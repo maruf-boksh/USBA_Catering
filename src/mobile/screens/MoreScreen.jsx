@@ -7,9 +7,7 @@ const OPERATIONS = [
 ];
 
 const SUPPLY_CHAIN = [
-  { key: 'stock',           icon: '📦', label: 'Stock Overview',   sub: 'Current inventory levels'  },
-  { key: 'demands',         icon: '📝', label: 'Demand Requests',  sub: 'Material requisitions'     },
-  { key: 'purchase-orders', icon: '🛒', label: 'Purchase Orders',  sub: 'PO creation & tracking'   },
+  { key: 'stock', icon: '📦', label: 'Stock Overview', sub: 'Current inventory levels' },
 ];
 
 function SectionLabel({ children }) {

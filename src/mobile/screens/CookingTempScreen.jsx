@@ -24,6 +24,7 @@ export function CookingTempScreen({ nav }) {
   const [failReason, setFailReason] = useState('');
   const [lastResult, setLastResult] = useState('pass');
   const [logRecordId, setLogRecordId] = useState(null);
+  const [newRecordId, setNewRecordId] = useState(null);
 
   const measuredNum = parseFloat(measured) || 0;
   const stdTemp     = qcTarget?.standardTemp ?? 75;
@@ -34,9 +35,11 @@ export function CookingTempScreen({ nav }) {
   const passQc = () => {
     const now = new Date();
     const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-    setRecords(prev => [{ id: `CT-${Date.now()}`, item: qcTarget.item, target: `≥${stdTemp}°C`, actual: `${measuredNum}°C`, status: 'pass', time: timeStr, chef: cookedBy || 'Kitchen Staff' }, ...prev]);
+    const recId = `CT-${Date.now()}`;
+    setRecords(prev => [{ id: recId, item: qcTarget.item, target: `≥${stdTemp}°C`, actual: `${measuredNum}°C`, status: 'pass', time: timeStr, chef: cookedBy || 'Kitchen Staff' }, ...prev]);
     setPending(prev => prev.filter(p => p.id !== qcTarget.id));
     setLastResult('pass');
+    setNewRecordId(recId);
     setScreen(4);
   };
 
@@ -44,9 +47,11 @@ export function CookingTempScreen({ nav }) {
     if (!failReason.trim()) return;
     const now = new Date();
     const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
-    setRecords(prev => [{ id: `CT-${Date.now()}`, item: qcTarget.item, target: `≥${stdTemp}°C`, actual: `${measuredNum}°C`, status: 'fail', time: timeStr, chef: cookedBy || 'Kitchen Staff', failReason }, ...prev]);
+    const recId = `CT-${Date.now()}`;
+    setRecords(prev => [{ id: recId, item: qcTarget.item, target: `≥${stdTemp}°C`, actual: `${measuredNum}°C`, status: 'fail', time: timeStr, chef: cookedBy || 'Kitchen Staff', failReason }, ...prev]);
     setPending(prev => prev.filter(p => p.id !== qcTarget.id));
     setLastResult('fail');
+    setNewRecordId(recId);
     setScreen(4);
   };
 
@@ -183,7 +188,14 @@ export function CookingTempScreen({ nav }) {
             {[['Batch', qcTarget.id], ['Item', qcTarget.item], ['Temp', `${measuredNum}°C / ≥${stdTemp}°C`], ['Cooked By', cookedBy || 'Kitchen Staff']].map(([l, v]) => (
               <div key={l} style={{ display: 'flex', justifyContent: 'space-between', paddingTop: 6, paddingBottom: 6, borderTop: `1px solid ${T.border}` }}>
                 <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{l}</span>
-                <span style={{ fontSize: 12, fontWeight: 600, color: l === 'Temp' ? (lastResult === 'pass' ? T.statusApproved : T.statusRejected) : T.textPrimary, fontFamily: T.fontBody }}>{v}</span>
+                {l === 'Batch' ? (
+                  <span
+                    onClick={() => { setTab('log'); setLogRecordId(newRecordId); }}
+                    style={{ fontSize: 12, fontWeight: 700, color: T.primary, fontFamily: T.fontBody, cursor: 'pointer', border: `1px solid ${T.primary}`, borderRadius: T.radiusMd, padding: '1px 8px' }}
+                  >{v}</span>
+                ) : (
+                  <span style={{ fontSize: 12, fontWeight: 600, color: l === 'Temp' ? (lastResult === 'pass' ? T.statusApproved : T.statusRejected) : T.textPrimary, fontFamily: T.fontBody }}>{v}</span>
+                )}
               </div>
             ))}
           </div>
