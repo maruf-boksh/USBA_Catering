@@ -3,6 +3,7 @@ import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { ReviewStatusCell } from "@/components/common/ReviewStatusCell";
 import { RowActions } from "@/components/common/RowActions";
 import { rowEditors } from "@/lib/row-editors";
 import { StatusBadge } from "@/components/common/StatusBadge";
@@ -99,7 +100,11 @@ function QuotationList({ rows, editors }: {
       render: (r) => <span className="tabular-nums font-medium">{r.total.toLocaleString()}</span>,
     },
     { key: "validity", header: "Valid Till" },
-    { key: "status", header: "Status", render: (r) => <StatusBadge status={r.status} /> },
+    { key: "status", header: "Status", render: (r) => (
+      <ReviewStatusCell category="Quotation" refId={r.id}>
+        <StatusBadge status={r.status} />
+      </ReviewStatusCell>
+    ) },
   ];
 
   return (

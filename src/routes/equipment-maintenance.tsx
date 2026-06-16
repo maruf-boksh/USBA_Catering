@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
+import { ReviewStatusCell } from "@/components/common/ReviewStatusCell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -210,9 +211,11 @@ function MaintenanceList({
                   <TableCell className="tabular-nums text-xs">{e.nextDue}</TableCell>
                   <TableCell className="text-xs text-muted-foreground max-w-[200px] truncate">{e.notes ?? "—"}</TableCell>
                   <TableCell>
-                    <Badge variant="outline" className={cn("text-[10px]", statusBadgeCls(e.status))}>
-                      {e.status}
-                    </Badge>
+                    <ReviewStatusCell category="Maintenance" refId={e.id}>
+                      <Badge variant="outline" className={cn("text-[10px]", statusBadgeCls(e.status))}>
+                        {e.status}
+                      </Badge>
+                    </ReviewStatusCell>
                   </TableCell>
                   <TableCell className="text-right">
                     <div className="flex items-center justify-end gap-1.5">

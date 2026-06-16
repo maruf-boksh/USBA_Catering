@@ -20,7 +20,7 @@ import {
   FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, ArrowLeft, Layers, UserCog, Users,
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
   PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane, MailQuestion, PlaneLanding, PlaneTakeoff,
-  BadgeDollarSign, Wrench,
+  BadgeDollarSign, Wrench, MessageSquare, CornerUpLeft,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -31,6 +31,7 @@ import {
 import { inventory, warehouses } from "@/lib/sample-data";
 import { getItemStock } from "@/lib/inventory-stock";
 import { useFlightOrders, updateFlightOrdersWhere, type FlightOrder } from "@/lib/flight-orders-store";
+import { useApprovalReviews, setReview, reviewKey } from "@/lib/approval-reviews";
 import { getRfqs, setRfqStatus } from "@/lib/rfqs";
 import { getQuotations, setQuotationStatus } from "@/lib/quotations";
 import { getStockAdjustments, setStockAdjustmentStatus } from "@/lib/stock-adjustments";
@@ -84,7 +85,7 @@ const APPROVAL_SECTIONS: { label: string; keys: Category[] }[] = [
 ];
 const CATEGORY_BY_KEY = new Map(CATEGORIES.map((c) => [c.key, c]));
 
-type ApprovalStatus = "Pending" | "Approved" | "Rejected";
+type ApprovalStatus = "Pending" | "Approved" | "Rejected" | "Reviewed";
 
 // A line item shown in the detail dialog. `qty`/`uom` are optional so the same
 // shape works for materials (Qty + UoM), single-line adjustments, etc. `note`
@@ -105,6 +106,8 @@ type ApprovalItem = {
   processedBy?: string;
   processedAt?: string;
   rejectionReason?: string;
+  /** Approver's review comment when the request was returned for correction. */
+  reviewComment?: string;
   /** Structured line items for the detail view (PR/PO/GRN/Transfer/etc.). */
   lines?: ApprovalLine[];
   /** Single-record field list for categories without line items (e.g. User). */
@@ -279,6 +282,14 @@ export default function ApprovalManagementPage() {
   const [shortfallQtys, setShortfallQtys] = useState<Record<string, string>>({});
   const [detailRejectOpen, setDetailRejectOpen] = useState(false);
   const [detailRejectReason, setDetailRejectReason] = useState("");
+  const [detailReviewOpen, setDetailReviewOpen] = useState(false);
+  const [detailReviewComment, setDetailReviewComment] = useState("");
+  // Review decisions — "send back to the requester for correction" instead of a
+  // hard reject. Persisted centrally (survives reload) keyed by category::refId,
+  // so every module's requester screen can read & clear it. Overlaid onto the
+  // projected items below; only applies while the request is still Pending.
+  // (Flight/Crew orders persist their review on the order row itself instead.)
+  const reviews = useApprovalReviews();
 
   // ── Dispatch approval modal ──────────────────────────────────────────────────
   const [dispatchViewOpen, setDispatchViewOpen] = useState(false);
@@ -337,6 +348,8 @@ export default function ApprovalManagementPage() {
     for (const [key, { orderNo, type, legs }] of byOrder) {
       const decision = foDecisions[key];
       const hasPending = legs.some((l) => l.status === "Pending");
+      // A returned-for-correction leg (reviewComment set while still Pending).
+      const reviewedLeg = legs.find((l) => l.reviewComment && l.status === "Pending");
       if (!hasPending && !decision) continue;
       const isCrew = type === "crew";
       const airlines = Array.from(new Set(legs.map((l) => l.airline)));
@@ -355,10 +368,11 @@ export default function ApprovalManagementPage() {
           ? `${airlines.join(", ")} · ${flightList}${more} · ${totalCrew} crew`
           : `${airlines.join(", ")} · ${flightList}${more} · ${totalPax} pax`,
         itemsCount: legs.length,
-        status: decision ? decision.status : "Pending",
-        processedBy: decision?.by,
-        processedAt: decision?.at,
+        status: decision ? decision.status : reviewedLeg ? "Reviewed" : "Pending",
+        processedBy: decision?.by ?? reviewedLeg?.reviewedBy,
+        processedAt: decision?.at ?? reviewedLeg?.reviewedAt,
         rejectionReason: decision?.reason,
+        reviewComment: reviewedLeg?.reviewComment,
       });
     }
     return result;
@@ -522,15 +536,22 @@ export default function ApprovalManagementPage() {
       });
   }, [maintenanceApprovals]);
 
-  const allItems = useMemo(
-    () => [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...items],
-    [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, items],
-  );
+  const allItems = useMemo(() => {
+    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...items];
+    // Overlay "Reviewed" (returned for correction) onto still-pending requests.
+    return base.map((it) => {
+      const rv = reviews[reviewKey(it.category, it.refId)];
+      if (rv && it.status === "Pending") {
+        return { ...it, status: "Reviewed" as ApprovalStatus, processedBy: rv.by, processedAt: rv.at, reviewComment: rv.comment };
+      }
+      return it;
+    });
+  }, [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, items, reviews]);
 
   const counts = useMemo(() => {
     const pendingByCat = new Map<Category, number>();
     for (const c of CATEGORIES) pendingByCat.set(c.key, 0);
-    let pending = 0, approvedToday = 0, rejectedToday = 0, valuePending = 0;
+    let pending = 0, approvedToday = 0, rejectedToday = 0, reviewedToday = 0, valuePending = 0;
     for (const it of allItems) {
       if (it.status === "Pending") {
         pending++;
@@ -539,9 +560,10 @@ export default function ApprovalManagementPage() {
       } else if (it.processedAt?.startsWith(today)) {
         if (it.status === "Approved") approvedToday++;
         if (it.status === "Rejected") rejectedToday++;
+        if (it.status === "Reviewed") reviewedToday++;
       }
     }
-    return { pending, approvedToday, rejectedToday, valuePending, pendingByCat };
+    return { pending, approvedToday, rejectedToday, reviewedToday, valuePending, pendingByCat };
   }, [allItems, today]);
 
   const filtered = useMemo(() => {
@@ -875,6 +897,8 @@ export default function ApprovalManagementPage() {
     setShortfallQtys({});
     setDetailRejectOpen(false);
     setDetailRejectReason("");
+    setDetailReviewOpen(false);
+    setDetailReviewComment("");
   };
 
   const handleFulfillFromStore = (dr: WfDemandRequest) => {
@@ -1005,6 +1029,35 @@ export default function ApprovalManagementPage() {
     setDetailItem(null);
   };
 
+  // Send the request back to the requester for correction with a comment, rather
+  // than rejecting it outright. Recorded in the session-local `reviews` overlay;
+  // the requester sees status "Reviewed" with the approver's comment.
+  const confirmDetailReview = () => {
+    if (!detailItem) return;
+    if (!detailReviewComment.trim()) { toast.error("Provide a review comment for the requester."); return; }
+    const comment = detailReviewComment.trim();
+    const by = `${role} (GM/Admin)`;
+    const at = stamp();
+    // Flight / Crew orders persist the review onto the order itself (store) so the
+    // requester sees the "Reviewed" status + comment on Order Management. Other
+    // categories use the session-local overlay (their requester screens don't
+    // carry a review surface yet).
+    if (detailItem.category === "Flight Orders" || detailItem.category === "Crew Orders") {
+      const t = detailItem.category === "Crew Orders" ? "crew" : "flight";
+      updateFlightOrdersWhere(
+        (o) => o.orderNo === detailItem.refId && (o.orderType === "crew" ? "crew" : "flight") === t && o.status === "Pending",
+        { reviewComment: comment, reviewedBy: by, reviewedAt: at },
+      );
+    } else {
+      setReview(detailItem.category, detailItem.refId, { by, at, comment });
+    }
+    toast.success(`${detailItem.refId} sent back to the requester for correction.`);
+    setDetailOpen(false);
+    setDetailReviewOpen(false);
+    setDetailReviewComment("");
+    setDetailItem(null);
+  };
+
   return (
     <>
       <PageHeader
@@ -1014,10 +1067,11 @@ export default function ApprovalManagementPage() {
 
       <div className="usb-livery-stripe h-1 rounded-full mb-5" aria-hidden />
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
-        <KpiCard label="Pending Approvals" value={counts.pending}        sub="awaiting action"   icon={Clock}       tone="warning" />
-        <KpiCard label="Approved Today"    value={counts.approvedToday}  sub="processed today"   icon={Check}       tone="success" />
-        <KpiCard label="Rejected Today"    value={counts.rejectedToday}  sub="processed today"   icon={XIcon}       tone="red"     />
+      <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <KpiCard label="Pending Approvals" value={counts.pending}        sub="awaiting action"      icon={Clock}         tone="warning" />
+        <KpiCard label="Approved Today"    value={counts.approvedToday}  sub="processed today"      icon={Check}         tone="success" />
+        <KpiCard label="Returned Today"    value={counts.reviewedToday}  sub="sent for correction"  icon={CornerUpLeft}  tone="info" />
+        <KpiCard label="Rejected Today"    value={counts.rejectedToday}  sub="processed today"      icon={XIcon}         tone="red"     />
       </div>
 
       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as Category | "all")}>
@@ -1331,6 +1385,7 @@ export default function ApprovalManagementPage() {
                   {recentItems.map((it) => {
                     const Icon = categoryIcon(it.category);
                     const approved = it.status === "Approved";
+                    const reviewed = it.status === "Reviewed";
                     return (
                       <button
                         key={it.id}
@@ -1347,6 +1402,11 @@ export default function ApprovalManagementPage() {
                             </div>
                             <div className="mt-1 text-sm font-medium">{it.title}</div>
                             <div className="text-[11px] text-muted-foreground">{it.summary}</div>
+                            {it.reviewComment && (
+                              <div className="mt-1 text-[11px] text-amber-700">
+                                <span className="font-medium">Comment:</span> {it.reviewComment}
+                              </div>
+                            )}
                             {it.rejectionReason && (
                               <div className="mt-1 text-[11px] text-destructive">
                                 <span className="font-medium">Reason:</span> {it.rejectionReason}
@@ -1358,12 +1418,12 @@ export default function ApprovalManagementPage() {
                               variant="outline"
                               className={cn(
                                 "font-medium text-[10px]",
-                                approved
-                                  ? "bg-success/10 text-success border-success/30"
-                                  : "bg-destructive/10 text-destructive border-destructive/30",
+                                approved && "bg-success/10 text-success border-success/30",
+                                reviewed && "bg-amber-100 text-amber-700 border-amber-300",
+                                !approved && !reviewed && "bg-destructive/10 text-destructive border-destructive/30",
                               )}
                             >
-                              {approved ? <Check className="h-2.5 w-2.5 mr-1" /> : <XIcon className="h-2.5 w-2.5 mr-1" />}
+                              {approved ? <Check className="h-2.5 w-2.5 mr-1" /> : reviewed ? <CornerUpLeft className="h-2.5 w-2.5 mr-1" /> : <XIcon className="h-2.5 w-2.5 mr-1" />}
                               {it.status}
                             </Badge>
                             <div className="text-[11px] text-muted-foreground mt-1 tabular-nums">{it.processedAt}</div>
@@ -1553,12 +1613,14 @@ export default function ApprovalManagementPage() {
                     detailItem.status === "Approved" && "bg-success/10 text-success border-success/30",
                     detailItem.status === "Rejected" && "bg-destructive/10 text-destructive border-destructive/30",
                     detailItem.status === "Pending"  && "bg-warning/15 text-warning-foreground border-warning/40",
+                    detailItem.status === "Reviewed" && "bg-amber-100 text-amber-700 border-amber-300",
                   )}
                 >
                   {detailItem.status === "Approved" && <Check className="h-3 w-3 mr-1" />}
                   {detailItem.status === "Rejected" && <XIcon className="h-3 w-3 mr-1" />}
                   {detailItem.status === "Pending"  && <Clock className="h-3 w-3 mr-1" />}
-                  {detailItem.status}
+                  {detailItem.status === "Reviewed" && <CornerUpLeft className="h-3 w-3 mr-1" />}
+                  {detailItem.status === "Reviewed" ? "Reviewed — returned for correction" : detailItem.status}
                 </Badge>
                 <div className="text-[11px] text-muted-foreground tabular-nums">
                   Raised <span className="text-foreground">{detailItem.requestedAt}</span>
@@ -1863,13 +1925,15 @@ export default function ApprovalManagementPage() {
                 <div
                   className={cn(
                     "rounded-md border p-3 text-xs",
-                    detailItem.status === "Approved"
-                      ? "border-success/30 bg-success/5"
-                      : "border-destructive/30 bg-destructive/5",
+                    detailItem.status === "Approved" && "border-success/30 bg-success/5",
+                    detailItem.status === "Rejected" && "border-destructive/30 bg-destructive/5",
+                    detailItem.status === "Reviewed" && "border-amber-300 bg-amber-50/60",
                   )}
                 >
                   <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
-                    {detailItem.status === "Approved" ? "Approved by" : "Rejected by"}
+                    {detailItem.status === "Approved" ? "Approved by"
+                      : detailItem.status === "Reviewed" ? "Returned for correction by"
+                      : "Rejected by"}
                   </div>
                   <div className="flex items-center gap-1.5 text-foreground">
                     <UserIcon className="h-3 w-3 text-muted-foreground" />
@@ -1877,6 +1941,12 @@ export default function ApprovalManagementPage() {
                     <span className="text-muted-foreground">·</span>
                     <span className="tabular-nums text-muted-foreground">{detailItem.processedAt}</span>
                   </div>
+                  {detailItem.reviewComment && (
+                    <div className="mt-2 pt-2 border-t border-amber-300/50 text-amber-800 flex items-start gap-1.5">
+                      <MessageSquare className="h-3 w-3 mt-0.5 shrink-0" />
+                      <span><span className="font-medium">Comment:</span> {detailItem.reviewComment}</span>
+                    </div>
+                  )}
                   {detailItem.rejectionReason && (
                     <div className="mt-2 pt-2 border-t border-destructive/20 text-destructive">
                       <span className="font-medium">Reason:</span> {detailItem.rejectionReason}
@@ -1887,7 +1957,7 @@ export default function ApprovalManagementPage() {
             </div>
           )}
 
-          <DialogFooter className={cn("px-5 border-t border-border bg-muted/20", detailItem?.status === "Pending" && detailRejectOpen ? "py-4" : "py-3")}>
+          <DialogFooter className={cn("px-5 border-t border-border bg-muted/20", detailItem?.status === "Pending" && (detailRejectOpen || detailReviewOpen) ? "py-4" : "py-3")}>
             {detailItem?.status === "Pending" && detailRejectOpen ? (
               <div className="w-full flex flex-col gap-2">
                 <div>
@@ -1915,6 +1985,40 @@ export default function ApprovalManagementPage() {
                   </Button>
                 </div>
               </div>
+            ) : detailItem?.status === "Pending" && detailReviewOpen ? (
+              <div className="w-full flex flex-col gap-2">
+                <div>
+                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+                    Review Comment <span className="text-destructive">*</span>
+                  </Label>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    Sent back to the requester for correction — not rejected. They can amend and resubmit.
+                  </p>
+                  <Textarea
+                    value={detailReviewComment}
+                    onChange={(e) => setDetailReviewComment(e.target.value)}
+                    placeholder="Tell the requester what needs to change..."
+                    className="mt-1 min-h-20"
+                    autoFocus
+                  />
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => { setDetailReviewOpen(false); setDetailReviewComment(""); }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="bg-amber-500 text-white hover:bg-amber-600"
+                    onClick={confirmDetailReview}
+                  >
+                    <CornerUpLeft className="h-3.5 w-3.5 mr-1" /> Send for Correction
+                  </Button>
+                </div>
+              </div>
             ) : (
               <>
                 {detailItem?.status === "Pending" && (
@@ -1925,6 +2029,13 @@ export default function ApprovalManagementPage() {
                       onClick={() => setDetailRejectOpen(true)}
                     >
                       <XIcon className="h-4 w-4 mr-1.5" /> Reject
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="border-amber-400 text-amber-700 hover:bg-amber-50"
+                      onClick={() => setDetailReviewOpen(true)}
+                    >
+                      <CornerUpLeft className="h-4 w-4 mr-1.5" /> Review
                     </Button>
                     <Button
                       className="bg-success text-success-foreground hover:bg-success/90"

@@ -2,6 +2,7 @@ import { useState, useMemo } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { ReviewStatusCell } from "@/components/common/ReviewStatusCell";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Plus, SlidersHorizontal, AlertTriangle, CheckCircle, Clock } from "lucide-react";
@@ -57,7 +58,11 @@ export default function StockAdjustment() {
     { key: "reason", header: "Reason" },
     { key: "reference", header: "Reference" },
     { key: "adjustedBy", header: "Adjusted By" },
-    { key: "status", header: "Status", render: (r) => <StatusBadge status={r.status} /> },
+    { key: "status", header: "Status", render: (r) => (
+      <ReviewStatusCell category="Stock Adjustment" refId={r.id}>
+        <StatusBadge status={r.status} />
+      </ReviewStatusCell>
+    ) },
   ];
 
   const handleSave = () => {

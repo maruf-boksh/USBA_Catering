@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { ReviewStatusCell } from "@/components/common/ReviewStatusCell";
 import { RowActions } from "@/components/common/RowActions";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
@@ -165,7 +166,11 @@ export default function ProcurementPage() {
     { key: "items", header: "Items" },
     { key: "amount", header: "Amount (৳)", render: (r) => r.amount > 0 ? r.amount.toLocaleString() : "—" },
     { key: "date", header: "Date" },
-    { key: "status", header: "Status", render: (r) => <StatusBadge status={r.status} /> },
+    { key: "status", header: "Status", render: (r) => (
+      <ReviewStatusCell category="Purchase Order" refId={r.id}>
+        <StatusBadge status={r.status} />
+      </ReviewStatusCell>
+    ) },
   ];
 
   const reqCols: Column<WfRequisition>[] = [

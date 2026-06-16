@@ -20,7 +20,7 @@ import {
 import {
   Plus, Upload, Download, Save, FileSpreadsheet, FileText, FileType,
   History, CheckCircle2, AlertCircle, Eye, CalendarRange, X, Plane, ArrowLeft, Pencil, CircleDot,
-  Users, Utensils,
+  Users, Utensils, CornerUpLeft, MessageSquare, Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -77,8 +77,18 @@ function OmStatusPill({ status }: { status: FlightOrderStatus }) {
   );
 }
 
-function OrderStatusBadges({ legs }: { legs: { status: FlightOrderStatus }[] }) {
+function OrderStatusBadges({ legs }: { legs: { status: FlightOrderStatus; reviewComment?: string }[] }) {
   if (legs.length === 0) return null;
+  // A leg returned for correction (reviewComment while still Pending) shows a
+  // distinct amber "Reviewed" pill so the requester notices it in the list.
+  const reviewed = legs.some((l) => l.reviewComment && l.status === "Pending");
+  if (reviewed) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full border px-3 py-1 text-[10.5px] font-bold uppercase tracking-[0.04em] text-amber-700 bg-amber-100 border-amber-300">
+        <CornerUpLeft className="h-3 w-3" /> Reviewed
+      </span>
+    );
+  }
   return <OmStatusPill status={legs[0].status} />;
 }
 
@@ -99,6 +109,10 @@ type FlightOrder = {
   orderType?: "flight" | "crew";
   /** Epoch ms when created in-app — created orders sort above seed rows (newest first). */
   createdAt?: number;
+  /** Approver's review note when returned for correction (status stays Pending). */
+  reviewComment?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
 };
 
 const AIRLINES = ["US-Bangla", "Air Astra"];
@@ -287,20 +301,24 @@ function parseCrewCsv(text: string): ParsedRow[] {
         : isDomesticSector(sector) ? "Domestic" : "International";
     const dirRaw = pick(rec, "direction").toLowerCase();
     const direction: FlightDirection = dirRaw.startsWith("ret") ? "Return" : "Outbound";
+    const etd = pick(rec, "etd");
+    // Business rule: the meal slot is derived from the ETD (configured slot
+    // windows). Falls back to the uploaded column only when no ETD is given.
+    const mealSlot = etd ? resolveMealSlot(etd).name : pick(rec, "meal slot", "slot");
     return {
       row: i + 1,
       id: "",
       flight,
       airline: pick(rec, "airline"),
       sector,
-      etd: pick(rec, "etd"),
+      etd,
       pax: 0,
       specialMeals: 0,
       valid: !!flight && !!sector && crew > 0,
       type,
       direction,
       crew,
-      mealSlot: pick(rec, "meal slot", "slot"),
+      mealSlot,
       date: normalizeDate(pick(rec, "date")),
     };
   });
@@ -1821,8 +1839,11 @@ function EditOrderLegDialog({
       pax: isCrew ? 0 : Math.max(0, draft.pax),
       crew: isCrew ? Math.max(0, draft.crew) : draft.crew,
       specialMeals: Math.max(0, draft.specialMeals),
+      // Editing a returned order is the "correction" — clear the review so it
+      // re-enters the approval queue as a clean Pending request.
+      ...(leg.reviewComment ? { reviewComment: undefined, reviewedBy: undefined, reviewedAt: undefined } : {}),
     });
-    toast.success(`${draft.flight} updated.`);
+    toast.success(leg.reviewComment ? `${draft.flight} corrected and resubmitted.` : `${draft.flight} updated.`);
     onClose();
   };
 
@@ -1839,6 +1860,19 @@ function EditOrderLegDialog({
             </Badge>
           </DialogTitle>
         </DialogHeader>
+        {leg.reviewComment && leg.status === "Pending" && (
+          <div className="mt-2 rounded-md border border-amber-300 bg-amber-50/60 px-3 py-2">
+            <div className="text-[10px] uppercase tracking-wider text-amber-700 font-medium mb-1 flex items-center gap-1">
+              <MessageSquare className="h-3 w-3" /> Reviewer's Comment — correct &amp; resubmit
+            </div>
+            <p className="text-sm text-amber-900">{leg.reviewComment}</p>
+            {(leg.reviewedBy || leg.reviewedAt) && (
+              <div className="mt-1 text-[11px] text-amber-700">
+                — {leg.reviewedBy}{leg.reviewedAt ? ` · ${leg.reviewedAt}` : ""}
+              </div>
+            )}
+          </div>
+        )}
         <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-3">
           <div>
             <Label className="text-xs text-muted-foreground">Flight No</Label>
@@ -3003,6 +3037,9 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
 
   const [importConfirmed, setImportConfirmed] = useState(false);
   const [showFinalReview, setShowFinalReview] = useState(false);
+  // Configured meal slots — the meal slot for a crew row is derived from its ETD
+  // (business rule), so editing the ETD re-resolves the slot automatically.
+  const slots = useMealSlots();
   const [mealEditMode, setMealEditMode] = useState(false);
   const [summaryEdit, setSummaryEdit] = useState<{
     intlDepMeal: number; intlDepChml: number; intlRetMeal: number; intlRetChml: number; intlRetVgml: number;
@@ -3045,7 +3082,10 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
     { message: "Bulk upload ready for validation", user: "ops.user", role: "Flight Ops", at: "2026-05-19 06:12" },
   ]);
 
-  const [editRow, setEditRow] = useState<{ source: "dom" | "intl"; data: ParsedRow } | null>(null);
+  const [editRow, setEditRow] = useState<{ source: "dom" | "intl" | "crew"; data: ParsedRow } | null>(null);
+  // Special-meal manifest row editor — keyed by the original upload object so we
+  // can patch it back into the flat specialRows list after editing.
+  const [editSpecial, setEditSpecial] = useState<{ original: SpecialMealUpload; data: SpecialMealUpload } | null>(null);
 
   const addLog = (message: string) => {
     const now = new Date();
@@ -3206,9 +3246,10 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
         fileName: "crew-meals-template.csv",
         label: "Crew meals",
         headers: ["Scope", "Flight No", "Airline", "From", "To", "Date", "ETD", "Meal Slot", "Direction", "No of Crew"],
+        // Meal Slot derived from ETD (business rule) so the sample stays consistent.
         rows: [
-          ["Domestic", "BS-141", "US-Bangla", "DAC", "CXB", "2026-05-24", "08:15", "Breakfast", "Outbound", 4],
-          ["International", "BS-225", "US-Bangla", "DAC", "DXB", "2026-05-24", "12:30", "Lunch", "Outbound", 14],
+          ["Domestic", "BS-141", "US-Bangla", "DAC", "CXB", "2026-05-24", "08:15", resolveMealSlot("08:15", slots).name, "Outbound", 4],
+          ["International", "BS-225", "US-Bangla", "DAC", "DXB", "2026-05-24", "12:30", resolveMealSlot("12:30", slots).name, "Outbound", 14],
         ],
       },
     };
@@ -3849,12 +3890,15 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                           <TableCell>
                             <div className="flex items-center gap-1.5">
                               <StatusBadge status={r.valid ? "OK" : "Failed"} />
-                              {!r.valid && (
-                                <Button size="sm" variant="outline" className="h-6 px-2 text-xs"
-                                  onClick={() => setEditRow({ source: "dom", data: { ...r } })}>
-                                  <Pencil className="h-3 w-3 mr-1" />Edit
-                                </Button>
-                              )}
+                              <Button size="sm" variant="outline" className="h-6 px-2 text-xs"
+                                onClick={() => setEditRow({ source: "dom", data: { ...r } })}>
+                                <Pencil className="h-3 w-3 mr-1" />Edit
+                              </Button>
+                              <Button size="sm" variant="outline" title="Delete row"
+                                className="h-6 px-2 text-xs text-destructive border-destructive/40 hover:bg-destructive/10"
+                                onClick={() => setDomParsed((prev) => prev.filter((x) => x.row !== r.row))}>
+                                <Trash2 className="h-3 w-3" />
+                              </Button>
                             </div>
                           </TableCell>
                         </TableRow>
@@ -3928,12 +3972,15 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                           <TableCell>
                             <div className="flex items-center gap-1.5">
                               <StatusBadge status={r.valid ? "OK" : "Failed"} />
-                              {!r.valid && (
-                                <Button size="sm" variant="outline" className="h-6 px-2 text-xs"
-                                  onClick={() => setEditRow({ source: "intl", data: { ...r } })}>
-                                  <Pencil className="h-3 w-3 mr-1" />Edit
-                                </Button>
-                              )}
+                              <Button size="sm" variant="outline" className="h-6 px-2 text-xs"
+                                onClick={() => setEditRow({ source: "intl", data: { ...r } })}>
+                                <Pencil className="h-3 w-3 mr-1" />Edit
+                              </Button>
+                              <Button size="sm" variant="outline" title="Delete row"
+                                className="h-6 px-2 text-xs text-destructive border-destructive/40 hover:bg-destructive/10"
+                                onClick={() => setIntlParsed((prev) => prev.filter((x) => x.row !== r.row))}>
+                                <Trash2 className="h-3 w-3" />
+                              </Button>
                             </div>
                           </TableCell>
                         </TableRow>
@@ -4002,7 +4049,20 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                           <TableCell className="text-xs tabular-nums">{r.etd}</TableCell>
                           <TableCell className="text-xs">{r.mealSlot || "—"}</TableCell>
                           <TableCell className="text-right text-xs tabular-nums">{r.crew ?? 0}</TableCell>
-                          <TableCell><StatusBadge status={r.valid ? "OK" : "Failed"} /></TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-1.5">
+                              <StatusBadge status={r.valid ? "OK" : "Failed"} />
+                              <Button size="sm" variant="outline" className="h-6 px-2 text-xs"
+                                onClick={() => setEditRow({ source: "crew", data: { ...r } })}>
+                                <Pencil className="h-3 w-3 mr-1" />Edit
+                              </Button>
+                              <Button size="sm" variant="outline" title="Delete row"
+                                className="h-6 px-2 text-xs text-destructive border-destructive/40 hover:bg-destructive/10"
+                                onClick={() => setCrewParsed((prev) => prev.filter((x) => x.row !== r.row))}>
+                                <Trash2 className="h-3 w-3" />
+                              </Button>
+                            </div>
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -4054,7 +4114,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                     <Table>
                       <TableHeader className="bg-muted/40">
                         <TableRow className="bg-emerald-50/60 border-b border-emerald-200/60 hover:bg-emerald-50/60">
-                          <TableHead colSpan={6} className="py-2">
+                          <TableHead colSpan={7} className="py-2">
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="inline-flex items-center rounded-[7px] bg-[#2a2528] px-[9px] py-1 text-xs font-bold tabular-nums text-white">{entries[0].flight}</span>
                               {fr?.direction && <DirectionBadge direction={fr.direction} />}
@@ -4082,6 +4142,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                           <TableHead className="text-xs uppercase tracking-wider">Passenger</TableHead>
                           <TableHead className="text-xs uppercase tracking-wider">Seat</TableHead>
                           <TableHead className="text-xs uppercase tracking-wider">Meal</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Action</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -4102,6 +4163,19 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                               <Badge variant="outline" className="h-5 px-1.5 text-[10px] font-mono" title={SPECIAL_MEAL_BY_CODE[e.mealCode]?.name ?? e.mealCode}>
                                 {e.mealCode}
                               </Badge>
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex items-center gap-1.5">
+                                <Button size="sm" variant="outline" className="h-6 px-2 text-xs"
+                                  onClick={() => setEditSpecial({ original: e, data: { ...e } })}>
+                                  <Pencil className="h-3 w-3 mr-1" />Edit
+                                </Button>
+                                <Button size="sm" variant="outline" title="Delete row"
+                                  className="h-6 px-2 text-xs text-destructive border-destructive/40 hover:bg-destructive/10"
+                                  onClick={() => setSpecialRows((prev) => prev.filter((x) => x !== e))}>
+                                  <Trash2 className="h-3 w-3" />
+                                </Button>
+                              </div>
                             </TableCell>
                           </TableRow>
                           );
@@ -4312,9 +4386,37 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
               <div>
                 <Label className="text-xs">DEP Time</Label>
                 <Input className="mt-1 h-8 text-sm" value={editRow.data.etd}
-                  onChange={(e) => setEditRow((prev) => prev && ({ ...prev, data: { ...prev.data, etd: e.target.value } }))} />
+                  onChange={(e) => {
+                    const etd = e.target.value;
+                    setEditRow((prev) => prev && ({
+                      ...prev,
+                      data: {
+                        ...prev.data,
+                        etd,
+                        // Crew meal slot follows the ETD (business rule).
+                        ...(prev.source === "crew" && etd ? { mealSlot: resolveMealSlot(etd, slots).name } : {}),
+                      },
+                    }));
+                  }} />
               </div>
-              {editRow.source === "dom" ? (
+              {editRow.source === "crew" ? (
+                <>
+                  <div>
+                    <Label className="text-xs">Airline</Label>
+                    <Input className="mt-1 h-8 text-sm" value={editRow.data.airline}
+                      onChange={(e) => setEditRow((prev) => prev && ({ ...prev, data: { ...prev.data, airline: e.target.value } }))} />
+                  </div>
+                  <div>
+                    <Label className="text-xs">Meal Slot <span className="text-muted-foreground normal-case">(auto from ETD)</span></Label>
+                    <Input className="mt-1 h-8 text-sm bg-muted/40" value={editRow.data.mealSlot ?? ""} readOnly tabIndex={-1} />
+                  </div>
+                  <div>
+                    <Label className="text-xs">Crew</Label>
+                    <Input type="number" min={0} className="mt-1 h-8 text-sm" value={editRow.data.crew ?? ""}
+                      onChange={(e) => setEditRow((prev) => prev && ({ ...prev, data: { ...prev.data, crew: Number(e.target.value) } }))} />
+                  </div>
+                </>
+              ) : editRow.source === "dom" ? (
                 <>
                   <div>
                     <Label className="text-xs">ZEN Load</Label>
@@ -4370,15 +4472,93 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
               const updated = { ...editRow.data, valid: true,
                 pax: editRow.source === "dom"
                   ? (editRow.data.zenLoad ?? editRow.data.pax)
+                  : editRow.source === "crew"
+                  ? 0
                   : (editRow.data.bcLoad ?? 0) + (editRow.data.ecLoad ?? 0),
               };
               if (editRow.source === "dom") {
                 setDomParsed((prev) => prev.map((r) => r.row === updated.row ? updated : r));
+              } else if (editRow.source === "crew") {
+                setCrewParsed((prev) => prev.map((r) => r.row === updated.row ? updated : r));
               } else {
                 setIntlParsed((prev) => prev.map((r) => r.row === updated.row ? updated : r));
               }
               setEditRow(null);
               toast.success(`Row ${updated.row} updated and marked valid.`);
+            }}>Save</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Special-Meal Manifest Row */}
+      <Dialog open={editSpecial !== null} onOpenChange={(open) => { if (!open) setEditSpecial(null); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Edit Special Meal — {editSpecial?.data.flight}</DialogTitle>
+          </DialogHeader>
+          {editSpecial && (
+            <div className="grid grid-cols-2 gap-3 py-2">
+              <div>
+                <Label className="text-xs">Flight No</Label>
+                <Input className="mt-1 h-8 text-sm" value={editSpecial.data.flight}
+                  onChange={(e) => setEditSpecial((p) => p && ({ ...p, data: { ...p.data, flight: e.target.value } }))} />
+              </div>
+              <div>
+                <Label className="text-xs">Date</Label>
+                <Input className="mt-1 h-8 text-sm" value={editSpecial.data.date}
+                  onChange={(e) => setEditSpecial((p) => p && ({ ...p, data: { ...p.data, date: e.target.value } }))} />
+              </div>
+              <div>
+                <Label className="text-xs">For</Label>
+                <select
+                  className="mt-1 h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
+                  value={editSpecial.data.audience}
+                  onChange={(e) => setEditSpecial((p) => p && ({ ...p, data: { ...p.data, audience: e.target.value as "Passenger" | "Crew" } }))}
+                >
+                  <option value="Passenger">Passenger</option>
+                  <option value="Crew">Crew</option>
+                </select>
+              </div>
+              <div>
+                <Label className="text-xs">Meal Code</Label>
+                <select
+                  className="mt-1 h-8 w-full rounded-md border border-input bg-background px-2 text-sm"
+                  value={editSpecial.data.mealCode}
+                  onChange={(e) => setEditSpecial((p) => p && ({ ...p, data: { ...p.data, mealCode: e.target.value } }))}
+                >
+                  {SPECIAL_MEAL_CODES.map((m) => (
+                    <option key={m.code} value={m.code}>{m.code} — {m.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <Label className="text-xs">PNR</Label>
+                <Input className="mt-1 h-8 text-sm" value={editSpecial.data.pnr}
+                  disabled={editSpecial.data.audience === "Crew"}
+                  onChange={(e) => setEditSpecial((p) => p && ({ ...p, data: { ...p.data, pnr: e.target.value } }))} />
+              </div>
+              <div>
+                <Label className="text-xs">Seat</Label>
+                <Input className="mt-1 h-8 text-sm" value={editSpecial.data.seat}
+                  disabled={editSpecial.data.audience === "Crew"}
+                  onChange={(e) => setEditSpecial((p) => p && ({ ...p, data: { ...p.data, seat: e.target.value } }))} />
+              </div>
+              <div className="col-span-2">
+                <Label className="text-xs">Passenger Name</Label>
+                <Input className="mt-1 h-8 text-sm" value={editSpecial.data.passengerName}
+                  disabled={editSpecial.data.audience === "Crew"}
+                  onChange={(e) => setEditSpecial((p) => p && ({ ...p, data: { ...p.data, passengerName: e.target.value } }))} />
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditSpecial(null)}>Cancel</Button>
+            <Button onClick={() => {
+              if (!editSpecial) return;
+              const { original, data } = editSpecial;
+              setSpecialRows((prev) => prev.map((r) => (r === original ? { ...data } : r)));
+              setEditSpecial(null);
+              toast.success(`Special meal for ${data.flight} updated.`);
             }}>Save</Button>
           </DialogFooter>
         </DialogContent>
@@ -5403,8 +5583,28 @@ function FlightOrderDetailsDialog({
 
             <div className="flex items-center gap-2 rounded-md bg-muted/40 px-3 py-2">
               <span className="text-[11px] uppercase tracking-wider text-muted-foreground">Status</span>
-              <StatusBadge status={leg.status} />
+              {leg.reviewComment && leg.status === "Pending" ? (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700 border border-amber-300">
+                  <CornerUpLeft className="h-3 w-3" /> Reviewed
+                </span>
+              ) : (
+                <StatusBadge status={leg.status} />
+              )}
             </div>
+
+            {leg.reviewComment && leg.status === "Pending" && (
+              <div className="rounded-md border border-amber-300 bg-amber-50/60 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-wider text-amber-700 font-medium mb-1 flex items-center gap-1">
+                  <MessageSquare className="h-3 w-3" /> Reviewer's Comment — returned for correction
+                </div>
+                <p className="text-sm text-amber-900">{leg.reviewComment}</p>
+                {(leg.reviewedBy || leg.reviewedAt) && (
+                  <div className="mt-1 text-[11px] text-amber-700">
+                    — {leg.reviewedBy}{leg.reviewedAt ? ` · ${leg.reviewedAt}` : ""}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div>
               <div className="flex items-center justify-between mb-2">

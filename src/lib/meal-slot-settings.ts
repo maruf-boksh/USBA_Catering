@@ -84,13 +84,31 @@ export function useMealSlots(): MealSlotConfig[] {
 }
 
 /**
- * Pure function — resolves a given ETD string ("HH:MM") to the slot whose
- * [from, to) window contains it. Falls back to the first slot if no match
- * (defensive: ensures the UI never crashes on a malformed ETD).
+ * Pure function — extracts the hour-of-day (0-23) from an ETD string. Handles
+ * the common formats people type, not just strict "HH:MM":
+ *   "08:15" → 8 · "7" → 7 · "13" → 13 · "730" → 7 · "1230" → 12 · "0915" → 9
+ * Returns -1 when no hour can be read (so a blank/garbage ETD doesn't silently
+ * resolve to the first slot).
+ */
+export function parseEtdHour(etd: string): number {
+  const t = (etd ?? "").trim();
+  if (!t) return -1;
+  const colon = t.match(/^(\d{1,2})\s*[:.]/);
+  if (colon) return Number(colon[1]);
+  const digits = t.replace(/\D/g, "");
+  if (!digits) return -1;
+  // 1-2 digits → the hour itself; 3-4 digits → military time (drop the minutes).
+  const h = digits.length <= 2 ? Number(digits) : Number(digits.slice(0, digits.length - 2));
+  return Number.isFinite(h) ? h : -1;
+}
+
+/**
+ * Pure function — resolves a given ETD string to the slot whose [from, to)
+ * window contains it. Falls back to the first slot if no match (defensive:
+ * ensures the UI never crashes on a malformed ETD).
  */
 export function resolveMealSlot(etd: string, slots: MealSlotConfig[] = current): MealSlotConfig {
-  const m = etd.match(/^(\d{1,2}):/);
-  const h = m ? Number(m[1]) : 0;
+  const h = parseEtdHour(etd);
   return slots.find((s) => h >= s.from && h < s.to) ?? slots[0] ?? DEFAULT_MEAL_SLOTS[0];
 }
 

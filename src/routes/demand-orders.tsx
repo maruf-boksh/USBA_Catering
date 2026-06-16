@@ -2,6 +2,7 @@ import { useNavigate } from "react-router-dom";
 import { useState, useMemo } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { ReviewStatusCell } from "@/components/common/ReviewStatusCell";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -104,7 +105,11 @@ export default function DemandOrders() {
           r.status === "Pending Approval" ? "Pending Approval"
           : r.status === "Rejected"      ? "Rejected"
           : "Approved";
-        return <StatusBadge status={label} />;
+        return (
+          <ReviewStatusCell category="Demand Request" refId={r.id}>
+            <StatusBadge status={label} />
+          </ReviewStatusCell>
+        );
       },
     },
     { key: "items", header: "Items", render: (r) => r.items.length },

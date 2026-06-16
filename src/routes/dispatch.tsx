@@ -160,6 +160,20 @@ type DmSheetEntry = {
 type FlightGroup = { flight: string; rows: PackagingRow[] };
 type DepTimeGroup = { depTime: string; flightGroups: FlightGroup[] };
 
+// Number of distinct dispatch runs in a list of flight groups — consecutive
+// legs sharing a Dispatch ID (a round trip) count as one run. Used to give each
+// dispatch a single serial number (one SL = one Dispatch ID), continuous across
+// departure-time groups.
+function dispatchRunCount(flightGroups: FlightGroup[]): number {
+  let count = 0;
+  for (let i = 0; i < flightGroups.length; i++) {
+    const dsp = flightGroups[i].rows.find((r) => r.dspRef)?.dspRef;
+    const prevDsp = i > 0 ? flightGroups[i - 1].rows.find((r) => r.dspRef)?.dspRef : undefined;
+    if (!(dsp && prevDsp === dsp)) count++;
+  }
+  return count;
+}
+
 type DispatchedFlightEntry = {
   id: string;
   flight: string;
@@ -1670,12 +1684,14 @@ export default function Dispatch() {
       {/* ── PRD Packaging Table ──────────────────────────────────────────────── */}
       <div data-arrival-id="dispatch-list" className="rounded-lg border border-border bg-card shadow-sm mb-6 overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="w-full text-sm min-w-[820px]">
+          <table className="w-full text-sm min-w-[960px]">
             <thead className="bg-muted/50 border-b border-border">
               <tr>
+                <th className="p-3 text-center font-semibold w-12">SL</th>
                 <th className="p-3 text-left font-semibold">Dispatch ID</th>
                 <th className="p-3 text-left font-semibold">Flight</th>
                 <th className="p-3 text-left font-semibold">Order</th>
+                <th className="p-3 text-left font-semibold">Date</th>
                 <th className="p-3 text-left font-semibold">Dep Time</th>
                 <th className="p-3 text-center font-semibold">Meals</th>
                 <th className="p-3 text-left font-semibold">Status</th>
@@ -1687,14 +1703,17 @@ export default function Dispatch() {
             {groupedPRDs.length === 0 ? (
               <tbody>
                 <tr>
-                  <td colSpan={8} className="p-10 text-center text-muted-foreground text-sm">
+                  <td colSpan={10} className="p-10 text-center text-muted-foreground text-sm">
                     No packaging orders match the selected filters.
                   </td>
                 </tr>
               </tbody>
             ) : (
-              groupedPRDs.map((timeGroup) => {
+              groupedPRDs.map((timeGroup, tgIdx) => {
                 const flightCount = timeGroup.flightGroups.length;
+                // Running serial across all time-groups — one serial per dispatch
+                // run (round-trip legs share a Dispatch ID and one SL).
+                const serialBase = groupedPRDs.slice(0, tgIdx).reduce((s, g) => s + dispatchRunCount(g.flightGroups), 0);
                 // Round-trip grouping: consecutive legs that share a Dispatch ID
                 // (outbound + return of the same dispatch) are merged so the
                 // Dispatch ID / Order cells span both legs — one dispatch, two
@@ -1735,6 +1754,9 @@ export default function Dispatch() {
                       const dspId = flightGroup.rows.find((r) => r.dspRef)?.dspRef;
                       const dspHasRecord = !!dspId && records.some((rec) => rec.id === dspId);
                       const run = dispatchRunInfo[fgIdx];
+                      // One serial per dispatch run (= per Dispatch ID).
+                      const runsBefore = dispatchRunInfo.slice(0, fgIdx).filter((r) => r.first).length;
+                      const serialNo = serialBase + runsBefore + 1;
                       // Order numbers across all legs of this dispatch run (so the
                       // merged Order cell covers both outbound + return).
                       const runFgs = run.first ? fgs.slice(fgIdx, fgIdx + run.span) : [];
@@ -1753,6 +1775,11 @@ export default function Dispatch() {
                           data-arrival-row-id={flightGroup.rows[0]?.id}
                           className={`hover:bg-muted/20 ${isAbsoluteLast ? "border-b-2 border-border" : "border-b border-border/50"}`}
                         >
+                          {run.first && (
+                            <td rowSpan={run.span} className="p-3 align-middle text-center text-xs font-medium text-muted-foreground tabular-nums border-r border-border/20">
+                              {serialNo}
+                            </td>
+                          )}
                           {run.first && (
                             <td rowSpan={run.span} className="p-3 align-middle border-r border-border/20">
                               {!dspId ? (
@@ -1804,6 +1831,11 @@ export default function Dispatch() {
                                   ))}
                                 </div>
                               )}
+                            </td>
+                          )}
+                          {run.first && (
+                            <td rowSpan={run.span} className="p-3 text-sm text-muted-foreground align-middle tabular-nums whitespace-nowrap border-r border-border/20">
+                              {flightGroup.rows[0]?.date ?? "—"}
                             </td>
                           )}
                           {isFirstInTime && (

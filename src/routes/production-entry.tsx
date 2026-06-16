@@ -2,6 +2,7 @@ import { useNavigate, useLocation, useSearchParams } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
+import { ReviewStatusCell } from "@/components/common/ReviewStatusCell";
 import { RowActions } from "@/components/common/RowActions";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
@@ -791,7 +792,11 @@ export default function ProductionEntryPage() {
         );
       },
     },
-    { key: "status", header: "Status", render: (r) => <StatusBadge status={r.status} /> },
+    { key: "status", header: "Status", render: (r) => (
+      <ReviewStatusCell category="Production Order" refId={r.id}>
+        <StatusBadge status={r.status} />
+      </ReviewStatusCell>
+    ) },
   ];
 
   return (

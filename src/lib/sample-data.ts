@@ -1467,6 +1467,12 @@ export type FlightOrderRow = {
   /** Epoch ms when created in-app. Absent on seed rows, which sort below
    *  created orders so freshly created/imported orders surface at the top. */
   createdAt?: number;
+  /** Approver's review note when the order was returned for correction (rather
+   *  than approved/rejected). Present ⇒ the order is "Reviewed" and awaiting the
+   *  requester's amendment. Cleared when the order is re-approved/edited. */
+  reviewComment?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
 };
 
 const ROSTER_FO_001: SpecialMealEntry[] = [
