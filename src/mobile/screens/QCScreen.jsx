@@ -39,10 +39,11 @@ function initChecks() {
 }
 
 export function QCScreen({ nav }) {
-  const [checks,      setChecks]      = useState(initChecks);
-  const [pendingQC,   setPendingQC]   = useState(() => qcStore.getBatches());
-  const [sensoryPage, setSensoryPage] = useState(null);
-  const [sForm,       setSForm]       = useState(initForm());
+  const [checks,        setChecks]        = useState(initChecks);
+  const [pendingQC,     setPendingQC]     = useState(() => qcStore.getBatches());
+  const [sensoryPage,   setSensoryPage]   = useState(null);
+  const [sForm,         setSForm]         = useState(initForm());
+  const [checksFilter,  setChecksFilter]  = useState('all');
 
   useEffect(() => qcStore.subscribe(setPendingQC), []);
 
@@ -50,8 +51,11 @@ export function QCScreen({ nav }) {
   const openCount = checks.filter(c => c.result === 'open').length;
   const passRate  = checks.length > 0 ? Math.round((passCount / checks.length) * 100) : 0;
 
+  const filteredChecks = checksFilter === 'all' ? checks
+    : checksFilter === 'pass' ? checks.filter(c => c.result === 'pass')
+    : checks.filter(c => c.result === 'fail' || c.result === 'open');
+
   const formComplete =
-    SENSORY_FIELDS.every(({ key }) => sForm[key] !== '') &&
     sForm.overall !== '' &&
     (sForm.overall !== 'fail' || sForm.justification.trim() !== '');
 
@@ -115,14 +119,13 @@ export function QCScreen({ nav }) {
             </div>
 
             <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', marginBottom: 12, boxShadow: T.shadowSm }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Check Details</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Batch Details</div>
               {[
-                ['Item',        sensoryPage.item],
-                ['Flight',      sensoryPage.flight],
-                ['Temperature', sensoryPage.temp],
-                ['Checked By',  sensoryPage.checkedBy],
-                ['Time',        sensoryPage.time],
-              ].filter(([, v]) => v && v !== '—').map(([l, v], i) => (
+                sensoryPage.flight && sensoryPage.flight !== '—' ? ['Flight No',  sensoryPage.flight]      : null,
+                ['Batch Name', sensoryPage.item],
+                sensoryPage.checkedBy ? ['Checked By', sensoryPage.checkedBy] : null,
+                sensoryPage.time      ? ['Time',       sensoryPage.time]      : null,
+              ].filter(Boolean).map(([l, v], i) => (
                 <div key={l} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: i === 0 ? 0 : 9, paddingBottom: 9, borderTop: i === 0 ? 'none' : `1px solid ${T.border}` }}>
                   <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{l}</span>
                   <span style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody }}>{v}</span>
@@ -130,19 +133,20 @@ export function QCScreen({ nav }) {
               ))}
             </div>
 
-            <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', boxShadow: T.shadowSm }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Sensory Evaluation</div>
-              {SENSORY_FIELDS.map(({ key, label }, i) => {
-                const val = sensoryPage.sensory?.[key] || 'good';
-                const opt = SENSORY_OPTS.find(o => o.val === val) || SENSORY_OPTS[0];
-                return (
-                  <div key={key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: i === 0 ? 0 : 9, paddingBottom: 9, borderTop: i === 0 ? 'none' : `1px solid ${T.border}` }}>
-                    <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{label}</span>
-                    <span style={{ fontSize: 12, fontWeight: 700, color: opt.color, background: opt.bg, padding: '2px 10px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>{opt.label}</span>
+            {sensoryPage.batchItems?.length > 0 && (
+              <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', boxShadow: T.shadowSm }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Batch Items & Temperature</div>
+                {sensoryPage.batchItems.map((bi, i) => (
+                  <div key={bi.name} style={{ paddingTop: i === 0 ? 0 : 10, paddingBottom: 10, borderTop: i === 0 ? 'none' : `1px solid ${T.border}` }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody, marginBottom: 4 }}>{bi.name}</div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>Standard: {bi.standardTemp}</span>
+                      <span style={{ fontSize: 11, fontWeight: 600, color: T.statusApproved, fontFamily: T.fontBody }}>Recorded: {bi.recordedTemp}</span>
+                    </div>
                   </div>
-                );
-              })}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       );
@@ -164,51 +168,39 @@ export function QCScreen({ nav }) {
           <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', marginBottom: 14, boxShadow: T.shadowSm }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Batch Details</div>
             {[
-              ['Item',          sensoryPage.item],
-              sensoryPage.flight  && sensoryPage.flight !== '—'  ? ['Flight',  sensoryPage.flight]  : null,
-              sensoryPage.section ? ['Section', sensoryPage.section] : null,
-              sensoryPage.qty     ? ['Quantity', sensoryPage.qty]    : null,
-              sensoryPage.temp && sensoryPage.temp !== '—' ? ['Temp Recorded', sensoryPage.temp] : null,
-              sensoryPage.issue   ? ['Issue Noted', sensoryPage.issue] : null,
+              sensoryPage.flight && sensoryPage.flight !== '—' ? ['Flight No',  sensoryPage.flight]  : null,
+              ['Batch Name', sensoryPage.item],
+              sensoryPage.section ? ['Section',  sensoryPage.section] : null,
+              sensoryPage.qty     ? ['Quantity', sensoryPage.qty]     : null,
             ].filter(Boolean).map(([l, v], i) => (
               <div key={l} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: i === 0 ? 0 : 9, paddingBottom: 9, borderTop: i === 0 ? 'none' : `1px solid ${T.border}` }}>
                 <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{l}</span>
-                <span style={{ fontSize: 12, fontWeight: 600, color: l === 'Issue Noted' ? T.primary : T.textPrimary, fontFamily: T.fontBody, maxWidth: '60%', textAlign: 'right' }}>{v}</span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody, maxWidth: '60%', textAlign: 'right' }}>{v}</span>
               </div>
             ))}
           </div>
 
-          {/* Sensory ratings */}
-          <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', marginBottom: 14, boxShadow: T.shadowSm }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 14 }}>Sensory Evaluation</div>
-            {SENSORY_FIELDS.map(({ key, label }, i) => (
-              <div key={key} style={{ marginBottom: i < SENSORY_FIELDS.length - 1 ? 14 : 0 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody, marginBottom: 8 }}>{label}</div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {SENSORY_OPTS.map(opt => {
-                    const selected = sForm[key] === opt.val;
-                    return (
-                      <button
-                        key={opt.val}
-                        onClick={() => setSForm(f => ({ ...f, [key]: opt.val }))}
-                        style={{
-                          flex: 1, padding: '7px 0',
-                          background: selected ? opt.color : T.bgSubtle,
-                          border: `1px solid ${selected ? opt.color : T.border}`,
-                          borderRadius: T.radiusMd,
-                          fontSize: 12, fontWeight: 700,
-                          color: selected ? '#fff' : T.textTertiary,
-                          fontFamily: T.fontBody, cursor: 'pointer',
-                        }}
-                      >
-                        {opt.label}
-                      </button>
-                    );
-                  })}
+          {sensoryPage.batchItems?.length > 0 && (
+            <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', marginBottom: 14, boxShadow: T.shadowSm }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Batch Items & Temperature</div>
+              {sensoryPage.batchItems.map((bi, i) => (
+                <div key={bi.name} style={{ paddingTop: i === 0 ? 0 : 10, paddingBottom: 10, borderTop: i === 0 ? 'none' : `1px solid ${T.border}` }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody, marginBottom: 4 }}>{bi.name}</div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>Standard: {bi.standardTemp}</span>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: T.primary, fontFamily: T.fontBody }}>Recorded: {bi.recordedTemp}</span>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
+
+          {sensoryPage.issue && (
+            <div style={{ background: T.primaryLight, border: `1px solid ${T.primary}30`, borderRadius: T.radiusLg, padding: '10px 14px', marginBottom: 14 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: T.primary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 3 }}>Issue Noted</div>
+              <div style={{ fontSize: 12, color: T.primary, fontFamily: T.fontBody }}>{sensoryPage.issue}</div>
+            </div>
+          )}
 
           {/* Overall result */}
           <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', marginBottom: 14, boxShadow: T.shadowSm }}>
@@ -353,11 +345,24 @@ export function QCScreen({ nav }) {
         )}
 
         {/* Today's Checks */}
-        <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.07em', marginTop: 8, marginBottom: 8 }}>
-          Today's Checks
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8, marginBottom: 8 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.07em' }}>Today's Checks</div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {[['pass', 'Pass'], ['fail', 'Failed']].map(([key, label]) => {
+              const active = checksFilter === key;
+              const color  = key === 'pass' ? T.statusApproved : T.statusRejected;
+              const bg     = key === 'pass' ? T.statusApprovedBg : T.statusRejectedBg;
+              return (
+                <button key={key} onClick={() => setChecksFilter(active ? 'all' : key)}
+                  style={{ padding: '4px 12px', borderRadius: T.radiusFull, border: `1.5px solid ${active ? color : T.border}`, background: active ? bg : T.bgSurface, color: active ? color : T.textTertiary, fontSize: 11, fontWeight: 700, fontFamily: T.fontBody, cursor: 'pointer' }}>
+                  {label}
+                </button>
+              );
+            })}
+          </div>
         </div>
 
-        {checks.map(check => {
+        {filteredChecks.map(check => {
           const r = RESULT_MAP[check.result] || RESULT_MAP.pass;
           return (
             <div

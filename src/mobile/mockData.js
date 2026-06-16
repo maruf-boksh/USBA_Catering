@@ -49,10 +49,38 @@ export const MOCK_PRODUCTION_ORDERS = [
 ];
 
 export const MOCK_QC_CHECKS = [
-  { id: 'QC-001', item: 'Economy Breakfast Box', flight: 'BS401', result: 'pass', temp: '4°C', checkedBy: 'Khalid H.',  time: '05:45' },
-  { id: 'QC-002', item: 'Economy Lunch Tray',    flight: 'BS202', result: 'open', temp: '8°C', checkedBy: 'Rashida B.', time: '07:20', issue: 'Temperature above 7°C threshold' },
-  { id: 'QC-003', item: 'Business Dinner Set',   flight: 'BS105', result: 'pass', temp: '3°C', checkedBy: 'Khalid H.',  time: '08:10' },
-  { id: 'QC-004', item: 'Economy Snack Pack',    flight: 'BS310', result: 'pass', temp: '5°C', checkedBy: 'Rashida B.', time: '09:00' },
+  { id: 'QC-001', item: 'Economy Breakfast Box', flight: 'BS401', result: 'pass', temp: '4°C', checkedBy: 'Khalid H.',  time: '05:45',
+    batchItems: [
+      { name: 'Croissant',     standardTemp: '≥65°C', recordedTemp: '68°C' },
+      { name: 'Scrambled Egg', standardTemp: '≥70°C', recordedTemp: '74°C' },
+      { name: 'Yogurt',        standardTemp: '≤7°C',  recordedTemp: '4°C'  },
+      { name: 'Orange Juice',  standardTemp: '≤7°C',  recordedTemp: '4°C'  },
+    ],
+  },
+  { id: 'QC-002', item: 'Economy Lunch Tray', flight: 'BS202', result: 'open', temp: '8°C', checkedBy: 'Rashida B.', time: '07:20', issue: 'Temperature above 7°C threshold',
+    batchItems: [
+      { name: 'Rice',       standardTemp: '≤7°C', recordedTemp: '8°C' },
+      { name: 'Chicken',    standardTemp: '≤7°C', recordedTemp: '8°C' },
+      { name: 'Vegetables', standardTemp: '≤7°C', recordedTemp: '8°C' },
+      { name: 'Firni',      standardTemp: '≤7°C', recordedTemp: '8°C' },
+    ],
+  },
+  { id: 'QC-003', item: 'Business Dinner Set', flight: 'BS105', result: 'pass', temp: '3°C', checkedBy: 'Khalid H.',  time: '08:10',
+    batchItems: [
+      { name: 'Rice',             standardTemp: '≤7°C', recordedTemp: '3°C' },
+      { name: 'Beef Steak',       standardTemp: '≤7°C', recordedTemp: '3°C' },
+      { name: 'Garden Salad',     standardTemp: '≤7°C', recordedTemp: '3°C' },
+      { name: 'Chocolate Mousse', standardTemp: '≤7°C', recordedTemp: '3°C' },
+    ],
+  },
+  { id: 'QC-004', item: 'Economy Snack Pack', flight: 'BS310', result: 'pass', temp: '5°C', checkedBy: 'Rashida B.', time: '09:00',
+    batchItems: [
+      { name: 'Sandwich',    standardTemp: '≤7°C', recordedTemp: '5°C' },
+      { name: 'Fruit Cup',   standardTemp: '≤7°C', recordedTemp: '5°C' },
+      { name: 'Cookie',      standardTemp: '≤7°C', recordedTemp: '5°C' },
+      { name: 'Apple Juice', standardTemp: '≤7°C', recordedTemp: '5°C' },
+    ],
+  },
 ];
 
 export const MOCK_HYGIENE_SLOTS = [
