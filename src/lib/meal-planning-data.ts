@@ -13,6 +13,15 @@ export type ForType = "Passengers" | "Crew";
 export type MealCard = {
   id: string;
   day: string;
+  /**
+   * Optional effective date range (inclusive, ISO "YYYY-MM-DD"). The card's menu
+   * applies on its weekday only when the date is within [effectiveFrom,
+   * effectiveTo]. An open or omitted bound is unbounded on that side; omitting
+   * both means the card applies on EVERY date — the original, range-agnostic
+   * behavior, so all pre-existing seed and persisted cards remain valid.
+   */
+  effectiveFrom?: string;
+  effectiveTo?: string;
   mealType: string;
   flightType: FlightType[];
   forType: ForType;
@@ -499,6 +508,23 @@ export function loadMealPlanningConfig(): MealCard[] {
 // a code + qty — neither names a dish. To tag each with its own production order,
 // we map them to a representative dish from the Meal Planning config.
 
+/**
+ * Does a card apply on the given date? A card with no effective range applies on
+ * every date (the range-agnostic default); a dated card applies only when the
+ * date falls within its inclusive [effectiveFrom, effectiveTo] bounds (each bound
+ * optional). Passing an empty/undefined date disables the filter (matches all).
+ * Compares ISO "YYYY-MM-DD" strings lexicographically, which is chronological.
+ */
+export function cardMatchesDate(
+  card: { effectiveFrom?: string; effectiveTo?: string },
+  date?: string,
+): boolean {
+  if (!date) return true;
+  if (card.effectiveFrom && date < card.effectiveFrom) return false;
+  if (card.effectiveTo && date > card.effectiveTo) return false;
+  return true;
+}
+
 /** Weekday name ("Monday"…"Sunday") for an ISO date string; "" when unparseable. */
 export function dayFromDate(dateStr: string): string {
   if (!dateStr) return "";
@@ -549,4 +575,60 @@ export function resolveSpecialDish(
   if (matches.length === 0) return null;
   const pick = matches.find((x) => x.day === day) ?? matches[0];
   return pick.sp?.items[0]?.name ?? null;
+}
+
+// ── Mobile bridge: map the web Meal-Planning config into the mobile screen's
+// plan shape ─────────────────────────────────────────────────────────────────
+// The mobile MealPlanningScreen renders a flat plan shape. This adapter lets the
+// mobile app read the SAME live, persisted web config (via loadMealPlanningConfig)
+// instead of its mock list — so menus configured on the web flow straight to
+// mobile, honouring the effective-date range. The mobile UI is unchanged; only
+// its data source is swapped.
+
+export type MobileMealPlan = {
+  id: string;
+  slot: string;
+  type: string;
+  items: string[];
+  calories: number;
+  allergens: string[];
+};
+
+// Web meal periods → mobile slot keys (mobile only styles these four; Snacks and
+// Heavy Snacks both collapse to "Snack").
+const MOBILE_SLOT: Record<string, string> = {
+  Breakfast: "Breakfast",
+  Lunch: "Lunch",
+  Dinner: "Dinner",
+  Snacks: "Snack",
+  "Heavy Snacks": "Snack",
+};
+
+/**
+ * The web meal-planning config rendered in the mobile screen's plan shape,
+ * filtered to the menus effective on `date` (defaults to today) so the mobile
+ * "active plans" list matches what the web shows as effective. Each plan's items
+ * are the primary choice (CHOICE 1) plus the dessert — the representative menu.
+ */
+export function loadMobileMealPlans(
+  date: string = new Date().toISOString().split("T")[0],
+  cards: MealCard[] = loadMealPlanningConfig(),
+): MobileMealPlan[] {
+  return cards
+    .filter((c) => cardMatchesDate(c, date))
+    .map((c) => {
+      const primary = c.choices[0]?.items ?? [];
+      const items = [
+        ...primary.map((it) => it.name).filter(Boolean),
+        ...(c.dessert?.name ? [c.dessert.name] : []),
+      ];
+      return {
+        id: c.id,
+        slot: MOBILE_SLOT[c.mealType] ?? c.mealType,
+        type: c.forType,
+        items,
+        calories: c.totalKcal,
+        allergens: [],
+      };
+    });
 }

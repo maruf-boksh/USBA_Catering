@@ -4437,14 +4437,9 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
               ) : (
                 <>
                   <div>
-                    <Label className="text-xs">B/C Load</Label>
-                    <Input type="number" min={0} className="mt-1 h-8 text-sm" value={editRow.data.bcLoad ?? ""}
-                      onChange={(e) => setEditRow((prev) => prev && ({ ...prev, data: { ...prev.data, bcLoad: Number(e.target.value), bcMeal: Number(e.target.value) } }))} />
-                  </div>
-                  <div>
-                    <Label className="text-xs">E/C Load</Label>
-                    <Input type="number" min={0} className="mt-1 h-8 text-sm" value={editRow.data.ecLoad ?? ""}
-                      onChange={(e) => setEditRow((prev) => prev && ({ ...prev, data: { ...prev.data, ecLoad: Number(e.target.value), ecMeal: Number(e.target.value) } }))} />
+                    <Label className="text-xs">PAX</Label>
+                    <Input type="number" min={0} className="mt-1 h-8 text-sm" value={editRow.data.pax ?? ""}
+                      onChange={(e) => setEditRow((prev) => prev && ({ ...prev, data: { ...prev.data, pax: Number(e.target.value) } }))} />
                   </div>
                   <div>
                     <Label className="text-xs">CHML</Label>
@@ -4474,7 +4469,10 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                   ? (editRow.data.zenLoad ?? editRow.data.pax)
                   : editRow.source === "crew"
                   ? 0
-                  : (editRow.data.bcLoad ?? 0) + (editRow.data.ecLoad ?? 0),
+                  // International: PAX is edited directly (cabin B/C + E/C loads
+                  // keep it in sync). Don't recompute from cabin loads — uploaded
+                  // rows have no bcLoad/ecLoad and that would wipe PAX to 0.
+                  : editRow.data.pax,
               };
               if (editRow.source === "dom") {
                 setDomParsed((prev) => prev.map((r) => r.row === updated.row ? updated : r));

@@ -37,6 +37,8 @@ import ConsumableUsagePage from "@/routes/consumable-usage";
 import ConsumableAllocationPage from "@/routes/consumable-allocation";
 import ConsumableReturnsPage from "@/routes/consumable-returns";
 import AirlineEquipmentsPage from "@/routes/airline-equipments";
+import AssetAssignmentPage from "@/routes/asset-assignment";
+import AssetDisposalPage from "@/routes/asset-disposal";
 import EquipmentMaintenancePage from "@/routes/equipment-maintenance";
 import EquipmentReturnsPage from "@/routes/equipment-returns";
 import EquipmentDamagePage from "@/routes/equipment-damage";
@@ -115,6 +117,8 @@ export function App() {
             <Route path="/consumable-allocation" element={<ConsumableAllocationPage />} />
             <Route path="/consumable-returns" element={<ConsumableReturnsPage />} />
             <Route path="/airline-equipments" element={<AirlineEquipmentsPage />} />
+            <Route path="/asset-assignment" element={<AssetAssignmentPage />} />
+            <Route path="/asset-disposal" element={<AssetDisposalPage />} />
             <Route path="/equipment-maintenance" element={<EquipmentMaintenancePage />} />
             <Route path="/equipment-returns" element={<EquipmentReturnsPage />} />
             <Route path="/equipment-damage" element={<EquipmentDamagePage />} />

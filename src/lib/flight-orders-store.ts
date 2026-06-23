@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import {
   seedFlightOrders,
+  isDomesticSector,
   type FlightOrderRow,
   type FlightOrderStatus,
 } from "@/lib/sample-data";
@@ -188,4 +189,74 @@ export function useFlightOrders(): FlightOrder[] {
     getFlightOrders,
     getFlightOrders,
   );
+}
+
+// ── Mobile bridge: map the web flight-orders store into the mobile Home screen's
+// flight-row shape ────────────────────────────────────────────────────────────
+// The mobile "Next Departures" list + flight KPIs read the SAME live order store
+// the web Order Management page uses, instead of a hardcoded MOCK_FLIGHTS list.
+// The mobile UI is unchanged; only its data source is swapped.
+
+export type MobileFlight = {
+  id: string;
+  airline: string;
+  route: string;
+  departure: string;
+  status: string;
+  pax: number;
+  meals: number;
+  sector: string;
+};
+
+// Web order-lifecycle status → the mobile flight-status vocabulary its pill/colors
+// expect. (The web tracks order progress, not operational flight state, so this is
+// the closest faithful mapping; the substantive data — flights, times, pax, meals —
+// is all real.)
+const MOBILE_FLIGHT_STATUS: Record<FlightOrderStatus, string> = {
+  Pending: "scheduled",
+  Approved: "scheduled",
+  Production: "boarding",
+  Dispatched: "departed",
+  Completed: "departed",
+};
+
+/**
+ * Live flight orders rendered in the mobile Home shape, scoped to a single day's
+ * departures sorted by ETD. Picks the reference date's flights (default today);
+ * if that date has none (e.g. the seed sits in a different period), falls back to
+ * the earliest upcoming date, then to the earliest date present — so the mobile
+ * list is never empty while real data exists. Crew-meal orders are excluded (they
+ * aren't departures); each row's meals = pax + crew + special meals.
+ */
+export function loadMobileFlights(
+  refDate: string = new Date().toISOString().split("T")[0],
+): MobileFlight[] {
+  const flights = getFlightOrders().filter((o) => (o.orderType ?? "flight") !== "crew");
+  if (flights.length === 0) return [];
+
+  // Choose the day to show: today if it has departures, else the soonest future
+  // day, else the earliest day in the data.
+  const onRef = flights.filter((o) => o.date === refDate);
+  const pool = onRef.length
+    ? onRef
+    : (() => {
+        const future = flights.filter((o) => o.date >= refDate);
+        const base = future.length ? future : flights;
+        const minDate = base.reduce((m, o) => (o.date < m ? o.date : m), base[0].date);
+        return base.filter((o) => o.date === minDate);
+      })();
+
+  return pool
+    .slice()
+    .sort((a, b) => a.etd.localeCompare(b.etd))
+    .map((o) => ({
+      id: o.flight,
+      airline: o.airline,
+      route: o.sector,
+      departure: o.etd,
+      status: MOBILE_FLIGHT_STATUS[o.status] ?? "scheduled",
+      pax: o.pax,
+      meals: o.pax + (o.crew ?? 0) + (o.specialMeals ?? 0),
+      sector: isDomesticSector(o.sector) ? "Domestic" : "International",
+    }));
 }

@@ -62,6 +62,7 @@ const MAP: Record<string, string> = {
   failed:        "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
   damaged:       "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
   open:          "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
+  destroyed:     "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
 
   /* ── Blue: active repair / in-progress / used asset ── */
   "under repair": "bg-[#EFF6FF] text-[#1d4ed8] border border-[#BFDBFE]",
@@ -73,6 +74,9 @@ const MAP: Record<string, string> = {
   /* ── Green: fleet active / resolved ── */
   "in service":  "bg-[#ECFDF5] text-[#059669] border border-[#A7F3D0]",
   repaired:      "bg-[#ECFDF5] text-[#059669] border border-[#A7F3D0]",
+
+  /* ── Teal: asset assigned out to a flight / station ── */
+  assigned:      "bg-[#f0fdfa] text-[#0f766e] border border-[#99f6e4]",
 
   /* ── Amber: fleet maintenance states ── */
   "in maintenance": "bg-[#FFFBEB] text-[#B45309] border border-[#FDE68A]",

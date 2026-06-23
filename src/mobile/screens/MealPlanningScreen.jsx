@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { T } from '../theme';
-import { MOCK_MEAL_PLANS } from '../mockData';
+import { loadMobileMealPlans } from '../../lib/meal-planning-data';
 
 const SLOT_COLORS = {
   Breakfast: { color: T.statusInfo,    bg: T.statusInfoBg    },
@@ -53,6 +53,8 @@ function MealDetail({ plan, onBack }) {
 
 export function MealPlanningScreen({ nav }) {
   const [selected, setSelected] = useState(null);
+  // Live web Meal-Planning config (effective today), mapped to the mobile shape.
+  const [plans] = useState(() => loadMobileMealPlans());
   if (selected) return <MealDetail plan={selected} onBack={() => setSelected(null)} />;
 
   return (
@@ -61,11 +63,11 @@ export function MealPlanningScreen({ nav }) {
         <button onClick={() => nav.goBack()} style={{ background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: T.radiusFull, width: 32, height: 32, cursor: 'pointer', color: '#fff', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>←</button>
         <div>
           <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Meal Planning</div>
-          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{MOCK_MEAL_PLANS.length} plans active</div>
+          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{plans.length} plans active</div>
         </div>
       </div>
       <div style={{ flex: 1, overflowY: 'auto', padding: '8px 14px 16px' }}>
-        {MOCK_MEAL_PLANS.map((plan) => {
+        {plans.map((plan) => {
           const sc = SLOT_COLORS[plan.slot] || SLOT_COLORS.Snack;
           return (
             <div
