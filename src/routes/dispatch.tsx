@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { useNavigate } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -334,6 +334,13 @@ export const INITIAL_PACKAGING_ROWS: PackagingRow[] = [
   { id: "PRD-9003", date: TODAY, depTime: "8:30 AM", flight: "BS-307", mealType: "Dinner",    mealName: "Grilled Salmon",          qty: 282, section: "Hot Kitchen",    packagingStatus: "Packaging In Progress", dspRef: "DSP-7705", orderNo: "ORD-3415", productionOrderId: "PRO-2026-100604" },
   { id: "PRD-9004", date: TODAY, depTime: "8:30 AM", flight: "BS-307", mealType: "Breakfast", mealName: "Continental Breakfast",   qty: 282, section: "Cold Kitchen",   packagingStatus: "Packaging Done",        dspRef: "DSP-7705", orderNo: "ORD-3415", productionOrderId: "PRO-2026-100605" },
   { id: "PRD-9005", date: TODAY, depTime: "9:00 AM", flight: "BS-101", mealType: "Special",   mealName: "Hindu Meal Special",      qty: 8,   section: "Special Meal",   packagingStatus: "Packaging Done",        dspRef: "DSP-7701", orderNo: "ORD-3422", productionOrderId: "PRO-2026-100606" },
+];
+
+// Two demo rows with all packaging done — so "Initiate QC" button is visible
+// for testing the full QC → Dispatch Monitoring → Galley Loading flow.
+const QC_SEED_ROWS: PackagingRow[] = [
+  { id: "PRD-QC-DEMO1", date: "2026-06-28", depTime: "10:00 AM", flight: "BS-141", mealType: "Snack",  mealName: "Snack Box",   qty: 72,  section: "Cold Kitchen", packagingStatus: "Packaging Done", orderNo: "ORD-DEMO1" },
+  { id: "PRD-QC-DEMO2", date: "2026-06-28", depTime: "6:25 PM",  flight: "BS-411", mealType: "Dinner", mealName: "Dinner Set",  qty: 162, section: "Hot Kitchen",  packagingStatus: "Packaging Done", orderNo: "ORD-DEMO2" },
 ];
 
 // ─── Dispatch Seed Data ───────────────────────────────────────────────────────
@@ -753,6 +760,32 @@ export default function Dispatch() {
     }),
     { pax: 0, crew: 0, special: 0, meals: 0 },
   );
+
+  // Inject QC demo rows on mount; also reset any that were previously dispatched back to Packaging Done
+  const _qcSeedDone = useRef(false);
+  useEffect(() => {
+    if (_qcSeedDone.current) return;
+    _qcSeedDone.current = true;
+    const SEED_IDS = new Set(QC_SEED_ROWS.map((r) => r.id));
+    setPackagingRows((prev) => {
+      const existing = new Set(prev.map((r) => r.id));
+      const toAdd = QC_SEED_ROWS.filter((r) => !existing.has(r.id));
+      const resetPrev = prev.map((r) =>
+        SEED_IDS.has(r.id) && r.packagingStatus === "Dispatched"
+          ? { ...r, packagingStatus: "Packaging Done" as PackagingStatus }
+          : r
+      );
+      return toAdd.length === 0 ? resetPrev : [...resetPrev, ...toAdd];
+    });
+    // Clear QC state for seed flights so "Initiate QC" reappears
+    setFlightQCStates((prev) => {
+      const seedFlights = new Set(QC_SEED_ROWS.map((r) => r.flight));
+      const next = new Map(prev);
+      seedFlights.forEach((f) => next.delete(f));
+      return next;
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Packaging derived ───────────────────────────────────────────────────────
 
@@ -1218,8 +1251,24 @@ export default function Dispatch() {
         }));
       if (outDeltas.length > 0) applyStockDeltas(outDeltas);
 
-      const updatedRows = packagingRows.map((r) => dispatchedFlightSet.has(r.flight) ? { ...r, packagingStatus: "Dispatched" as PackagingStatus } : r);
+      const SEED_IDS = new Set(["PRD-QC-DEMO1", "PRD-QC-DEMO2"]);
+      const updatedRows = packagingRows.map((r) => {
+        if (dispatchedFlightSet.has(r.flight)) {
+          if (SEED_IDS.has(r.id)) return { ...r, packagingStatus: "Packaging Done" as PackagingStatus };
+          return { ...r, packagingStatus: "Dispatched" as PackagingStatus };
+        }
+        return r;
+      });
       setPackagingRows(updatedRows);
+      // Reset QC state for seed flights so "Initiate QC" reappears
+      const seedFlights = [...SEED_IDS].map((id) => packagingRows.find((r) => r.id === id)?.flight).filter(Boolean) as string[];
+      if (seedFlights.some((f) => dispatchedFlightSet.has(f))) {
+        setFlightQCStates((prev) => {
+          const next = new Map(prev);
+          seedFlights.forEach((f) => { if (dispatchedFlightSet.has(f)) next.delete(f); });
+          return next;
+        });
+      }
     }
     setDispatched(true);
     toast.success("Dispatch initiated — awaiting airport receipt.");
@@ -1746,6 +1795,7 @@ export default function Dispatch() {
                       const allPackagingDone = flightGroup.rows.every(
                         (r) => r.packagingStatus === "Packaging Done" || r.packagingStatus === "Ready for Dispatch"
                       );
+                      const allDispatched = flightGroup.rows.every((r) => r.packagingStatus === "Dispatched");
                       const flightStatus = getFlightStatus(flightGroup.rows, flightQCState);
                       const isFirstInTime = fgIdx === 0;
                       const isAbsoluteLast = fgIdx === flightCount - 1;
@@ -1859,7 +1909,7 @@ export default function Dispatch() {
                             </span>
                           </td>
                           <td className="p-3 align-middle border-l border-border/20">
-                            {flightQCState === "done" ? (
+                            {(flightQCState === "done" || allDispatched) ? (
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold cursor-default" style={{ backgroundColor: "#42F527", color: "#166534" }}
                                 title={`QC checked at ${flightQCData?.qcCheckedAt ?? ""}`}>
                                 <ShieldCheck className="h-3 w-3" /> QC Done

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
@@ -16,11 +17,14 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
+import {
   Check, X as XIcon, Clock, ShieldCheck, Search,
   FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, ArrowLeft, Layers, UserCog, Users,
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
   PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane, MailQuestion, PlaneLanding, PlaneTakeoff,
-  BadgeDollarSign, Wrench, MessageSquare, CornerUpLeft,
+  BadgeDollarSign, Wrench, MessageSquare, CornerUpLeft, LayoutGrid, Timer,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -28,7 +32,7 @@ import {
   useWorkflow,
   type WfDemandRequest, type WfDemandStatus, type WfDispatchApproval,
 } from "@/lib/workflow-store";
-import { inventory, warehouses } from "@/lib/sample-data";
+import { inventory, warehouses, consumableItems, type ConsumableItem } from "@/lib/sample-data";
 import { getItemStock } from "@/lib/inventory-stock";
 import { useFlightOrders, updateFlightOrdersWhere, type FlightOrder } from "@/lib/flight-orders-store";
 import { useApprovalReviews, setReview, reviewKey } from "@/lib/approval-reviews";
@@ -52,7 +56,58 @@ type Category =
   | "Bill of Materials"
   | "User Account"
   | "Dispatch"
-  | "Maintenance";
+  | "Maintenance"
+  | "Return Items"
+  | "Galley Loading";
+
+// Shared type with dispatch-monitoring.tsx via "galley_loading" sessionStorage key
+type SignOffLog = { name: string; designation: string; signedAt: string };
+type GalleyStatus = "forwarded" | "loading" | "completed" | "awaiting_approval" | "approved";
+type GalleyPlan = Record<string, string>;
+type GalleyLoadingRecord = {
+  id: string;
+  dispatchEntryId: string;
+  flightId: string;
+  flightLabel: string;
+  date: string;
+  galleyPlan: GalleyPlan;
+  signOff: {
+    preparedBy: SignOffLog;
+    physicallyHandedBy: SignOffLog;
+    flightCheckedBy: SignOffLog;
+    handedOverBy: SignOffLog;
+  };
+  galleyStatus: GalleyStatus;
+  forwardedAt: string;
+  loadingStartedAt?: string;
+  loadingCompletedAt?: string;
+  loadingDurationSec?: number;
+  approvedAt?: string;
+  approvedBy?: string;
+};
+
+// Shared type with consumable-returns.tsx via "consumable-return-approvals" localStorage key
+type ReturnApprovalRecord = {
+  id: string;
+  returnId: string;
+  flight: string;
+  sector: string;
+  date: string;
+  returnedBy: string;
+  status: "Pending" | "Approved" | "Declined";
+  processedBy?: string;
+  processedAt?: string;
+  declineReason?: string;
+  lines: {
+    itemId: string;
+    itemName: string;
+    lineType: "item" | "meal";
+    uom: string;
+    returnQty: number;
+    reusableQty: number;
+    partialReason?: string;
+  }[];
+};
 
 const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Flight Orders",        label: "Flight Orders",      icon: Plane           },
@@ -70,6 +125,8 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "User Account",         label: "Users",              icon: UserCog         },
   { key: "Dispatch",             label: "Dispatch",           icon: Truck           },
   { key: "Maintenance",          label: "Maintenance",        icon: Wrench          },
+  { key: "Return Items",         label: "Return Items",       icon: PackageCheck    },
+  { key: "Galley Loading",       label: "Galley Loading",     icon: LayoutGrid      },
 ];
 
 // Overview grid — categories grouped into business sections (mirrors the
@@ -82,8 +139,19 @@ const APPROVAL_SECTIONS: { label: string; keys: Category[] }[] = [
   { label: "Production Approval",     keys: ["Production Order", "Bill of Materials"] },
   { label: "Administration Approval", keys: ["User Account"] },
   { label: "Asset Management Approval", keys: ["Maintenance"] },
+  { label: "Consumable Returns Approval", keys: ["Return Items"] },
+  { label: "Galley Loading Approval",     keys: ["Galley Loading"] },
 ];
 const CATEGORY_BY_KEY = new Map(CATEGORIES.map((c) => [c.key, c]));
+
+function formatGalleyDuration(sec: number): string {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  return h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`;
+}
+
+const HOC_NAMES = ["Cmd. A. Rahman", "M. Jahangir", "S. Karim", "R. Ahmed"];
 
 type ApprovalStatus = "Pending" | "Approved" | "Rejected" | "Reviewed";
 
@@ -234,6 +302,14 @@ export default function ApprovalManagementPage() {
   const flightOrders = useFlightOrders();
 
   const [items, setItems] = useState<ApprovalItem[]>(SEED);
+  const [returnApprovals, setReturnApprovals] = usePersistedState<ReturnApprovalRecord[]>(
+    "consumable-return-approvals",
+    [],
+  );
+  const [consumableInventory, setConsumableInventory] = usePersistedState<ConsumableItem[]>(
+    "airline-consumables-items",
+    consumableItems,
+  );
   // Flight orders have no "Rejected" status in their store flow, so approval
   // decisions made here are tracked locally. Approve also advances the order's
   // Pending legs to "Approved" in the shared store (reflected on Order Mgmt &
@@ -284,12 +360,66 @@ export default function ApprovalManagementPage() {
   const [detailRejectReason, setDetailRejectReason] = useState("");
   const [detailReviewOpen, setDetailReviewOpen] = useState(false);
   const [detailReviewComment, setDetailReviewComment] = useState("");
+  // Editable reusable qty per line for Return Items approval
+  const [returnLineQtys, setReturnLineQtys] = useState<Record<number, string>>({});
+  // Per-line justification when reusable qty < return qty
+  const [returnLineReasons, setReturnLineReasons] = useState<Record<number, string>>({});
+  // True after Save is clicked — keeps modal open in view-only mode
+  const [returnItemsSaved, setReturnItemsSaved] = useState(false);
   // Review decisions — "send back to the requester for correction" instead of a
   // hard reject. Persisted centrally (survives reload) keyed by category::refId,
   // so every module's requester screen can read & clear it. Overlaid onto the
   // projected items below; only applies while the request is still Pending.
   // (Flight/Crew orders persist their review on the order row itself instead.)
   const reviews = useApprovalReviews();
+
+  // ── Galley Loading records (shared via sessionStorage with dispatch-monitoring) ──
+  const [galleyLoadingRecords, setGalleyLoadingRecords] = useState<GalleyLoadingRecord[]>(() => {
+    try {
+      const raw = sessionStorage.getItem("galley_loading");
+      if (!raw) return [];
+      return JSON.parse(raw) as GalleyLoadingRecord[];
+    } catch { return []; }
+  });
+  const [galleyDetailOpen, setGalleyDetailOpen] = useState(false);
+  const [galleyDetailRecord, setGalleyDetailRecord] = useState<GalleyLoadingRecord | null>(null);
+  const [galleyEditMode, setGalleyEditMode] = useState(false);
+  const [galleyEditPlan, setGalleyEditPlan] = useState<GalleyPlan>({});
+
+  // Poll sessionStorage for galley records from the other page
+  useEffect(() => {
+    const sync = () => {
+      try {
+        const raw = sessionStorage.getItem("galley_loading");
+        if (!raw) return;
+        setGalleyLoadingRecords(JSON.parse(raw) as GalleyLoadingRecord[]);
+      } catch { /* ignore */ }
+    };
+    const id = setInterval(sync, 2000);
+    return () => clearInterval(id);
+  }, []);
+
+  function approveGalley(record: GalleyLoadingRecord, by: string) {
+    const updated = galleyLoadingRecords.map((r) =>
+      r.id === record.id
+        ? { ...r, galleyStatus: "approved" as GalleyStatus, approvedAt: new Date().toISOString().slice(0, 16).replace("T", " "), approvedBy: by }
+        : r,
+    );
+    setGalleyLoadingRecords(updated);
+    sessionStorage.setItem("galley_loading", JSON.stringify(updated));
+    setGalleyDetailOpen(false);
+    toast.success("Galley approved — Ready To Fly!");
+  }
+
+  function saveGalleyEdits(record: GalleyLoadingRecord, plan: GalleyPlan) {
+    const updated = galleyLoadingRecords.map((r) =>
+      r.id === record.id ? { ...r, galleyPlan: plan } : r,
+    );
+    setGalleyLoadingRecords(updated);
+    sessionStorage.setItem("galley_loading", JSON.stringify(updated));
+    setGalleyEditMode(false);
+    toast.success("Galley plan updated.");
+  }
 
   // ── Dispatch approval modal ──────────────────────────────────────────────────
   const [dispatchViewOpen, setDispatchViewOpen] = useState(false);
@@ -536,8 +666,33 @@ export default function ApprovalManagementPage() {
       });
   }, [maintenanceApprovals]);
 
+  const returnApprovalItems: ApprovalItem[] = useMemo(() => {
+    return returnApprovals
+      .filter((ra) => ra.status === "Pending" || ra.status !== "Pending")
+      .map((ra) => {
+        const approvalStatus: ApprovalStatus =
+          ra.status === "Approved" ? "Approved"
+          : ra.status === "Declined" ? "Rejected"
+          : "Pending";
+        return {
+          id: `RA-AP-${ra.id}`,
+          category: "Return Items" as Category,
+          refId: ra.id,
+          title: `Return Items — ${ra.flight} (${ra.sector})`,
+          requestedBy: ra.returnedBy,
+          requestedAt: ra.date,
+          summary: `${ra.lines.length} meal item${ra.lines.length === 1 ? "" : "s"} · Return Ref: ${ra.returnId} · ${ra.flight}`,
+          itemsCount: ra.lines.length,
+          status: approvalStatus,
+          processedBy: ra.processedBy,
+          processedAt: ra.processedAt,
+          rejectionReason: ra.declineReason,
+        };
+      });
+  }, [returnApprovals]);
+
   const allItems = useMemo(() => {
-    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...items];
+    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...items];
     // Overlay "Reviewed" (returned for correction) onto still-pending requests.
     return base.map((it) => {
       const rv = reviews[reviewKey(it.category, it.refId)];
@@ -682,6 +837,61 @@ export default function ApprovalManagementPage() {
     }
   };
 
+  const saveReturnItems = () => {
+    if (!detailItem) return;
+    const ra = returnApprovals.find((r) => r.id === detailItem.refId);
+    if (!ra) return;
+    for (let i = 0; i < ra.lines.length; i++) {
+      const rq = Number(returnLineQtys[i]) || 0;
+      if (rq < 0 || rq > ra.lines[i].returnQty) {
+        toast.error(`Line ${i + 1}: Reusable QTY cannot exceed Return QTY (${ra.lines[i].returnQty}).`);
+        return;
+      }
+      if (rq < ra.lines[i].returnQty && !returnLineReasons[i]?.trim()) {
+        toast.error(`Line ${i + 1}: justification required when Reusable QTY is less than Return QTY.`);
+        return;
+      }
+    }
+    setReturnApprovals((prev) =>
+      prev.map((r) =>
+        r.id === detailItem.refId
+          ? {
+              ...r,
+              status: "Approved",
+              processedBy: `${role} (GM/Admin)`,
+              processedAt: stamp(),
+              lines: r.lines.map((l, i) => ({
+                ...l,
+                reusableQty: Number(returnLineQtys[i]) || 0,
+                partialReason: Number(returnLineQtys[i]) < l.returnQty ? returnLineReasons[i]?.trim() : undefined,
+              })),
+            }
+          : r,
+      ),
+    );
+    // Add reusable qty back to consumable inventory stock
+    setConsumableInventory((prev) => {
+      const updated = [...prev];
+      for (let i = 0; i < ra.lines.length; i++) {
+        if (ra.lines[i].lineType !== "item") continue;
+        const rq = Number(returnLineQtys[i]) || 0;
+        if (rq <= 0) continue;
+        const idx = updated.findIndex((it) => it.id === ra.lines[i].itemId);
+        if (idx === -1) continue;
+        const item = updated[idx];
+        const newStock = item.stock + rq;
+        updated[idx] = {
+          ...item,
+          stock: newStock,
+          status: newStock < item.reorder * 0.5 ? "Critical" : newStock < item.reorder ? "Low" : "OK",
+        };
+      }
+      return updated;
+    });
+    toast.success(`${detailItem.refId} — Return items approved. Reusable quantities saved.`);
+    setReturnItemsSaved(true);
+  };
+
   const approve = (it: ApprovalItem, opts: { silent?: boolean } = {}) => {
     const { silent = false } = opts;
     if (it.category === "Demand Request") {
@@ -756,6 +966,17 @@ export default function ApprovalManagementPage() {
       if (!silent) toast.success(`${it.refId} — Maintenance Approved.`);
       return;
     }
+    if (it.category === "Return Items") {
+      setReturnApprovals((prev) =>
+        prev.map((ra) =>
+          ra.id === it.refId
+            ? { ...ra, status: "Approved", processedBy: `${role} (GM/Admin)`, processedAt: stamp() }
+            : ra,
+        ),
+      );
+      if (!silent) toast.success(`${it.refId} — Return items approved for Airport Store.`);
+      return;
+    }
     setItems((p) =>
       p.map((x) =>
         x.id === it.id
@@ -820,6 +1041,14 @@ export default function ApprovalManagementPage() {
         rejectedAt: stamp(),
         rejectionReason: reason,
       });
+    } else if (it.category === "Return Items") {
+      setReturnApprovals((prev) =>
+        prev.map((ra) =>
+          ra.id === it.refId
+            ? { ...ra, status: "Declined", processedBy: `${role} (GM/Admin)`, processedAt: stamp(), declineReason: reason }
+            : ra,
+        ),
+      );
     } else {
       setItems((p) =>
         p.map((x) =>
@@ -899,6 +1128,22 @@ export default function ApprovalManagementPage() {
     setDetailRejectReason("");
     setDetailReviewOpen(false);
     setDetailReviewComment("");
+    // Init per-line reusable qty inputs for Return Items
+    if (it.category === "Return Items") {
+      const ra = returnApprovals.find((r) => r.id === it.refId);
+      const qtys: Record<number, string> = {};
+      const reasons: Record<number, string> = {};
+      ra?.lines.forEach((l, i) => {
+        qtys[i] = l.reusableQty > 0 ? String(l.reusableQty) : "";
+        reasons[i] = l.partialReason ?? "";
+      });
+      setReturnLineQtys(qtys);
+      setReturnLineReasons(reasons);
+    } else {
+      setReturnLineQtys({});
+      setReturnLineReasons({});
+    }
+    setReturnItemsSaved(false);
   };
 
   const handleFulfillFromStore = (dr: WfDemandRequest) => {
@@ -1013,6 +1258,14 @@ export default function ApprovalManagementPage() {
         rejectedAt: stamp(),
         rejectionReason: reason,
       });
+    } else if (detailItem.category === "Return Items") {
+      setReturnApprovals((prev) =>
+        prev.map((ra) =>
+          ra.id === detailItem.refId
+            ? { ...ra, status: "Declined", processedBy: `${role} (GM/Admin)`, processedAt: stamp(), declineReason: reason }
+            : ra,
+        ),
+      );
     } else {
       setItems((p) =>
         p.map((x) =>
@@ -1228,7 +1481,110 @@ export default function ApprovalManagementPage() {
             </Card>
           )}
 
-          {activeTab !== "Dispatch" && (<><Card className="brand-accent-border-left">
+          {/* ── Galley Loading subtab ──────────────────────────────────────────── */}
+          {activeTab === "Galley Loading" && (
+            <Card className="brand-accent-border-left">
+              <CardContent className="pt-5">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold uppercase tracking-wider flex items-center gap-2">
+                    <LayoutGrid className="h-4 w-4 text-muted-foreground" /> Galley Loading — Awaiting Approval
+                  </h3>
+                  <span className="text-xs text-muted-foreground">
+                    {galleyLoadingRecords.filter((r) => r.galleyStatus === "awaiting_approval").length} item(s)
+                  </span>
+                </div>
+                {galleyLoadingRecords.filter((r) => r.galleyStatus === "awaiting_approval").length === 0 ? (
+                  <div className="text-center text-sm text-muted-foreground py-10">No galley loading records pending approval.</div>
+                ) : (
+                  <div className="border border-border rounded-md overflow-hidden">
+                    <Table>
+                      <TableHeader className="bg-muted/40">
+                        <TableRow>
+                          <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Forwarded At</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Loading Duration</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Status</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider text-right">Actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {galleyLoadingRecords.filter((r) => r.galleyStatus === "awaiting_approval").map((rec) => (
+                          <TableRow key={rec.id} className="hover:bg-muted/30">
+                            <TableCell className="font-semibold text-sky-700 text-xs">{rec.flightLabel}</TableCell>
+                            <TableCell className="text-xs">{rec.date}</TableCell>
+                            <TableCell className="text-xs tabular-nums">{rec.forwardedAt}</TableCell>
+                            <TableCell className="text-xs tabular-nums">
+                              {rec.loadingDurationSec != null ? formatGalleyDuration(rec.loadingDurationSec) : "—"}
+                            </TableCell>
+                            <TableCell>
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700">
+                                Awaiting Approval
+                              </span>
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                size="icon"
+                                variant="outline"
+                                className="h-7 w-7 text-muted-foreground hover:text-sky-600 hover:border-sky-400"
+                                onClick={() => { setGalleyDetailRecord(rec); setGalleyEditMode(false); setGalleyEditPlan(rec.galleyPlan); setGalleyDetailOpen(true); }}
+                                title="View galley details"
+                              >
+                                <Eye className="h-3.5 w-3.5" />
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+
+                {/* Approved records */}
+                {galleyLoadingRecords.filter((r) => r.galleyStatus === "approved").length > 0 && (
+                  <div className="mt-5">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Approved — Ready To Fly</p>
+                    <div className="border border-border rounded-md overflow-hidden">
+                      <Table>
+                        <TableHeader className="bg-muted/40">
+                          <TableRow>
+                            <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
+                            <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                            <TableHead className="text-xs uppercase tracking-wider">Approved By</TableHead>
+                            <TableHead className="text-xs uppercase tracking-wider">Approved At</TableHead>
+                            <TableHead className="text-xs uppercase tracking-wider text-right">Actions</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {galleyLoadingRecords.filter((r) => r.galleyStatus === "approved").map((rec) => (
+                            <TableRow key={rec.id} className="hover:bg-muted/30">
+                              <TableCell className="font-semibold text-emerald-700 text-xs">{rec.flightLabel}</TableCell>
+                              <TableCell className="text-xs">{rec.date}</TableCell>
+                              <TableCell className="text-xs font-medium">{rec.approvedBy ?? "—"}</TableCell>
+                              <TableCell className="text-xs tabular-nums">{rec.approvedAt ?? "—"}</TableCell>
+                              <TableCell className="text-right">
+                                <Button
+                                  size="icon"
+                                  variant="outline"
+                                  className="h-7 w-7 text-muted-foreground hover:text-emerald-600 hover:border-emerald-400"
+                                  onClick={() => { setGalleyDetailRecord(rec); setGalleyEditMode(false); setGalleyEditPlan(rec.galleyPlan); setGalleyDetailOpen(true); }}
+                                  title="View galley details"
+                                >
+                                  <Eye className="h-3.5 w-3.5" />
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
+
+          {activeTab !== "Dispatch" && activeTab !== "Galley Loading" && (<><Card className="brand-accent-border-left">
             <CardContent className="pt-5">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold uppercase tracking-wider">
@@ -1720,8 +2076,118 @@ export default function ApprovalManagementPage() {
                 );
               })()}
 
+              {/* Return Items — Return QTY shown + editable Reusable QTY inputs for approver */}
+              {detailItem.category === "Return Items" && (() => {
+                const ra = returnApprovals.find((r) => r.id === detailItem.refId);
+                if (!ra || ra.lines.length === 0) return null;
+                const isPending = ra.status === "Pending";
+                return (
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">
+                      Returned Items — {ra.flight} ({ra.lines.length} line{ra.lines.length === 1 ? "" : "s"})
+                      {isPending && <span className="ml-2 normal-case text-indigo-600">Enter Reusable QTY below</span>}
+                    </div>
+                    <div className="rounded-md border border-border overflow-hidden">
+                      <table className="w-full text-sm">
+                        <thead className="bg-muted/40">
+                          <tr>
+                            <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground">Item</th>
+                            <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-16">Type</th>
+                            <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-28">Return QTY</th>
+                            <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-32">Reusable QTY</th>
+                            <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-36">Wastage</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {ra.lines.map((l, idx) => (
+                            <tr key={`${l.itemId}-${idx}`} className={`border-t border-border ${idx % 2 === 0 ? "" : "bg-muted/20"}`}>
+                              <td className="px-3 py-2">
+                                <div className="font-medium text-foreground">{l.itemName}</div>
+                                <div className="text-[10px] text-muted-foreground font-mono">{l.itemId}</div>
+                              </td>
+                              <td className="px-3 py-2">
+                                <Badge variant="outline" className="text-[10px]">
+                                  {l.lineType === "meal" ? "Meal" : "Item"}
+                                </Badge>
+                              </td>
+                              <td className="px-3 py-2 text-center tabular-nums">
+                                <span className="font-semibold">{l.returnQty}</span>
+                                <span className="text-[10px] text-muted-foreground ml-1">{l.uom}</span>
+                              </td>
+                              {/* Reusable QTY */}
+                              <td className="px-3 py-2 text-center">
+                                {isPending ? (
+                                  <div className="flex items-center justify-center gap-1.5">
+                                    <Input
+                                      type="number"
+                                      min={0}
+                                      max={l.returnQty}
+                                      placeholder="0"
+                                      value={returnLineQtys[idx] ?? ""}
+                                      onChange={(e) => setReturnLineQtys((prev) => ({ ...prev, [idx]: e.target.value }))}
+                                      className="h-7 w-20 text-center text-xs tabular-nums"
+                                    />
+                                    <span className="text-[10px] text-muted-foreground">{l.uom}</span>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <span className={cn("font-semibold tabular-nums", l.reusableQty > 0 ? "text-success" : "text-muted-foreground")}>
+                                      {l.reusableQty}
+                                    </span>
+                                    <span className="text-[10px] text-muted-foreground ml-1">{l.uom}</span>
+                                  </>
+                                )}
+                              </td>
+                              {/* Wastage — auto-computed */}
+                              <td className="px-3 py-2 text-center">
+                                {isPending ? (() => {
+                                  const hasInput = returnLineQtys[idx] !== "" && returnLineQtys[idx] !== undefined;
+                                  if (!hasInput) return <span className="text-[10px] text-muted-foreground">—</span>;
+                                  const wastage = l.returnQty - (Number(returnLineQtys[idx]) || 0);
+                                  return (
+                                    <div className="flex flex-col items-center gap-1.5">
+                                      <div>
+                                        <span className={cn("font-semibold tabular-nums text-xs", wastage > 0 ? "text-destructive" : "text-muted-foreground")}>
+                                          {wastage}
+                                        </span>
+                                        <span className="text-[10px] text-muted-foreground ml-1">{l.uom}</span>
+                                      </div>
+                                      {wastage > 0 && (
+                                        <Input
+                                          placeholder="Justification (required)"
+                                          value={returnLineReasons[idx] ?? ""}
+                                          onChange={(e) => setReturnLineReasons((prev) => ({ ...prev, [idx]: e.target.value }))}
+                                          className="h-7 w-44 text-xs"
+                                        />
+                                      )}
+                                    </div>
+                                  );
+                                })() : (() => {
+                                  const wastage = l.returnQty - l.reusableQty;
+                                  return (
+                                    <>
+                                      <span className={cn("font-semibold tabular-nums text-xs", wastage > 0 ? "text-destructive" : "text-muted-foreground")}>
+                                        {wastage}
+                                      </span>
+                                      <span className="text-[10px] text-muted-foreground ml-1">{l.uom}</span>
+                                      {l.partialReason && (
+                                        <div className="text-[10px] text-muted-foreground mt-0.5 italic">{l.partialReason}</div>
+                                      )}
+                                    </>
+                                  );
+                                })()}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Generic line items — PR / PO / GRN / Transfer / Stock Adj / Production / BOM */}
-              {detailItem.lines && detailItem.lines.length > 0 && (
+              {detailItem.category !== "Return Items" && detailItem.lines && detailItem.lines.length > 0 && (
                 <div>
                   <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">
                     Line Items ({detailItem.lines.length})
@@ -1962,7 +2428,7 @@ export default function ApprovalManagementPage() {
               <div className="w-full flex flex-col gap-2">
                 <div>
                   <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-                    Rejection Reason <span className="text-destructive">*</span>
+                    {detailItem?.category === "Return Items" ? "Decline Justification" : "Rejection Reason"} <span className="text-destructive">*</span>
                   </Label>
                   <Textarea
                     value={detailRejectReason}
@@ -1981,7 +2447,7 @@ export default function ApprovalManagementPage() {
                     Cancel
                   </Button>
                   <Button variant="destructive" size="sm" onClick={confirmDetailReject}>
-                    <XIcon className="h-3.5 w-3.5 mr-1" /> Confirm Reject
+                    <XIcon className="h-3.5 w-3.5 mr-1" /> {detailItem?.category === "Return Items" ? "Confirm Decline" : "Confirm Reject"}
                   </Button>
                 </div>
               </div>
@@ -2021,7 +2487,23 @@ export default function ApprovalManagementPage() {
               </div>
             ) : (
               <>
-                {detailItem?.status === "Pending" && (
+                {detailItem?.status === "Pending" && detailItem.category === "Return Items" && !returnItemsSaved ? (
+                  <>
+                    <Button
+                      variant="outline"
+                      className="border-destructive/40 text-destructive hover:bg-destructive/10"
+                      onClick={() => setDetailRejectOpen(true)}
+                    >
+                      <XIcon className="h-4 w-4 mr-1.5" /> Decline
+                    </Button>
+                    <Button
+                      className="bg-success text-success-foreground hover:bg-success/90"
+                      onClick={saveReturnItems}
+                    >
+                      <Check className="h-4 w-4 mr-1.5" /> Save
+                    </Button>
+                  </>
+                ) : detailItem?.status === "Pending" ? (
                   <>
                     <Button
                       variant="outline"
@@ -2046,11 +2528,154 @@ export default function ApprovalManagementPage() {
                       <Check className="h-4 w-4 mr-1.5" /> Approve
                     </Button>
                   </>
-                )}
+                ) : null}
                 <Button variant="outline" onClick={() => setDetailOpen(false)}>Close</Button>
               </>
             )}
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Galley Loading detail modal ───────────────────────────────────────── */}
+      <Dialog open={galleyDetailOpen} onOpenChange={(v) => { if (!v) { setGalleyDetailOpen(false); setGalleyEditMode(false); } }}>
+        <DialogContent className="w-full max-w-4xl max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
+          <div className="bg-gradient-to-r from-sky-700 to-sky-600 text-white px-6 pt-5 pb-4 shrink-0">
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="text-[10px] text-sky-200 uppercase tracking-widest font-semibold">US-Bangla Airlines · Galley Loading Record</p>
+                <h2 className="text-lg font-bold mt-0.5 flex items-center gap-2">
+                  <LayoutGrid className="h-5 w-5" />
+                  {galleyDetailRecord?.flightLabel}
+                </h2>
+                <div className="flex flex-wrap items-center gap-3 mt-1 text-xs">
+                  <span className="text-sky-200">{galleyDetailRecord?.date}</span>
+                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${galleyDetailRecord?.galleyStatus === "approved" ? "bg-emerald-500 text-white" : "bg-amber-400 text-amber-900"}`}>
+                    {galleyDetailRecord?.galleyStatus === "approved" ? "Ready To Fly" : "Awaiting Approval"}
+                  </span>
+                  {galleyDetailRecord?.loadingDurationSec != null && (
+                    <span className="text-sky-200 flex items-center gap-1">
+                      <Timer className="h-3 w-3" /> Loading: {formatGalleyDuration(galleyDetailRecord.loadingDurationSec)}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {galleyDetailRecord && (
+            <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+              {/* Sign-off section */}
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-sky-700 mb-2">Sign-Off</p>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 rounded-md border border-sky-100 bg-sky-50/40 p-3 text-sm">
+                  {[
+                    ["Dispatch Sheet Prepared By", galleyDetailRecord.signOff.preparedBy],
+                    ["Physically Handed By", galleyDetailRecord.signOff.physicallyHandedBy],
+                    ["Flight Checked By", galleyDetailRecord.signOff.flightCheckedBy],
+                    ["Handed Over By", galleyDetailRecord.signOff.handedOverBy],
+                  ].map(([label, entry]) => {
+                    const log = entry as SignOffLog;
+                    return (
+                      <div key={label as string}>
+                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">{label as string}</div>
+                        <div className="font-semibold mt-0.5 text-sm">{log?.name || "—"}</div>
+                        {log?.designation && <div className="text-[10px] text-slate-500">{log.designation}</div>}
+                        {log?.signedAt && <div className="text-[10px] text-slate-400 tabular-nums">{log.signedAt}</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Loading timeline */}
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-sky-700 mb-2">Loading Timeline</p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {[
+                    { label: "Forwarded to Aircraft", value: galleyDetailRecord.forwardedAt, color: "sky" },
+                    { label: "Loading Started", value: galleyDetailRecord.loadingStartedAt ? new Date(galleyDetailRecord.loadingStartedAt).toLocaleString() : "—", color: "violet" },
+                    { label: "Loading Completed", value: galleyDetailRecord.loadingCompletedAt ? new Date(galleyDetailRecord.loadingCompletedAt).toLocaleString() : "—", color: "emerald" },
+                  ].map(({ label, value, color }) => (
+                    <div key={label} className={`rounded-md border p-3 text-sm ${color === "sky" ? "border-sky-200 bg-sky-50/40" : color === "violet" ? "border-violet-200 bg-violet-50/40" : "border-emerald-200 bg-emerald-50/40"}`}>
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">{label}</div>
+                      <div className="font-semibold mt-0.5 tabular-nums text-xs">{value}</div>
+                    </div>
+                  ))}
+                </div>
+                {galleyDetailRecord.loadingDurationSec != null && (
+                  <div className="mt-2 text-xs text-muted-foreground">
+                    Total loading duration: <span className="font-bold text-foreground">{formatGalleyDuration(galleyDetailRecord.loadingDurationSec)}</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Galley plan overview */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-sky-700">Galley Plan Details</p>
+                  {galleyDetailRecord.galleyStatus === "awaiting_approval" && !galleyEditMode && (
+                    <Button size="sm" variant="outline" className="h-7 text-xs border-sky-300 text-sky-700 hover:bg-sky-50"
+                      onClick={() => { setGalleyEditMode(true); setGalleyEditPlan({ ...galleyDetailRecord.galleyPlan }); }}>
+                      Make Changes
+                    </Button>
+                  )}
+                  {galleyEditMode && (
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => setGalleyEditMode(false)}>Cancel</Button>
+                      <Button size="sm" className="h-7 text-xs bg-sky-600 hover:bg-sky-700 text-white"
+                        onClick={() => saveGalleyEdits(galleyDetailRecord, galleyEditPlan)}>
+                        Save Changes
+                      </Button>
+                    </div>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 max-h-60 overflow-y-auto border border-border rounded-md p-3 bg-muted/10">
+                  {Object.entries(galleyEditMode ? galleyEditPlan : galleyDetailRecord.galleyPlan)
+                    .filter(([, v]) => v !== "" && v !== "0")
+                    .slice(0, 40)
+                    .map(([k, v]) => (
+                      <div key={k}>
+                        <div className="text-[9px] uppercase tracking-wider text-muted-foreground font-medium leading-tight">{k.replace(/([A-Z])/g, " $1").trim()}</div>
+                        {galleyEditMode ? (
+                          <input
+                            type="text"
+                            value={galleyEditPlan[k] ?? v}
+                            onChange={(e) => setGalleyEditPlan((prev) => ({ ...prev, [k]: e.target.value }))}
+                            className="w-full h-6 px-1.5 text-xs border border-input rounded bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none mt-0.5"
+                          />
+                        ) : (
+                          <div className="font-semibold text-xs mt-0.5 tabular-nums">{v}</div>
+                        )}
+                      </div>
+                    ))}
+                </div>
+              </div>
+
+              {/* Approved info */}
+              {galleyDetailRecord.galleyStatus === "approved" && (
+                <div className="rounded-md border border-emerald-200 bg-emerald-50/40 p-3 text-sm">
+                  <div className="text-[10px] uppercase tracking-wider text-emerald-700 font-bold mb-1">Approved — Ready To Fly</div>
+                  <div className="flex items-center gap-2 text-xs text-emerald-800">
+                    <span className="font-medium">{galleyDetailRecord.approvedBy}</span>
+                    <span>·</span>
+                    <span className="tabular-nums">{galleyDetailRecord.approvedAt}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="border-t bg-white px-6 py-3 shrink-0 flex items-center justify-end gap-2">
+            {galleyDetailRecord && galleyDetailRecord.galleyStatus === "awaiting_approval" && !galleyEditMode && (
+              <Button
+                className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                onClick={() => approveGalley(galleyDetailRecord, role || HOC_NAMES[0])}
+              >
+                Approve
+              </Button>
+            )}
+            <Button variant="outline" onClick={() => { setGalleyDetailOpen(false); setGalleyEditMode(false); }}>Close</Button>
+          </div>
         </DialogContent>
       </Dialog>
     </>
