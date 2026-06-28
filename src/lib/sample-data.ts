@@ -527,10 +527,23 @@ export const meals = [
 ];
 
 export const mealOrders = [
-  { id: "MO-1001", date: "2025-11-05", flight: "BS-203", serviceGroup: "Passenger", menuStandard: "KML", mealType: "Lunch", items: 168, calories: 720, status: "Confirmed", note: "BS-203 lunch order" },
-  { id: "MO-1002", date: "2025-11-05", flight: "BS-307", serviceGroup: "Passenger", menuStandard: "CHML", mealType: "Dinner", items: 282, calories: 610, status: "Confirmed", note: "BS-307 dinner order" },
-  { id: "MO-1003", date: "2025-11-06", flight: "BS-101", serviceGroup: "Passenger", menuStandard: "KML", mealType: "Breakfast", items: 68, calories: 480, status: "Confirmed", note: "BS-101 breakfast order" },
-  { id: "MO-1004", date: "2025-11-06", flight: "BS-203", serviceGroup: "Crew", menuStandard: "KML", mealType: "H.Snacks", items: 8, calories: 680, status: "Confirmed", note: "Crew snack order" },
+  { id: "MO-1001", date: "2025-11-05", flight: "BS-203", serviceGroup: "Passenger", menuStandard: "KML",  mealType: "Lunch",     items: 168, calories: 720, status: "Confirmed", note: "BS-203 lunch order" },
+  { id: "MO-1002", date: "2025-11-05", flight: "BS-307", serviceGroup: "Passenger", menuStandard: "CHML", mealType: "Dinner",    items: 282, calories: 610, status: "Confirmed", note: "BS-307 dinner order" },
+  { id: "MO-1003", date: "2025-11-06", flight: "BS-101", serviceGroup: "Passenger", menuStandard: "KML",  mealType: "Breakfast", items: 68,  calories: 480, status: "Confirmed", note: "BS-101 breakfast order" },
+  { id: "MO-1004", date: "2025-11-06", flight: "BS-203", serviceGroup: "Crew",      menuStandard: "KML",  mealType: "H.Snacks",  items: 8,   calories: 680, status: "Confirmed", note: "Crew snack order" },
+  // Return-flight linked meal orders (used by Consumable Returns → Log Return)
+  { id: "MO-1005", date: "2026-06-28", flight: "BG-401", serviceGroup: "Passenger", menuStandard: "KML",  mealType: "Lunch",     items: 186, calories: 720, status: "Confirmed", note: "BG-401 Y-class lunch" },
+  { id: "MO-1006", date: "2026-06-28", flight: "BG-401", serviceGroup: "Passenger", menuStandard: "KML",  mealType: "Snacks",    items: 186, calories: 380, status: "Confirmed", note: "BG-401 Y-class snack" },
+  { id: "MO-1007", date: "2026-06-28", flight: "BG-401", serviceGroup: "Crew",      menuStandard: "KML",  mealType: "H.Snacks",  items: 8,   calories: 680, status: "Confirmed", note: "BG-401 crew snack" },
+  { id: "MO-1008", date: "2026-06-28", flight: "BG-522", serviceGroup: "Passenger", menuStandard: "KML",  mealType: "Lunch",     items: 214, calories: 720, status: "Confirmed", note: "BG-522 Y-class lunch" },
+  { id: "MO-1009", date: "2026-06-28", flight: "BG-522", serviceGroup: "Passenger", menuStandard: "CHML", mealType: "Dinner",    items: 214, calories: 610, status: "Confirmed", note: "BG-522 Y-class dinner" },
+  { id: "MO-1010", date: "2026-06-28", flight: "BG-522", serviceGroup: "Passenger", menuStandard: "KML",  mealType: "Snacks",    items: 214, calories: 260, status: "Confirmed", note: "BG-522 Y-class snack" },
+  { id: "MO-1011", date: "2026-06-28", flight: "BG-522", serviceGroup: "Crew",      menuStandard: "KML",  mealType: "H.Snacks",  items: 12,  calories: 680, status: "Confirmed", note: "BG-522 crew snack" },
+  { id: "MO-1012", date: "2026-06-28", flight: "BS-105", serviceGroup: "Passenger", menuStandard: "KML",  mealType: "Snacks",    items: 72,  calories: 380, status: "Confirmed", note: "BS-105 snack" },
+  { id: "MO-1013", date: "2026-06-28", flight: "BS-141", serviceGroup: "Passenger", menuStandard: "KML",  mealType: "Snacks",    items: 68,  calories: 380, status: "Confirmed", note: "BS-141 snack" },
+  { id: "MO-1014", date: "2026-06-28", flight: "VQ-901", serviceGroup: "Passenger", menuStandard: "CHML", mealType: "Dinner",    items: 162, calories: 610, status: "Confirmed", note: "VQ-901 dinner" },
+  { id: "MO-1015", date: "2026-06-28", flight: "VQ-901", serviceGroup: "Passenger", menuStandard: "VGML", mealType: "Snacks",    items: 162, calories: 260, status: "Confirmed", note: "VQ-901 snack" },
+  { id: "MO-1016", date: "2026-06-28", flight: "VQ-901", serviceGroup: "Crew",      menuStandard: "KML",  mealType: "H.Snacks",  items: 10,  calories: 680, status: "Confirmed", note: "VQ-901 crew snack" },
 ];
 
 export const productionOrders = [

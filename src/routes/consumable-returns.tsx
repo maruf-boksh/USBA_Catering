@@ -20,6 +20,7 @@ import { toast } from "sonner";
 import {
   consumableItems,
   consumableUsage as SEED_USAGE,
+  mealOrders,
   type ConsumableItem,
   type ConsumableUsage,
 } from "@/lib/sample-data";
@@ -33,11 +34,13 @@ const CURRENT_USER = "Md. Hossain";
 type ReturnLine = {
   itemId: string;
   itemName: string;
-  qty: number;
+  qty: number;           // Return QTY
+  reusableQty?: number;  // Reusable QTY (subset of qty in good condition)
   issuedQty?: number;
   uom: string;
   reusable: boolean;
   nonReusableReason?: string;
+  lineType?: "item" | "meal";
 };
 
 type ConsumableReturn = {
@@ -48,7 +51,32 @@ type ConsumableReturn = {
   sector: string;
   returnedBy: string;
   savedAt?: string;
+  forwardToAirportStore?: boolean;
+  approvalId?: string;
   lines: ReturnLine[];
+};
+
+// Shared with approval-management via "consumable-return-approvals" localStorage key
+type ReturnApprovalRecord = {
+  id: string;
+  returnId: string;
+  flight: string;
+  sector: string;
+  date: string;
+  returnedBy: string;
+  status: "Pending" | "Approved" | "Declined";
+  processedBy?: string;
+  processedAt?: string;
+  declineReason?: string;
+  lines: {
+    itemId: string;
+    itemName: string;
+    lineType: "item" | "meal";
+    uom: string;
+    returnQty: number;
+    reusableQty: number;
+    partialReason?: string;
+  }[];
 };
 
 type FlightSchedule = {
@@ -86,37 +114,41 @@ export default function ConsumableReturnsPage() {
     consumableItems,
   );
   const [usage] = usePersistedState<ConsumableUsage[]>("consumable-usage", SEED_USAGE);
+  const [returnApprovals, setReturnApprovals] = usePersistedState<ReturnApprovalRecord[]>(
+    "consumable-return-approvals",
+    [],
+  );
 
   const nextId = `CR-${String(7000 + returns.length + 1).padStart(4, "0")}`;
+  const nextApprovalId = `RA-${String(8000 + returnApprovals.length + 1).padStart(4, "0")}`;
 
   const addReturn = (r: ConsumableReturn) => {
-    setInventoryItems((prev) =>
-      prev.map((item) => {
-        const returnedQty = r.lines
-          .filter((l) => l.itemId === item.id && l.reusable)
-          .reduce((s, l) => s + l.qty, 0);
-        return returnedQty > 0 ? { ...item, stock: item.stock + returnedQty } : item;
-      }),
-    );
-    setReturns((prev) => [r, ...prev]);
+    // Create approval record for all lines — approver will enter Reusable QTY
+    const approvalId = nextApprovalId;
+    const approvalRecord: ReturnApprovalRecord = {
+      id: approvalId,
+      returnId: r.id,
+      flight: r.flight,
+      sector: r.sector,
+      date: r.date,
+      returnedBy: r.returnedBy,
+      status: "Pending",
+      lines: r.lines.map((l) => ({
+        itemId: l.itemId,
+        itemName: l.itemName,
+        lineType: l.lineType ?? "item",
+        uom: l.uom,
+        returnQty: l.qty,
+        reusableQty: 0,
+      })),
+    };
+    setReturnApprovals((prev) => [approvalRecord, ...prev]);
+    setReturns((prev) => [{ ...r, approvalId, forwardToAirportStore: true }, ...prev]);
     setView("list");
   };
 
   const updateReturn = (updated: ConsumableReturn) => {
-    const old = editTarget!;
-    setInventoryItems((prev) =>
-      prev.map((item) => {
-        const oldQty = old.lines
-          .filter((l) => l.itemId === item.id && l.reusable)
-          .reduce((s, l) => s + l.qty, 0);
-        const newQty = updated.lines
-          .filter((l) => l.itemId === item.id && l.reusable)
-          .reduce((s, l) => s + l.qty, 0);
-        const delta = newQty - oldQty;
-        return delta !== 0 ? { ...item, stock: item.stock + delta } : item;
-      }),
-    );
-    setReturns((prev) => prev.map((r) => (r.id === old.id ? updated : r)));
+    setReturns((prev) => prev.map((r) => (r.id === editTarget!.id ? updated : r)));
     setEditTarget(null);
     setView("list");
   };
@@ -148,7 +180,7 @@ export default function ConsumableReturnsPage() {
         }
       />
 
-      {view === "list" && <ReturnList returns={returns} onEdit={handleEdit} />}
+      {view === "list" && <ReturnList returns={returns} approvals={returnApprovals} onEdit={handleEdit} />}
       {(view === "create" || view === "edit") && (
         <ReturnCreate
           key={editTarget?.id ?? "create"}
@@ -159,6 +191,7 @@ export default function ConsumableReturnsPage() {
           editRecord={editTarget ?? undefined}
         />
       )}
+
     </>
   );
 }
@@ -167,11 +200,15 @@ export default function ConsumableReturnsPage() {
 
 function ReturnList({
   returns,
+  approvals,
   onEdit,
 }: {
   returns: ConsumableReturn[];
+  approvals: ReturnApprovalRecord[];
   onEdit: (r: ConsumableReturn) => void;
 }) {
+  const getApproval = (r: ConsumableReturn) =>
+    r.approvalId ? approvals.find((a) => a.id === r.approvalId) : undefined;
   const [viewRecord, setViewRecord] = useState<ConsumableReturn | null>(null);
   const [searchItem, setSearchItem] = useState("");
   const [filterReusable, setFilterReusable] = useState<"all" | "yes" | "no">("all");
@@ -248,44 +285,67 @@ function ReturnList({
                   <div>{viewRecord.sector}</div>
                 </div>
               </div>
+              {/* Approval status if forwarded to airport store */}
+              {viewRecord.forwardToAirportStore && (() => {
+                const appr = viewRecord.approvalId ? approvals.find(a => a.id === viewRecord.approvalId) : undefined;
+                if (!appr) return null;
+                return (
+                  <div className={cn(
+                    "rounded-md border p-3 text-xs mb-1",
+                    appr.status === "Approved"  && "border-success/30 bg-success/5 text-success",
+                    appr.status === "Declined"  && "border-destructive/30 bg-destructive/5 text-destructive",
+                    appr.status === "Pending"   && "border-warning/40 bg-warning/5 text-warning-foreground",
+                  )}>
+                    <div className="font-semibold uppercase tracking-wider text-[10px] mb-1">
+                      Airport Store Approval — {appr.status}
+                    </div>
+                    {appr.processedBy && <div>Processed by {appr.processedBy} · {appr.processedAt}</div>}
+                    {appr.declineReason && <div className="mt-1"><span className="font-medium">Reason:</span> {appr.declineReason}</div>}
+                  </div>
+                );
+              })()}
               <div className="border border-border rounded-md overflow-hidden">
                 <Table>
                   <TableHeader className="bg-muted/40">
                     <TableRow>
                       <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
-                      <TableHead className="text-xs uppercase tracking-wider text-right">QTY</TableHead>
-                      <TableHead className="text-xs uppercase tracking-wider">Reusable</TableHead>
-                      <TableHead className="text-xs uppercase tracking-wider">Reason</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider">Type</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Return QTY</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Reusable QTY</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {viewRecord.lines.map((l, i) => (
-                      <TableRow key={i} className="hover:bg-muted/30">
-                        <TableCell>
-                          <div className="font-medium text-sm">{l.itemName}</div>
-                          <div className="font-mono text-[10px] text-muted-foreground">{l.itemId}</div>
-                        </TableCell>
-                        <TableCell className="text-right tabular-nums font-semibold text-xs whitespace-nowrap">
-                          {l.qty} {l.uom}
-                        </TableCell>
-                        <TableCell>
-                          <Badge
-                            variant="outline"
-                            className={cn(
-                              "text-[10px]",
-                              l.reusable
-                                ? "border-success/40 bg-success/10 text-success"
-                                : "border-destructive/40 bg-destructive/10 text-destructive",
+                    {viewRecord.lines.map((l, i) => {
+                      const appr = viewRecord.approvalId ? approvals.find(a => a.id === viewRecord.approvalId) : undefined;
+                      const apprLine = appr?.lines.find(al => al.itemId === l.itemId);
+                      return (
+                        <TableRow key={i} className="hover:bg-muted/30">
+                          <TableCell>
+                            <div className="font-medium text-sm">{l.itemName}</div>
+                            <div className="font-mono text-[10px] text-muted-foreground">{l.itemId}</div>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline" className="text-[10px]">
+                              {l.lineType === "meal" ? "Meal" : "Item"}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums font-semibold text-xs whitespace-nowrap">
+                            {l.qty} {l.uom}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums text-xs whitespace-nowrap">
+                            {appr?.status === "Approved" && apprLine ? (
+                              <span className={apprLine.reusableQty > 0 ? "text-success font-semibold" : "text-muted-foreground"}>
+                                {apprLine.reusableQty} {l.uom}
+                              </span>
+                            ) : appr?.status === "Declined" ? (
+                              <span className="text-destructive text-[10px]">Declined</span>
+                            ) : (
+                              <span className="text-muted-foreground text-[10px]">Pending</span>
                             )}
-                          >
-                            {l.reusable ? "Yes" : "No"}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {!l.reusable ? l.nonReusableReason : "—"}
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
                   </TableBody>
                 </Table>
               </div>
@@ -359,15 +419,16 @@ function ReturnList({
               <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Issued QTY</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">Returned QTY</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">Reusable</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">Return QTY</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">Airport Store (Reusable QTY)</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">Wastage</TableHead>
               <TableHead className="text-xs uppercase tracking-wider text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {filteredReturns.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={9} className="text-center text-sm text-muted-foreground py-8">
+                <TableCell colSpan={10} className="text-center text-sm text-muted-foreground py-8">
                   {returns.length === 0 ? "No consumable returns logged yet." : "No records match the current filters."}
                 </TableCell>
               </TableRow>
@@ -415,29 +476,69 @@ function ReturnList({
                         {l.issuedQty != null ? `${l.issuedQty} ${l.uom}` : "—"}
                       </TableCell>
 
-                      {/* Returned QTY — always shown */}
+                      {/* Return QTY — always shown */}
                       <TableCell className="tabular-nums text-xs font-semibold whitespace-nowrap">
                         {l.qty} {l.uom}
                       </TableCell>
 
-                      {/* Reusable — always shown */}
+                      {/* Airport Store (Reusable QTY) — per line when approved, status badge on first line */}
                       <TableCell>
-                        <Badge
-                          variant="outline"
-                          className={cn(
-                            "text-[10px]",
-                            l.reusable
-                              ? "border-success/40 bg-success/10 text-success"
-                              : "border-destructive/40 bg-destructive/10 text-destructive",
-                          )}
-                        >
-                          {l.reusable ? "Yes" : "No"}
-                        </Badge>
-                        {!l.reusable && l.nonReusableReason && (
-                          <div className="text-[10px] text-muted-foreground mt-0.5 max-w-[160px] truncate">
-                            {l.nonReusableReason}
-                          </div>
-                        )}
+                        {r.forwardToAirportStore && (() => {
+                          const appr = getApproval(r);
+                          if (!appr) return null;
+                          if (appr.status === "Approved") {
+                            const apprLine = appr.lines.find(al => al.itemId === l.itemId);
+                            return (
+                              <span className={cn("text-xs tabular-nums", apprLine && apprLine.reusableQty > 0 ? "text-success font-semibold" : "text-muted-foreground")}>
+                                {apprLine ? `${apprLine.reusableQty} ${l.uom}` : "—"}
+                              </span>
+                            );
+                          }
+                          if (li !== 0) return null;
+                          return (
+                            <div>
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  "text-[10px]",
+                                  appr.status === "Declined" && "border-destructive/40 bg-destructive/10 text-destructive",
+                                  appr.status === "Pending"  && "border-warning/40 bg-warning/10 text-warning-foreground",
+                                )}
+                              >
+                                {appr.status}
+                              </Badge>
+                              {appr.status === "Declined" && appr.declineReason && (
+                                <div className="text-[10px] text-destructive mt-0.5 max-w-[160px] truncate">
+                                  {appr.declineReason}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+                      </TableCell>
+
+                      {/* Wastage — only when Approved */}
+                      <TableCell>
+                        {r.forwardToAirportStore && (() => {
+                          const appr = getApproval(r);
+                          if (!appr || appr.status !== "Approved") return null;
+                          const apprLine = appr.lines.find(al => al.itemId === l.itemId);
+                          if (!apprLine) return null;
+                          const wastage = l.qty - apprLine.reusableQty;
+                          if (wastage <= 0) return <span className="text-xs text-muted-foreground">—</span>;
+                          return (
+                            <div>
+                              <span className="text-xs tabular-nums text-destructive font-semibold">
+                                {wastage} {l.uom}
+                              </span>
+                              {apprLine.partialReason && (
+                                <div className="text-[10px] text-muted-foreground mt-0.5 italic max-w-[180px] truncate" title={apprLine.partialReason}>
+                                  {apprLine.partialReason}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </TableCell>
 
                       {/* Actions — only first line */}
@@ -481,15 +582,17 @@ type DraftLine = {
   itemId: string;
   qty: string;
   issuedQty?: number;
+  lineType: "item" | "meal";
+  mealName?: string;
   reusable: boolean;
-  nonReusableReason: string;
+  nonReusableReason?: string;
 };
 
 const emptyLine = (): DraftLine => ({
   itemId: "",
   qty: "",
-  reusable: true,
-  nonReusableReason: "",
+  lineType: "item",
+  reusable: false,
 });
 
 function ReturnCreate({
@@ -516,8 +619,10 @@ function ReturnCreate({
           itemId: l.itemId,
           qty: String(l.qty),
           issuedQty: l.issuedQty,
-          reusable: l.reusable,
-          nonReusableReason: l.nonReusableReason ?? "",
+          lineType: l.lineType ?? "item",
+          mealName: l.lineType === "meal" ? l.itemName : undefined,
+          reusable: l.reusable ?? false,
+          nonReusableReason: l.nonReusableReason,
         }))
       : [emptyLine()],
   );
@@ -533,11 +638,24 @@ function ReturnCreate({
     setFlight(flightNo);
     if (flightNo) {
       const issued = usageLog.filter((u) => u.flight === flightNo);
-      setLines(
-        issued.length > 0
-          ? issued.map((u) => ({ itemId: u.itemId, qty: "", issuedQty: u.qty, reusable: true, nonReusableReason: "" }))
-          : [emptyLine()],
-      );
+      const issuedMeals = mealOrders.filter((m) => m.flight === flightNo);
+      const itemLines: DraftLine[] = issued.map((u) => ({
+        itemId: u.itemId,
+        qty: "",
+        issuedQty: u.qty,
+        lineType: "item" as const,
+        reusable: false,
+      }));
+      const mealLines: DraftLine[] = issuedMeals.map((m) => ({
+        itemId: m.id,
+        qty: "",
+        issuedQty: m.items,
+        lineType: "meal" as const,
+        mealName: `${m.mealType} — ${m.menuStandard} (${m.serviceGroup})`,
+        reusable: false,
+      }));
+      const allLines = [...itemLines, ...mealLines];
+      setLines(allLines.length > 0 ? allLines : [emptyLine()]);
     } else {
       setLines([emptyLine()]);
     }
@@ -558,16 +676,30 @@ function ReturnCreate({
 
     for (let i = 0; i < lines.length; i++) {
       const l = lines[i];
-      const inv = inventoryItems.find((it) => it.id === l.itemId);
-      if (!inv) { toast.error(`Line ${i + 1}: select an item.`); return; }
-      const q = Number(l.qty);
-      if (q < 0) { toast.error(`Line ${i + 1}: quantity cannot be negative.`); return; }
-      if (!l.reusable && !l.nonReusableReason.trim()) {
-        toast.error(`Line ${i + 1}: reason is required when item is non-reusable.`); return;
+      if (l.lineType === "item") {
+        const inv = inventoryItems.find((it) => it.id === l.itemId);
+        if (!inv) { toast.error(`Line ${i + 1}: select an item.`); return; }
+      } else {
+        if (!l.itemId) { toast.error(`Line ${i + 1}: meal item missing.`); return; }
       }
+      const q = Number(l.qty);
+      if (isNaN(q) || q < 0) { toast.error(`Line ${i + 1}: invalid return quantity.`); return; }
+      if (!l.reusable && !l.nonReusableReason?.trim()) { toast.error(`Line ${i + 1}: justification required when not reusable.`); return; }
     }
 
     const returnLines: ReturnLine[] = lines.map((l) => {
+      if (l.lineType === "meal") {
+        return {
+          itemId: l.itemId,
+          itemName: l.mealName ?? l.itemId,
+          qty: Number(l.qty),
+          issuedQty: l.issuedQty,
+          uom: "Pcs",
+          reusable: l.reusable,
+          nonReusableReason: l.reusable ? undefined : l.nonReusableReason,
+          lineType: "meal" as const,
+        };
+      }
       const inv = inventoryItems.find((it) => it.id === l.itemId)!;
       return {
         itemId: inv.id,
@@ -576,7 +708,8 @@ function ReturnCreate({
         issuedQty: l.issuedQty,
         uom: inv.uom,
         reusable: l.reusable,
-        nonReusableReason: l.reusable ? undefined : l.nonReusableReason.trim(),
+        nonReusableReason: l.reusable ? undefined : l.nonReusableReason,
+        lineType: "item" as const,
       };
     });
 
@@ -590,11 +723,12 @@ function ReturnCreate({
       sector: selectedSchedule?.sector ?? "",
       returnedBy: isEdit ? editRecord!.returnedBy : CURRENT_USER,
       savedAt: isEdit ? editRecord!.savedAt : new Date().toISOString(),
+      forwardToAirportStore: true,
       lines: returnLines,
     });
 
     toast.success(
-      `${recordId} ${isEdit ? "updated" : "saved"} — ${returnLines.length} item${returnLines.length !== 1 ? "s" : ""} for ${flight}.`,
+      `${recordId} ${isEdit ? "updated" : "sent for approval"} — ${returnLines.length} line${returnLines.length !== 1 ? "s" : ""} for ${flight}.`,
     );
   };
 
@@ -667,10 +801,24 @@ function ReturnCreate({
 
             <div className="space-y-3">
               {lines.map((line, idx) => {
-                const inv = inventoryItems.find((it) => it.id === line.itemId);
+                const inv = line.lineType === "item" ? inventoryItems.find((it) => it.id === line.itemId) : undefined;
+                const uomLabel = line.lineType === "meal" ? "Pcs" : (inv?.uom ?? "—");
                 return (
-                  <div key={idx} className="border border-border rounded-md p-4 bg-muted/20 relative">
-                    {lines.length > 1 && (
+                  <div
+                    key={idx}
+                    className={cn(
+                      "border rounded-md p-4 bg-muted/20 relative",
+                      line.lineType === "meal" ? "border-indigo-200 bg-indigo-50/30" : "border-border",
+                    )}
+                  >
+                    {/* Line type badge */}
+                    <span className={cn(
+                      "absolute top-3 left-3 text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded",
+                      line.lineType === "meal" ? "bg-indigo-100 text-indigo-700" : "bg-muted text-muted-foreground",
+                    )}>
+                      {line.lineType === "meal" ? "Meal" : "Item"}
+                    </span>
+                    {lines.length > 1 && line.lineType === "item" && (
                       <button
                         className="absolute top-3 right-3 text-muted-foreground hover:text-destructive transition-colors"
                         onClick={() => removeLine(idx)}
@@ -679,30 +827,44 @@ function ReturnCreate({
                         <X className="h-4 w-4" />
                       </button>
                     )}
-                    <div className="grid grid-cols-1 md:grid-cols-4 gap-x-6 gap-y-3">
+                    <div className="grid grid-cols-1 md:grid-cols-5 gap-x-6 gap-y-3 mt-5">
+                      {/* Name / Item selector */}
                       <div className="md:col-span-2">
-                        <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item *</Label>
-                        <select
-                          value={line.itemId}
-                          onChange={(e) => updateLine(idx, { itemId: e.target.value })}
-                          className={selectCls}
-                        >
-                          <option value="">Select item…</option>
-                          {inventoryItems.map((it) => (
-                            <option key={it.id} value={it.id}>
-                              {it.name} ({it.id})
-                            </option>
-                          ))}
-                        </select>
+                        {line.lineType === "meal" ? (
+                          <>
+                            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Meal</Label>
+                            <div className="mt-1 h-9 flex items-center px-3 rounded-md border border-indigo-200 bg-indigo-50/50 text-sm font-medium text-indigo-800">
+                              {line.mealName ?? line.itemId}
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item *</Label>
+                            <select
+                              value={line.itemId}
+                              onChange={(e) => updateLine(idx, { itemId: e.target.value })}
+                              className={selectCls}
+                            >
+                              <option value="">Select item…</option>
+                              {inventoryItems.map((it) => (
+                                <option key={it.id} value={it.id}>
+                                  {it.name} ({it.id})
+                                </option>
+                              ))}
+                            </select>
+                          </>
+                        )}
                       </div>
+                      {/* Issued QTY */}
                       <div>
                         <Label className="text-xs uppercase tracking-wider text-muted-foreground">Issued QTY</Label>
                         <div className="mt-1 h-9 flex items-center px-3 rounded-md border border-input bg-muted/40 text-sm tabular-nums text-muted-foreground">
-                          {line.issuedQty != null ? `${line.issuedQty} ${inv?.uom ?? ""}` : "—"}
+                          {line.issuedQty != null ? `${line.issuedQty} ${uomLabel}` : "—"}
                         </div>
                       </div>
+                      {/* Return QTY */}
                       <div>
-                        <Label className="text-xs uppercase tracking-wider text-muted-foreground">Returned QTY *</Label>
+                        <Label className="text-xs uppercase tracking-wider text-muted-foreground">Return QTY *</Label>
                         <div className="mt-1 flex items-center gap-2">
                           <Input
                             type="number"
@@ -712,41 +874,40 @@ function ReturnCreate({
                             className="tabular-nums"
                             placeholder="0"
                           />
-                          <span className="text-xs text-muted-foreground whitespace-nowrap">
-                            {inv?.uom ?? "—"}
-                          </span>
+                          <span className="text-xs text-muted-foreground whitespace-nowrap">{uomLabel}</span>
                         </div>
                       </div>
-                      <div className="md:col-span-4">
-                        <Label className="text-xs uppercase tracking-wider text-muted-foreground">Reusable?</Label>
-                        <div className="mt-2 flex items-center gap-6 flex-wrap">
-                          <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                      {/* Reusable */}
+                      <div className={cn(line.reusable === false ? "md:col-span-2" : "")}>
+                        <Label className="text-xs uppercase tracking-wider text-muted-foreground">Reusable</Label>
+                        <div className="mt-2 flex items-center gap-4">
+                          <label className="flex items-center gap-1.5 cursor-pointer text-sm">
                             <input
                               type="radio"
                               name={`reusable-${idx}`}
-                              checked={line.reusable}
+                              checked={line.reusable === true}
                               onChange={() => updateLine(idx, { reusable: true, nonReusableReason: "" })}
                             />
                             Yes
                           </label>
-                          <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+                          <label className="flex items-center gap-1.5 cursor-pointer text-sm">
                             <input
                               type="radio"
                               name={`reusable-${idx}`}
-                              checked={!line.reusable}
+                              checked={line.reusable === false}
                               onChange={() => updateLine(idx, { reusable: false })}
                             />
                             No
                           </label>
-                          {!line.reusable && (
-                            <Input
-                              className="flex-1 min-w-[200px]"
-                              placeholder="Brief reason (required)"
-                              value={line.nonReusableReason}
-                              onChange={(e) => updateLine(idx, { nonReusableReason: e.target.value })}
-                            />
-                          )}
                         </div>
+                        {line.reusable === false && (
+                          <Input
+                            className="mt-2 text-xs"
+                            placeholder="Justification (required)"
+                            value={line.nonReusableReason ?? ""}
+                            onChange={(e) => updateLine(idx, { nonReusableReason: e.target.value })}
+                          />
+                        )}
                       </div>
                     </div>
                   </div>
@@ -755,10 +916,10 @@ function ReturnCreate({
             </div>
           </div>
 
-          {/* Bottom save button */}
+          {/* Bottom button */}
           <div className="flex justify-end mt-6 pt-4 border-t border-border">
             <Button onClick={save}>
-              <Save className="h-4 w-4 mr-1.5" /> {isEdit ? "Update Return" : "Save Return"}
+              <Save className="h-4 w-4 mr-1.5" /> {isEdit ? "Update Return" : "Send for Approval"}
             </Button>
           </div>
         </CardContent>
