@@ -1,10 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
 import { rowEditors } from "@/lib/row-editors";
-import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -22,7 +21,7 @@ import { KpiCard } from "@/components/common/KpiCard";
 import { toast } from "sonner";
 import { activeItems, warehouses as ALL_WAREHOUSES, inventory, allocateFefo } from "@/lib/sample-data";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
-import { useWorkflow, type WfTransferNote } from "@/lib/workflow-store";
+import { useWorkflow, type WfTransferNote, type StockDelta } from "@/lib/workflow-store";
 import { useArrivalFlash } from "@/lib/arrival-flash";
 
 
@@ -166,9 +165,36 @@ function wfTransferNoteToTransfer(wf: WfTransferNote): Transfer {
   };
 }
 
+// Dispatch-originated transfer notes (grnRef "Dispatch") are materialized into
+// the local, mutable rows instead of bridged read-only. A dispatched sheet has
+// physically left, so it enters as outbound "In Transit" (fully shipped): it is
+// listed as data on the Transfer Out tab and received on the In Transit tab.
+function wfDispatchNoteToTransfer(wf: WfTransferNote): Transfer {
+  return {
+    id: wf.id,
+    date: wf.date,
+    trRef: wf.demandRef,            // originating dispatch id (DSP-XXXX)
+    from: wf.from,
+    to: wf.to,
+    issuedBy: wf.issuedBy,
+    receivedBy: "—",
+    lines: wf.items.map((it, i) => ({
+      id: `${wf.id}-L${i + 1}`,
+      item: it.name,
+      uom: it.uom,
+      requestedQty: it.qty,
+      transferredQty: it.qty,
+    })),
+    status: "In Transit",
+    kind: "Outbound",
+    officeId: wf.officeId ?? "OFF-001",
+    warehouseId: wf.warehouseId ?? "WH-001",
+  };
+}
+
 export default function TransferPage() {
   useArrivalFlash();
-  const { transferNotes } = useWorkflow();
+  const { transferNotes, applyStockDeltas } = useWorkflow();
   const [rows, setRows] = usePersistedState<Transfer[]>("transfer-rows", SEED);
   const [view, setView] = useState<"list" | "create">("list");
   const [actionTransfer, setActionTransfer] = useState<Transfer | null>(null);
@@ -176,9 +202,24 @@ export default function TransferPage() {
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
 
+  // Dispatch-originated notes are materialized into the local mutable rows once
+  // (so they can be sent/received), rather than shown as read-only bridged rows.
+  useEffect(() => {
+    const dispatchNotes = transferNotes.filter((n) => n.grnRef === "Dispatch");
+    if (dispatchNotes.length === 0) return;
+    setRows((prev) => {
+      const have = new Set(prev.map((r) => r.id));
+      const toAdd = dispatchNotes.filter((n) => !have.has(n.id)).map(wfDispatchNoteToTransfer);
+      return toAdd.length ? [...toAdd, ...prev] : prev;
+    });
+  }, [transferNotes, setRows]);
+
   // Workflow-store transfer notes (MRP, item-issue allocations, etc.) bridged
-  // in for display. De-dupe against local Transfer ids.
-  const bridged: Transfer[] = transferNotes.map(wfTransferNoteToTransfer);
+  // in for display. Dispatch notes are excluded — they're materialized above.
+  // De-dupe against local Transfer ids.
+  const bridged: Transfer[] = transferNotes
+    .filter((n) => n.grnRef !== "Dispatch")
+    .map(wfTransferNoteToTransfer);
   const localIds = new Set(rows.map((r) => r.id));
   const combined = [
     ...bridged.filter((b) => !localIds.has(b.id)),
@@ -203,21 +244,80 @@ export default function TransferPage() {
   const closeAction = () => setActionTransfer(null);
 
   const applyReceive = (id: string, qty: Record<string, number>) => {
-    setRows((prev) => prev.map((r) => {
-      if (r.id !== id) return r;
-      const updatedLines = r.lines.map((l) => {
-        const received = Math.max(0, Math.min(l.transferredQty, qty[l.id] ?? l.transferredQty));
-        return { ...l, transferredQty: received };
-      });
-      return {
-        ...r,
-        status: "Completed",
-        lines: updatedLines,
-        receivedBy: r.receivedBy === "—" ? "(received)" : r.receivedBy,
+    const target = rows.find((r) => r.id === id);
+    if (!target) { closeAction(); return; }
+
+    // Per-line accepted (clamped to what's in transit) and what remains in transit.
+    const split = target.lines.map((l) => {
+      const received = Math.max(0, Math.min(l.transferredQty, qty[l.id] ?? l.transferredQty));
+      return { line: l, received, remaining: l.transferredQty - received };
+    });
+    const totalReceived = split.reduce((s, x) => s + x.received, 0);
+    const totalRemaining = split.reduce((s, x) => s + x.remaining, 0);
+    if (totalReceived <= 0) { toast.error("Enter a quantity to receive."); return; }
+
+    const now = new Date().toISOString().slice(0, 16).replace("T", " ");
+    // The accepted portion becomes a Completed (Received) record.
+    const receivedLines: TransferLine[] = split
+      .filter((x) => x.received > 0)
+      .map((x) => ({ ...x.line, requestedQty: x.received, transferredQty: x.received }));
+
+    setRows((prev) => {
+      if (totalRemaining <= 0) {
+        // Fully received — the original record itself becomes Completed.
+        return prev.map((r) =>
+          r.id === id
+            ? { ...r, status: "Completed", date: now, lines: receivedLines,
+                receivedBy: r.receivedBy === "—" ? "(received)" : r.receivedBy }
+            : r);
+      }
+      // Partial — the original keeps its id and stays In Transit holding only the
+      // remaining (un-received) quantity, so it isn't lost; the accepted portion
+      // is split out as a separate Completed record.
+      const remainingRec: Transfer = {
+        ...target,
+        status: "In Transit",
+        lines: split
+          .filter((x) => x.remaining > 0)
+          .map((x) => ({ ...x.line, requestedQty: x.remaining, transferredQty: x.remaining })),
       };
-    }));
-    const totalReceived = Object.values(qty).reduce((s, n) => s + (Number(n) || 0), 0);
-    toast.success(`${id} received — ${totalReceived} unit${totalReceived === 1 ? "" : "s"} accepted.`);
+      const receivedRec: Transfer = {
+        ...target,
+        id: `${target.id}-RCV-${now.replace(/[^0-9]/g, "").slice(-6)}`,
+        date: now,
+        status: "Completed",
+        receivedBy: target.receivedBy === "—" ? "(received)" : target.receivedBy,
+        lines: receivedLines,
+      };
+      return prev.flatMap((r) => (r.id === id ? [remainingRec, receivedRec] : [r]));
+    });
+
+    // Close the inventory loop for dispatch-originated transfers (trRef = the
+    // DSP-XXXX id): the accepted meals land in the destination warehouse as an
+    // inbound stock movement, netting against the negative delta the dispatch
+    // posted at the source. Partial receipts post only what was accepted; the
+    // remainder posts when it's received later. Regular transfers are untouched.
+    if (target.trRef.startsWith("DSP-")) {
+      const dest = tagsForLocation(target.to);
+      const deltas: StockDelta[] = split
+        .filter((x) => x.received > 0)
+        .map((x) => ({
+          itemId: x.line.item,
+          delta: x.received,
+          date: now,
+          reference: id,
+          officeId: dest.officeId,
+          warehouseId: dest.warehouseId,
+          label: "Transfer In",
+        }));
+      if (deltas.length > 0) applyStockDeltas(deltas);
+    }
+
+    toast.success(
+      totalRemaining > 0
+        ? `${id} — ${totalReceived} received; ${totalRemaining} still in transit.`
+        : `${id} received — ${totalReceived} unit${totalReceived === 1 ? "" : "s"} accepted.`,
+    );
     closeAction();
   };
 
@@ -542,7 +642,9 @@ function TransferTabs({
   onReturn: (id: string) => void;
   editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
 }) {
-  const transferOut    = data.filter((r) => r.kind === "Outbound" && r.status === "Pending");
+  // Transfer Out lists every active outbound transfer (pending or shipped) as a
+  // data log with the quantity breakdown — receipt happens on the In Transit tab.
+  const transferOut    = data.filter((r) => r.kind === "Outbound" && (r.status === "Pending" || r.status === "In Transit"));
   const inTransit      = data.filter((r) => r.status === "In Transit");
   const returns        = data.filter((r) => r.kind === "Return");
   const received       = data.filter((r) => r.kind === "Outbound" && r.status === "Completed");
@@ -568,7 +670,7 @@ function TransferTabs({
         </TabsTrigger>
       </TabsList>
 
-      <TabsContent value="out"      className="mt-0"><TransferList data={transferOut} emptyHint="No outgoing transfers waiting to dispatch." editors={editors} /></TabsContent>
+      <TabsContent value="out"      className="mt-0"><TransferList data={transferOut} qtyBreakdown noActions emptyHint="No outgoing transfers." editors={editors} /></TabsContent>
       <TabsContent value="transit"  className="mt-0">
         <TransferList
           data={inTransit}
@@ -584,15 +686,101 @@ function TransferTabs({
   );
 }
 
+// Rich read-only detail for the row View modal — replaces the generic field
+// dump so the line items (with quantities) are shown rather than "N items".
+function TransferDetail({ t }: { t: Transfer }) {
+  const field = (label: string, value: ReactNode) => (
+    <div className="rounded-lg border border-border px-3 py-2 bg-muted/30">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="text-sm font-medium mt-0.5 break-words">{value || "—"}</div>
+    </div>
+  );
+  const totalReq = t.lines.reduce((s, l) => s + l.requestedQty, 0);
+  const totalTrf = t.lines.reduce((s, l) => s + l.transferredQty, 0);
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        {field("Transfer #", t.id)}
+        {field("Date", t.date)}
+        {field("TR Ref", t.trRef)}
+        {field("Kind", t.kind)}
+        {field("Route", <span className="inline-flex items-center gap-1.5">{t.from}<MoveRight className="h-3 w-3 text-muted-foreground" />{t.to}</span>)}
+        {field("Status", t.status)}
+        {field("Issued By", t.issuedBy)}
+        {field("Received By", t.receivedBy)}
+        {field("Office / Warehouse", <LocationCell officeId={t.officeId} warehouseId={t.warehouseId} />)}
+      </div>
+      <div>
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">Items ({t.lines.length})</div>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Item</TableHead>
+              <TableHead>UoM</TableHead>
+              <TableHead className="text-right">Requested</TableHead>
+              <TableHead className="text-right">Transferred</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {t.lines.map((l) => (
+              <TableRow key={l.id}>
+                <TableCell className="font-medium">{l.item}</TableCell>
+                <TableCell>{l.uom}</TableCell>
+                <TableCell className="text-right tabular-nums">{l.requestedQty}</TableCell>
+                <TableCell className="text-right tabular-nums">{l.transferredQty}</TableCell>
+              </TableRow>
+            ))}
+            <TableRow>
+              <TableCell className="font-semibold">Total</TableCell>
+              <TableCell />
+              <TableCell className="text-right tabular-nums font-semibold">{totalReq}</TableCell>
+              <TableCell className="text-right tabular-nums font-semibold">{totalTrf}</TableCell>
+            </TableRow>
+          </TableBody>
+        </Table>
+      </div>
+    </div>
+  );
+}
+
 function TransferList({
-  data, emptyHint, onReceive, onReturn, editors,
+  data, emptyHint, qtyBreakdown, noActions, onReceive, onReturn, editors,
 }: {
   data: Transfer[];
   emptyHint?: string;
+  /** Transfer Out: show Total / Received / Return / In Transit quantity columns
+   *  instead of the compact Items column. */
+  qtyBreakdown?: boolean;
+  /** Render the list as a read-only data log (no Actions column). */
+  noActions?: boolean;
   onReceive?: (id: string) => void;
   onReturn?: (id: string) => void;
   editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
 }) {
+  const sumReq = (r: Transfer) => r.lines.reduce((s, l) => s + l.requestedQty, 0);
+  const sumDone = (r: Transfer) => r.lines.reduce((s, l) => s + l.transferredQty, 0);
+  const num = (n: number) => <span className="text-xs tabular-nums">{n.toFixed(2)}</span>;
+  const qtyCols: Column<Transfer>[] = [
+    { key: "totalQty",     header: "Total Qty",     sortable: false, render: (r) => num(sumReq(r)) },
+    { key: "receivedQty",  header: "Received Qty",  sortable: false, render: (r) => num(r.status === "Completed" ? sumDone(r) : 0) },
+    { key: "returnQty",    header: "Return Qty",    sortable: false, render: (r) => num(r.kind === "Return" ? sumReq(r) : 0) },
+    { key: "inTransitQty", header: "In Transit Qty", sortable: false, render: (r) => num(r.status === "In Transit" ? sumDone(r) : 0) },
+  ];
+  const itemsCol: Column<Transfer> = {
+    key: "lines",
+    header: "Items",
+    className: "text-right",
+    render: (r) => {
+      const totalReq = r.lines.reduce((s, l) => s + l.requestedQty, 0);
+      const totalDone = r.lines.reduce((s, l) => s + l.transferredQty, 0);
+      return (
+        <span className="text-xs tabular-nums">
+          {totalDone}/{totalReq}{" "}
+          <span className="text-muted-foreground">({r.lines.length} item{r.lines.length > 1 ? "s" : ""})</span>
+        </span>
+      );
+    },
+  };
   const cols: Column<Transfer>[] = [
     {
       key: "id",
@@ -636,22 +824,7 @@ function TransferList({
     },
     { key: "issuedBy", header: "Issued By" },
     { key: "receivedBy", header: "Received By" },
-    {
-      key: "lines",
-      header: "Items",
-      className: "text-right",
-      render: (r) => {
-        const totalReq = r.lines.reduce((s, l) => s + l.requestedQty, 0);
-        const totalDone = r.lines.reduce((s, l) => s + l.transferredQty, 0);
-        return (
-          <span className="text-xs tabular-nums">
-            {totalDone}/{totalReq}{" "}
-            <span className="text-muted-foreground">({r.lines.length} item{r.lines.length > 1 ? "s" : ""})</span>
-          </span>
-        );
-      },
-    },
-    { key: "status", header: "Status", render: (r) => <StatusBadge status={r.status} /> },
+    ...(qtyBreakdown ? qtyCols : [itemsCol]),
   ];
   if (data.length === 0 && emptyHint) {
     return (
@@ -669,7 +842,7 @@ function TransferList({
       columns={cols}
       searchKeys={["id", "trRef", "from", "to", "issuedBy", "receivedBy", "status"]}
       selectable={false}
-      actions={(r) => {
+      actions={noActions ? undefined : (r) => {
         if (onReceive && onReturn && r.status === "In Transit") {
           return (
             <div className="flex items-center gap-1.5">
@@ -696,6 +869,7 @@ function TransferList({
           <RowActions
             row={r}
             actions={["view", "edit", "print"]}
+            detail={<TransferDetail t={r} />}
             onSave={editors.onSave}
             editDetail={({ save, close }) => <TransferFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
           />

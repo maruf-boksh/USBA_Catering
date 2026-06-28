@@ -5,14 +5,14 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import {
   Truck, Package, Plus, AlertTriangle, Bell, MoreHorizontal,
-  Eye, Croissant, Pill, ChefHat, ShieldCheck, Download,
+  Eye, Croissant, Pill, ShieldCheck, Download,
   CheckCircle2, ThermometerSun, PlaneLanding, User, Clock,
 } from "lucide-react";
-import { flights, meals } from "@/lib/sample-data";
+import { flights, meals, activeWarehouses } from "@/lib/sample-data";
 import {
   dayFromDate, parseMealQty, resolveCrewDish, resolveSpecialDish,
 } from "@/lib/meal-planning-data";
-import { useFlightOrders, type FlightOrder } from "@/lib/flight-orders-store";
+import { useFlightOrders, getOrderAmendments, type FlightOrder } from "@/lib/flight-orders-store";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import {
@@ -28,7 +28,7 @@ import { useWorkflow } from "@/lib/workflow-store";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type DispatchStatus = "Preparing" | "Prepared" | "Ready For QC" | "Ready For Dispatch" | "Dispatched";
+export type DispatchStatus = "Preparing" | "Prepared" | "Ready For QC" | "Ready For Dispatch" | "Dispatched";
 
 type StatusLog = { status: DispatchStatus; by: string; date: string; time: string };
 
@@ -91,6 +91,15 @@ export type DispatchRecord = {
   trail: StatusLog[];
   dispatchedBy?: string;
   notifiedAirport?: boolean;
+  /** Inventory warehouses the dispatch moves meals between. Picked in the
+   *  Configure New Dispatch modal; on "Dispatched" a Transfer Note is raised
+   *  from → to so the movement lands in the Inventory → Transfer module. */
+  fromWarehouseId?: string;
+  toWarehouseId?: string;
+  /** ISO time this dispatch was configured. Used to detect LMC staleness — a
+   *  source order amended AFTER this is flagged for re-sync. Absent on legacy/
+   *  seed records (never flagged). */
+  builtAt?: string;
   detail: DispatchDetail;
   sections: FlightSection[];
   dynamicItems: DynamicItem[];
@@ -436,7 +445,7 @@ export const INITIAL_RECORDS: DispatchRecord[] = [
 export default function Dispatch() {
   useArrivalFlash();
   const navigate = useNavigate();
-  const { applyStockDeltas, productionEntries, qcClearedFlights, dispatchApprovals } = useWorkflow();
+  const { applyStockDeltas, addTransferNote, productionEntries, qcClearedFlights, dispatchApprovals } = useWorkflow();
   const flightOrders = useFlightOrders();
   // ── Dispatch records state ──────────────────────────────────────────────────
   const [records, setRecords] = usePersistedState<DispatchRecord[]>("dispatch-records", INITIAL_RECORDS);
@@ -476,6 +485,12 @@ export default function Dispatch() {
   const [configDate, setConfigDate]         = useState("");
   const [configDepTime, setConfigDepTime]   = useState("");
   const [configFlight, setConfigFlight]     = useState("");
+  // Warehouse the meals are dispatched FROM (kitchen/cold store) and TO. On
+  // "Dispatched" these drive the Transfer Note raised into the Inventory module.
+  const DEFAULT_FROM_WH = "WH-003"; // Hot Kitchen
+  const DEFAULT_TO_WH   = "WH-001"; // Central Warehouse
+  const [configFromWarehouse, setConfigFromWarehouse] = useState(DEFAULT_FROM_WH);
+  const [configToWarehouse, setConfigToWarehouse]     = useState(DEFAULT_TO_WH);
   const [configPaxLines, setConfigPaxLines] = useState<CfgPaxLine[]>([
     { id: "p1", itemName: "", percent: 60, qty: 0 },
     { id: "p2", itemName: "", percent: 40, qty: 0 },
@@ -544,15 +559,30 @@ export default function Dispatch() {
     [selectedOrder, configFlight]
   );
 
-  // The return leg of an order's round trip: the other leg of the same Order #
-  // with the opposite direction. Prefer the one whose sector is the exact reverse
-  // of the selected sector; else the first opposite-direction leg.
+  // The return leg of an order's round trip. An explicit Trip Ref (pairId, set on
+  // bulk upload) is the authoritative link — it disambiguates same-sector trips
+  // that share one date's Order #. Without it, fall back to same Order # + the
+  // opposite direction, preferring the exact reverse sector.
   const findReturnLeg = (order: FlightOrder | null | undefined): FlightOrder | null => {
-    if (!order?.orderNo) return null;
+    if (!order) return null;
     const opp: LegDirection = order.direction === "Return" ? "Outbound" : "Return";
     // Crew orders can now share a flight order's Order #, so match the same
     // order TYPE — a flight's return leg is a flight, never the crew order.
     const orderKind = order.orderType ?? "flight";
+    const rev = reverseSector(order.sector);
+    // 1) Explicit pair key wins.
+    if (order.pairId) {
+      const paired = flightOrders.filter(
+        (o) =>
+          o.pairId === order.pairId &&
+          (o.orderType ?? "flight") === orderKind &&
+          o.flight !== order.flight &&
+          o.direction === opp,
+      );
+      if (paired.length > 0) return paired.find((o) => o.sector === rev) ?? paired[0];
+    }
+    // 2) Fall back to Order # + opposite direction (+ reverse-sector preference).
+    if (!order.orderNo) return null;
     const legs = flightOrders.filter(
       (o) =>
         o.orderNo === order.orderNo &&
@@ -561,7 +591,6 @@ export default function Dispatch() {
         o.direction === opp,
     );
     if (legs.length === 0) return null;
-    const rev = reverseSector(order.sector);
     return legs.find((o) => o.sector === rev) ?? legs[0];
   };
   const returnOrder = useMemo<FlightOrder | null>(
@@ -949,6 +978,8 @@ export default function Dispatch() {
     setConfigDate("");
     setConfigDepTime("");
     setConfigAdditional([]);
+    setConfigFromWarehouse(DEFAULT_FROM_WH);
+    setConfigToWarehouse(DEFAULT_TO_WH);
     resetFlightFields();
   };
 
@@ -1000,6 +1031,8 @@ export default function Dispatch() {
       toast.error(`Return leg ${returnOrder.flight} is already configured — untick "Dispatch the return sector together" to dispatch ${configFlight} alone.`);
       return;
     }
+    if (!configFromWarehouse || !configToWarehouse) { toast.error("Please select both a from and to warehouse."); return; }
+    if (configFromWarehouse === configToWarehouse) { toast.error("From and to warehouse must be different."); return; }
     // Soft warning only — proceed even if some meals aren't produced/QC-passed.
     if (!productionReady) {
       toast.warning(`Dispatching with meals not yet produced & QC-passed: ${blockingMeals.join(", ")}.`);
@@ -1125,6 +1158,8 @@ export default function Dispatch() {
             ? {
                 ...r,
                 flightNos: [...r.flightNos, ...legFlights],
+                fromWarehouseId: r.fromWarehouseId ?? configFromWarehouse,
+                toWarehouseId: r.toWarehouseId ?? configToWarehouse,
                 sections: [...r.sections, ...newSections],
                 detail: {
                   ...r.detail,
@@ -1147,6 +1182,9 @@ export default function Dispatch() {
         depTime: configDepTime,
         kitchenName: "Flight Kitchen A",
         flightNos: legFlights,
+        fromWarehouseId: configFromWarehouse,
+        toWarehouseId: configToWarehouse,
+        builtAt: new Date().toISOString(),
         status: "Preparing",
         trail: [{ status: "Preparing", by: "System", date: dateStr, time: timeStr }],
         detail: {
@@ -1218,6 +1256,46 @@ export default function Dispatch() {
         }));
       if (outDeltas.length > 0) applyStockDeltas(outDeltas);
 
+      // Connect to the Inventory → Transfer module: a dispatched sheet moves
+      // its meals out of the source warehouse, so raise one Transfer Note from
+      // the dispatch's From → To warehouse. It enters the Transfer list as an
+      // outbound "Pending" transfer (Transfer Out tab); the destination then
+      // sends it in transit and receives it through the normal flow.
+      const fromWh =
+        activeWarehouses.find((w) => w.id === dispatchingRecord.fromWarehouseId) ??
+        activeWarehouses.find((w) => w.id === "WH-003");
+      const toWh =
+        activeWarehouses.find((w) => w.id === dispatchingRecord.toWarehouseId) ??
+        activeWarehouses.find((w) => w.id === "WH-001");
+      const mealAgg = new Map<string, { qty: number; uom: string }>();
+      for (const r of dispatchedRows) {
+        if (r.qty <= 0) continue;
+        const prev = mealAgg.get(r.mealName);
+        mealAgg.set(r.mealName, { qty: (prev?.qty ?? 0) + r.qty, uom: "Meal" });
+      }
+      const tnItems = [...mealAgg.entries()].map(([name, v], i) => ({
+        id: `${dispatchingRecord.id}-I${i + 1}`,
+        name,
+        qty: v.qty,
+        uom: v.uom,
+      }));
+      if (fromWh && toWh && tnItems.length > 0) {
+        addTransferNote({
+          id: `TRF-${dispatchingRecord.id}`,
+          demandRef: dispatchingRecord.id,
+          grnRef: "Dispatch",
+          items: tnItems,
+          from: fromWh.name,
+          to: toWh.name,
+          issuedBy: execName,
+          date: `${dispatchingRecord.date} ${timeStr}`,
+          status: "Pending",
+          officeId: fromWh.officeId,
+          warehouseId: fromWh.id,
+        });
+        toast.info(`Transfer ${`TRF-${dispatchingRecord.id}`} created in Transfer Out: ${fromWh.name} → ${toWh.name} (${tnItems.length} item${tnItems.length > 1 ? "s" : ""}).`);
+      }
+
       const updatedRows = packagingRows.map((r) => dispatchedFlightSet.has(r.flight) ? { ...r, packagingStatus: "Dispatched" as PackagingStatus } : r);
       setPackagingRows(updatedRows);
     }
@@ -1238,6 +1316,135 @@ export default function Dispatch() {
     );
     setNotifyOpen(false);
     setFormOpen(false);
+  };
+
+  // ── LMC downstream impact: a dispatch is built from a snapshot of the order's
+  // PAX. If the order is later amended, the snapshot goes stale. Compare each
+  // leg's snapshot pax (sum of its paxLines) against the source order's current
+  // pax and surface the deltas so the dispatcher can re-sync (or recall).
+  type ImpactField = { label: string; was: string | number; now: string | number };
+  type RecordImpact = { flight: string; fields: ImpactField[] };
+  const normTime = (t: string | undefined) => (t ?? "").trim().slice(0, 5);
+  const recordImpacts = (rec: DispatchRecord): RecordImpact[] => {
+    // Only records configured with a build time can go stale; legacy/seed
+    // records (no builtAt) are never flagged — avoids false positives where a
+    // seed snapshot simply never matched its order.
+    if (!rec.builtAt) return [];
+    const out: RecordImpact[] = [];
+    for (const sec of rec.sections) {
+      const order =
+        flightOrders.find((o) => o.flight === sec.flightNo && o.date === rec.date && o.orderType !== "crew") ??
+        flightOrders.find((o) => o.flight === sec.flightNo && o.orderType !== "crew");
+      if (!order) continue;
+      // Which fields were amended AFTER this dispatch was built? We surface every
+      // high-impact change (not just PAX) so a last-minute ETD/date/special-meal
+      // edit is visible to the dispatcher, not silently missed.
+      const amendedFields = new Set(
+        getOrderAmendments(order.id)
+          .filter((a) => a.at > rec.builtAt!)
+          .flatMap((a) => a.changes.map((c) => c.field)),
+      );
+      if (amendedFields.size === 0) continue;
+      const fields: ImpactField[] = [];
+      const snapPax = sec.paxLines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
+      if (snapPax !== order.pax) fields.push({ label: "PAX", was: snapPax, now: order.pax });
+      if (amendedFields.has("specialMeals")) {
+        const snapSpec = (sec.vgml || 0) + (sec.chml || 0) + (sec.spml || 0);
+        if (snapSpec !== order.specialMeals) fields.push({ label: "Special Meals", was: snapSpec, now: order.specialMeals });
+      }
+      if (amendedFields.has("etd") && normTime(rec.depTime) !== normTime(order.etd))
+        fields.push({ label: "ETD", was: rec.depTime, now: order.etd });
+      if (amendedFields.has("date") && rec.date !== order.date)
+        fields.push({ label: "Date", was: rec.date, now: order.date });
+      if (fields.length) out.push({ flight: sec.flightNo, fields });
+    }
+    return out;
+  };
+
+  // Re-sync a dispatch record to its source orders' current PAX: re-split each
+  // leg's paxLines (keeping dish names + percentages), refresh the kitchen total
+  // and the linked PAX packaging-row quantities. Crew/special are untouched.
+  const resyncRecord = (rec: DispatchRecord) => {
+    const splitPax = (lines: PaxLine[], pax: number): PaxLine[] => {
+      if (lines.length === 0) return lines;
+      let assigned = 0;
+      return lines.map((l, i) => {
+        const qty = i === lines.length - 1 ? pax - assigned : Math.round((pax * l.percent) / 100);
+        assigned += qty;
+        return { ...l, qty: Math.max(0, qty) };
+      });
+    };
+    // Re-scale the special-meal breakdown (veg/child/special) to a new total,
+    // keeping each component's share. When the snapshot total was 0 we can't
+    // infer a split, so the whole new total lands in `spml`.
+    const scaleSpecial = (sec: FlightSection, newTotal: number) => {
+      const old = (sec.vgml || 0) + (sec.chml || 0) + (sec.spml || 0);
+      if (old === newTotal) return sec;
+      if (old === 0) return { ...sec, spml: newTotal };
+      const vgml = Math.round((newTotal * (sec.vgml || 0)) / old);
+      const chml = Math.round((newTotal * (sec.chml || 0)) / old);
+      const spml = newTotal - vgml - chml;
+      return { ...sec, vgml, chml, spml: Math.max(0, spml) };
+    };
+    const newSections = rec.sections.map((sec) => {
+      const order =
+        flightOrders.find((o) => o.flight === sec.flightNo && o.date === rec.date && o.orderType !== "crew") ??
+        flightOrders.find((o) => o.flight === sec.flightNo && o.orderType !== "crew");
+      if (!order) return sec;
+      let next = { ...sec, paxLines: splitPax(sec.paxLines, order.pax) };
+      next = scaleSpecial(next, order.specialMeals);
+      return next;
+    });
+    // Pull the record's schedule forward to the (possibly amended) source ETD/date.
+    const schedOrder =
+      flightOrders.find((o) => rec.flightNos.includes(o.flight) && o.orderType !== "crew");
+    const hotTotal = newSections.reduce((s, sec) => s + sec.paxLines.reduce((a, l) => a + l.qty, 0), 0);
+    const newDepTime = schedOrder ? schedOrder.etd : rec.depTime;
+    const newDate = schedOrder ? schedOrder.date : rec.date;
+    setRecords((prev) => prev.map((r) => r.id === rec.id ? {
+      ...r,
+      date: newDate,
+      depTime: newDepTime,
+      sections: newSections,
+      detail: { ...r.detail, flightKitchen: {
+        ...r.detail.flightKitchen, totalMeals: hotTotal,
+        lunch: Math.floor(hotTotal * 0.6), breakfast: Math.floor(hotTotal * 0.4),
+      } },
+    } : r));
+    // Update the PAX packaging rows (non crew/special) for this dispatch, plus
+    // re-scale Special Meal rows to each flight's new special-meal total.
+    const newQtyByKey = new Map<string, number>();
+    const newSpecByFlight = new Map<string, number>();
+    for (const sec of newSections) {
+      for (const l of sec.paxLines) newQtyByKey.set(`${sec.flightNo}|${l.itemName}`, l.qty);
+      newSpecByFlight.set(sec.flightNo, (sec.vgml || 0) + (sec.chml || 0) + (sec.spml || 0));
+    }
+    // Special rows are distributed proportionally to their share of the flight's
+    // old special total (computed from the rows themselves so it stays in sync).
+    const oldSpecByFlight = new Map<string, number>();
+    for (const row of packagingRows) {
+      if (row.dspRef !== rec.id || row.section !== "Special Meal") continue;
+      oldSpecByFlight.set(row.flight, (oldSpecByFlight.get(row.flight) || 0) + row.qty);
+    }
+    setPackagingRows((prev) => prev.map((row) => {
+      if (row.dspRef !== rec.id) return row;
+      if (row.section === "Crew Meal") return row;
+      if (row.section === "Special Meal") {
+        const oldTot = oldSpecByFlight.get(row.flight) || 0;
+        const newTot = newSpecByFlight.get(row.flight);
+        if (newTot == null || oldTot === newTot) return row;
+        const q = oldTot === 0 ? newTot : Math.round((newTot * row.qty) / oldTot);
+        return { ...row, qty: Math.max(0, q), date: newDate, depTime: newDepTime };
+      }
+      const q = newQtyByKey.get(`${row.flight}|${row.mealName}`);
+      return q == null ? row : { ...row, qty: q, date: newDate, depTime: newDepTime };
+    }));
+    const impacts = recordImpacts(rec);
+    const summary = impacts
+      .map((i) => `${i.flight}: ${i.fields.map((f) => `${f.label} ${f.was}→${f.now}`).join(", ")}`)
+      .join(" · ");
+    toast.success(`${rec.id} re-synced to current orders${summary ? ` (${summary})` : ""}.`);
+    setViewRecord((cur) => cur && cur.id === rec.id ? { ...cur, date: newDate, depTime: newDepTime, sections: newSections } : cur);
   };
 
   // Derive a flight's check-sheet section from real system data:
@@ -1796,6 +2003,14 @@ export default function Dispatch() {
                               ) : (
                                 <span className="text-xs font-mono font-semibold text-foreground whitespace-nowrap">{dspId}</span>
                               )}
+                              {dspHasRecord && (() => {
+                                const rec = records.find((r) => r.id === dspId);
+                                return rec && recordImpacts(rec).length > 0 ? (
+                                  <span className="mt-1 flex w-fit items-center gap-1 rounded bg-rose-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-rose-700" title="Source order amended since configured — open to re-sync">
+                                    <AlertTriangle className="h-2.5 w-2.5" /> LMC
+                                  </span>
+                                ) : null;
+                              })()}
                               {isRoundTrip && (
                                 <span className="mt-1 block text-[10px] font-medium text-amber-600 whitespace-nowrap">Round trip · {run.span} legs</span>
                               )}
@@ -2298,13 +2513,58 @@ export default function Dispatch() {
               </div>
             </div>
 
-            {/* Auto-loaded order summary */}
-            {selectedOrder && (
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 rounded-md border border-slate-200 bg-slate-50/70 p-3 text-xs">
-                <div><div className="text-muted-foreground">Sector</div><div className="font-semibold text-slate-700">{selectedSector || "—"}</div></div>
-                <div><div className="text-muted-foreground">Departure (ETD)</div><div className="font-semibold text-slate-700">{selectedOrder.etd}</div></div>
-                <div><div className="text-muted-foreground">PAX</div><div className="font-semibold text-slate-700">{selectedOrder.pax}</div></div>
-                <div><div className="text-muted-foreground">Crew</div><div className="font-semibold text-slate-700">{selectedOrder.crew}</div></div>
+            {/* Inventory warehouses — meals move From → To. On "Dispatched" a
+                Transfer Note is raised between these into the Inventory module. */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <Label className="text-xs font-semibold">From Warehouse</Label>
+                <select
+                  value={configFromWarehouse}
+                  onChange={(e) => setConfigFromWarehouse(e.target.value)}
+                  className="h-9 mt-1 w-full rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  {activeWarehouses.map((w) => (
+                    <option key={w.id} value={w.id}>{w.name} ({w.code})</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <Label className="text-xs font-semibold">To Warehouse</Label>
+                <select
+                  value={configToWarehouse}
+                  onChange={(e) => setConfigToWarehouse(e.target.value)}
+                  className="h-9 mt-1 w-full rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  {activeWarehouses.map((w) => (
+                    <option key={w.id} value={w.id}>{w.name} ({w.code})</option>
+                  ))}
+                </select>
+                {configFromWarehouse === configToWarehouse && (
+                  <p className="text-xs text-amber-600 mt-1">From and to warehouse must be different.</p>
+                )}
+              </div>
+            </div>
+
+            {/* Auto-loaded order summary — one card per leg (Outbound first), so a
+                bundled round trip shows BOTH sectors, each labelled by flight. */}
+            {selectedOrder && summaryLegs.length > 0 && (
+              <div className="space-y-2">
+                {summaryLegs.map((l) => (
+                  <div key={l.order.id} className="rounded-md border border-slate-200 bg-slate-50/70 p-3 text-xs">
+                    <div className="mb-2 flex items-center gap-1.5">
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide ${l.order.direction === "Return" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
+                        {l.order.direction}
+                      </span>
+                      <span className="font-semibold text-slate-700">{l.order.flight}</span>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <div><div className="text-muted-foreground">Sector</div><div className="font-semibold text-slate-700">{l.order.sector || "—"}</div></div>
+                      <div><div className="text-muted-foreground">Departure (ETD)</div><div className="font-semibold text-slate-700">{l.order.etd}</div></div>
+                      <div><div className="text-muted-foreground">PAX</div><div className="font-semibold text-slate-700">{l.order.pax}</div></div>
+                      <div><div className="text-muted-foreground">Crew</div><div className="font-semibold text-slate-700">{l.order.crew}</div></div>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
 
@@ -2554,8 +2814,37 @@ export default function Dispatch() {
               // than a standalone figure stored on the record.
               const linkedRows = packagingRows.filter((r) => r.dspRef === viewRecord.id);
               const mealsTotal = linkedRows.reduce((s, r) => s + r.qty, 0);
+              const impacts = recordImpacts(viewRecord);
+              const dispatched = viewRecord.status === "Dispatched";
               return (
                 <>
+                  {impacts.length > 0 && (
+                    <div className="rounded-lg border border-rose-300 bg-rose-50/70 px-3 py-2.5">
+                      <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-rose-700 font-semibold">
+                        <AlertTriangle className="h-3.5 w-3.5" /> Order amended since this dispatch was built
+                      </div>
+                      <ul className="mt-1 space-y-0.5 text-xs text-rose-900">
+                        {impacts.map((im) => (
+                          <li key={im.flight} className="tabular-nums">
+                            <span className="font-medium">{im.flight}</span> ·{" "}
+                            {im.fields.map((f, i) => (
+                              <span key={f.label}>
+                                {i > 0 ? <span className="text-rose-400"> · </span> : null}
+                                {f.label} <span className="line-through text-rose-400">{f.was}</span> → <span className="font-semibold">{f.now}</span>
+                              </span>
+                            ))}
+                          </li>
+                        ))}
+                      </ul>
+                      {dispatched ? (
+                        <p className="mt-1.5 text-[11px] text-rose-700">Already dispatched — meals have left the kitchen. Coordinate a recall/top-up with the airport.</p>
+                      ) : (
+                        <Button size="sm" className="mt-2 h-7 px-2.5 text-xs" onClick={() => resyncRecord(viewRecord)}>
+                          <ThermometerSun className="h-3 w-3 mr-1" /> Re-sync to current orders
+                        </Button>
+                      )}
+                    </div>
+                  )}
                   <div>
                     <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-3">Status Trail</div>
                     <div className="space-y-3">
@@ -2583,8 +2872,7 @@ export default function Dispatch() {
 
                   <div>
                     <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-slate-500 mb-2">
-                      <ChefHat className="h-3.5 w-3.5" /> Flight Kitchen
-                      <span className="ml-auto font-semibold text-slate-700 normal-case tracking-normal">{mealsTotal.toLocaleString()} total meals</span>
+                      <span className="font-semibold text-slate-700 normal-case tracking-normal">{mealsTotal.toLocaleString()} total meals</span>
                     </div>
                     {linkedRows.length === 0 ? (
                       <div className="rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground">No linked packaging rows.</div>

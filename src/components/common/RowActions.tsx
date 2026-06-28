@@ -126,6 +126,88 @@ function buildUpdated(
   return out;
 }
 
+/** An array of plain objects — rendered as a nested table in the View modal. */
+function isArrayOfObjects(v: unknown): v is Record<string, unknown>[] {
+  return (
+    Array.isArray(v) &&
+    v.length > 0 &&
+    v.every((x) => x !== null && typeof x === "object" && !Array.isArray(x))
+  );
+}
+
+/** A non-array object — rendered as its own key/value grid in the View modal. */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+/** Union of keys across rows, in first-seen order, for nested-table columns. */
+function unionKeys(rows: Record<string, unknown>[]): string[] {
+  const seen: string[] = [];
+  for (const r of rows) for (const k of Object.keys(r)) if (!seen.includes(k)) seen.push(k);
+  return seen;
+}
+
+const cardStyle: React.CSSProperties = {
+  border: "1px solid var(--color-border)",
+  borderRadius: 8,
+  padding: "8px 10px",
+  background: "var(--color-muted, transparent)",
+};
+const valueStyle: React.CSSProperties = {
+  fontSize: 13,
+  fontWeight: 500,
+  marginTop: 2,
+  wordBreak: "break-word",
+};
+
+/** Renders an array of objects (e.g. transfer lines, PO line items) as a table. */
+function NestedTable({ rows }: { rows: Record<string, unknown>[] }) {
+  const cols = unionKeys(rows);
+  return (
+    <div style={{ overflowX: "auto", border: "1px solid var(--color-border)", borderRadius: 8 }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+        <thead>
+          <tr>
+            {cols.map((c) => (
+              <th
+                key={c}
+                style={{
+                  textAlign: "left",
+                  padding: "6px 10px",
+                  borderBottom: "1px solid var(--color-border)",
+                  color: "var(--color-muted-foreground)",
+                  fontWeight: 600,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {humanizeKey(c)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i}>
+              {cols.map((c) => (
+                <td
+                  key={c}
+                  style={{
+                    padding: "6px 10px",
+                    borderBottom: i === rows.length - 1 ? "none" : "1px solid var(--color-border)",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {formatValue(r[c])}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export function RowActions({
   row,
   actions = ["view", "edit", "approve", "delete"],
@@ -253,6 +335,10 @@ export function RowActions({
   };
 
   const entries = Object.entries(row);
+  // Scalars render in the 2-col card grid; arrays-of-objects / nested objects
+  // render full-width below (a table / their own grid) instead of "N items".
+  const scalarEntries = entries.filter(([, v]) => !isArrayOfObjects(v) && !isPlainObject(v));
+  const complexEntries = entries.filter(([, v]) => isArrayOfObjects(v) || isPlainObject(v));
 
   return (
     <>
@@ -346,31 +432,35 @@ export function RowActions({
           <div>{editIsRenderProp ? (editDetail as (api: EditApi) => ReactNode)(editApi) : editDetail}</div>
         )}
 
-        {/* Generic read-only View — humanized labels, formatted values. */}
+        {/* Generic read-only View — humanized labels, formatted values, with
+            nested tables for line-item arrays and grids for nested objects. */}
         {open === "view" && !detail && (
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr 1fr",
-              gap: 12,
-              maxHeight: 460,
-              overflow: "auto",
-            }}
-          >
-            {entries.map(([k, v]) => (
-              <div
-                key={k}
-                style={{
-                  border: "1px solid var(--color-border)",
-                  borderRadius: 8,
-                  padding: "8px 10px",
-                  background: "var(--color-muted, transparent)",
-                }}
-              >
-                <div className="field-label">{humanizeKey(k)}</div>
-                <div style={{ fontSize: 13, fontWeight: 500, marginTop: 2, wordBreak: "break-word" }}>
-                  {formatValue(v)}
+          <div style={{ display: "flex", flexDirection: "column", gap: 12, maxHeight: 460, overflow: "auto" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              {scalarEntries.map(([k, v]) => (
+                <div key={k} style={cardStyle}>
+                  <div className="field-label">{humanizeKey(k)}</div>
+                  <div style={valueStyle}>{formatValue(v)}</div>
                 </div>
+              ))}
+            </div>
+            {complexEntries.map(([k, v]) => (
+              <div key={k}>
+                <div className="field-label" style={{ marginBottom: 6 }}>
+                  {humanizeKey(k)}{Array.isArray(v) ? ` (${v.length})` : ""}
+                </div>
+                {isArrayOfObjects(v) ? (
+                  <NestedTable rows={v} />
+                ) : (
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                    {Object.entries(v as Record<string, unknown>).map(([ck, cv]) => (
+                      <div key={ck} style={cardStyle}>
+                        <div className="field-label">{humanizeKey(ck)}</div>
+                        <div style={valueStyle}>{formatValue(cv)}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             ))}
           </div>

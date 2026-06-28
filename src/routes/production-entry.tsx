@@ -1,4 +1,4 @@
-import { useNavigate, useLocation, useSearchParams } from "react-router-dom";
+import { useNavigate, useLocation, useSearchParams, Link } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -34,7 +34,7 @@ import {
   useProductionBasisSettings, effectiveBasis, productionQtyForBasis,
   PRODUCTION_BASIS_LABEL, type ProductionBasis,
 } from "@/lib/production-basis-settings";
-import { useFlightOrders, updateFlightOrdersWhere } from "@/lib/flight-orders-store";
+import { useFlightOrders, updateFlightOrdersWhere, getAllAmendments } from "@/lib/flight-orders-store";
 import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-settings";
 import { Fragment } from "react";
 import { useArrivalFlash } from "@/lib/arrival-flash";
@@ -818,6 +818,39 @@ export default function ProductionEntryPage() {
           </Button>
         }
       />
+
+      {(() => {
+        // LMC awareness: planned production is derived from flight-order pax /
+        // special-meal counts, so a last-minute change today may invalidate it.
+        // Production is planned at the aggregate meal-item level (no per-flight
+        // qty link), so we surface a review prompt rather than auto-recompute.
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const lmcToday = getAllAmendments().filter((a) => a.isLmc && a.at.slice(0, 10) === todayIso);
+        if (lmcToday.length === 0) return null;
+        const critical = lmcToday.filter((a) => a.severity === "critical").length;
+        return (
+          <Link
+            to="/order-management?lmc=1"
+            className="mb-4 flex items-center gap-3 rounded-lg border px-4 py-3 no-underline"
+            style={{
+              borderColor: critical > 0 ? "#fda4af" : "#fcd34d",
+              background: critical > 0 ? "#fff1f2" : "#fffbeb",
+              color: "inherit",
+            }}
+          >
+            <AlertCircle className="h-5 w-5 flex-shrink-0" style={{ color: critical > 0 ? "#e11d48" : "#b45309" }} />
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold" style={{ color: "#1a0204" }}>
+                {lmcToday.length} last-minute change{lmcToday.length === 1 ? "" : "s"} today may affect planned production
+              </div>
+              <div className="text-xs text-muted-foreground mt-0.5">
+                {critical} critical — review affected orders and re-check today's production quantities
+              </div>
+            </div>
+            <span className="text-xs font-semibold shrink-0" style={{ color: "#6d28d9" }}>Review →</span>
+          </Link>
+        );
+      })()}
 
       {view === "list" ? (
         <>

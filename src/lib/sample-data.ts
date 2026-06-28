@@ -1464,6 +1464,11 @@ export type FlightOrderRow = {
   /** Distinguishes a passenger flight order from a crew-meal order. Absent on
    *  legacy/seed rows, which are treated as "flight". */
   orderType?: "flight" | "crew";
+  /** Explicit round-trip link from the bulk-upload "Trip Ref" column (date-
+   *  scoped). Both legs of a round trip carry the same value, so dispatch can
+   *  pair them even when sectors are identical and they share one date's Order #.
+   *  Absent ⇒ pairing falls back to Order # + reverse-sector. */
+  pairId?: string;
   /** Epoch ms when created in-app. Absent on seed rows, which sort below
    *  created orders so freshly created/imported orders surface at the top. */
   createdAt?: number;

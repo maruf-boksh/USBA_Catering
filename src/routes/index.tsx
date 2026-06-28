@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { useState, useEffect, type ReactNode } from "react";
-import { Button, Input, Popover, DatePicker } from "antd";
+import { Button, Input, Popover, DatePicker, Segmented } from "antd";
 import {
   RocketOutlined,
   CoffeeOutlined,
@@ -13,6 +13,7 @@ import {
   TeamOutlined,
   CalendarOutlined,
   CloseOutlined,
+  DownloadOutlined,
 } from "@ant-design/icons";
 import { getAuthUser } from "@/lib/auth";
 import { KpiCard } from "@/components/common/KpiCard";
@@ -23,7 +24,7 @@ import {
   seedFlightOrders, inventory, inventoryValue, warehouses,
 } from "@/lib/sample-data";
 import { useWorkflow } from "@/lib/workflow-store";
-import { useFlightOrders } from "@/lib/flight-orders-store";
+import { useFlightOrders, getFlightOrders, getAllAmendments } from "@/lib/flight-orders-store";
 import { flagArrival } from "@/lib/arrival-flash";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import {
@@ -174,6 +175,15 @@ function useDashboardKpis(period: Period, range?: DateRange) {
 
   const stockValue = inventoryValue(inventory);
 
+  // Last-Minute Changes recorded today (real wall-clock day), split by severity.
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const lmcToday = getAllAmendments().filter((a) => a.isLmc && a.at.slice(0, 10) === todayIso);
+  const lmc = {
+    count: lmcToday.length,
+    critical: lmcToday.filter((a) => a.severity === "critical").length,
+    major: lmcToday.filter((a) => a.severity === "major").length,
+  };
+
   const trendToday = [
     { d: "06:00", meals: Math.round(producedTotal * 0.07), target: Math.round(targetTotal * 0.10) },
     { d: "09:00", meals: Math.round(producedTotal * 0.18), target: Math.round(targetTotal * 0.22) },
@@ -218,6 +228,7 @@ function useDashboardKpis(period: Period, range?: DateRange) {
       dispatch: { value: dispatchActive, sub: `${dispatchReady} ready for dispatch`, ids: dispatchRowIds },
       dailyCost:{ value: formatLakh(stockValue), sub: "on-hand valuation", ids: [] as string[] },
     },
+    lmc,
     trend: isCustom ? buildCustomTrend(range!, producedTotal, targetTotal) : (isWeek || isWindow) ? trendWeek : trendToday,
     trendTitle: isCustom
       ? `Meal Production Trend (${range!.from || "…"} → ${range!.to || "…"})`
@@ -308,6 +319,22 @@ function buildActivityFeed({
   transferNotes: ReturnType<typeof useWorkflow>["transferNotes"];
 }): ActivityEntry[] {
   const out: ActivityEntry[] = [];
+
+  // Last-Minute Changes first — they're the most time-critical signal.
+  getAllAmendments()
+    .filter((a) => a.isLmc)
+    .slice(0, 2)
+    .forEach((a) => {
+      const flight = getFlightOrders().find((o) => o.id === a.orderId)?.flight ?? a.orderId;
+      out.push({
+        t: a.at.slice(11, 16),
+        e: `LMC · ${a.severity}`,
+        d: `${flight} — ${a.changes.map((c) => c.label).join(", ")}`,
+        tone: a.severity === "critical" ? "destructive" : "warning",
+        to: "/order-management",
+        highlight: "active-orders",
+      });
+    });
 
   inventory
     .filter((i) => i.status === "Critical" || i.status === "Low")
@@ -682,32 +709,61 @@ export default function Dashboard() {
     : period === "year" ? "Yearly"
     : range ? `${range.from} → ${range.to}` : "Custom";
 
+  // Export Report — build a CSV snapshot of the current KPI tiles for the
+  // selected period and trigger a download (no backend; mirrors DataTable's
+  // client-side CSV export).
+  const exportReport = () => {
+    const k = data.kpis;
+    const metricRows: (string | number)[][] = [
+      ["Flights", k.flights.value, k.flights.sub],
+      ["Meals Prepared", k.meals.value, k.meals.sub],
+      ["Delayed Flights", k.delayed.value, k.delayed.sub],
+      ["QC Issues", k.qcIssues.value, k.qcIssues.sub],
+      ["Pending POs", k.pendingPOs.value, k.pendingPOs.sub],
+      ["Inventory Alerts", k.invAlerts.value, k.invAlerts.sub],
+      ["Dispatch Active", k.dispatch.value, k.dispatch.sub],
+      ["Stock Value", k.dailyCost.value, k.dailyCost.sub],
+    ];
+    const lines: (string | number)[][] = [
+      ["Harvest Catering — Dashboard Report"],
+      ["Period", periodLabel],
+      ["Generated", new Date().toLocaleString("en-GB")],
+      [],
+      ["Metric", "Value", "Detail"],
+      ...metricRows,
+    ];
+    const csv = lines
+      .map((row) => row.map((cell) => `"${String(cell ?? "").replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `dashboard-report-${period}-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success(`${periodLabel} report exported.`);
+  };
+
   return (
     <>
       <DashboardGreeting
         actions={
           <>
-            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
-              {([
-                { value: "today",   label: "Today"        },
-                { value: "week",    label: "This Week"    },
-                { value: "month",   label: "This Month"   },
-                { value: "quarter", label: "This Quarter" },
-                { value: "year",    label: "This Year"    },
-              ] as { value: Period; label: string }[]).map((opt) => {
-                const selected = period === opt.value;
-                return (
-                  <Button
-                    key={opt.value}
-                    size="small"
-                    type={selected ? "primary" : "default"}
-                    className={selected ? undefined : "period-toggle-idle"}
-                    onClick={() => { setPeriod(opt.value); setRange(null); }}
-                  >
-                    {opt.label}
-                  </Button>
-                );
-              })}
+            <div className="dashboard-filter-group" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6 }}>
+              <Segmented<string>
+                size="small"
+                className="period-segmented"
+                value={period === "custom" ? "" : period}
+                onChange={(val) => { setPeriod(val as Period); setRange(null); }}
+                options={[
+                  { label: "Today",        value: "today"   },
+                  { label: "This Week",    value: "week"    },
+                  { label: "This Month",   value: "month"   },
+                  { label: "This Quarter", value: "quarter" },
+                  { label: "This Year",    value: "year"    },
+                ]}
+              />
               <CustomRangePicker
                 active={period === "custom"}
                 range={range}
@@ -715,10 +771,13 @@ export default function Dashboard() {
                 onClear={() => { setRange(null); setPeriod("today"); }}
               />
             </div>
+            <span aria-hidden className="dashboard-action-divider" />
             <Button
-              type="primary"
+              type="default"
               size="small"
-              onClick={() => toast.success(`${periodLabel} report exported.`)}
+              className="export-report-btn"
+              icon={<DownloadOutlined />}
+              onClick={exportReport}
             >
               Export Report
             </Button>
@@ -732,6 +791,30 @@ export default function Dashboard() {
         background: 'linear-gradient(90deg, var(--color-primary, #E10101) 0%, var(--color-primary-dark, #a60303) 46%, var(--color-primary-dark, #1a0204) 100%)',
         opacity: 0.9,
       }} aria-hidden />
+
+      {data.lmc.count > 0 && (
+        <Link
+          to="/order-management?lmc=1"
+          onClick={() => flagArrival("active-orders")}
+          className="mb-4 flex items-center gap-3 rounded-xl border px-4 py-3 no-underline"
+          style={{
+            borderColor: data.lmc.critical > 0 ? "#fda4af" : "#fcd34d",
+            background: data.lmc.critical > 0 ? "#fff1f2" : "#fffbeb",
+            color: "inherit",
+          }}
+        >
+          <WarningOutlined style={{ color: data.lmc.critical > 0 ? "#e11d48" : "#b45309", fontSize: 18 }} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700, color: "#1a0204" }}>
+              {data.lmc.count} last-minute change{data.lmc.count === 1 ? "" : "s"} today
+            </div>
+            <div style={{ fontSize: 12, color: "var(--color-muted-foreground)" }}>
+              {data.lmc.critical} critical · {data.lmc.major} major — review affected orders
+            </div>
+          </div>
+          <span style={{ fontSize: 12.5, fontWeight: 600, color: "#6d28d9" }}>Review →</span>
+        </Link>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {showKpi("kpi-flights") && (
