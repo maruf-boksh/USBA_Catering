@@ -36,7 +36,7 @@ import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-
 import {
   useFlightOrders, addFlightOrders, updateFlightOrder, updateFlightOrderStatus,
   amendOrder, getOrderAmendments, revertAmendment, canRevertAmendment,
-  leadHoursToDeparture, isLmcLead, LMC_WINDOW_HOURS,
+  leadHoursToDeparture, isLmcLead, hasDeparted, LMC_WINDOW_HOURS,
   type OrderAmendment,
 } from "@/lib/flight-orders-store";
 import { getAuthUser } from "@/lib/auth";
@@ -1051,9 +1051,9 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                                       variant="outline"
                                       className="h-7 w-7"
                                       onClick={() => setEditLeg(o)}
-                                      disabled={o.status === "Completed"}
+                                      disabled={isAmendLocked(o)}
                                       aria-label={`${o.status === "Pending" ? "Edit" : "Amend"} ${o.flight}`}
-                                      title={o.status === "Completed" ? "Locked — Completed" : o.status === "Pending" ? "Edit" : "Amend — last-minute change"}
+                                      title={amendLockTitle(o)}
                                     >
                                       <Pencil className="h-3.5 w-3.5" />
                                     </Button>
@@ -1727,9 +1727,9 @@ function OrdersList({
                               variant="outline"
                               className="h-7 w-7"
                               onClick={() => setEditLeg(o)}
-                              disabled={o.status === "Completed"}
+                              disabled={isAmendLocked(o)}
                               aria-label={`${o.status === "Pending" ? "Edit" : "Amend"} ${o.flight}`}
-                              title={o.status === "Completed" ? "Locked — Completed" : o.status === "Pending" ? "Edit" : "Amend — last-minute change"}
+                              title={amendLockTitle(o)}
                             >
                               <Pencil className="h-3.5 w-3.5" />
                             </Button>
@@ -1911,6 +1911,13 @@ function EditOrderLegDialog({
   const inLmcWindow = isLmcLead(lead);
 
   const save = () => {
+    // Departure-based lock: once the flight has left, the order is "Flown" and
+    // its as-flown figures are frozen. The amend button is already disabled for
+    // these, but guard the save too in case the dialog was opened via stale state.
+    if (hasDeparted(leg)) {
+      toast.error("Flight has already departed — this order is locked from editing.");
+      return;
+    }
     if (!draft.flight.trim()) { toast.error("Flight number is required."); return; }
     if (!draft.sector.trim()) { toast.error("Sector is required."); return; }
     // A Last-Minute Change must carry a reason — that's the ops audit trail.
@@ -2174,6 +2181,18 @@ const LMC_SEVERITY_BADGE: Record<string, string> = {
   minor:    "bg-slate-100 text-slate-600 border-slate-200",
   info:     "bg-slate-100 text-slate-600 border-slate-200",
 };
+
+/** Departure-based lock: once a flight has departed, its order is "Flown" and
+ *  its figures are locked from editing (the as-flown record must stay fixed).
+ *  Completed is the existing terminal lock; both block the amend path. */
+function isAmendLocked(o: FlightOrder): boolean {
+  return o.status === "Completed" || hasDeparted(o);
+}
+function amendLockTitle(o: FlightOrder): string {
+  if (o.status === "Completed") return "Locked — Completed";
+  if (hasDeparted(o)) return "Locked — flight departed";
+  return o.status === "Pending" ? "Edit" : "Amend — last-minute change";
+}
 
 /** Compact "LMC" chip on a leg that has a last-minute amendment (most recent
  *  LMC wins for the severity colour). Renders nothing otherwise. */

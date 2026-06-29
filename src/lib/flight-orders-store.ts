@@ -102,6 +102,14 @@ export function isLmcLead(leadHours: number | null): boolean {
   return leadHours != null && leadHours >= 0 && leadHours <= LMC_WINDOW_HOURS;
 }
 
+/** True once the flight's scheduled departure has passed — the order is "Flown".
+ *  Used to lock the order's figures from editing after departure (the as-flown
+ *  record must not be silently mutated). Unparseable date/ETD ⇒ not locked. */
+export function hasDeparted(o: Pick<FlightOrder, "date" | "etd">): boolean {
+  const lead = leadHoursToDeparture(o);
+  return lead != null && lead < 0;
+}
+
 function classifyAmendment(
   changes: FieldChange[],
   leadHours: number | null,
