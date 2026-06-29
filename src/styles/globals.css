@@ -563,8 +563,10 @@ html[data-theme="dark"] .app-quick-menu-module {
 
 .header-profile-copy {
   display: flex;
-  align-items: center;
-  line-height: 1.25;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  line-height: 1.2;
 }
 
 .header-profile-name {
@@ -1220,6 +1222,106 @@ html[data-theme="dark"] .app-tabbar-clear-btn {
 }
 .period-toggle-idle.ant-btn-default:not(.ant-btn-icon-only):not(.ant-btn-dangerous):not(.ant-btn-text):not(.ant-btn-link) .anticon {
   color: inherit !important;
+}
+
+/* ── Period Segmented control ────────────────────────────────────────────────
+   Dashboard date-range selector rendered as a single segmented toggle. The
+   active segment reads as the brand CTA; idle segments stay neutral with a
+   brand-tinted hover, matching the .period-toggle-idle buttons it replaces. */
+/* The whole cluster reads as one brand-forward control deck: a soft pill rail
+   of period chips with a red-gradient active thumb, a matching Custom-range
+   pill, and a red-gradient Export CTA — same 32px height + pill radius. */
+.period-segmented.ant-segmented {
+  background: linear-gradient(180deg, #ffffff 0%, #faf5f3 100%);
+  border: 1px solid var(--color-border-strong, #e0d9d5);
+  border-radius: 999px;
+  padding: 3px;
+  box-shadow: inset 0 1px 2px rgba(26, 2, 4, 0.05);
+}
+.period-segmented .ant-segmented-item {
+  min-height: 24px;
+  border-radius: 999px !important;
+  transition: color .18s ease, background .18s ease;
+}
+.period-segmented .ant-segmented-item-label {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 13px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.period-segmented .ant-segmented-thumb,
+.period-segmented .ant-segmented-item-selected {
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark, #a60303) 100%) !important;
+  border-radius: 999px !important;
+  box-shadow: 0 4px 11px -3px rgba(var(--color-primary-rgb, 225, 1, 1), 0.5);
+}
+.period-segmented .ant-segmented-item-selected,
+.period-segmented .ant-segmented-item-selected .ant-segmented-item-label {
+  color: #ffffff !important;
+  font-weight: 700;
+}
+.period-segmented .ant-segmented-item:not(.ant-segmented-item-selected) {
+  color: var(--color-foreground, #3c3a40);
+}
+.period-segmented .ant-segmented-item:not(.ant-segmented-item-selected):hover {
+  color: var(--color-primary) !important;
+  background: var(--color-primary-light, #fff5f5) !important;
+}
+
+/* Custom-range pill — matches the segmented rail (height, pill radius, weight)
+   so the date controls read as one cluster. Idle = light pill; active = brand
+   red (type=primary), mirroring the selected segment. */
+.dashboard-filter-group .ant-btn-sm {
+  height: 32px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  padding-inline: 14px;
+}
+
+/* Export Report — the eye-catching primary action: red-gradient fill, pill
+   shape, soft brand glow that lifts on hover. */
+.export-report-btn.ant-btn-sm {
+  height: 32px;
+  border-radius: 999px;
+  padding-inline: 16px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  transition: transform .16s ease, box-shadow .16s ease, filter .16s ease;
+}
+.export-report-btn.ant-btn-sm .anticon { font-size: 12px; }
+.export-report-btn.ant-btn-default:not(.ant-btn-icon-only):not(.ant-btn-dangerous):not(.ant-btn-text):not(.ant-btn-link),
+.export-report-btn.ant-btn-default:not(.ant-btn-icon-only):not(.ant-btn-dangerous):not(.ant-btn-text):not(.ant-btn-link):focus {
+  background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark, #a60303) 100%) !important;
+  background-image: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark, #a60303) 100%) !important;
+  color: #ffffff !important;
+  border: 1px solid transparent !important;
+  box-shadow: 0 4px 12px -3px rgba(var(--color-primary-rgb, 225, 1, 1), 0.5) !important;
+}
+.export-report-btn.ant-btn-default:not(.ant-btn-icon-only):not(.ant-btn-dangerous):not(.ant-btn-text):not(.ant-btn-link):not(:disabled):hover {
+  background-image: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark, #a60303) 100%) !important;
+  color: #ffffff !important;
+  filter: brightness(1.07);
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px -4px rgba(var(--color-primary-rgb, 225, 1, 1), 0.62) !important;
+}
+.export-report-btn.ant-btn-default .anticon {
+  color: inherit !important;
+}
+
+/* Thin separator between the date-filter group and the Export action so the
+   primary CTA reads as a distinct action, not another filter chip. */
+.dashboard-action-divider {
+  display: inline-block;
+  width: 1px;
+  align-self: stretch;
+  min-height: 22px;
+  margin: 0 2px;
+  background: var(--color-border-strong, #e0d9d5);
 }
 
 /* Popup consistency: modal, drawer, popover, dropdown */

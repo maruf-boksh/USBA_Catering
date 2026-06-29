@@ -35,7 +35,11 @@ import {
 import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-settings";
 import {
   useFlightOrders, addFlightOrders, updateFlightOrder, updateFlightOrderStatus,
+  amendOrder, getOrderAmendments, revertAmendment, canRevertAmendment,
+  leadHoursToDeparture, isLmcLead, hasDeparted, LMC_WINDOW_HOURS,
+  type OrderAmendment,
 } from "@/lib/flight-orders-store";
+import { getAuthUser } from "@/lib/auth";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useArrivalFlash } from "@/lib/arrival-flash";
 import { useRole } from "@/lib/roles";
@@ -107,6 +111,9 @@ type FlightOrder = {
   direction: FlightDirection;
   specialMealRoster?: SpecialMealEntry[];
   orderType?: "flight" | "crew";
+  /** Explicit round-trip link from the bulk-upload "Trip Ref" column — both legs
+   *  share it so dispatch pairs them even with identical sectors / shared Order #. */
+  pairId?: string;
   /** Epoch ms when created in-app — created orders sort above seed rows (newest first). */
   createdAt?: number;
   /** Approver's review note when returned for correction (status stays Pending). */
@@ -158,6 +165,9 @@ type ParsedRow = {
   returnSector?: string;
   date?: string;
   direction?: FlightDirection;
+  /** "Trip Ref" column — a user token shared by an outbound + its return so the
+   *  two legs are linked into one round trip on dispatch. Blank ⇒ unpaired. */
+  tripRef?: string;
   /** Crew-meal upload only: number of crew + the meal slot. */
   crew?: number;
   mealSlot?: string;
@@ -260,6 +270,7 @@ function parseFlightCsv(text: string): ParsedRow[] {
       valid: !!flight && !!sector && pax > 0,
       type,
       direction,
+      tripRef: pick(rec, "trip ref", "trip", "rotation", "pair"),
       date: normalizeDate(pick(rec, "date")),
     };
   });
@@ -833,6 +844,8 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
   const [airline, setAirline] = useState<string>("All");
   // Crew leg being edited — only Pending legs can open this.
   const [editLeg, setEditLeg] = useState<FlightOrder | null>(null);
+  // Crew leg whose change history (LMC) is open — available regardless of status.
+  const [historyLeg, setHistoryLeg] = useState<FlightOrder | null>(null);
   // Crew leg whose special-meal count was clicked — drives the roster dialog.
   const [mealDetailLeg, setMealDetailLeg] = useState<FlightOrder | null>(null);
   const slots = useMealSlots();
@@ -1024,6 +1037,7 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                                   <span className="inline-flex items-center gap-1.5">
                                     <span className="whitespace-nowrap">{o.flight}</span>
                                     <DirectionBadge direction={o.direction} />
+                                    <LmcBadge orderId={o.id} />
                                   </span>
                                 </TableCell>
                                 <TableCell>{o.sector}</TableCell>
@@ -1031,17 +1045,29 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
                                 <TableCell className="tabular-nums">{o.etd}</TableCell>
                                 <TableCell className="text-right tabular-nums font-semibold">{o.crew}</TableCell>
                                 <TableCell>
-                                  <Button
-                                    size="icon"
-                                    variant="outline"
-                                    className="h-7 w-7"
-                                    onClick={() => setEditLeg(o)}
-                                    disabled={o.status !== "Pending"}
-                                    aria-label={`Edit ${o.flight}`}
-                                    title={o.status === "Pending" ? "Edit" : `Locked — ${o.status}`}
-                                  >
-                                    <Pencil className="h-3.5 w-3.5" />
-                                  </Button>
+                                  <div className="flex items-center gap-1.5">
+                                    <Button
+                                      size="icon"
+                                      variant="outline"
+                                      className="h-7 w-7"
+                                      onClick={() => setEditLeg(o)}
+                                      disabled={isAmendLocked(o)}
+                                      aria-label={`${o.status === "Pending" ? "Edit" : "Amend"} ${o.flight}`}
+                                      title={amendLockTitle(o)}
+                                    >
+                                      <Pencil className="h-3.5 w-3.5" />
+                                    </Button>
+                                    <Button
+                                      size="icon"
+                                      variant="outline"
+                                      className="h-7 w-7"
+                                      onClick={() => setHistoryLeg(o)}
+                                      aria-label={`Change history for ${o.flight}`}
+                                      title="Change history"
+                                    >
+                                      <History className="h-3.5 w-3.5" />
+                                    </Button>
+                                  </div>
                                 </TableCell>
                               </TableRow>
                             ))}
@@ -1124,6 +1150,7 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
         )}
 
         <EditOrderLegDialog leg={editLeg} onClose={() => setEditLeg(null)} />
+        <OrderHistoryDialog leg={historyLeg} onClose={() => setHistoryLeg(null)} />
 
         {/* Focused special-meal handler — count + per-code breakdown + roster for one flight. */}
         <Dialog open={!!mealDetailLeg} onOpenChange={(open) => !open && setMealDetailLeg(null)}>
@@ -1255,10 +1282,18 @@ function OrdersList({
   const [airline, setAirline] = useState<string>("All");
   const [scope, setScope] = useState<"All" | "Domestic" | "International">("All");
   const [status, setStatus] = useState<"All" | FlightOrderStatus>("All");
+  // LMC-only filter — surfaces just the orders affected by a last-minute change
+  // today. Deep-linked from the dashboard's "N last-minute changes today" banner
+  // via ?lmc=1; the param is stripped after mount (see effect below).
+  const [lmcOnly, setLmcOnly] = useState<boolean>(
+    () => new URLSearchParams(window.location.search).get("lmc") === "1",
+  );
   // Flight whose special-meal count was clicked — drives the focused roster dialog.
   const [mealDetailLeg, setMealDetailLeg] = useState<FlightOrder | null>(null);
   // Leg being edited — only Pending legs can open this (button disabled otherwise).
   const [editLeg, setEditLeg] = useState<FlightOrder | null>(null);
+  // Leg whose change history (LMC) is open — available regardless of status.
+  const [historyLeg, setHistoryLeg] = useState<FlightOrder | null>(null);
 
   const airlineOptions = Array.from(new Set(orders.map((o) => o.airline))).sort();
 
@@ -1274,6 +1309,11 @@ function OrdersList({
           if (scope === "Domestic" && !isDomesticSector(o.sector)) return false;
           if (scope === "International" && isDomesticSector(o.sector)) return false;
           if (status !== "All" && o.status !== status) return false;
+          if (
+            lmcOnly &&
+            !getOrderAmendments(o.id).some((r) => r.isLmc && r.at.slice(0, 10) === today)
+          )
+            return false;
           return true;
         })
         // Freshly created/imported orders (with createdAt) surface first, newest
@@ -1282,7 +1322,7 @@ function OrdersList({
           (b.createdAt ?? 0) - (a.createdAt ?? 0)
           || b.date.localeCompare(a.date)
           || b.etd.localeCompare(a.etd)),
-    [orders, from, to, airline, scope, status],
+    [orders, from, to, airline, scope, status, lmcOnly, today],
   );
 
   // Group filtered rows by Order # — memoised so we don't redo this work each
@@ -1317,7 +1357,7 @@ function OrdersList({
     });
 
   // Whenever the filter/sort inputs change the result set, jump back to page 1.
-  useEffect(() => { setPage(1); }, [from, to, airline, scope, status]);
+  useEffect(() => { setPage(1); }, [from, to, airline, scope, status, lmcOnly]);
   // Defensive: if `page` is now past the last page (e.g. after a filter
   // narrowed the list), clamp it.
   useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
@@ -1328,6 +1368,15 @@ function OrdersList({
   // view, then strip the param so a manual refresh doesn't keep re-triggering.
   const [searchParams, setSearchParams] = useSearchParams();
   const ordParam = searchParams.get("ord");
+  // The ?lmc=1 deep-link has already been read into `lmcOnly` state at mount;
+  // strip it so a manual refresh / shared URL keeps the filter only as long as
+  // the user leaves it on (and "Clear All" fully clears it).
+  useEffect(() => {
+    if (!searchParams.has("lmc")) return;
+    const next = new URLSearchParams(searchParams);
+    next.delete("lmc");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
   // Row id to scroll to after a deep-link page jump. Set here, consumed by the
   // scroll effect below — kept separate so stripping ?ord doesn't tear down the
   // pending scroll before the target page has rendered.
@@ -1401,7 +1450,7 @@ function OrdersList({
   const pendingCount = filteredOrders.filter((o) => o.status === "Pending").length;
   const totalPaxMeals = filteredOrders.reduce((s, o) => s + o.pax, 0);
   const rangeActive = from !== "" || to !== "";
-  const filtersActive = rangeActive || airline !== "All" || scope !== "All" || status !== "All";
+  const filtersActive = rangeActive || airline !== "All" || scope !== "All" || status !== "All" || lmcOnly;
   const rangeLabel =
     from && to
       ? from === to
@@ -1415,7 +1464,7 @@ function OrdersList({
 
   const clearRange = () => { setFrom(""); setTo(""); };
   const setToday = () => { setFrom(today); setTo(today); };
-  const clearAll = () => { setFrom(""); setTo(""); setAirline("All"); setScope("All"); setStatus("All"); };
+  const clearAll = () => { setFrom(""); setTo(""); setAirline("All"); setScope("All"); setStatus("All"); setLmcOnly(false); };
 
   return (
     <Card>
@@ -1504,6 +1553,20 @@ function OrdersList({
                 {FLIGHT_ORDER_STATUS_FLOW.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </div>
+            {lmcOnly && (
+              <Badge
+                className="gap-1 border border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-50"
+                role="button"
+                tabIndex={0}
+                onClick={() => setLmcOnly(false)}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setLmcOnly(false); } }}
+                title="Showing only orders with a last-minute change today — click to clear"
+              >
+                <AlertCircle className="h-3 w-3" />
+                LMC only
+                <X className="h-3 w-3" />
+              </Badge>
+            )}
             {filtersActive && (
               <Button
                 size="sm"
@@ -1619,6 +1682,7 @@ function OrdersList({
                               {o.flight}
                             </span>
                             <DirectionBadge direction={o.direction} />
+                            <LmcBadge orderId={o.id} />
                           </div>
                         </TableCell>
                         <TableCell>{o.airline}</TableCell>
@@ -1663,11 +1727,21 @@ function OrdersList({
                               variant="outline"
                               className="h-7 w-7"
                               onClick={() => setEditLeg(o)}
-                              disabled={o.status !== "Pending"}
-                              aria-label={`Edit ${o.flight}`}
-                              title={o.status === "Pending" ? "Edit" : `Locked — ${o.status}`}
+                              disabled={isAmendLocked(o)}
+                              aria-label={`${o.status === "Pending" ? "Edit" : "Amend"} ${o.flight}`}
+                              title={amendLockTitle(o)}
                             >
                               <Pencil className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              size="icon"
+                              variant="outline"
+                              className="h-7 w-7"
+                              onClick={() => setHistoryLeg(o)}
+                              aria-label={`Change history for ${o.flight}`}
+                              title="Change history"
+                            >
+                              <History className="h-3.5 w-3.5" />
                             </Button>
                           </div>
                         </TableCell>
@@ -1799,6 +1873,7 @@ function OrdersList({
         </Dialog>
 
         <EditOrderLegDialog leg={editLeg} onClose={() => setEditLeg(null)} />
+        <OrderHistoryDialog leg={historyLeg} onClose={() => setHistoryLeg(null)} />
       </CardContent>
     </Card>
   );
@@ -1817,33 +1892,67 @@ function EditOrderLegDialog({
   onClose: () => void;
 }) {
   const isCrew = leg?.orderType === "crew";
+  // Pending = a normal correction (everything editable). Any other (non-terminal)
+  // status = a last-minute amendment: lock the identity fields and only allow the
+  // operational ones (date, ETD, PAX, crew, special meals) to change.
+  const isPending = (leg?.status ?? "Pending") === "Pending";
+  const lockIdentity = !isPending;
   const [draft, setDraft] = useState<FlightOrder | null>(leg);
-  // Reset the working copy whenever a new leg is opened.
-  useEffect(() => { setDraft(leg); }, [leg]);
+  const [reason, setReason] = useState("");
+  // Reset the working copy + reason whenever a new leg is opened.
+  useEffect(() => { setDraft(leg); setReason(""); }, [leg]);
 
   if (!leg || !draft) return null;
 
   const set = <K extends keyof FlightOrder>(key: K, value: FlightOrder[K]) =>
     setDraft((p) => (p ? { ...p, [key]: value } : p));
 
+  const lead = leadHoursToDeparture(leg);
+  const inLmcWindow = isLmcLead(lead);
+
   const save = () => {
+    // Departure-based lock: once the flight has left, the order is "Flown" and
+    // its as-flown figures are frozen. The amend button is already disabled for
+    // these, but guard the save too in case the dialog was opened via stale state.
+    if (hasDeparted(leg)) {
+      toast.error("Flight has already departed — this order is locked from editing.");
+      return;
+    }
     if (!draft.flight.trim()) { toast.error("Flight number is required."); return; }
     if (!draft.sector.trim()) { toast.error("Sector is required."); return; }
-    updateFlightOrder(leg.id, {
-      flight: draft.flight.trim(),
-      airline: draft.airline.trim(),
-      sector: draft.sector.trim(),
-      date: draft.date,
-      etd: draft.etd,
-      direction: draft.direction,
-      pax: isCrew ? 0 : Math.max(0, draft.pax),
-      crew: isCrew ? Math.max(0, draft.crew) : draft.crew,
-      specialMeals: Math.max(0, draft.specialMeals),
-      // Editing a returned order is the "correction" — clear the review so it
-      // re-enters the approval queue as a clean Pending request.
-      ...(leg.reviewComment ? { reviewComment: undefined, reviewedBy: undefined, reviewedAt: undefined } : {}),
-    });
-    toast.success(leg.reviewComment ? `${draft.flight} corrected and resubmitted.` : `${draft.flight} updated.`);
+    // A Last-Minute Change must carry a reason — that's the ops audit trail.
+    if (inLmcWindow && !reason.trim()) {
+      toast.error("This is a last-minute change — a reason is required.");
+      return;
+    }
+    const user = getAuthUser();
+    // amendOrder records the edit as a versioned revision (field diff + who/when/
+    // why) before applying it, so the change is auditable rather than overwritten.
+    const rev = amendOrder(
+      leg.id,
+      {
+        flight: draft.flight.trim(),
+        airline: draft.airline.trim(),
+        sector: draft.sector.trim(),
+        date: draft.date,
+        etd: draft.etd,
+        direction: draft.direction,
+        pax: isCrew ? 0 : Math.max(0, draft.pax),
+        crew: isCrew ? Math.max(0, draft.crew) : draft.crew,
+        specialMeals: Math.max(0, draft.specialMeals),
+        // Editing a returned order is the "correction" — clear the review so it
+        // re-enters the approval queue as a clean Pending request.
+        ...(leg.reviewComment ? { reviewComment: undefined, reviewedBy: undefined, reviewedAt: undefined } : {}),
+      },
+      { by: user?.name ?? "System", role: user?.role ?? "", reason },
+    );
+    toast.success(
+      leg.reviewComment
+        ? `${draft.flight} corrected and resubmitted.`
+        : rev
+          ? `${draft.flight} updated — ${rev.changes.length} change${rev.changes.length === 1 ? "" : "s"} logged.`
+          : `${draft.flight} — no changes.`,
+    );
     onClose();
   };
 
@@ -1852,7 +1961,7 @@ function EditOrderLegDialog({
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 flex-wrap">
-            Edit {isCrew ? "Crew Order" : "Flight Order"}
+            {isPending ? "Edit" : "Amend"} {isCrew ? "Crew Order" : "Flight Order"}
             <span className="font-mono text-sm text-muted-foreground">— {leg.flight}</span>
             <DirectionBadge direction={leg.direction} />
             <Badge variant="outline" className="h-5 px-1.5 text-[10px] uppercase tracking-wider">
@@ -1873,24 +1982,43 @@ function EditOrderLegDialog({
             )}
           </div>
         )}
+        {inLmcWindow && (
+          <div className="mt-2 rounded-md border border-rose-300 bg-rose-50/70 px-3 py-2">
+            <div className="text-[10px] uppercase tracking-wider text-rose-700 font-medium mb-0.5 flex items-center gap-1">
+              <AlertCircle className="h-3 w-3" /> Last-Minute Change
+            </div>
+            <p className="text-xs text-rose-900">
+              {lead != null && lead >= 0
+                ? `Departure in ${lead < 1 ? `${Math.round(lead * 60)} min` : `${lead.toFixed(1)} h`} — within the ${LMC_WINDOW_HOURS}h cut-off.`
+                : "Flight has already departed."}{" "}
+              A reason is required and the change is flagged for the team.
+            </p>
+          </div>
+        )}
+        {!isPending && (
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            Amending an <span className="font-medium text-foreground">{leg.status}</span> order — flight, airline, sector &amp; direction are locked; the change is recorded in the order's history.
+          </p>
+        )}
         <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-3">
           <div>
             <Label className="text-xs text-muted-foreground">Flight No</Label>
-            <Input value={draft.flight} onChange={(e) => set("flight", e.target.value)} className="mt-1 h-9" />
+            <Input value={draft.flight} onChange={(e) => set("flight", e.target.value)} disabled={lockIdentity} className="mt-1 h-9" />
           </div>
           <div>
             <Label className="text-xs text-muted-foreground">Airline</Label>
-            <Input value={draft.airline} onChange={(e) => set("airline", e.target.value)} className="mt-1 h-9" />
+            <Input value={draft.airline} onChange={(e) => set("airline", e.target.value)} disabled={lockIdentity} className="mt-1 h-9" />
           </div>
           <div>
             <Label className="text-xs text-muted-foreground">Sector</Label>
-            <Input value={draft.sector} onChange={(e) => set("sector", e.target.value)} className="mt-1 h-9" />
+            <Input value={draft.sector} onChange={(e) => set("sector", e.target.value)} disabled={lockIdentity} className="mt-1 h-9" />
           </div>
           <div>
             <Label className="text-xs text-muted-foreground">Direction</Label>
             <select
               value={draft.direction}
               onChange={(e) => set("direction", e.target.value as FlightDirection)}
+              disabled={lockIdentity}
               className={selectCls}
             >
               <option value="Outbound">Outbound</option>
@@ -1933,12 +2061,152 @@ function EditOrderLegDialog({
             </>
           )}
         </div>
+        <div className="mt-3">
+          <Label className="text-xs text-muted-foreground">
+            Reason for change{" "}
+            {inLmcWindow
+              ? <span className="text-rose-600 font-medium">(required — last-minute)</span>
+              : <span className="text-muted-foreground/60">(optional)</span>}
+          </Label>
+          <Input
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="e.g. ATC delay, pax re-book, equipment swap"
+            className={`mt-1 h-9 ${inLmcWindow && !reason.trim() ? "border-rose-300" : ""}`}
+          />
+          <p className="mt-1 text-[11px] text-muted-foreground">Saved to this order's change history.</p>
+        </div>
         <DialogFooter className="mt-5">
           <Button variant="outline" onClick={onClose}>Cancel</Button>
           <Button onClick={save}>Save Changes</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Read-only change-history (LMC) timeline for one order leg — every recorded
+// amendment with its field diffs, author and reason, newest first.
+// ─────────────────────────────────────────────────────────────────────────────
+function fmtAmendVal(v: unknown): string {
+  if (v == null || v === "") return "—";
+  return String(v);
+}
+function fmtAmendTime(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function OrderHistoryDialog({ leg, onClose }: { leg: FlightOrder | null; onClose: () => void }) {
+  if (!leg) return null;
+  const revisions: OrderAmendment[] = getOrderAmendments(leg.id);
+  return (
+    <Dialog open={!!leg} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 flex-wrap">
+            <History className="h-4 w-4" /> Change History
+            <span className="font-mono text-sm text-muted-foreground">— {leg.flight}</span>
+            <Badge variant="outline" className="h-5 px-1.5 text-[10px] uppercase tracking-wider">{leg.orderNo}</Badge>
+          </DialogTitle>
+        </DialogHeader>
+        {revisions.length === 0 ? (
+          <div className="py-10 text-center text-sm text-muted-foreground">No changes recorded yet.</div>
+        ) : (
+          <div className="mt-1 space-y-3 max-h-[60vh] overflow-y-auto pr-1">
+            {revisions.map((r) => (
+              <div key={r.id} className="rounded-lg border border-border p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-xs font-medium text-foreground">{r.by}{r.role ? ` · ${r.role}` : ""}</span>
+                    {r.isLmc && (
+                      <Badge variant="outline" className={`h-4 px-1.5 text-[9px] font-bold uppercase tracking-wider ${LMC_SEVERITY_BADGE[r.severity] ?? LMC_SEVERITY_BADGE.info}`}>
+                        LMC · {r.severity}
+                      </Badge>
+                    )}
+                  </span>
+                  <span className="text-[11px] text-muted-foreground tabular-nums">{fmtAmendTime(r.at)}</span>
+                </div>
+                {r.reason && <div className="text-[11px] text-muted-foreground mt-0.5">{r.reason}</div>}
+                <div className="mt-2 space-y-1">
+                  {r.changes.map((c, i) => (
+                    <div key={i} className="flex items-center gap-2 text-xs">
+                      <span className="w-28 shrink-0 font-medium text-muted-foreground">{c.label}</span>
+                      <span className="line-through text-muted-foreground">{fmtAmendVal(c.from)}</span>
+                      <span className="text-muted-foreground">→</span>
+                      <span className="font-semibold text-foreground">{fmtAmendVal(c.to)}</span>
+                    </div>
+                  ))}
+                </div>
+                {(() => {
+                  const guard = canRevertAmendment(leg.id, r.id);
+                  return (
+                    <div className="mt-2 flex justify-end">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={!guard.ok}
+                        className="h-6 px-2 text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                        onClick={() => {
+                          const u = getAuthUser();
+                          const done = revertAmendment(leg.id, r.id, { by: u?.name, role: u?.role });
+                          if (done) toast.success(`Reverted — ${r.changes.map((c) => c.label).join(", ")} restored.`);
+                          else toast.error(canRevertAmendment(leg.id, r.id).reason ?? "Could not revert this change.");
+                        }}
+                        title={guard.ok ? "Undo this change (logged as a new amendment)" : guard.reason}
+                      >
+                        <CornerUpLeft className="h-3 w-3 mr-1" /> Revert
+                      </Button>
+                    </div>
+                  );
+                })()}
+              </div>
+            ))}
+          </div>
+        )}
+        <DialogFooter className="mt-2">
+          <Button variant="outline" onClick={onClose}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+const LMC_SEVERITY_BADGE: Record<string, string> = {
+  critical: "bg-rose-100 text-rose-700 border-rose-200",
+  major:    "bg-amber-100 text-amber-700 border-amber-200",
+  minor:    "bg-slate-100 text-slate-600 border-slate-200",
+  info:     "bg-slate-100 text-slate-600 border-slate-200",
+};
+
+/** Departure-based lock: once a flight has departed, its order is "Flown" and
+ *  its figures are locked from editing (the as-flown record must stay fixed).
+ *  Completed is the existing terminal lock; both block the amend path. */
+function isAmendLocked(o: FlightOrder): boolean {
+  return o.status === "Completed" || hasDeparted(o);
+}
+function amendLockTitle(o: FlightOrder): string {
+  if (o.status === "Completed") return "Locked — Completed";
+  if (hasDeparted(o)) return "Locked — flight departed";
+  return o.status === "Pending" ? "Edit" : "Amend — last-minute change";
+}
+
+/** Compact "LMC" chip on a leg that has a last-minute amendment (most recent
+ *  LMC wins for the severity colour). Renders nothing otherwise. */
+function LmcBadge({ orderId }: { orderId: string }) {
+  const lmc = getOrderAmendments(orderId).find((r) => r.isLmc);
+  if (!lmc) return null;
+  return (
+    <Badge
+      variant="outline"
+      className={`h-5 px-1.5 text-[10px] font-bold uppercase tracking-wider ${LMC_SEVERITY_BADGE[lmc.severity] ?? LMC_SEVERITY_BADGE.info}`}
+      title={`Last-minute change · ${lmc.severity} · ${lmc.reason}`}
+    >
+      LMC
+    </Badge>
   );
 }
 
@@ -3207,15 +3475,21 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
     //    screen's roster bulk-paste accepts.
     //  • Crew Meals — crew-meal order fields from the Create Crew Meal screen
     //    (Scope, Flight, Airline, sector, Date, ETD, Meal Slot, No of Crew).
-    const FLIGHT_HEADERS = ["Scope", "Flight No", "Airline", "From", "To", "Date", "ETD", "Direction", "PAX", "No of Crew", "Special Meals"];
+    // "Trip Ref" links a round trip: put the SAME value on an outbound and its
+    // return so dispatch pairs them (even when sectors are identical). Blank for
+    // one-way flights.
+    const FLIGHT_HEADERS = ["Scope", "Flight No", "Airline", "From", "To", "Date", "ETD", "Direction", "PAX", "No of Crew", "Special Meals", "Trip Ref"];
     const TEMPLATES: Record<typeof kind, { fileName: string; label: string; headers: string[]; rows: (string | number)[][] }> = {
       dom: {
         fileName: "domestic-flights-template.csv",
         label: "Domestic flights",
         headers: FLIGHT_HEADERS,
         rows: [
-          ["Domestic", "BS-141", "US-Bangla", "DAC", "CXB", "2026-05-24", "08:15", "Outbound", 72, 4, 4],
-          ["Domestic", "BS-203", "US-Bangla", "DAC", "CGP", "2026-05-24", "10:30", "Outbound", 88, 4, 2],
+          // A round trip — same Trip Ref (T1) on the outbound and its return.
+          ["Domestic", "BS-141", "US-Bangla", "DAC", "CXB", "2026-05-24", "08:15", "Outbound", 72, 4, 4, "T1"],
+          ["Domestic", "BS-142", "US-Bangla", "CXB", "DAC", "2026-05-24", "14:00", "Return", 70, 4, 4, "T1"],
+          ["Domestic", "BS-203", "US-Bangla", "DAC", "CGP", "2026-05-24", "10:30", "Outbound", 88, 4, 2, "T2"],
+          ["Domestic", "BS-204", "US-Bangla", "CGP", "DAC", "2026-05-24", "17:30", "Return", 84, 4, 2, "T2"],
         ],
       },
       intl: {
@@ -3223,8 +3497,9 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
         label: "International flights",
         headers: FLIGHT_HEADERS,
         rows: [
-          ["International", "BS-225", "US-Bangla", "DAC", "DXB", "2026-05-24", "12:30", "Outbound", 174, 14, 14],
-          ["International", "BS-307", "US-Bangla", "DAC", "KUL", "2026-05-24", "23:50", "Outbound", 282, 16, 18],
+          // Cross-midnight round trip — out 23:50, return 02:30 next day, same Trip Ref.
+          ["International", "BS-307", "US-Bangla", "DAC", "KUL", "2026-05-24", "23:50", "Outbound", 282, 16, 18, "R1"],
+          ["International", "BS-308", "US-Bangla", "KUL", "DAC", "2026-05-25", "02:30", "Return", 274, 16, 16, "R1"],
         ],
       },
       special: {
@@ -3448,6 +3723,11 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
           direction: r.direction ?? "Outbound",
           orderType: "flight",
           createdAt: Date.now(),
+          // Trip Ref → explicit round-trip link (scoped to this upload batch,
+          // case-insensitive) so the two legs pair on dispatch regardless of
+          // sector / shared Order #. Batch-scoped (not date) so a cross-midnight
+          // round trip — out 23:50, return 02:30 next day — still links.
+          pairId: r.tripRef?.trim() ? `TRIP-${stamp}-${r.tripRef.trim().toLowerCase()}` : undefined,
           specialMealRoster: roster.length > 0 ? roster : undefined,
         });
       }
@@ -3517,6 +3797,26 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
         });
       }
     }
+    // Trip Ref sanity check — each ref should tag exactly one outbound + one
+    // return. Surface typos (a ref on 3+ legs, or two same-direction legs) so
+    // they're caught before they mispair on dispatch. Import still proceeds.
+    const tripGroups = new Map<string, ParsedRow[]>();
+    for (const r of valid) {
+      const t = r.tripRef?.trim().toLowerCase();
+      if (t) (tripGroups.get(t) ?? tripGroups.set(t, []).get(t)!).push(r);
+    }
+    const tripIssues: string[] = [];
+    for (const rows of tripGroups.values()) {
+      const outs = rows.filter((r) => (r.direction ?? "Outbound") === "Outbound").length;
+      const rets = rows.length - outs;
+      if (rows.length !== 2 || outs !== 1 || rets !== 1) {
+        tripIssues.push(`"${rows[0].tripRef}" (${rows.length} legs: ${outs} out / ${rets} return)`);
+      }
+    }
+    if (tripIssues.length > 0) {
+      toast.warning(`Check Trip Ref pairing — ${tripIssues.join(", ")}. Each Trip Ref should tag one outbound + one return.`);
+    }
+
     setImportedOrders(orders);
     setImportConfirmed(true);
     // Persist into the Order Management table immediately, with system Order Nos.
