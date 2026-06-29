@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
@@ -210,6 +210,18 @@ function ReturnList({
   const getApproval = (r: ConsumableReturn) =>
     r.approvalId ? approvals.find((a) => a.id === r.approvalId) : undefined;
   const [viewRecord, setViewRecord] = useState<ConsumableReturn | null>(null);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const id = sessionStorage.getItem("highlight-return-id");
+    if (id) {
+      sessionStorage.removeItem("highlight-return-id");
+      setHighlightId(id);
+      highlightTimerRef.current = setTimeout(() => setHighlightId(null), 3500);
+    }
+    return () => { if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current); };
+  }, []);
   const [searchItem, setSearchItem] = useState("");
   const [filterReusable, setFilterReusable] = useState<"all" | "yes" | "no">("all");
   const [dateFrom, setDateFrom] = useState("");
@@ -244,6 +256,7 @@ function ReturnList({
 
   return (
     <>
+      <style>{`@keyframes returnRowBlink{0%,100%{background-color:transparent}50%{background-color:#d1fae5}}`}</style>
       {/* View modal */}
       <Dialog open={!!viewRecord} onOpenChange={(o) => !o && setViewRecord(null)}>
         <DialogContent className="max-w-2xl">
@@ -442,6 +455,7 @@ function ReturnList({
                         "hover:bg-muted/30 transition-colors",
                         li === 0 ? "border-t-2 border-t-primary/20" : "border-t border-t-border/40",
                       )}
+                      style={r.id === highlightId ? { animation: "returnRowBlink 0.65s ease-in-out 3" } : undefined}
                     >
                       {/* Return ID — only first line */}
                       <TableCell>
