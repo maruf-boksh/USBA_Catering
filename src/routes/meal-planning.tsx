@@ -14,7 +14,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useMealSlots } from "@/lib/meal-slot-settings";
 import { resolveItemProfile } from "@/lib/item-profiles";
 import { usePersistedState } from "@/lib/use-persisted-state";
-import { MEAL_PLAN_CONFIG_KEY, mealCards as seedMealCards } from "@/lib/meal-planning-data";
+import { MEAL_PLAN_CONFIG_KEY, mealCards as seedMealCards, cardMatchesDate } from "@/lib/meal-planning-data";
 
 // Resolve a meal item's serving weight/kcal. The Item Profile (config-item) is
 // the source of truth when configured; the static FOOD_ITEMS/DESSERT_ITEMS entry
@@ -51,6 +51,10 @@ interface SpecialMeal {
 interface MealCard {
   id: string;
   day: string;
+  // Optional inclusive effective date range (ISO "YYYY-MM-DD"); omitting both
+  // means the card applies on every date.
+  effectiveFrom?: string;
+  effectiveTo?: string;
   mealType: string;
   flightType: string[];
   forType: string;
@@ -77,6 +81,20 @@ interface GMOrder {
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const MEAL_TYPES = ["Breakfast", "Lunch", "Snacks", "Heavy Snacks", "Dinner"];
+// Compact "DD MMM" for effective-range chips/labels (ISO "YYYY-MM-DD" in).
+const shortDate = (iso: string) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString("en-GB", { day: "2-digit", month: "short" });
+};
+// Human label for a card's effective range; "" when the card has no range.
+const rangeLabel = (from?: string, to?: string) => {
+  if (!from && !to) return "";
+  if (from && to) return `${shortDate(from)} – ${shortDate(to)}`;
+  if (from) return `From ${shortDate(from)}`;
+  return `Until ${shortDate(to!)}`;
+};
 
 const FOOD_ITEMS: Record<string, Array<{ name: string; weight: number; calories: number }>> = {
   Breakfast: [
@@ -270,6 +288,10 @@ export default function MealPlanning() {
   }, []);
   const [selectedDay, setSelectedDay] = useState(DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]);
   const today = DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1];
+  // Date the planner is viewed "as of": only configs whose effective range covers
+  // this date (plus range-less configs) are shown. Empty string = show all dates.
+  // Defaults to today so the planner opens on the currently-effective menus.
+  const [viewDate, setViewDate] = useState<string>(new Date().toISOString().split("T")[0]);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [viewMenuOpen, setViewMenuOpen] = useState(false);
@@ -297,6 +319,9 @@ export default function MealPlanning() {
 
   const getInitialCreateData = (day: string) => ({
     day,
+    // New configs default to no effective range (apply on every date).
+    effectiveFrom: "",
+    effectiveTo: "",
     flightType: [] as string[],
     forType: "",
     mealTypes: [] as string[],
@@ -341,7 +366,7 @@ export default function MealPlanning() {
   const [createStep, setCreateStep] = useState(1);
   const [activeMealTab, setActiveMealTab] = useState<string>("Breakfast");
 
-  const currentDayMeals = useMemo(() => meals.filter((m) => m.day === selectedDay), [meals, selectedDay]);
+  const currentDayMeals = useMemo(() => meals.filter((m) => m.day === selectedDay && cardMatchesDate(m, viewDate)), [meals, selectedDay, viewDate]);
   const effectiveItemsTab = (activeItemsTab && (createData.mealTypes.includes(activeItemsTab) || activeItemsTab === "special-meals" || activeItemsTab === "dessert"))
     ? activeItemsTab
     : (createData.mealTypes[0] ?? "");
@@ -422,6 +447,9 @@ export default function MealPlanning() {
       return {
         id: `meal-${Date.now()}-${mealType}`,
         day: createData.day,
+        // Empty bound → undefined (unbounded / applies on every date).
+        effectiveFrom: createData.effectiveFrom || undefined,
+        effectiveTo: createData.effectiveTo || undefined,
         mealType,
         flightType: createData.flightType,
         forType: createData.forType || "Passengers",
@@ -442,7 +470,7 @@ export default function MealPlanning() {
   };
 
   const getMealsByTypeForDay = (day: string) => {
-    const dayMeals = meals.filter((m) => m.day === day);
+    const dayMeals = meals.filter((m) => m.day === day && cardMatchesDate(m, viewDate));
     const filtered = dayMeals.filter(mealMatchesFilters);
     const grouped: Record<string, MealCard[]> = {};
     MEAL_TYPES.forEach((type) => {
@@ -457,6 +485,8 @@ export default function MealPlanning() {
     setSelectedMeal(meal);
     setCreateData({
       day: meal.day,
+      effectiveFrom: meal.effectiveFrom ?? "",
+      effectiveTo: meal.effectiveTo ?? "",
       flightType: meal.flightType,
       forType: meal.forType,
       mealTypes: [meal.mealType],
@@ -496,7 +526,7 @@ export default function MealPlanning() {
         validIntl: [],
         validDom: [],
       },
-      forwardedMeals: meals.filter((m) => m.day === selectedDay),
+      forwardedMeals: meals.filter((m) => m.day === selectedDay && cardMatchesDate(m, viewDate)),
       forwardedDay: selectedDay,
     };
   };
@@ -558,7 +588,7 @@ export default function MealPlanning() {
 
               <div className="space-y-5">
                 {/* ── Basic Info ── */}
-                <div className="grid grid-cols-3 gap-4">
+                <div className="grid grid-cols-4 gap-4">
                   <div>
                     <Label>Day</Label>
                     <select
@@ -570,6 +600,34 @@ export default function MealPlanning() {
                         <option key={day} value={day}>{day}</option>
                       ))}
                     </select>
+                  </div>
+                  <div>
+                    <Label>Effective Dates</Label>
+                    <div className="mt-1 space-y-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] text-muted-foreground w-9 shrink-0">From</span>
+                        <Input
+                          type="date"
+                          value={createData.effectiveFrom}
+                          max={createData.effectiveTo || undefined}
+                          onChange={(e) => setCreateData({ ...createData, effectiveFrom: e.target.value })}
+                          className="h-8 text-sm"
+                        />
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] text-muted-foreground w-9 shrink-0">To</span>
+                        <Input
+                          type="date"
+                          value={createData.effectiveTo}
+                          min={createData.effectiveFrom || undefined}
+                          onChange={(e) => setCreateData({ ...createData, effectiveTo: e.target.value })}
+                          className="h-8 text-sm"
+                        />
+                      </div>
+                    </div>
+                    <p className="mt-1 text-[11px] text-muted-foreground leading-tight">
+                      Leave both empty to apply on every date.
+                    </p>
                   </div>
                   <div>
                     <Label>Flight Type</Label>
@@ -1781,7 +1839,7 @@ export default function MealPlanning() {
           <div className="px-6 py-3 bg-white border-b">
             <div className="grid grid-cols-2 gap-3">
               {(() => {
-                const domMeals = meals.filter((m) => m.day === pendingDay && m.flightType.includes("Domestic"));
+                const domMeals = meals.filter((m) => m.day === pendingDay && cardMatchesDate(m, viewDate) && m.flightType.includes("Domestic"));
                 const domTypes = [...new Set(domMeals.map((m) => m.mealType))];
                 return (
                   <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
@@ -1797,7 +1855,7 @@ export default function MealPlanning() {
                 );
               })()}
               {(() => {
-                const intlMeals = meals.filter((m) => m.day === pendingDay && m.flightType.includes("International"));
+                const intlMeals = meals.filter((m) => m.day === pendingDay && cardMatchesDate(m, viewDate) && m.flightType.includes("International"));
                 const intlTypes = [...new Set(intlMeals.map((m) => m.mealType))];
                 return (
                   <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
@@ -1834,7 +1892,7 @@ export default function MealPlanning() {
               };
               return MEAL_TYPES.map((mealType, typeIdx) => {
                 const pal = tagPalette[typeIdx % tagPalette.length];
-                const mealsForType = meals.filter((m) => m.day === pendingDay && m.mealType === mealType);
+                const mealsForType = meals.filter((m) => m.day === pendingDay && cardMatchesDate(m, viewDate) && m.mealType === mealType);
                 return (
                   <div key={mealType} className={`rounded-xl border ${pal.border} overflow-hidden shadow-sm`}>
                     {/* Row header */}
@@ -1923,6 +1981,27 @@ export default function MealPlanning() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Effective-date filter */}
+      <div className="flex items-center gap-2 mb-4 flex-wrap">
+        <span className="text-sm font-medium text-muted-foreground mr-1">Menus effective on:</span>
+        <Input
+          type="date"
+          value={viewDate}
+          onChange={(e) => setViewDate(e.target.value)}
+          className="h-8 w-40 text-sm"
+        />
+        {viewDate && (
+          <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => setViewDate("")}>
+            Show all dates
+          </Button>
+        )}
+        <span className="text-xs text-muted-foreground ml-1">
+          {viewDate
+            ? `Showing menus effective on ${formatDateDDMMMYYYY(viewDate)} (plus menus with no date range).`
+            : "Showing all configured menus regardless of date."}
+        </span>
+      </div>
 
       {/* Day Tabs */}
       <Tabs value={selectedDay} onValueChange={setSelectedDay} className="mb-6">
@@ -2052,6 +2131,9 @@ export default function MealPlanning() {
                                   {meal.flightType.map((ft) => (
                                     <span key={ft} className="px-2 py-0.5 text-xs rounded-full bg-primary/10 text-primary">{ft}</span>
                                   ))}
+                                  <span className={`px-2 py-0.5 text-xs rounded-full ${(meal.effectiveFrom || meal.effectiveTo) ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-600"}`}>
+                                    {rangeLabel(meal.effectiveFrom, meal.effectiveTo) || "All Dates"}
+                                  </span>
                                   <span className="text-xs text-muted-foreground">Serving: {meal.servingTime.start} – {meal.servingTime.end}</span>
                                   <span className="text-xs italic text-muted-foreground">Effective: {formatDateDDMMMYYYY(meal.createdDate)}</span>
                                   <Button variant="ghost" size="sm" className="h-6 px-2 text-xs ml-auto" onClick={() => openViewMenu(meal)}>📋 View Menu</Button>

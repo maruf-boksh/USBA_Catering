@@ -712,7 +712,7 @@ export type EquipmentAsset = {
   location: string;
   lastMaintenance: string;
   nextMaintenance: string;
-  status: "In Service" | "In Maintenance" | "Damaged" | "Retired" | "New" | "Used";
+  status: "In Service" | "In Maintenance" | "Damaged" | "Retired" | "New" | "Used" | "Assigned" | "Destroyed";
   grnNumber?: string;
   purchaseDate?: string;
   supplierName?: string;

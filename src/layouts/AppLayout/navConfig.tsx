@@ -52,6 +52,7 @@ import {
   Warehouse,
   BadgeDollarSign,
   GitBranch,
+  Trash2,
 } from 'lucide-react';
 
 export interface NavSubItem {
@@ -201,10 +202,12 @@ export const NAV_MODULES: NavModule[] = [
     label: 'Fleet Operations',
     icon: I(Plane),
     children: [
-      { key: '/fleet-overview',        label: 'Fleet Overview',  icon: I(LayoutDashboard) },
-      { key: '/airline-equipments',    label: 'Assets',          icon: I(Boxes) },
-      { key: '/equipment-maintenance', label: 'Maintenance',     icon: I(Wrench) },
-      { key: '/equipment-damage',      label: 'Damage Reports',  icon: I(ShieldAlert) },
+      { key: '/fleet-overview',        label: 'Fleet Overview',     icon: I(LayoutDashboard) },
+      { key: '/airline-equipments',    label: 'Asset Registration', icon: I(Boxes) },
+      { key: '/asset-assignment',      label: 'Asset Assign',       icon: I(Send) },
+      { key: '/asset-disposal',        label: 'Asset Disposal',     icon: I(Trash2) },
+      { key: '/equipment-maintenance', label: 'Maintenance',        icon: I(Wrench) },
+      { key: '/equipment-damage',      label: 'Damage Reports',     icon: I(ShieldAlert) },
     ],
   },
 

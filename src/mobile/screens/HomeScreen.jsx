@@ -1,7 +1,11 @@
 import { useState } from 'react';
 import { T } from '../theme';
 import { KPICard } from '../components/KPICard';
-import { MOCK_FLIGHTS, MOCK_PRODUCTION_ORDERS, MOCK_QC_CHECKS, MOCK_DISPATCHES, MOCK_APPROVALS, MOCK_INVENTORY_ALERTS } from '../mockData';
+import { MOCK_PRODUCTION_ORDERS, MOCK_QC_CHECKS, MOCK_DISPATCHES, MOCK_APPROVALS, MOCK_INVENTORY_ALERTS } from '../mockData';
+import { loadMobileFlights } from '../../lib/flight-orders-store';
+
+// Live flights from the web Order Management store (replaces the old MOCK_FLIGHTS).
+const FLIGHTS = loadMobileFlights();
 
 const STATUS_STYLE = {
   boarding:  { color: T.statusBoarding,  bg: T.statusBoardingBg  },
@@ -41,10 +45,10 @@ function FlightRow({ flight }) {
 }
 
 // ── Computed KPIs — derived from mock data so values stay in sync ──────────────
-const totalFlights     = MOCK_FLIGHTS.length;
-const totalMeals       = MOCK_FLIGHTS.reduce((s, f) => s + f.meals, 0);
-const delayedFlights   = MOCK_FLIGHTS.filter(f => f.status === 'delayed').length;
-const delayedPax       = MOCK_FLIGHTS.filter(f => f.status === 'delayed').reduce((s, f) => s + f.pax, 0);
+const totalFlights     = FLIGHTS.length;
+const totalMeals       = FLIGHTS.reduce((s, f) => s + f.meals, 0);
+const delayedFlights   = FLIGHTS.filter(f => f.status === 'delayed').length;
+const delayedPax       = FLIGHTS.filter(f => f.status === 'delayed').reduce((s, f) => s + f.pax, 0);
 const onTimeRate       = totalFlights > 0 ? Math.round(((totalFlights - delayedFlights) / totalFlights) * 100) : 100;
 const qcOpenIssues     = MOCK_QC_CHECKS.filter(c => c.result === 'open').length;
 const qcResolvedToday  = MOCK_QC_CHECKS.filter(c => c.result === 'pass').length;
@@ -64,7 +68,7 @@ const KPI_ROWS = [
 ];
 
 // Pipeline step data derived from mock data
-const ordersConfirmed  = MOCK_FLIGHTS.length;
+const ordersConfirmed  = FLIGHTS.length;
 const productionActive = MOCK_PRODUCTION_ORDERS.filter(o => o.status === 'in-progress').length;
 const qcPass           = MOCK_QC_CHECKS.filter(c => c.result === 'pass').length;
 const qcTotal          = MOCK_QC_CHECKS.length;
@@ -312,7 +316,7 @@ export function HomeScreen({ nav }) {
               Orders →
             </button>
           </div>
-          {MOCK_FLIGHTS.slice(0, 4).map(f => (
+          {FLIGHTS.slice(0, 4).map(f => (
             <FlightRow key={f.id} flight={f} />
           ))}
           <div style={{ paddingTop: 6, fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, textAlign: 'center' }}>

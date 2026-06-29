@@ -880,6 +880,7 @@ export default function CookingTemp() {
                     <Input
                       value={qcBatchNo}
                       readOnly
+                      tabIndex={-1}
                       className="mt-1 tabular-nums bg-muted/50 cursor-not-allowed"
                       placeholder="Batch number"
                     />
