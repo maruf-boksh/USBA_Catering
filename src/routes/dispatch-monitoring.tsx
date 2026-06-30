@@ -1,4 +1,4 @@
-import { useState, Fragment, useEffect, useRef } from "react";
+import { useState, Fragment, useEffect, useRef, useMemo } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -16,9 +16,11 @@ import { toast } from "sonner";
 import {
   Plus, Truck, Pencil, Trash2, ThermometerSun, ShieldCheck,
   AlertOctagon, AlertTriangle, PlaneTakeoff, PlaneLanding,
-  Clock, User, CheckCircle2, Eye, Smartphone, ChevronRight, QrCode, X as CloseIcon, LayoutGrid, Timer, Play,
+  Clock, User, CheckCircle2, Eye, Smartphone, ChevronRight, QrCode, X as CloseIcon, Timer, Play,
 } from "lucide-react";
 import { flights as FLIGHT_BOARD, seedFlightOrders } from "@/lib/sample-data";
+import { getFlightOrders } from "@/lib/flight-orders-store";
+import { INITIAL_RECORDS as DISPATCH_SEED_RECORDS } from "@/routes/dispatch";
 import { useRole } from "@/lib/roles";
 import { useWorkflow } from "@/lib/workflow-store";
 import { useDispatchMonitoringSettings } from "@/lib/dispatch-monitoring-settings";
@@ -28,12 +30,12 @@ import { KpiCard } from "@/components/common/KpiCard";
 // (`FLIGHT_BOARD`) only carries a handful of flights, so we merge in every
 // distinct flight number from the order book (`seedFlightOrders`) — deduped by
 // flight code — so the Flight Number dropdown has them all pre-loaded.
-type FlightOption = {
+export type FlightOption = {
   id: string; flight: string; sector: string; aircraft: string; dep: string; arr: string;
   pax: number; adult: number; child: number; infant: number; crew: number;
   type: string; window: string; duration: string; status: string;
 };
-const flights: FlightOption[] = (() => {
+export const flights: FlightOption[] = (() => {
   const merged: FlightOption[] = FLIGHT_BOARD.map((f) => ({ ...f }));
   const seen = new Set(merged.map((f) => f.flight));
   for (const o of seedFlightOrders) {
@@ -82,7 +84,7 @@ const HOC_DESIG: Record<string, string> = {
 const DEP_TIMES = [...new Set(flights.map((f) => f.dep))].sort();
 const todayStr = new Date().toISOString().split("T")[0];
 
-function nowTimeStr() {
+export function nowTimeStr() {
   const now = new Date();
   return `${todayStr} ${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}`;
 }
@@ -90,7 +92,7 @@ function nowTimeStr() {
 // ── Types ───────────────────────────────────────────────────────────────────
 type MealLine = { type: string; qty: string };
 type ApprovalLog = { name: string; date: string; time: string; remarks: string };
-type DispatchEntry = {
+export type DispatchEntry = {
   id: string; flightId: string; packagingDate: string; mealLines: MealLine[];
   vehicleNo: string; vehicleClean: "Yes" | "No"; chilledTemp: string; frozenTemp: string;
   loadStartTime: string; loadEndTime: string; vehicleTempBegin: string; vehicleTempEnd: string;
@@ -117,8 +119,8 @@ type FormState = {
 };
 
 type SignOffLog = { name: string; designation: string; signedAt: string };
-type GalleyStatus = "forwarded" | "loading" | "completed" | "awaiting_approval" | "approved";
-type GalleyLoadingRecord = {
+export type GalleyStatus = "forwarded" | "loading" | "completed" | "awaiting_approval" | "approved";
+export type GalleyLoadingRecord = {
   id: string;
   dispatchEntryId: string;
   flightId: string;
@@ -207,7 +209,7 @@ function initGalleySeed(): GalleyLoadingRecord[] {
   return seed;
 }
 
-function loadGalleyRecords(): GalleyLoadingRecord[] {
+export function loadGalleyRecords(): GalleyLoadingRecord[] {
   try {
     const raw = sessionStorage.getItem(GALLEY_KEY);
     if (!raw) return initGalleySeed();
@@ -215,8 +217,53 @@ function loadGalleyRecords(): GalleyLoadingRecord[] {
   } catch { return initGalleySeed(); }
 }
 
-function saveGalleyRecords(records: GalleyLoadingRecord[]) {
+export function saveGalleyRecords(records: GalleyLoadingRecord[]) {
   sessionStorage.setItem(GALLEY_KEY, JSON.stringify(records));
+}
+
+// ── Dispatch (packaging) records — read-only source for the galley Meals tab ──
+// The dish-level meal breakdown lives on the Packaging & Dispatch records
+// (persisted by dispatch.tsx). We read them directly so Meals integrate from
+// dispatch data rather than being hand-keyed.
+type DispPaxLine = { itemName: string; percent?: number; qty: number };
+type DispCrewMeal = { type: string; qty: string };
+type DispSection = {
+  flightNo: string; sector?: string; direction?: string;
+  paxLines: DispPaxLine[]; vgml?: number; chml?: number; spml?: number;
+  crewMeals?: DispCrewMeal[];
+};
+type DispRecord = { id: string; date: string; flightNos: string[]; sections: DispSection[] };
+
+function loadDispatchRecords(): DispRecord[] {
+  try {
+    const raw = localStorage.getItem("harvest-data-v1:dispatch-records");
+    if (raw) return JSON.parse(raw) as DispRecord[];
+  } catch { /* fall through to seed */ }
+  // Not persisted yet (user hasn't opened the Dispatch page) — fall back to the
+  // same seed dispatch.tsx uses, so the galley Meals tab still integrates.
+  return DISPATCH_SEED_RECORDS as unknown as DispRecord[];
+}
+
+/** The dispatch section (dish breakdown) for a flight, if a dispatch was built. */
+function dispatchSectionForFlight(flightNo: string | undefined): DispSection | undefined {
+  if (!flightNo) return undefined;
+  for (const rec of loadDispatchRecords()) {
+    const sec = rec.sections?.find((s) => s.flightNo === flightNo);
+    if (sec) return sec;
+  }
+  return undefined;
+}
+
+/** Read the shared dispatch-monitoring entries (seeding on first use) so other
+ *  modules — e.g. Galley Planning — can plan against the same dispatches. */
+export function loadDispatchEntries(): DispatchEntry[] {
+  try {
+    const s = sessionStorage.getItem("dm_entries");
+    if (s) return JSON.parse(s) as DispatchEntry[];
+    const seed = initDispatchSeed();
+    sessionStorage.setItem("dm_entries", JSON.stringify(seed));
+    return seed;
+  } catch { return initDispatchSeed(); }
 }
 
 function initDispatchSeed(): DispatchEntry[] {
@@ -311,7 +358,7 @@ const chilledOOR = (v: string) => { const n = parseFloat(v); return v !== "" && 
 const frozenOOR  = (v: string) => { const n = parseFloat(v); return v !== "" && !isNaN(n) && (n < -12 || n > -8); };
 const vehOOR     = (v: string) => { const n = parseFloat(v); return v !== "" && !isNaN(n) && n > 8; };
 const totalQty   = (lines: MealLine[]) => lines.reduce((s, l) => s + (parseInt(l.qty) || 0), 0);
-const flightLabel = (id: string) => { const f = flights.find((x) => x.id === id); return f ? `${f.flight} — ${f.sector}` : id; };
+export const flightLabel = (id: string) => { const f = flights.find((x) => x.id === id); return f ? `${f.flight} — ${f.sector}` : id; };
 const flightNo    = (id: string) => { const f = flights.find((x) => x.id === id); return f ? f.flight : id; };
 const flightDest  = (id: string) => { const f = flights.find((x) => x.id === id); return f ? f.sector.split("-").pop() ?? "—" : "—"; };
 function dispatchStatusBadge(entry: DispatchEntry) {
@@ -438,7 +485,6 @@ export default function DispatchMonitoring() {
   const [approvalName, setApprovalName] = useState("");
   const [approvalRemarks, setApprovalRemarks] = useState("");
   const [viewEntryId, setViewEntryId] = useState<string | null>(null);
-  const [galleyPlanEntryId, setGalleyPlanEntryId] = useState<string | null>(null);
   const [galleyRecords, setGalleyRecords] = useState<GalleyLoadingRecord[]>(() => loadGalleyRecords());
   const [tickCount, setTickCount] = useState(0);
   const [formLoadStartIso, setFormLoadStartIso] = useState("");
@@ -582,24 +628,6 @@ export default function DispatchMonitoring() {
     return () => clearInterval(id);
   }, [formLoadStartIso]);
 
-  function forwardToAircraft(entryId: string, plan: GalleyPlan, signOff: GalleyLoadingRecord["signOff"]) {
-    const entry = entries.find((e) => e.id === entryId);
-    if (!entry) return;
-    const rec: GalleyLoadingRecord = {
-      id: `GL-${Date.now().toString(36)}`,
-      dispatchEntryId: entryId,
-      flightId: entry.flightId,
-      flightLabel: flightLabel(entry.flightId),
-      date: entry.packagingDate,
-      galleyPlan: plan,
-      signOff,
-      galleyStatus: "forwarded",
-      forwardedAt: nowTimeStr(),
-    };
-    setGalleyRecords((prev) => [...prev.filter((r) => r.dispatchEntryId !== entryId), rec]);
-    setGalleyPlanEntryId(null);
-    toast.success("Forwarded to Aircraft. Use 'Start Loading' when ready.");
-  }
 
   function startLoading(entryId: string) {
     setGalleyRecords((prev) =>
@@ -1040,17 +1068,10 @@ export default function DispatchMonitoring() {
                         )}
                         {entry.receivedAt && (() => {
                           const gr = galleyRecords.find((r) => r.dispatchEntryId === entry.id);
-                          if (!gr) {
-                            return (
-                              <Button
-                                size="sm"
-                                className="h-6 px-2.5 text-[10px] bg-sky-600 hover:bg-sky-700 text-white border-0"
-                                onClick={() => setGalleyPlanEntryId(entry.id)}
-                              >
-                                <LayoutGrid className="h-3 w-3 mr-1" /> Galley Planning
-                              </Button>
-                            );
-                          }
+                          // Galley planning now lives in the Galley Planning module.
+                          // Until a plan is forwarded from there, the loading actions
+                          // below don't apply yet, so render nothing.
+                          if (!gr) return null;
                           if (gr.galleyStatus === "forwarded") {
                             return (
                               <Button
@@ -1913,20 +1934,8 @@ export default function DispatchMonitoring() {
         );
       })()}
 
-      {/* ── Galley Planning Modal ─────────────────────────────────────────── */}
-      {galleyPlanEntryId && (() => {
-        const gpEntry = entries.find((e) => e.id === galleyPlanEntryId);
-        if (!gpEntry) return null;
-        const gpFlight = flights.find((f) => f.id === gpEntry.flightId);
-        return (
-          <GalleyPlanningModal
-            entry={gpEntry}
-            flight={gpFlight}
-            onClose={() => setGalleyPlanEntryId(null)}
-            onForward={(plan, signOff) => forwardToAircraft(galleyPlanEntryId, plan, signOff)}
-          />
-        );
-      })()}
+      {/* Galley planning relocated to the Galley Planning module; this page now
+          only executes loading (Start Loading → Completed → approval). */}
 
       {/* ── Mobile App View Overlay ────────────────────────────────────────── */}
       {mobileOpen && (
@@ -2571,9 +2580,9 @@ function GalleySecTitle({ children }: { children: React.ReactNode }) {
   );
 }
 
-type GalleyPlan = Record<string, string>;
+export type GalleyPlan = Record<string, string>;
 
-function buildInitialGalley(entry: DispatchEntry, flight: FlightOption | undefined): GalleyPlan {
+export function buildInitialGalley(entry: DispatchEntry, flight: FlightOption | undefined): GalleyPlan {
   const pax = flight?.pax ?? totalQty(entry.mealLines);
   const crew = flight?.crew ?? 7;
   const child = flight?.child ?? 0;
@@ -2672,7 +2681,7 @@ function buildInitialGalley(entry: DispatchEntry, flight: FlightOption | undefin
   };
 }
 
-function GalleyPlanningModal({
+export function GalleyPlanningModal({
   entry,
   flight,
   onClose,
@@ -2683,10 +2692,30 @@ function GalleyPlanningModal({
   onClose: () => void;
   onForward: (plan: GalleyPlan, signOff: GalleyLoadingRecord["signOff"]) => void;
 }) {
-  type GTab = "overview" | "meals" | "beverages" | "safety" | "equipment";
+  type GTab = "overview" | "meals" | "beverages" | "amenities" | "equipment";
   const [tab, setTab] = useState<GTab>("overview");
   const [g, setG] = useState<GalleyPlan>(() => buildInitialGalley(entry, flight));
   const sg = (k: string, v: string) => setG((prev) => ({ ...prev, [k]: v }));
+
+  // Load Summary is connected from Order Management; Meals integrate from the
+  // Dispatch (packaging) record. Beverages/Amenities/Equipment stay manual.
+  const flightNo = flight?.flight ?? entry.flightId;
+  const order = useMemo(() => {
+    const list = getFlightOrders().filter((o) => o.orderType !== "crew" && o.flight === flightNo);
+    return list.find((o) => o.date === entry.packagingDate) ?? list[0];
+  }, [flightNo, entry.packagingDate]);
+  const dispatchSection = useMemo(() => dispatchSectionForFlight(flightNo), [flightNo]);
+  const specialTotal = (dispatchSection?.vgml ?? 0) + (dispatchSection?.chml ?? 0) + (dispatchSection?.spml ?? 0);
+
+  // Read-only field (connected value, not editable) for the connected tabs.
+  const RO = ({ label, value }: { label: string; value: string | number }) => (
+    <div>
+      <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">{label}</p>
+      <div className="w-full h-7 px-2 text-xs border border-slate-200 rounded-md bg-slate-50 text-slate-700 tabular-nums flex items-center">
+        {value === "" || value == null ? "—" : value}
+      </div>
+    </div>
+  );
 
   const signPreparedBy = APT_EXECUTIVES[0];
   const signPhysicallyBy = APT_EXECUTIVES[1];
@@ -2711,12 +2740,14 @@ function GalleyPlanningModal({
     );
   }
 
+  // Standard galley-loading sequence: load summary → meals → beverages →
+  // amenities/consumables → equipment.
   const TABS: { key: GTab; label: string }[] = [
-    { key: "overview", label: "Overview" },
+    { key: "overview", label: "Load Summary" },
     { key: "meals", label: "Meals" },
     { key: "beverages", label: "Beverages & Tea" },
-    { key: "safety", label: "Safety & Medicine" },
-    { key: "equipment", label: "Equipment & Fruits" },
+    { key: "amenities", label: "Amenities & Consumables" },
+    { key: "equipment", label: "Equipment" },
   ];
 
   return (
@@ -2767,49 +2798,36 @@ function GalleyPlanningModal({
           {tab === "overview" && (
             <div className="space-y-5">
               <div>
-                <GalleySecTitle>Load Summary</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="depZenithLoad" label="Departure Zenith Load" />
-                  <GF k="arrZenithLoad" label="Arrival Zenith Load" />
-                  <GF k="traySetupDep" label="Tray Setup Load — Dept" />
-                  <GF k="traySetupArr" label="Tray Setup Load — Arrv" />
-                  <GF k="depMealLoad" label="Departure Meal Load" />
-                  <GF k="arrMealLoad" label="Arrival Meal Load" />
-                  <GF k="depBCPax" label="Dept B/C Pax Load" />
-                  <GF k="arrBCPax" label="Arrv B/C Pax Load" />
-                  <GF k="depBCMeal" label="Dept B/C Meal Load" />
-                  <GF k="arrBCMeal" label="Arrv B/C Meal Load" />
-                  <GF k="depCrewBC" label="Departure Crew B/C" />
-                  <GF k="arrCrewBC" label="Arrival Crew B/C" />
+                <div className="flex items-center justify-between mb-2">
+                  <GalleySecTitle>Flight Order</GalleySecTitle>
+                  <span className="text-[10px] text-sky-700 bg-sky-50 border border-sky-100 rounded-full px-2 py-0.5 font-semibold">
+                    Connected from Order Management
+                  </span>
                 </div>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <GalleySecTitle>Dept. Crew Configuration</GalleySecTitle>
-                  <div className="grid grid-cols-3 gap-2">
-                    <GF k="depCockpit" label="Cockpit" />
-                    <GF k="depCabin" label="Cabin" />
-                    <GF k="depObs" label="Obs" />
+                {order ? (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <RO label="Order #" value={order.orderNo} />
+                    <RO label="Flight" value={order.flight} />
+                    <RO label="Airline" value={order.airline} />
+                    <RO label="Status" value={order.status} />
+                    <RO label="Sector" value={order.sector} />
+                    <RO label="Direction" value={order.direction} />
+                    <RO label="Date" value={order.date} />
+                    <RO label="ETD" value={order.etd} />
                   </div>
-                </div>
-                <div>
-                  <GalleySecTitle>Arr. Crew Configuration</GalleySecTitle>
-                  <div className="grid grid-cols-3 gap-2">
-                    <GF k="arrCockpit" label="Cockpit" />
-                    <GF k="arrCabin" label="Cabin" />
-                    <GF k="arrObs" label="Obs" />
+                ) : (
+                  <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                    No matching flight order found in Order Management for <strong>{flightNo}</strong>{entry.packagingDate ? ` on ${entry.packagingDate}` : ""}. Showing schedule data only.
                   </div>
-                </div>
+                )}
               </div>
               <div>
-                <GalleySecTitle>Child & Special Load</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                  <GF k="depChildPax" label="Departure Child Pax" />
-                  <GF k="arrChildPax" label="Arrival Child Pax" />
-                  <GF k="depChildMeal" label="Dept Child Meal Load" />
-                  <GF k="arrChildMeal" label="Arrv Child Meal Load" />
-                  <GF k="extHotMeal" label="Ext. Hot Meal — CHML (Arr+Dep)" />
-                  <GF k="totalMealLoad" label="Total Meal Load" />
+                <GalleySecTitle>Load Counts</GalleySecTitle>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <RO label="Passengers (PAX)" value={order?.pax ?? flight?.pax ?? "—"} />
+                  <RO label="Crew" value={order?.crew ?? flight?.crew ?? "—"} />
+                  <RO label="Special Meals" value={order?.specialMeals ?? "—"} />
+                  <RO label="Total Meals (PAX + Crew)" value={order ? order.pax + order.crew : (flight ? flight.pax + flight.crew : "—")} />
                 </div>
               </div>
             </div>
@@ -2817,66 +2835,55 @@ function GalleyPlanningModal({
 
           {tab === "meals" && (
             <div className="space-y-5">
-              <div>
-                <GalleySecTitle>EY Passenger — Departure Meal</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="depChicken" label="Chicken Meal — 40%" />
-                  <GF k="depBeef" label="Beef Meal — 60%" />
-                  <GF k="depVeg" label="Vegetarian Meal" />
-                  <GF k="depChilled" label="Chilled Meal" />
-                  <GF k="depDiabetic" label="Diabetics / Gluten Free" />
-                  <GF k="depBreakfast" label="Breakfast (EY Pax)" />
-                  <GF k="totalDepMeal" label="Total Meal for Departure" />
-                </div>
+              <div className="flex items-center justify-between">
+                <GalleySecTitle>Meals</GalleySecTitle>
+                <span className="text-[10px] text-sky-700 bg-sky-50 border border-sky-100 rounded-full px-2 py-0.5 font-semibold">
+                  Integrated from Dispatch
+                </span>
               </div>
-              <div>
-                <GalleySecTitle>EY Passenger — Arrival Meal</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="arrChicken" label="Chicken Meal — 40%" />
-                  <GF k="arrBeef" label="Beef Meal — 60%" />
-                  <GF k="arrVeg" label="Vegetarian Meal" />
-                  <GF k="arrChilled" label="Chilled Meal" />
-                  <GF k="arrDiabetic" label="Diabetics / Gluten Free" />
-                  <GF k="totalArrMeal" label="Total Meal for Arrival" />
+              {dispatchSection ? (
+                <>
+                  <div>
+                    <GalleySecTitle>Passenger Meals</GalleySecTitle>
+                    <div className="rounded-lg border border-border overflow-hidden">
+                      {dispatchSection.paxLines.length === 0 ? (
+                        <div className="px-3 py-2 text-xs text-muted-foreground">No passenger meal lines.</div>
+                      ) : dispatchSection.paxLines.map((l, i) => (
+                        <div key={i} className={`flex items-center justify-between px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
+                          <span className="text-slate-700">{l.itemName}{l.percent != null ? ` · ${l.percent}%` : ""}</span>
+                          <span className="font-semibold tabular-nums">{l.qty}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  {dispatchSection.crewMeals && dispatchSection.crewMeals.length > 0 && (
+                    <div>
+                      <GalleySecTitle>Crew Meals</GalleySecTitle>
+                      <div className="rounded-lg border border-border overflow-hidden">
+                        {dispatchSection.crewMeals.map((c, i) => (
+                          <div key={i} className={`flex items-center justify-between px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
+                            <span className="text-slate-700">{c.type}</span>
+                            <span className="font-semibold tabular-nums">{c.qty}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div>
+                    <GalleySecTitle>Special Meals</GalleySecTitle>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <RO label="VGML — Veg / Vegan" value={dispatchSection.vgml ?? 0} />
+                      <RO label="CHML — Child" value={dispatchSection.chml ?? 0} />
+                      <RO label="SPML — Special" value={dispatchSection.spml ?? 0} />
+                      <RO label="Total Special" value={specialTotal} />
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                  No dispatch has been built for <strong>{flightNo}</strong> yet — the meal breakdown will populate here once this flight is dispatched in Packaging &amp; Dispatch.
                 </div>
-              </div>
-              <div>
-                <GalleySecTitle>BC Passenger Meals</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="bcDepPassMeal" label="Dept. Business Class Pass. Meal" />
-                  <GF k="bcArrPassMeal" label="Arrv. Business Class Pass. Meal" />
-                  <GF k="bcDepCrewMeal" label="Dept. Business Class Crew Meal" />
-                  <GF k="bcArrCrewMeal" label="Arrv. Business Class Crew Meal" />
-                  <GF k="bcAppetizer" label="Appetizer for All BC Pax" />
-                  <GF k="bcNutPkt" label="Nut PKT for All BC Pax" />
-                  <GF k="bcDessert" label="Dessert for All BC Pax" />
-                </div>
-              </div>
-              <div>
-                <GalleySecTitle>Crew Meals</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="crewBreakfast" label="Breakfast Meal for Crew" />
-                  <GF k="crewLunch" label="Lunch Meal for Crew" />
-                  <GF k="crewHeavySnacks" label="Heavy Snacks for Crew" />
-                  <GF k="crewAppetizer" label="Appetizer / Bun for Crew" />
-                  <GF k="crewLightSnacks" label="Light Snacks for Crew" />
-                  <GF k="crewDessert" label="Dessert for Crew" />
-                  <GF k="crewExtraLunchVeg" label="Extra Lunch & Breakfast Veg" />
-                  <GF k="crewButterJam" label="Butter or Jam for Crew" />
-                </div>
-              </div>
-              <div>
-                <GalleySecTitle>Setup</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="traySetupDepEY" label="Tray Setup for Dept. EY Passenger" />
-                  <GF k="traySetupArrEY" label="Tray Setup for Arrv. EY Passenger" />
-                  <GF k="totalSalad" label="Total Salad" />
-                  <GF k="totalFirni" label="Total Firni" />
-                  <GF k="totalCutlery" label="Total Cutlery" />
-                  <GF k="bcSetupDep" label="BC Setup for Departure" />
-                  <GF k="bcSetupArr" label="BC Setup for Arrival" />
-                </div>
-              </div>
+              )}
             </div>
           )}
 
@@ -2933,16 +2940,30 @@ function GalleyPlanningModal({
             </div>
           )}
 
-          {tab === "safety" && (
+          {tab === "amenities" && (
             <div className="space-y-5">
               <div>
-                <GalleySecTitle>Cabin Appearance & Safety Items</GalleySecTitle>
+                <GalleySecTitle>Tissues & Napkins</GalleySecTitle>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   <GF k="wetTissue" label="Wet Tissue (As per Pax + Crew)" unit="pcs" />
-                  <GF k="blanket" label="Blanket" unit="pcs" />
                   <GF k="napkinPaper" label="Napkin Paper (PKT)" unit="pkts" />
                   <GF k="facialTissue" label="Facial Tissue (Box)" unit="box" />
                   <GF k="kitchenTowel" label="Kitchen Towel" unit="pcs" />
+                  <GF k="babyWipes" label="Baby Wipes" unit="pcs" />
+                </div>
+              </div>
+              <div>
+                <GalleySecTitle>Bedding & Covers</GalleySecTitle>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <GF k="blanket" label="Blanket" unit="pcs" />
+                  <GF k="headRestCover" label="Head Rest Cover" unit="pcs" />
+                  <GF k="pillowCoverSmall" label="Pillow Cover (Small)" unit="pcs" />
+                  <GF k="pillowCoverBig" label="Pillow Cover (Big)" unit="pcs" />
+                </div>
+              </div>
+              <div>
+                <GalleySecTitle>Hygiene & Cleaning</GalleySecTitle>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   <GF k="handWash" label="Hand Wash (BTL)" unit="btl" />
                   <GF k="toiletRoll" label="Toilet Roll" unit="pcs" />
                   <GF k="aerosol" label="Aerosol" unit="pcs" />
@@ -2952,16 +2973,17 @@ function GalleyPlanningModal({
                   <GF k="ovenGloves" label="Oven Gloves" unit="pcs" />
                   <GF k="surgicalMask" label="Surgical Face Mask" unit="pcs" />
                   <GF k="oneShot" label="One Shot" unit="pcs" />
-                  <GF k="babyWipes" label="Baby Wipes" unit="pcs" />
-                  <GF k="sicknessBag" label="Sickness Bag" unit="pcs" />
-                  <GF k="headRestCover" label="Head Rest Cover" unit="pcs" />
-                  <GF k="pillowCoverSmall" label="Pillow Cover (Small)" unit="pcs" />
-                  <GF k="pillowCoverBig" label="Pillow Cover (Big)" unit="pcs" />
-                  <GF k="safetyCard" label="Safety Instruction Card" unit="pcs" />
                 </div>
               </div>
               <div>
-                <GalleySecTitle>Medicine</GalleySecTitle>
+                <GalleySecTitle>Safety & Sickness</GalleySecTitle>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <GF k="safetyCard" label="Safety Instruction Card" unit="pcs" />
+                  <GF k="sicknessBag" label="Sickness Bag" unit="pcs" />
+                </div>
+              </div>
+              <div>
+                <GalleySecTitle>Medical Kits</GalleySecTitle>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   <GF k="dailyMedeline" label="Daily Medeline (Set)" unit="pcs" />
                   <GF k="emkBox" label="EMK BOX" unit="pc" />
@@ -2970,7 +2992,7 @@ function GalleyPlanningModal({
                 </div>
               </div>
               <div>
-                <GalleySecTitle>Forms</GalleySecTitle>
+                <GalleySecTitle>Forms & Cards</GalleySecTitle>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   <GF k="healthDeclForm" label="RD Health Declaration Form" unit="pcs" />
                   <GF k="baggageDeclForm" label="Baggage Declaration Form" unit="pcs" />
@@ -3021,7 +3043,7 @@ function GalleyPlanningModal({
                 </div>
               </div>
               <div>
-                <GalleySecTitle>Fresh Fruits for Passengers & Crew</GalleySecTitle>
+                <GalleySecTitle>Fresh Fruits for Passengers &amp; Crew</GalleySecTitle>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   <GF k="banana" label="Banana" unit="pcs" />
                   <GF k="apple" label="Apple" unit="pcs" />

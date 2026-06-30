@@ -3,19 +3,18 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-  Coffee, Boxes, AlertTriangle, CheckCircle2, Send, Package, Wallet, TrendingDown,
+  Coffee, Boxes, AlertTriangle, CheckCircle2, Send, Wallet, TrendingDown,
+  Plane, LayoutGrid, Clock,
 } from "lucide-react";
-import { consumableItems, consumableUsage } from "@/lib/sample-data";
+import { consumableItems, type ConsumableItem } from "@/lib/sample-data";
+import {
+  loadDispatchEntries, loadGalleyRecords,
+  type GalleyStatus,
+} from "@/routes/dispatch-monitoring";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Cell,
   PieChart, Pie, Legend,
 } from "recharts";
-
-const CABIN_COLORS: Record<string, string> = {
-  Y: "#0EA5E9",
-  B: "#7C3AED",
-  F: "#D97706",
-};
 
 const STATUS_BADGE: Record<string, string> = {
   OK: "bg-emerald-100 text-emerald-800",
@@ -23,59 +22,99 @@ const STATUS_BADGE: Record<string, string> = {
   Critical: "bg-red-100 text-red-800",
 };
 
+// Galley plan lifecycle → label + colour (matches the Galley Plan / Dispatch chips).
+const GSTATUS: Record<GalleyStatus, { label: string; color: string }> = {
+  forwarded:         { label: "Forwarded",         color: "#0EA5E9" },
+  loading:           { label: "Loading",           color: "#D97706" },
+  completed:         { label: "Loaded",            color: "#16A34A" },
+  awaiting_approval: { label: "Awaiting Approval", color: "#7C3AED" },
+  approved:          { label: "Approved",          color: "#0F7A40" },
+};
+const GSTATUS_ORDER: GalleyStatus[] = ["forwarded", "loading", "completed", "awaiting_approval", "approved"];
+
+// Galley forwards write consumable allocations under usePersistedState's prefix.
+function readAllocCount(): number {
+  try {
+    const raw = localStorage.getItem("harvest-data-v1:consumable-allocations");
+    return raw ? (JSON.parse(raw) as unknown[]).length : 0;
+  } catch { return 0; }
+}
+// Inventory stock is deducted on allocation; read the live override if present.
+function readItems(): ConsumableItem[] {
+  try {
+    const raw = localStorage.getItem("harvest-data-v1:airline-consumables-items");
+    return raw ? (JSON.parse(raw) as ConsumableItem[]) : consumableItems;
+  } catch { return consumableItems; }
+}
+
 export default function AirlineConsumablesOverviewPage() {
   const stats = useMemo(() => {
-    const totalSKUs = consumableItems.length;
-    const totalStock = consumableItems.reduce((s, r) => s + r.stock, 0);
-    const stockValue = consumableItems.reduce((s, r) => s + r.stock * r.unitCost, 0);
-    const lowStock = consumableItems.filter((r) => r.reorder > 0 && r.stock <= r.reorder).length;
-    const ok = consumableItems.filter((r) => r.status === "OK").length;
+    // ── Galley planning (live module data) ─────────────────────────────────
+    const entries = loadDispatchEntries();
+    const galleyRecords = loadGalleyRecords();
+    const plannedEntryIds = new Set(galleyRecords.map((r) => r.dispatchEntryId));
+    const dispatches = entries.length;
+    const galleyPlans = galleyRecords.length;
+    const awaitingPlan = entries.filter((e) => !plannedEntryIds.has(e.id)).length;
+    const allocations = readAllocCount();
 
-    // By category
-    const byCategory = consumableItems.reduce<Record<string, number>>((acc, r) => {
+    const statusCounts = galleyRecords.reduce<Record<string, number>>((acc, r) => {
+      acc[r.galleyStatus] = (acc[r.galleyStatus] ?? 0) + 1;
+      return acc;
+    }, {});
+    const statusChart = GSTATUS_ORDER
+      .filter((s) => (statusCounts[s] ?? 0) > 0)
+      .map((s) => ({ name: GSTATUS[s].label, value: statusCounts[s], color: GSTATUS[s].color }));
+
+    // ── Consumables stock health ───────────────────────────────────────────
+    const items = readItems();
+    const totalSKUs = items.length;
+    const totalStock = items.reduce((s, r) => s + r.stock, 0);
+    const stockValue = items.reduce((s, r) => s + r.stock * r.unitCost, 0);
+    const lowStock = items.filter((r) => r.reorder > 0 && r.stock <= r.reorder).length;
+    const ok = items.filter((r) => r.status === "OK").length;
+
+    const byCategory = items.reduce<Record<string, number>>((acc, r) => {
       acc[r.category] = (acc[r.category] ?? 0) + r.stock;
       return acc;
     }, {});
     const categoryChart = Object.entries(byCategory).map(([category, stock]) => ({ category, stock }));
 
-    // By cabin class (usage)
-    const byCabin = consumableUsage.reduce<Record<string, number>>((acc, u) => {
-      acc[u.cabinClass] = (acc[u.cabinClass] ?? 0) + u.qty;
-      return acc;
-    }, {});
-    const cabinChart = Object.entries(byCabin).map(([name, value]) => ({ name, value }));
-
-    // Reorder items (top 8 by deficit)
-    const reorderItems = consumableItems
+    const reorderItems = items
       .filter((r) => r.reorder > 0 && r.stock <= r.reorder)
       .map((r) => ({ ...r, deficit: r.reorder - r.stock }))
       .sort((a, b) => b.deficit - a.deficit).slice(0, 8);
 
-    const totalUsage = consumableUsage.reduce((s, u) => s + u.qty, 0);
-
     return {
+      dispatches, galleyPlans, awaitingPlan, allocations, statusChart,
       totalSKUs, totalStock, stockValue, lowStock, ok,
-      totalUsage, distinctFlights: new Set(consumableUsage.map((u) => u.flight)).size,
-      categoryChart, cabinChart, reorderItems,
+      categoryChart, reorderItems,
     };
   }, []);
 
   return (
     <>
       <PageHeader
-        title="Consumables Dashboard"
-        subtitle="Napkins, cutlery, amenity kits — stock health, usage and reorder load"
+        title="Galley Planning Dashboard"
+        subtitle="Per-flight galley plans, aircraft loading and consumable stock health — one view across the module"
       />
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-4 mb-6">
-        <KpiCard label="Total SKUs"     value={stats.totalSKUs.toLocaleString()} icon={Coffee} tone="navy" />
-        <KpiCard label="Total Stock"    value={stats.totalStock.toLocaleString()} icon={Boxes} tone="navy" />
-        <KpiCard label="Stock Value"    value={`৳ ${(stats.stockValue / 1000).toFixed(0)}k`} icon={Wallet} tone="navy" sub={`৳ ${stats.stockValue.toLocaleString()}`} />
-        <KpiCard label="In Reorder"     value={stats.lowStock.toLocaleString()} icon={TrendingDown} tone="warning" sub="Below threshold" />
-        <KpiCard label="Healthy SKUs"   value={stats.ok.toLocaleString()} icon={CheckCircle2} tone="success" />
-        <KpiCard label="Total Usage"    value={stats.totalUsage.toLocaleString()} icon={Send} tone="navy" sub="Units consumed" />
-        <KpiCard label="Flights Served" value={stats.distinctFlights.toLocaleString()} icon={Package} tone="navy" />
-        <KpiCard label="Categories"     value={stats.categoryChart.length.toLocaleString()} icon={AlertTriangle} tone="navy" />
+      {/* ── Galley planning band ─────────────────────────────────────────── */}
+      <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-muted-foreground mb-2">Galley Planning</p>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <KpiCard label="Dispatches"        value={stats.dispatches.toLocaleString()}   icon={Plane}        tone="navy" sub="Flights to plan" />
+        <KpiCard label="Galley Plans"      value={stats.galleyPlans.toLocaleString()}  icon={LayoutGrid}   tone="success" sub="Forwarded to loading" />
+        <KpiCard label="Awaiting Plan"     value={stats.awaitingPlan.toLocaleString()} icon={Clock}        tone="warning" sub="Not yet planned" />
+        <KpiCard label="Flight Allocations" value={stats.allocations.toLocaleString()} icon={Send}         tone="navy" sub="Consumables issued" />
+      </div>
+
+      {/* ── Consumables band ─────────────────────────────────────────────── */}
+      <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-muted-foreground mb-2">Consumables Stock</p>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <KpiCard label="Total SKUs"   value={stats.totalSKUs.toLocaleString()}  icon={Coffee} tone="navy" />
+        <KpiCard label="Total Stock"  value={stats.totalStock.toLocaleString()} icon={Boxes} tone="navy" />
+        <KpiCard label="Stock Value"  value={`৳ ${(stats.stockValue / 1000).toFixed(0)}k`} icon={Wallet} tone="navy" sub={`৳ ${stats.stockValue.toLocaleString()}`} />
+        <KpiCard label="In Reorder"   value={stats.lowStock.toLocaleString()} icon={TrendingDown} tone="warning" sub="Below threshold" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
@@ -98,18 +137,24 @@ export default function AirlineConsumablesOverviewPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-sm uppercase tracking-wider">Usage by Cabin Class</CardTitle>
+            <CardTitle className="text-sm uppercase tracking-wider">Galley Plan Status</CardTitle>
           </CardHeader>
           <CardContent className="h-72">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie data={stats.cabinChart} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={85}
-                     label={(e) => `Class ${e.name}: ${e.value}`}>
-                  {stats.cabinChart.map((d) => <Cell key={d.name} fill={CABIN_COLORS[d.name] ?? "#64748b"} />)}
-                </Pie>
-                <Tooltip /><Legend />
-              </PieChart>
-            </ResponsiveContainer>
+            {stats.statusChart.length === 0 ? (
+              <div className="h-full grid place-items-center text-sm text-muted-foreground text-center px-4">
+                No galley plans forwarded yet.<br />Plan a flight from <span className="font-medium text-foreground">Galley Plan</span> to populate this.
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={stats.statusChart} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={85}
+                       label={(e) => `${e.name}: ${e.value}`}>
+                    {stats.statusChart.map((d) => <Cell key={d.name} fill={d.color} />)}
+                  </Pie>
+                  <Tooltip /><Legend />
+                </PieChart>
+              </ResponsiveContainer>
+            )}
           </CardContent>
         </Card>
       </div>

@@ -41,6 +41,7 @@ import {
   Coffee,
   Clock,
   Plane,
+  LayoutGrid,
   ScanBarcode,
   Wrench,
   ShieldAlert,
@@ -183,13 +184,14 @@ export const NAV_MODULES: NavModule[] = [
     ],
   },
 
-  // ── 8. Airline Consumables ─────────────────────────────────────────────────
+  // ── 8. Galley Planning (galley plan + airline consumables) ─────────────────
   {
     key: 'airline-consumables',
-    label: 'Airline Consumables',
+    label: 'Galley Planning',
     icon: I(Coffee),
     children: [
-      { key: '/airline-consumables-overview', label: 'Consumables Dashboard', icon: I(LayoutDashboard) },
+      { key: '/airline-consumables-overview', label: 'Galley Dashboard',  icon: I(LayoutDashboard) },
+      { key: '/galley-planning',              label: 'Galley Plan',       icon: I(LayoutGrid) },
       { key: '/airline-consumables',   label: 'Inventory',         icon: I(Boxes) },
       { key: '/consumable-allocation', label: 'Flight Allocation', icon: I(Plane) },
       { key: '/consumable-returns',    label: 'Returns',           icon: I(Undo2) },

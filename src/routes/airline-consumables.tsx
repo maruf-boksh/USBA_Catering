@@ -15,7 +15,7 @@ import {
 import { Plus, ArrowLeft, Save, Boxes, AlertTriangle, Coffee, Eye, CalendarDays } from "lucide-react";
 import { toast } from "sonner";
 import {
-  consumableItems, items as MASTER_ITEMS,
+  consumableItems,
   type ConsumableCategory, type ConsumableItem,
 } from "@/lib/sample-data";
 import { cn } from "@/lib/utils";
@@ -586,25 +586,18 @@ function ConsumableList({ items, flashItemIds }: { items: ConsumableItem[]; flas
               <TableHead className="text-xs uppercase tracking-wider">UoM</TableHead>
               <TableHead className="text-xs uppercase tracking-wider text-right">Stock</TableHead>
               <TableHead className="text-xs uppercase tracking-wider text-right">Reorder</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider text-right">Unit Cost</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider text-right">Value</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">Bin</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Status</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={11} className="text-center text-sm text-muted-foreground py-8">
+                <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-8">
                   No items match the selected filters.
                 </TableCell>
               </TableRow>
             ) : (
               filtered.map((it, i) => {
-                const masterBin = MASTER_ITEMS.find(
-                  (m) => m.name.toLowerCase() === it.name.toLowerCase(),
-                )?.binLocation;
-                const bin = masterBin ?? it.binLocation ?? "—";
                 return (
                   <TableRow key={it.id} className="hover:bg-muted/30">
                     <TableCell className="text-xs text-muted-foreground tabular-nums">{i + 1}</TableCell>
@@ -632,20 +625,6 @@ function ConsumableList({ items, flashItemIds }: { items: ConsumableItem[]; flas
                       </button>
                     </TableCell>
                     <TableCell className="text-right tabular-nums text-muted-foreground">{it.reorder.toLocaleString()}</TableCell>
-                    <TableCell className="text-right tabular-nums">৳ {it.unitCost.toFixed(2)}</TableCell>
-                    <TableCell className="text-right tabular-nums font-medium">
-                      ৳ {Math.round(it.stock * it.unitCost).toLocaleString()}
-                    </TableCell>
-                    <TableCell className="font-mono text-[11px] text-muted-foreground">
-                      <span className="inline-flex items-center gap-1">
-                        {bin}
-                        {masterBin && (
-                          <Badge variant="outline" className="text-[9px] py-0 px-1 border-primary/30 bg-primary/5 text-primary">
-                            profile
-                          </Badge>
-                        )}
-                      </span>
-                    </TableCell>
                     <TableCell><StatusBadge status={it.status} /></TableCell>
                   </TableRow>
                 );
