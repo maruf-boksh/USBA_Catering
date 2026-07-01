@@ -54,6 +54,7 @@ import {
   BadgeDollarSign,
   GitBranch,
   Trash2,
+  Archive,
 } from 'lucide-react';
 
 export interface NavSubItem {
@@ -125,38 +126,6 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/transfer',          label: 'Transfer',         icon: I(MoveRight) },
       { key: '/inventory',         label: 'Stock Overview',   icon: I(Package) },
       { key: '/stock-adjustment',  label: 'Stock Adjustment', icon: I(SlidersHorizontal) },
-    ],
-  },
-
-  // ── 4. Supply Chain ────────────────────────────────────────────────────────
-  {
-    key: 'supply',
-    label: 'Supply Chain',
-    icon: I(ShoppingCart),
-    children: [
-      { key: '/supply-chain-overview',  label: 'Supply Chain Dashboard', icon: I(LayoutDashboard) },
-      { key: '/purchase-requisition',   label: 'Purchase Requisition',   icon: I(FileText) },
-      { key: '/request-for-quotation',  label: 'Request for Quotation',  icon: I(MailQuestion) },
-      { key: '/quotation-entry',        label: 'Quotation Entry',        icon: I(ClipboardList) },
-      { key: '/comparative-statement',  label: 'Comparative Statement',  icon: I(Scale) },
-      { key: '/procurement',            label: 'Purchase Orders',        icon: I(ShoppingCart) },
-      { key: '/receive-item',           label: 'Receive Items',          icon: I(Truck) },
-      { key: '/purchase-return',        label: 'Purchase Return',        icon: I(Undo2) },
-      { key: '/purchase-reports',       label: 'Purchase Reports',       icon: I(LineChart) },
-    ],
-  },
-
-  // ── 5. Accounts ────────────────────────────────────────────────────────────
-  {
-    key: 'accounts',
-    label: 'Accounts',
-    icon: I(Wallet),
-    children: [
-      { key: '/accounts-overview',  label: 'Accounts Dashboard',    icon: I(LayoutDashboard) },
-      { key: '/accounts-invoices',  label: 'Invoices & Payments',   icon: I(Receipt) },
-      { key: '/accounts-approvals', label: 'Payment Approvals',     icon: I(BadgeCheck) },
-      { key: '/accounts-expenses',  label: 'Expense Overview',      icon: I(PieChart) },
-      { key: '/accounts',           label: 'Accounts Summary',      icon: I(Wallet) },
     ],
   },
 
@@ -253,6 +222,43 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/config-meal-slots', label: 'Meal Config',       icon: I(Clock) },
       { key: '/config-production-basis', label: 'Production Basis', icon: I(Scale) },
       { key: '/config-access-control', label: 'User Access Control', icon: I(ShieldCheck) },
+    ],
+  },
+
+  // ── 14. Archive (Supply Chain + Accounts) ──────────────────────────────────
+  {
+    key: 'archive',
+    label: 'Archive',
+    icon: I(Archive),
+    children: [
+      {
+        key: 'supply',
+        label: 'Supply Chain',
+        icon: I(ShoppingCart),
+        children: [
+          { key: '/supply-chain-overview',  label: 'Supply Chain Dashboard', icon: I(LayoutDashboard) },
+          { key: '/purchase-requisition',   label: 'Purchase Requisition',   icon: I(FileText) },
+          { key: '/request-for-quotation',  label: 'Request for Quotation',  icon: I(MailQuestion) },
+          { key: '/quotation-entry',        label: 'Quotation Entry',        icon: I(ClipboardList) },
+          { key: '/comparative-statement',  label: 'Comparative Statement',  icon: I(Scale) },
+          { key: '/procurement',            label: 'Purchase Orders',        icon: I(ShoppingCart) },
+          { key: '/receive-item',           label: 'Receive Items',          icon: I(Truck) },
+          { key: '/purchase-return',        label: 'Purchase Return',        icon: I(Undo2) },
+          { key: '/purchase-reports',       label: 'Purchase Reports',       icon: I(LineChart) },
+        ],
+      },
+      {
+        key: 'accounts',
+        label: 'Accounts',
+        icon: I(Wallet),
+        children: [
+          { key: '/accounts-overview',  label: 'Accounts Dashboard',    icon: I(LayoutDashboard) },
+          { key: '/accounts-invoices',  label: 'Invoices & Payments',   icon: I(Receipt) },
+          { key: '/accounts-approvals', label: 'Payment Approvals',     icon: I(BadgeCheck) },
+          { key: '/accounts-expenses',  label: 'Expense Overview',      icon: I(PieChart) },
+          { key: '/accounts',           label: 'Accounts Summary',      icon: I(Wallet) },
+        ],
+      },
     ],
   },
 ];
