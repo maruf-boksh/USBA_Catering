@@ -307,7 +307,7 @@ function BomDetailsDialog({
 
         <DialogFooter className="px-6 py-3 border-t border-border">
           <Button variant="outline" onClick={() => onOpenChange(false)}>
-            <span className="text-destructive uppercase tracking-wider text-xs font-semibold">Close</span>
+            <span className="uppercase tracking-wider text-xs font-semibold">Close</span>
           </Button>
           <Button onClick={onEdit}>
             <span className="uppercase tracking-wider text-xs font-semibold">Edit</span>

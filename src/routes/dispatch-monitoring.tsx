@@ -691,7 +691,6 @@ export default function DispatchMonitoring() {
     if (!form.vehicleClean) e.vehicleClean = "Vehicle cleanliness status is required.";
     if (!form.loadStartTime) e.loadStartTime = "Required.";
     if (!form.loadEndTime) e.loadEndTime = "Required.";
-    if (form.loadStartTime && form.loadEndTime && form.loadEndTime <= form.loadStartTime) e.loadEndTime = "Must be after start.";
     if (!form.vehicleTempBegin) e.vehicleTempBegin = "Required.";
     if (!form.vehicleTempEnd) e.vehicleTempEnd = "Required.";
     if (!form.resultSatisfy) e.resultSatisfy = "Required.";
