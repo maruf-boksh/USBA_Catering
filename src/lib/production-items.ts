@@ -95,7 +95,7 @@ export const PRODUCTION_ITEMS: ProductionItem[] = [
 
   // ── Meal-plan items (Wednesday Breakfast menu) ───────────────────────────
   // Recipes for the menu items raised by the bulk "Create All Orders" flow on
-  // the Meal Planning Details dialog, so MRP can compute on-hand vs shortfall
+  // the Menu Planning Details dialog, so MRP can compute on-hand vs shortfall
   // and the resulting Demand Request actually carries materials.
   {
     code: "FG-PRT",

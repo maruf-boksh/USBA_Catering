@@ -11,7 +11,7 @@ interface PathMeta {
 const PATH_META: Record<string, PathMeta> = {
   "/": { label: "Dashboard" },
   "/order-management": { label: "Order Management" },
-  "/meal-planning": { label: "Meal Planning" },
+  "/meal-planning": { label: "Menu Planning" },
   "/bom": { label: "Bill of Materials", parent: "Production" },
   "/production-entry": { label: "Production Order", parent: "Production" },
   "/production-entry-new": { label: "Production Entry", parent: "Production" },
@@ -33,7 +33,8 @@ const PATH_META: Record<string, PathMeta> = {
   "/accounts-invoices": { label: "Invoices & Payments", parent: "Accounts" },
   "/accounts-approvals": { label: "Payment Approvals", parent: "Accounts" },
   "/accounts-expenses": { label: "Expense Overview", parent: "Accounts" },
-  "/hygiene-monitoring": { label: "Hygiene Monitoring", parent: "Food Safety & QC" },
+  "/hygiene-monitoring":          { label: "Hygiene Monitoring",                    parent: "Food Safety & QC" },
+  "/personal-hygiene-monitoring": { label: "Health & Personal Hygiene Monitoring", parent: "Food Safety & QC" },
   "/cooking-temp": { label: "Cooking Temp & Sensory", parent: "Food Safety & QC" },
   "/dispatch-monitoring": { label: "Dispatch Monitoring", parent: "Food Safety & QC" },
   "/dispatch": { label: "Packaging & Dispatch" },

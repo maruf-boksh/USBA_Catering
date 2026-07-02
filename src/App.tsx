@@ -29,6 +29,7 @@ import AccountsApprovalsPage from "@/routes/accounts-approvals";
 import AccountsExpensesPage from "@/routes/accounts-expenses";
 import AccountsPage from "@/routes/accounts";
 import HygieneMonitoringPage from "@/routes/hygiene-monitoring";
+import PersonalHygieneMonitoringPage from "@/routes/personal-hygiene-monitoring";
 import CookingTempPage from "@/routes/cooking-temp";
 import DispatchMonitoringPage from "@/routes/dispatch-monitoring";
 import DispatchPage from "@/routes/dispatch";
@@ -110,6 +111,7 @@ export function App() {
             <Route path="/accounts-expenses" element={<AccountsExpensesPage />} />
             <Route path="/accounts" element={<AccountsPage />} />
             <Route path="/hygiene-monitoring" element={<HygieneMonitoringPage />} />
+            <Route path="/personal-hygiene-monitoring" element={<PersonalHygieneMonitoringPage />} />
             <Route path="/cooking-temp" element={<CookingTempPage />} />
             <Route path="/dispatch-monitoring" element={<DispatchMonitoringPage />} />
             <Route path="/dispatch" element={<DispatchPage />} />

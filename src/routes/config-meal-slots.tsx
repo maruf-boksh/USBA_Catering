@@ -121,7 +121,7 @@ export default function ConfigMealSlotsPage() {
     <>
       <PageHeader
         title="Meal Config"
-        subtitle="Define the meals (day-parts) available across Meal Planning. Each meal has a time window; flights are grouped by ETD using these windows."
+        subtitle="Define the meals (day-parts) available across Menu Planning. Each meal has a time window; flights are grouped by ETD using these windows."
         actions={
           <div className="flex items-center gap-2">
             <Button variant="outline" onClick={handleRestoreDefaults} title="Replace the list with the four built-in defaults">

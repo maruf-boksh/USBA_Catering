@@ -214,7 +214,7 @@ function to12h(hhmm: string): string {
 }
 
 /** Resolve a meal name to its kitchen section + packaging meal-type via the
- *  Meal Planning catalog, with sensible fallbacks. */
+ *  Menu Planning catalog, with sensible fallbacks. */
 function mealMeta(name: string): { section: string; mealType: PackagingRow["mealType"] } {
   const m = meals.find((x) => x.name === name);
   const cat = m?.category;
@@ -548,7 +548,7 @@ export default function Dispatch() {
       flightOrders.find((o) => o.flight === configFlight),
     [flightOrders, configFlight, configDate],
   );
-  // PAX main-meal menu sourced from Meal Planning (approved passenger main dishes).
+  // PAX main-meal menu sourced from Menu Planning (approved passenger main dishes).
   const paxMenu = useMemo(
     () => meals.filter((m) => m.serviceGroup === "Passenger" && (m.category === "Hot" || m.category === "Cold") && m.status === "Approved"),
     [],
@@ -629,7 +629,7 @@ export default function Dispatch() {
   };
 
   // Select a flight → auto-load the rest of the form from Order Management
-  // (ETD, sector, PAX, crew, special-meal roster) and Meal Planning (the PAX
+  // (ETD, sector, PAX, crew, special-meal roster) and Menu Planning (the PAX
   // main-meal menu, split across the passenger count). The user only picks the
   // flight; everything below is filled in and remains editable.
   const autoLoadFromFlight = (flightNo: string) => {
@@ -1497,7 +1497,7 @@ export default function Dispatch() {
   };
 
   // Derive a flight's check-sheet section from real system data:
-  //   • PAX Main Meal ← the produced passenger meals (Meal Planning → Production,
+  //   • PAX Main Meal ← the produced passenger meals (Menu Planning → Production,
   //     carried on the packaging rows linked to this flight)
   //   • Sector / Special Meals (VGML/CHML/SPML) / Crew ← the Order Management
   //     flight + crew orders for this flight
@@ -1563,7 +1563,7 @@ export default function Dispatch() {
     const esc = (s: unknown) =>
       String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c] as string));
 
-    // Build the sheet from live Order Management + Meal Planning data.
+    // Build the sheet from live Order Management + Menu Planning data.
     const sheetSections = buildSectionsForRecord(rec);
 
     // Production order numbers backing this dispatch (from its packaging rows).
@@ -2531,7 +2531,7 @@ export default function Dispatch() {
         <DialogContent className="w-full max-w-full sm:max-w-2xl max-h-[100vh] sm:max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
           <div className="px-6 pt-5 pb-4 border-b shrink-0">
             <DialogTitle className="text-base font-semibold">Configure New Dispatch</DialogTitle>
-            <p className="text-xs text-muted-foreground mt-0.5">Pick a date and flight — sector, departure time, PAX, crew and meals auto-load from Order Management &amp; Meal Planning.</p>
+            <p className="text-xs text-muted-foreground mt-0.5">Pick a date and flight — sector, departure time, PAX, crew and meals auto-load from Order Management &amp; Menu Planning.</p>
           </div>
 
           <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">

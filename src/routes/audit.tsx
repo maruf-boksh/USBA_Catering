@@ -28,7 +28,7 @@ type ActionKind =
   | "Login" | "Logout" | "Export" | "Import" | "Print" | "Lock";
 
 type Module =
-  | "Auth" | "Orders" | "Meal Planning" | "Production" | "Inventory"
+  | "Auth" | "Orders" | "Menu Planning" | "Production" | "Inventory"
   | "Procurement" | "Accounts" | "QC" | "Dispatch" | "Config" | "Users";
 
 type Result = "Success" | "Failure";
@@ -53,7 +53,7 @@ type AuditEvent = {
 const MODULE_META: Record<Module, { icon: React.ComponentType<{ className?: string }>; color: string }> = {
   "Auth":         { icon: Lock,         color: "bg-slate-100 text-slate-700 border-slate-200" },
   "Orders":       { icon: Plane,        color: "bg-sky-50 text-sky-700 border-sky-200" },
-  "Meal Planning":{ icon: ChefHat,      color: "bg-amber-50 text-amber-700 border-amber-200" },
+  "Menu Planning":{ icon: ChefHat,      color: "bg-amber-50 text-amber-700 border-amber-200" },
   "Production":   { icon: ChefHat,      color: "bg-orange-50 text-orange-700 border-orange-200" },
   "Inventory":    { icon: Boxes,        color: "bg-indigo-50 text-indigo-700 border-indigo-200" },
   "Procurement":  { icon: ShoppingCart, color: "bg-violet-50 text-violet-700 border-violet-200" },
@@ -171,8 +171,8 @@ const LOGS: AuditEvent[] = [
   },
   {
     id: "LG-9022", at: "2026-05-24 08:50:09", user: "ops.user", userRole: "Operations",
-    module: "Meal Planning", action: "Update", description: "Updated meal choices for BS-307 international",
-    target: "MP-2026-0044 / BS-307", targetType: "Meal Plan",
+    module: "Menu Planning", action: "Update", description: "Updated meal choices for BS-307 international",
+    target: "MP-2026-0044 / BS-307", targetType: "Menu Plan",
     ip: "10.0.4.12", device: "Chrome 132 · Windows",
     result: "Success", severity: "info",
     changes: [
@@ -300,7 +300,7 @@ const LOGS: AuditEvent[] = [
   },
   {
     id: "LG-9005", at: "2026-05-23 15:30:14", user: "ops.user", userRole: "Operations",
-    module: "Meal Planning", action: "Create", description: "Created weekly menu cycle (week 22)",
+    module: "Menu Planning", action: "Create", description: "Created weekly menu cycle (week 22)",
     target: "MP-W22-2026", targetType: "Menu Cycle",
     ip: "10.0.4.12", device: "Chrome 132 · Windows",
     result: "Success", severity: "info",
@@ -337,7 +337,7 @@ const LOGS: AuditEvent[] = [
 ];
 
 const MODULE_OPTIONS: (Module | "All")[] = [
-  "All", "Auth", "Orders", "Meal Planning", "Production",
+  "All", "Auth", "Orders", "Menu Planning", "Production",
   "Inventory", "Procurement", "Accounts", "QC", "Dispatch", "Config", "Users",
 ];
 

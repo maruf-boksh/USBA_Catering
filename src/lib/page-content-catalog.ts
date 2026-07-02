@@ -52,7 +52,7 @@ const SRC: Record<string, Group> = {
     sections: [["section-flight-orders", "Flight Orders"], ["section-crew-meals", "Crew Meals"]],
   },
   "/meal-planning": {
-    actions: [["action-new-meal", "New Meal"]],
+    actions: [["action-new-meal", "New Menu"]],
     fields: [["field-day", "Day"], ["field-flight-type", "Flight Type"], ["field-for", "For"], ["field-meal-percentage", "Meal Percentage"], ["field-serving-time", "Serving Time"]],
     sections: [["section-meal-configuration", "Meal Configuration"], ["section-special-meals", "Special Meals"], ["section-dessert", "Dessert"]],
   },

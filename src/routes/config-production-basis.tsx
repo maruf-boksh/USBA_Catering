@@ -269,7 +269,7 @@ export default function ConfigProductionBasisPage() {
 
       <div className="mt-4">
         <Badge variant="outline" className="text-[10px]">
-          Applied when creating Production Orders from the Meal Plan review dialog.
+          Applied when creating Production Orders from the Menu Plan review dialog.
         </Badge>
       </div>
     </>

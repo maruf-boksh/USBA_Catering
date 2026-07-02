@@ -20,7 +20,7 @@ export type StaffMember = {
 
 export const STAFF_SEED: StaffMember[] = [
   { id: "USR-001", username: "r.hossain",  fullName: "R. Hossain",   email: "r.hossain@us-bangla.com",  phone: "+880 1711-100001", role: "GM/Admin",                  location: "Head Office Dhaka",     lastLogin: "2026-05-20 09:14", status: "Active"   },
-  { id: "USR-002", username: "s.ahmed",    fullName: "S. Ahmed",     email: "s.ahmed@us-bangla.com",    phone: "+880 1711-100002", role: "Meal Planner",              location: "Head Office Dhaka",     lastLogin: "2026-05-20 08:22", status: "Active"   },
+  { id: "USR-002", username: "s.ahmed",    fullName: "S. Ahmed",     email: "s.ahmed@us-bangla.com",    phone: "+880 1711-100002", role: "Menu Planner",              location: "Head Office Dhaka",     lastLogin: "2026-05-20 08:22", status: "Active"   },
   { id: "USR-003", username: "f.begum",    fullName: "F. Begum",     email: "f.begum@us-bangla.com",    phone: "+880 1711-100003", role: "Store & Inventory",         location: "Central Warehouse",     lastLogin: "2026-05-19 18:45", status: "Active"   },
   { id: "USR-004", username: "m.karim",    fullName: "Md. Karim",    email: "m.karim@us-bangla.com",    phone: "+880 1711-100004", role: "Procurement & Supply Chain", location: "Head Office Dhaka",    lastLogin: "2026-05-19 16:20", status: "Active"   },
   { id: "USR-005", username: "t.islam",    fullName: "T. Islam",     email: "t.islam@us-bangla.com",    phone: "+880 1711-100005", role: "Food Safety & QC",          location: "Hot Kitchen",           lastLogin: "2026-05-20 07:55", status: "Active"   },

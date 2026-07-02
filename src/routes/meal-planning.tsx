@@ -274,7 +274,7 @@ export default function MealPlanning() {
   const location = useLocation();
   const backUrl = (location.state as { backUrl?: string } | null)?.backUrl ?? null;
   // Persisted so the configured menus survive a reload and feed the Production
-  // Order "Meal Plan" tab (read via loadMealPlanningConfig). Drop-in for useState.
+  // Order "Menu Plan" tab (read via loadMealPlanningConfig). Drop-in for useState.
   const [meals, setMeals] = usePersistedState<MealCard[]>(MEAL_PLAN_CONFIG_KEY, getSampleMeals());
   // Backfill: older persisted state only held the day the app was first opened
   // on (the previous single-day seed), leaving every other day empty. Add the
@@ -304,7 +304,7 @@ export default function MealPlanning() {
   const [forwardCycle, setForwardCycle] = useState<"pending" | "forwarded" | "ready">("pending");
   const [lastForwardedQuantity, setLastForwardedQuantity] = useState(0);
   const [orderHistory, setOrderHistory] = useState<Array<{ mealsOrdered: number; orderedBy: string; designation: string; date: string; time: string; period: string }>>([
-    { mealsOrdered: 9600, orderedBy: "S. Ahmed", designation: "Meal Planner", date: "08 Nov 2025", time: "10:45 AM", period: "24-hour cycle" },
+    { mealsOrdered: 9600, orderedBy: "S. Ahmed", designation: "Menu Planner", date: "08 Nov 2025", time: "10:45 AM", period: "24-hour cycle" },
   ]);
   const [orderModalOpen, setOrderModalOpen] = useState(false);
   const [orderModalQuantity, setOrderModalQuantity] = useState("");
@@ -566,7 +566,7 @@ export default function MealPlanning() {
   return (
     <>
       <PageHeader
-        title="Meal Planning"
+        title="Menu Planning"
         subtitle="Configure daily meal service for passengers and crew"
         actions={
           <>
@@ -578,12 +578,12 @@ export default function MealPlanning() {
           <Dialog open={createModalOpen} onOpenChange={handleCreateOpenChange}>
             <DialogTrigger asChild>
               <Button>
-                <Plus className="h-4 w-4 mr-1" /> New Meal
+                <Plus className="h-4 w-4 mr-1" /> New Menu
               </Button>
             </DialogTrigger>
             <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
               <DialogHeader>
-                <DialogTitle>Create New Meal Configuration</DialogTitle>
+                <DialogTitle>Create New Menu Configuration</DialogTitle>
               </DialogHeader>
 
               <div className="space-y-5">
@@ -1697,7 +1697,7 @@ export default function MealPlanning() {
                 <div>Last 24 hours — meals ordered: {lastForwardedQuantity.toLocaleString()}</div>
                 {forwardedAt && (
                   <div>
-                    Forwarded by: Current User | Meal Planner | {forwardedAt.toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" })} {forwardedAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: true })}
+                    Forwarded by: Current User | Menu Planner | {forwardedAt.toLocaleDateString("en-GB", { day: "2-digit", month: "2-digit", year: "numeric" })} {forwardedAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: true })}
                   </div>
                 )}
               </div>
@@ -1743,12 +1743,12 @@ export default function MealPlanning() {
               const now = new Date();
               const todayFormatted = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
               const timeFormatted = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: true });
-              setOrderHistory([...orderHistory, { mealsOrdered: qty, orderedBy: "Current User", designation: "Meal Planner", date: todayFormatted, time: timeFormatted, period: "24-hour cycle" }]);
+              setOrderHistory([...orderHistory, { mealsOrdered: qty, orderedBy: "Current User", designation: "Menu Planner", date: todayFormatted, time: timeFormatted, period: "24-hour cycle" }]);
               setOrderModalOpen(false);
               setOrderModalQuantity("");
-              toast.success("Meal order forwarded to Meal Planner successfully");
+              toast.success("Meal order forwarded to Menu Planner successfully");
             }}>
-              Forward to Meal Planner
+              Forward to Menu Planner
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1970,9 +1970,9 @@ export default function MealPlanning() {
                 setLastForwardedQuantity(gmOrderData.totalMealsToday);
                 setForwardedAt(now);
                 setTagLog({ name: "Current User", date: todayFormatted, time: timeFormatted });
-                setOrderHistory((prev) => [...prev, { mealsOrdered: gmOrderData.totalMealsToday, orderedBy: "Current User", designation: "Meal Planner", date: todayFormatted, time: timeFormatted, period: "24-hour cycle" }]);
+                setOrderHistory((prev) => [...prev, { mealsOrdered: gmOrderData.totalMealsToday, orderedBy: "Current User", designation: "Menu Planner", date: todayFormatted, time: timeFormatted, period: "24-hour cycle" }]);
                 setDaySelectionOpen(false);
-                toast.success("Meal plan tagged and forwarded to Production — opening Production Order");
+                toast.success("Menu plan tagged and forwarded to Production — opening Production Order");
                 navigate("/production-entry", { state: buildProductionNavState(now) });
               }}
             >
@@ -2113,7 +2113,7 @@ export default function MealPlanning() {
                     <div className={`${palette.body} p-3`}>
                       {mealsForType.length === 0 ? (
                         <div className="py-4 text-center text-muted-foreground text-sm">
-                          No meals configured — click + New Meal to add
+                          No menus configured — click + New Menu to add
                         </div>
                       ) : (
                         <div className="space-y-5">
@@ -2506,7 +2506,7 @@ export default function MealPlanning() {
       <Dialog open={forwardConfirmOpen} onOpenChange={setForwardConfirmOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Forward Meal Plan to Production?</DialogTitle>
+            <DialogTitle>Forward Menu Plan to Production?</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 text-sm">
             <div>

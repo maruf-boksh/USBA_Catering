@@ -95,7 +95,7 @@ export const NAV_MODULES: NavModule[] = [
     children: [
       { key: '/operations-overview', label: 'Operations Dashboard', icon: I(LayoutDashboard) },
       { key: '/order-management',    label: 'Order Management',     icon: I(Upload) },
-      { key: '/meal-planning',       label: 'Meal Planning',    icon: I(UtensilsCrossed) },
+      { key: '/meal-planning',       label: 'Menu Planning',    icon: I(UtensilsCrossed) },
     ],
   },
 
@@ -135,9 +135,10 @@ export const NAV_MODULES: NavModule[] = [
     label: 'Food Safety & QC',
     icon: I(ShieldCheck),
     children: [
-      { key: '/food-safety-overview', label: 'Food Safety Dashboard',     icon: I(LayoutDashboard) },
-      { key: '/hygiene-monitoring',   label: 'Daily Hygiene Monitoring',  icon: I(ClipboardCheck) },
-      { key: '/cooking-temp',         label: 'Cooking Temp & Sensory',    icon: I(ThermometerSun) },
+      { key: '/food-safety-overview',           label: 'Food Safety Dashboard',               icon: I(LayoutDashboard) },
+      { key: '/hygiene-monitoring',            label: 'Daily Hygiene Monitoring',            icon: I(ClipboardCheck) },
+      { key: '/personal-hygiene-monitoring',   label: 'Health & Personal Hygiene Monitoring', icon: I(Users) },
+      { key: '/cooking-temp',                  label: 'Cooking Temp & Sensory',              icon: I(ThermometerSun) },
       { key: '/dispatch-monitoring',  label: 'Dispatch Monitoring',       icon: I(Truck) },
     ],
   },

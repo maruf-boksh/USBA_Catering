@@ -618,7 +618,7 @@ export default function ProductionEntryPage() {
     const dr: WfDemandRequest = {
       id: drId,
       reference: orders.map((o) => o.id).join(", "),
-      requestedBy: "Auto (Meal Plan)",
+      requestedBy: "Auto (Menu Plan)",
       role: "Flight Kitchen Executive",
       date: stamp,
       status: "Pending Approval",
@@ -654,7 +654,7 @@ export default function ProductionEntryPage() {
     const mrpRun: WfMrpRun = {
       id: `MRP-2026-${String(mrpRuns.length + 1).padStart(3, "0")}`,
       date: stamp,
-      runBy: "Auto (Meal Plan)",
+      runBy: "Auto (Menu Plan)",
       basis: "remaining",
       orderIds: orders.map((o) => o.id),
       totalUnits: orders.reduce((sum, o) => sum + (o.orderQty ?? 0), 0),
@@ -994,7 +994,7 @@ export default function ProductionEntryPage() {
                 {forwardedMeals && (
                   <div className="mt-4 border-t border-amber-200 pt-4">
                     <div className="text-xs font-semibold uppercase tracking-wider text-amber-900 mb-3">
-                      Configured Meal Plan — {forwardedDay}
+                      Configured Menu Plan — {forwardedDay}
                     </div>
                     {forwardedMeals.length === 0 ? (
                       <div className="text-xs text-amber-700 italic">No meals configured for this day</div>
@@ -1578,7 +1578,7 @@ function ProductionEntryCreate({
   const [officeId, setOfficeId] = useState("OFF-001");
   const [warehouseId, setWarehouseId] = useState("WH-003"); // Hot Kitchen
   const [remarks, setRemarks] = useState(
-    initialItem ? "Pre-filled from Meal Planning Details — Meal Plan tab." : "",
+    initialItem ? "Pre-filled from Menu Planning Details — Menu Plan tab." : "",
   );
 
   // Single Production Output Item (constraint: only one item per entry)
@@ -1818,7 +1818,7 @@ function ProductionEntryCreate({
             </div>
             {outputItem?.source === "meal-plan" && (
               <Badge variant="outline" className="bg-success/10 text-success border-success/30 font-normal text-xs">
-                <UtensilsCrossed className="h-3 w-3 mr-1" /> From Meal Plan
+                <UtensilsCrossed className="h-3 w-3 mr-1" /> From Menu Plan
               </Badge>
             )}
           </div>
@@ -2201,7 +2201,7 @@ function MealPlanningDetailsDialog({
   const requirements = useMemo(() => computeOrderRequirements(ordersForDate), [ordersForDate]);
   const orderDays = useMemo(() => new Set(requirements.map((r) => r.day)), [requirements]);
 
-  // Latest configured menus from the Meal Planning page (falls back to seed).
+  // Latest configured menus from the Menu Planning page (falls back to seed).
   // Re-read whenever the dialog opens so menu edits flow through live.
   const planCards = useMemo(() => loadMealPlanningConfig(), [open]);
 
@@ -2424,7 +2424,7 @@ function MealPlanningDetailsDialog({
         <DialogHeader className="px-6 pt-6 pb-4 border-b border-border">
           <div className="flex items-start justify-between gap-4">
             <DialogTitle>
-              Meal Planning Details — New Meal Order for {date || gmOrderSummary.date}
+              Menu Planning Details — New Meal Order for {date || gmOrderSummary.date}
             </DialogTitle>
             <Button
               variant="outline"
@@ -2435,7 +2435,7 @@ function MealPlanningDetailsDialog({
                 navigate("/meal-planning");
               }}
             >
-              <UtensilsCrossed className="h-4 w-4 mr-1" /> Open in Meal Planner
+              <UtensilsCrossed className="h-4 w-4 mr-1" /> Open in Menu Planner
             </Button>
           </div>
           <div className="mt-3 grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm">
@@ -2466,7 +2466,7 @@ function MealPlanningDetailsDialog({
                 value="meals"
                 className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-1 pb-3 text-xs uppercase tracking-wider font-semibold"
               >
-                Meal Plan
+                Menu Plan
               </TabsTrigger>
             </TabsList>
           </div>

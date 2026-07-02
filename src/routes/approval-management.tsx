@@ -40,6 +40,8 @@ import { getRfqs, setRfqStatus } from "@/lib/rfqs";
 import { getQuotations, setQuotationStatus } from "@/lib/quotations";
 import { getStockAdjustments, setStockAdjustmentStatus } from "@/lib/stock-adjustments";
 import { useRole } from "@/lib/roles";
+import { usePersistedState } from "@/lib/use-persisted-state";
+import { type PersonalHygieneRecord, PHSignOffPanel, PHFormGrid, phNotOkCount } from "@/routes/personal-hygiene-monitoring";
 
 type Category =
   | "Flight Orders"
@@ -58,7 +60,8 @@ type Category =
   | "Dispatch"
   | "Maintenance"
   | "Return Items"
-  | "Galley Loading";
+  | "Galley Loading"
+  | "Personal Hygiene";
 
 // Shared type with dispatch-monitoring.tsx via "galley_loading" sessionStorage key
 type SignOffLog = { name: string; designation: string; signedAt: string };
@@ -127,6 +130,7 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Maintenance",          label: "Maintenance",        icon: Wrench          },
   { key: "Return Items",         label: "Return Items",       icon: PackageCheck    },
   { key: "Galley Loading",       label: "Galley Loading",     icon: LayoutGrid      },
+  { key: "Personal Hygiene",    label: "Personal Hygiene",   icon: Users           },
 ];
 
 // Overview grid — categories grouped into business sections (mirrors the
@@ -140,7 +144,8 @@ const APPROVAL_SECTIONS: { label: string; keys: Category[] }[] = [
   { label: "Administration Approval", keys: ["User Account"] },
   { label: "Asset Management Approval", keys: ["Maintenance"] },
   { label: "Consumable Returns Approval", keys: ["Return Items"] },
-  { label: "Galley Loading Approval",     keys: ["Galley Loading"] },
+  { label: "Galley Loading Approval",     keys: ["Galley Loading"]   },
+  { label: "Food Safety Approval",        keys: ["Personal Hygiene"] },
 ];
 const CATEGORY_BY_KEY = new Map(CATEGORIES.map((c) => [c.key, c]));
 
@@ -373,6 +378,35 @@ export default function ApprovalManagementPage() {
   // (Flight/Crew orders persist their review on the order row itself instead.)
   const reviews = useApprovalReviews();
 
+  // ── Personal Hygiene records (shared via localStorage with personal-hygiene-monitoring) ──
+  const [phRecords, setPhRecords] = usePersistedState<PersonalHygieneRecord[]>(
+    "personal-hygiene-records",
+    [],
+  );
+  const [phDetailOpen, setPhDetailOpen]     = useState(false);
+  const [phDetailRecord, setPhDetailRecord] = useState<PersonalHygieneRecord | null>(null);
+
+  const phStamp = () => {
+    const n = new Date();
+    return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")} ${String(n.getHours()).padStart(2,"0")}:${String(n.getMinutes()).padStart(2,"0")}`;
+  };
+
+  const phVerify = (rec: PersonalHygieneRecord) => {
+    const verifiedBy  = `${role} (SE Food Safety & Hygiene)`;
+    const verifiedAt  = phStamp();
+    setPhRecords(prev => prev.map(r => r.id === rec.id ? { ...r, status: "verified", verifiedBy, verifiedAt } : r));
+    setPhDetailOpen(false);
+    toast.success(`${rec.id} verified — awaiting GM-Catering authorization.`);
+  };
+
+  const phApprove = (rec: PersonalHygieneRecord) => {
+    const approvedBy = `${role} (GM-Catering)`;
+    const approvedAt = phStamp();
+    setPhRecords(prev => prev.map(r => r.id === rec.id ? { ...r, status: "approved", approvedBy, approvedAt } : r));
+    setPhDetailOpen(false);
+    toast.success(`${rec.id} approved — record visible in the Personal Hygiene module.`);
+  };
+
   // ── Galley Loading records (shared via sessionStorage with dispatch-monitoring) ──
   const [galleyLoadingRecords, setGalleyLoadingRecords] = useState<GalleyLoadingRecord[]>(() => {
     try {
@@ -446,7 +480,7 @@ export default function ApprovalManagementPage() {
       category: "Demand Request" as Category,
       refId: d.id,
       title: d.autoFulfill
-        ? "Auto-fulfill demand from Meal Plan"
+        ? "Auto-fulfill demand from Menu Plan"
         : `Material demand from ${d.role}`,
       requestedBy: d.requestedBy,
       requestedAt: d.date,
@@ -691,8 +725,30 @@ export default function ApprovalManagementPage() {
       });
   }, [returnApprovals]);
 
+  const personalHygieneItems: ApprovalItem[] = useMemo(() => {
+    return phRecords
+      .filter(r => r.status !== "approved" || r.approvedAt)
+      .map(r => {
+        const approvalStatus: ApprovalStatus =
+          r.status === "approved" ? "Approved" : "Pending";
+        const nok = phNotOkCount(r);
+        return {
+          id:          `PH-AP-${r.id}`,
+          category:    "Personal Hygiene" as Category,
+          refId:       r.id,
+          title:       `Health & Personal Hygiene — ${r.date} (${r.shift} Shift)`,
+          requestedBy: r.checkedBy,
+          requestedAt: r.checkedAt,
+          summary:     `${r.shift} Shift · ${nok > 0 ? `${nok} Not-Ok item${nok > 1 ? "s" : ""}` : "All Ok"} · Submitted by ${r.checkedBy}`,
+          status:      approvalStatus,
+          processedBy: r.approvedBy,
+          processedAt: r.approvedAt,
+        };
+      });
+  }, [phRecords]);
+
   const allItems = useMemo(() => {
-    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...items];
+    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...personalHygieneItems, ...items];
     // Overlay "Reviewed" (returned for correction) onto still-pending requests.
     return base.map((it) => {
       const rv = reviews[reviewKey(it.category, it.refId)];
@@ -1584,7 +1640,182 @@ export default function ApprovalManagementPage() {
             </Card>
           )}
 
-          {activeTab !== "Dispatch" && activeTab !== "Galley Loading" && (<><Card className="brand-accent-border-left">
+          {/* ── Personal Hygiene subtab ─────────────────────────────────────── */}
+          {activeTab === "Personal Hygiene" && (() => {
+            const submitted = phRecords.filter(r => r.status === "submitted");
+            const verified  = phRecords.filter(r => r.status === "verified");
+            const approved  = phRecords.filter(r => r.status === "approved");
+            return (
+              <Card className="brand-accent-border-left">
+                <CardContent className="pt-5 space-y-6">
+
+                  {/* Pending Verification */}
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-sm font-semibold uppercase tracking-wider flex items-center gap-2">
+                        <Clock className="h-4 w-4 text-amber-500" /> Pending Verification
+                      </h3>
+                      <span className="text-xs text-muted-foreground">{submitted.length} item{submitted.length !== 1 ? "s" : ""}</span>
+                    </div>
+                    {submitted.length === 0 ? (
+                      <p className="text-sm text-muted-foreground text-center py-6">No records pending verification.</p>
+                    ) : (
+                      <div className="border border-border rounded-md overflow-hidden">
+                        <Table>
+                          <TableHeader className="bg-muted/40">
+                            <TableRow>
+                              <TableHead className="text-xs uppercase tracking-wider">Ref</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Shift</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Checked By</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Result</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider text-right">Actions</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {submitted.map(rec => {
+                              const nok = phNotOkCount(rec);
+                              return (
+                                <TableRow key={rec.id} className="hover:bg-muted/30">
+                                  <TableCell className="font-mono text-xs">{rec.id}</TableCell>
+                                  <TableCell className="text-sm">{rec.date}</TableCell>
+                                  <TableCell className="text-sm">{rec.shift}</TableCell>
+                                  <TableCell className="text-xs">
+                                    <div>{rec.checkedBy}</div>
+                                    <div className="text-[10px] text-muted-foreground tabular-nums">{rec.checkedAt}</div>
+                                  </TableCell>
+                                  <TableCell>
+                                    {nok > 0
+                                      ? <Badge variant="outline" className="text-[10px] bg-red-50 text-red-700 border-red-200">{nok} Not Ok</Badge>
+                                      : <Badge variant="outline" className="text-[10px] bg-green-50 text-green-700 border-green-200">All Ok</Badge>
+                                    }
+                                  </TableCell>
+                                  <TableCell className="text-right">
+                                    <Button
+                                      size="icon" variant="outline"
+                                      className="h-7 w-7 text-muted-foreground hover:text-primary hover:border-primary/40"
+                                      onClick={() => { setPhDetailRecord(rec); setPhDetailOpen(true); }}
+                                      title="View & Verify"
+                                    >
+                                      <Eye className="h-3.5 w-3.5" />
+                                    </Button>
+                                  </TableCell>
+                                </TableRow>
+                              );
+                            })}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Verified — Awaiting GM */}
+                  <div>
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="text-sm font-semibold uppercase tracking-wider flex items-center gap-2">
+                        <ShieldCheck className="h-4 w-4 text-blue-500" /> Verified — Awaiting GM Authorization
+                      </h3>
+                      <span className="text-xs text-muted-foreground">{verified.length} item{verified.length !== 1 ? "s" : ""}</span>
+                    </div>
+                    {verified.length === 0 ? (
+                      <p className="text-sm text-muted-foreground text-center py-6">No records awaiting authorization.</p>
+                    ) : (
+                      <div className="border border-border rounded-md overflow-hidden">
+                        <Table>
+                          <TableHeader className="bg-muted/40">
+                            <TableRow>
+                              <TableHead className="text-xs uppercase tracking-wider">Ref</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Shift</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Checked By</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Verified By</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider text-right">Actions</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {verified.map(rec => (
+                              <TableRow key={rec.id} className="hover:bg-muted/30">
+                                <TableCell className="font-mono text-xs">{rec.id}</TableCell>
+                                <TableCell className="text-sm">{rec.date}</TableCell>
+                                <TableCell className="text-sm">{rec.shift}</TableCell>
+                                <TableCell className="text-xs">
+                                  <div>{rec.checkedBy}</div>
+                                  <div className="text-[10px] text-muted-foreground tabular-nums">{rec.checkedAt}</div>
+                                </TableCell>
+                                <TableCell className="text-xs">
+                                  <div className="text-blue-700 font-medium">{rec.verifiedBy}</div>
+                                  <div className="text-[10px] text-blue-500 tabular-nums">{rec.verifiedAt}</div>
+                                </TableCell>
+                                <TableCell className="text-right">
+                                  <Button
+                                    size="icon" variant="outline"
+                                    className="h-7 w-7 text-muted-foreground hover:text-emerald-600 hover:border-emerald-400"
+                                    onClick={() => { setPhDetailRecord(rec); setPhDetailOpen(true); }}
+                                    title="View & Approve"
+                                  >
+                                    <Eye className="h-3.5 w-3.5" />
+                                  </Button>
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Approved */}
+                  {approved.length > 0 && (
+                    <div>
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-sm font-semibold uppercase tracking-wider flex items-center gap-2">
+                          <Check className="h-4 w-4 text-emerald-500" /> Approved Records
+                        </h3>
+                        <span className="text-xs text-muted-foreground">{approved.length} record{approved.length !== 1 ? "s" : ""}</span>
+                      </div>
+                      <div className="border border-border rounded-md overflow-hidden">
+                        <Table>
+                          <TableHeader className="bg-muted/40">
+                            <TableRow>
+                              <TableHead className="text-xs uppercase tracking-wider">Ref</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Shift</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Approved By</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Approved At</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider text-right">Actions</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {approved.map(rec => (
+                              <TableRow key={rec.id} className="hover:bg-muted/30">
+                                <TableCell className="font-mono text-xs">{rec.id}</TableCell>
+                                <TableCell className="text-sm">{rec.date}</TableCell>
+                                <TableCell className="text-sm">{rec.shift}</TableCell>
+                                <TableCell className="text-xs font-medium text-emerald-700">{rec.approvedBy ?? "—"}</TableCell>
+                                <TableCell className="text-xs tabular-nums text-muted-foreground">{rec.approvedAt ?? "—"}</TableCell>
+                                <TableCell className="text-right">
+                                  <Button
+                                    size="icon" variant="outline"
+                                    className="h-7 w-7 text-muted-foreground hover:text-emerald-600 hover:border-emerald-400"
+                                    onClick={() => { setPhDetailRecord(rec); setPhDetailOpen(true); }}
+                                    title="View record"
+                                  >
+                                    <Eye className="h-3.5 w-3.5" />
+                                  </Button>
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })()}
+
+          {activeTab !== "Dispatch" && activeTab !== "Galley Loading" && activeTab !== "Personal Hygiene" && (<><Card className="brand-accent-border-left">
             <CardContent className="pt-5">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold uppercase tracking-wider">
@@ -2533,6 +2764,86 @@ export default function ApprovalManagementPage() {
               </>
             )}
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Personal Hygiene detail modal ────────────────────────────────────── */}
+      <Dialog open={phDetailOpen} onOpenChange={v => { if (!v) setPhDetailOpen(false); }}>
+        <DialogContent className="w-full max-w-6xl max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
+          {/* Colored header */}
+          <div className="bg-gradient-to-r from-indigo-700 to-indigo-600 text-white px-6 pt-5 pb-4 shrink-0">
+            <p className="text-[10px] text-indigo-200 uppercase tracking-widest font-semibold">
+              US-Bangla Airlines Ltd. · Catering Department
+            </p>
+            <h2 className="text-lg font-bold mt-0.5">Health &amp; Personal Hygiene Monitoring</h2>
+            <p className="text-indigo-200 text-xs">USBA-FSH-PH-01</p>
+            {phDetailRecord && (
+              <div className="flex flex-wrap items-center gap-4 mt-2 text-xs text-indigo-100">
+                <span>Date: <span className="font-medium text-white">{phDetailRecord.date}</span></span>
+                <span>Shift: <span className="font-medium text-white">{phDetailRecord.shift}</span></span>
+                <span>Ref: <span className="font-medium text-white font-mono">{phDetailRecord.id}</span></span>
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                  phDetailRecord.status === "approved" ? "bg-emerald-500 text-white" :
+                  phDetailRecord.status === "verified" ? "bg-blue-400 text-white" :
+                  "bg-amber-400 text-amber-900"
+                }`}>
+                  {phDetailRecord.status === "approved" ? "Approved"
+                    : phDetailRecord.status === "verified" ? "Verified — Awaiting GM Authorization"
+                    : "Pending Verification"}
+                </span>
+              </div>
+            )}
+          </div>
+
+          {phDetailRecord && (
+            <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+              {/* Inspection grid (read-only) */}
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">Inspection Parameters</p>
+                <PHFormGrid rows={phDetailRecord.rows} readOnly />
+              </div>
+
+              {/* Comments / Correction / Corrective Action */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
+                {[
+                  { label: "Comments",          value: phDetailRecord.comments },
+                  { label: "Correction",        value: phDetailRecord.correction },
+                  { label: "Corrective Action", value: phDetailRecord.correctiveAction },
+                ].map(({ label, value }) => (
+                  <div key={label} className="rounded-md border border-border bg-muted/20 p-3">
+                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">{label}</p>
+                    <p className={value ? "text-foreground text-sm" : "text-muted-foreground text-sm italic"}>{value || "—"}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Sign-off log */}
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">Sign-Off Log</p>
+                <PHSignOffPanel rec={phDetailRecord} />
+              </div>
+            </div>
+          )}
+
+          <div className="border-t bg-muted/20 px-6 py-3 shrink-0 flex items-center justify-end gap-2">
+            {phDetailRecord?.status === "submitted" && (
+              <Button
+                className="bg-blue-600 hover:bg-blue-700 text-white"
+                onClick={() => phVerify(phDetailRecord)}
+              >
+                <ShieldCheck className="h-4 w-4 mr-1.5" /> Verify
+              </Button>
+            )}
+            {phDetailRecord?.status === "verified" && (
+              <Button
+                className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                onClick={() => phApprove(phDetailRecord)}
+              >
+                <Check className="h-4 w-4 mr-1.5" /> Approve
+              </Button>
+            )}
+            <Button variant="outline" onClick={() => setPhDetailOpen(false)}>Close</Button>
+          </div>
         </DialogContent>
       </Dialog>
 

@@ -3234,7 +3234,7 @@ function formatDayLabel(dateStr: string) {
   return d.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
 }
 
-// Weekly meal config keyed by day-of-week (0=Sun…6=Sat), sourced from Meal Planning module
+// Weekly meal config keyed by day-of-week (0=Sun…6=Sat), sourced from Menu Planning module
 const WEEK_MEAL_CONFIG: Record<number, {
   intl: { depMealName: string; depChmlName: string; retMealName: string; retVgmlName: string };
   dom: {
@@ -3867,13 +3867,13 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
       const ts = _ts.toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
       const refId = `OMR-${Date.now().toString().slice(-6)}`;
       addLog(
-        `Meal order for next 24 hours has been created and forwarded to Meal Planner — Ref: ${refId} · ${totalFlights} flights · ${totalMeals} meals · Confirmed by system`,
+        `Meal order for next 24 hours has been created and forwarded to Menu Planner — Ref: ${refId} · ${totalFlights} flights · ${totalMeals} meals · Confirmed by system`,
       );
       const confirmationData = { timestamp: ts, totalFlights, totalMeals, tomorrowDayName, dayAfterDayName, dayAfterDateStr, validIntl, validDom, dayAfterMenu };
       onOrderConfirmed?.(confirmationData);
       // Orders were already persisted to the table in confirmImport; here we
       // only forward the meal plan to Production.
-      toast.success("Meal plan tagged and forwarded to Production.");
+      toast.success("Menu plan tagged and forwarded to Production.");
       onComplete?.();
       navigate("/production-entry", { state: { mealOrderConfirmation: confirmationData } });
     }, 1500);
@@ -4999,7 +4999,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
               <ArrowLeft className="h-3.5 w-3.5 mr-1.5" /> Back
             </Button>
             <Button variant="secondary" onClick={() => { setShowViewMenuModal(null); navigate("/meal-planning"); }}>
-              Edit in Meal Planning
+              Edit in Menu Planning
             </Button>
           </DialogFooter>
         </DialogContent>

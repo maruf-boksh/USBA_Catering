@@ -137,7 +137,7 @@ export type PermMap = Record<string, Record<string, Action[]>>;
 
 const DEFAULT_MODULES_BY_ROLE: Record<string, string[]> = {
   "GM/Admin": RBAC_TREE.map((m) => m.key),
-  "Meal Planner": ["dashboard", "operations"],
+  "Menu Planner": ["dashboard", "operations"],
   "Production": ["dashboard", "production", "qc"],
   "Packaging & Dispatch": ["dashboard", "dispatch"],
   "Store & Inventory": ["dashboard", "inventory"],

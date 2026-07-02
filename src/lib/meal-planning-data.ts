@@ -474,9 +474,9 @@ export const mealCards: MealCard[] = [
 ];
 
 // ─── Live Meal-Planning config bridge ────────────────────────────────────────
-// The Meal Planning page persists its configured menus under this key (via
+// The Menu Planning page persists its configured menus under this key (via
 // usePersistedState, so the on-disk key is "harvest-data-v1:" + KEY). Downstream
-// consumers (e.g. the Production Order "Meal Plan" tab) read the latest config
+// consumers (e.g. the Production Order "Menu Plan" tab) read the latest config
 // through loadMealPlanningConfig() so menu edits flow through without a reload.
 export const MEAL_PLAN_CONFIG_KEY = "meal-planning-config";
 
@@ -506,7 +506,7 @@ export function loadMealPlanningConfig(): MealCard[] {
 // ── Dispatch helpers: resolve crew / special meals to producible dishes ───────
 // Dispatch captures crew meals as a meal-period + headcount and special meals as
 // a code + qty — neither names a dish. To tag each with its own production order,
-// we map them to a representative dish from the Meal Planning config.
+// we map them to a representative dish from the Menu Planning config.
 
 /**
  * Does a card apply on the given date? A card with no effective range applies on

@@ -972,7 +972,7 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
     [code],
   );
 
-  // Serving info — flows to Meal Planning meal items.
+  // Serving info — flows to Menu Planning meal items.
   const [weightG, setWeightG] = useState("");
   const [kcal, setKcal] = useState("");
 
@@ -1281,12 +1281,12 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Weight (g)</Label>
             <Input type="number" min={0} value={weightG} onChange={(e) => setWeightG(e.target.value)} placeholder="0" className="mt-1" />
-            <div className="mt-1 text-[11px] text-muted-foreground">Default serving weight used in Meal Planning.</div>
+            <div className="mt-1 text-[11px] text-muted-foreground">Default serving weight used in Menu Planning.</div>
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Kcal</Label>
             <Input type="number" min={0} value={kcal} onChange={(e) => setKcal(e.target.value)} placeholder="0" className="mt-1" />
-            <div className="mt-1 text-[11px] text-muted-foreground">Default energy per serving used in Meal Planning.</div>
+            <div className="mt-1 text-[11px] text-muted-foreground">Default energy per serving used in Menu Planning.</div>
           </div>
 
           {/* ── ALT UOMs ───────────────────────────────────────────────── */}
