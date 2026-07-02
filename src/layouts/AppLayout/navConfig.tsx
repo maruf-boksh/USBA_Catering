@@ -183,6 +183,16 @@ export const NAV_MODULES: NavModule[] = [
     ],
   },
 
+  // ── 10. Wastage Management ─────────────────────────────────────────────────
+  {
+    key: 'wastage-management',
+    label: 'Wastage Management',
+    icon: I(Trash2),
+    children: [
+      { key: '/wastage-management', label: 'Wastage Reports',  icon: I(ClipboardCheck) },
+    ],
+  },
+
   // ── 11. Reports ────────────────────────────────────────────────────────────
   {
     key: 'reports',

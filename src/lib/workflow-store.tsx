@@ -212,7 +212,8 @@ export type WfProductionEntryStatus =
   | "Approved"
   | "In Preparation"
   | "Ready for QC"
-  | "Completed";
+  | "Completed"
+  | "Re-Cook";
 
 export type WfProductionEntry = {
   id: string;
@@ -228,6 +229,9 @@ export type WfProductionEntry = {
   qcCheckedBy?: string;
   completedAt?: string;
   inventoryAdded?: boolean;
+  qcFailedAt?: string;
+  qcFailedBy?: string;
+  qcFailReason?: string;
   officeId?: string;
   warehouseId?: string;
 };

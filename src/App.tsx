@@ -73,6 +73,7 @@ import AirlineConsumablesOverviewPage from "@/routes/airline-consumables-overvie
 import AirlineEquipmentsOverviewPage from "@/routes/airline-equipments-overview";
 import MaintenanceOverviewPage from "@/routes/maintenance-overview";
 import FleetOverviewPage from "@/routes/fleet-overview";
+import WastageManagementPage from "@/routes/wastage-management";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 1000 * 60 * 5 } },
@@ -155,6 +156,7 @@ export function App() {
             <Route path="/airline-equipments-overview" element={<AirlineEquipmentsOverviewPage />} />
             <Route path="/maintenance-overview" element={<MaintenanceOverviewPage />} />
             <Route path="/fleet-overview" element={<FleetOverviewPage />} />
+            <Route path="/wastage-management" element={<WastageManagementPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

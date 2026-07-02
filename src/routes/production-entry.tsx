@@ -402,6 +402,63 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
                 </div>
               </div>
             )}
+
+            {/* QC Failure Log — shown when batch was sent to Re-Cook */}
+            {entry.qcFailedAt && (
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-destructive mb-3">
+                  Failed — Cooking Temp &amp; Sensory Test
+                </div>
+                <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 space-y-3">
+                  {/* Test date and time */}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Date</div>
+                      <div className="mt-0.5 text-sm font-medium tabular-nums">{entry.qcFailedAt?.split(" ")[0]}</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Time</div>
+                      <div className="mt-0.5 text-sm font-medium tabular-nums">{entry.qcFailedAt?.split(" ")[1]}</div>
+                    </div>
+                  </div>
+                  {/* Re-cooking reason */}
+                  {entry.qcFailReason && (
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Re-Cooking Reason</div>
+                      <div className="mt-0.5 text-sm text-destructive/90">{entry.qcFailReason}</div>
+                    </div>
+                  )}
+                  {/* Sent to Re-Cook by */}
+                  {entry.qcFailedBy && (
+                    <div className="border-t border-destructive/20 pt-3">
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">Sent to Re-Cook By</div>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <div className="text-[10px] text-muted-foreground">Name</div>
+                          <div className="mt-0.5 text-sm font-medium">
+                            {entry.qcFailedBy.includes(" (") ? entry.qcFailedBy.split(" (")[0] : entry.qcFailedBy}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-muted-foreground">Designation</div>
+                          <div className="mt-0.5 text-sm font-medium">
+                            {entry.qcFailedBy.includes(" (") ? entry.qcFailedBy.split(" (")[1]?.replace(")", "") : "—"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-muted-foreground">Date</div>
+                          <div className="mt-0.5 text-sm tabular-nums">{entry.qcFailedAt?.split(" ")[0]}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-muted-foreground">Time</div>
+                          <div className="mt-0.5 text-sm tabular-nums">{entry.qcFailedAt?.split(" ")[1]}</div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           <DialogFooter className="px-6 py-3 border-t border-border bg-muted/20">

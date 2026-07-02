@@ -62,6 +62,7 @@ const MAP: Record<string, string> = {
   failed:        "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
   damaged:       "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
   open:          "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
+  "re-cook":     "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
   destroyed:     "bg-[#FEF2F2] text-[#DC2626] border border-[#FECACA]",
 
   /* ── Blue: active repair / in-progress / used asset ── */

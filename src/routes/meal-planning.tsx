@@ -57,10 +57,14 @@ interface MealCard {
   effectiveTo?: string;
   mealType: string;
   flightType: string[];
+  route?: string;
   forType: string;
   choices: MealChoice[];
   specialMeals: SpecialMeal[];
   dessert: MealItem;
+  salads?: MealItem[];
+  freshFruits?: MealItem[];
+  customAddons?: Record<string, MealItem[]>;
   servingTime: { start: string; end: string };
   totalKcal: number;
   createdDate: string;
@@ -190,6 +194,51 @@ const DESSERT_ITEMS = [
   { name: "Gulab Jamun", weight: 60, calories: 200 },
   { name: "Panna Cotta", weight: 80, calories: 180 },
   { name: "Ice Cream", weight: 60, calories: 130 },
+];
+
+const SALAD_ITEMS = [
+  { name: "Garden Salad", weight: 80, calories: 40 },
+  { name: "Caesar Salad", weight: 100, calories: 120 },
+  { name: "Greek Salad", weight: 80, calories: 90 },
+  { name: "Coleslaw", weight: 60, calories: 110 },
+  { name: "Pasta Salad", weight: 100, calories: 180 },
+  { name: "Waldorf Salad", weight: 80, calories: 140 },
+  { name: "Russian Salad", weight: 80, calories: 130 },
+  { name: "Mixed Green Salad", weight: 60, calories: 30 },
+  { name: "Chickpea Salad", weight: 100, calories: 160 },
+];
+
+const FRESH_FRUIT_ITEMS = [
+  { name: "Apple Slices", weight: 80, calories: 42 },
+  { name: "Banana", weight: 100, calories: 89 },
+  { name: "Orange Wedges", weight: 80, calories: 37 },
+  { name: "Watermelon Cubes", weight: 120, calories: 36 },
+  { name: "Grapes", weight: 80, calories: 54 },
+  { name: "Mango Slices", weight: 100, calories: 60 },
+  { name: "Pineapple Chunks", weight: 80, calories: 42 },
+  { name: "Mixed Fruit Platter", weight: 120, calories: 70 },
+  { name: "Papaya Slices", weight: 100, calories: 39 },
+  { name: "Strawberries", weight: 80, calories: 26 },
+];
+
+const DOMESTIC_ROUTES = [
+  "DAC-CGP-DAC",
+  "DAC-ZYL-DAC",
+  "DAC-CXB-DAC",
+  "DAC-JSR-DAC",
+  "DAC-BZL-DAC",
+  "DAC-SPD-DAC",
+  "DAC-RJH-DAC",
+];
+
+const INTERNATIONAL_ROUTES = [
+  "DAC-DXB-DAC",
+  "DAC-KUL-DAC",
+  "DAC-DOH-DAC",
+  "DAC-SIN-DAC",
+  "DAC-MCT-DAC",
+  "DAC-CMB-DAC",
+  "CGP-DXB-CGP",
 ];
 
 const SPECIAL_MEAL_INFO: Record<string, { code: string; label: string; allowed: string[]; notAllowed: string[]; note: string }> = {
@@ -323,6 +372,7 @@ export default function MealPlanning() {
     effectiveFrom: "",
     effectiveTo: "",
     flightType: [] as string[],
+    route: "",
     forType: "",
     mealTypes: [] as string[],
     choices: [
@@ -336,6 +386,13 @@ export default function MealPlanning() {
     ] as [Record<string, MealItem[]>, Record<string, MealItem[]>],
     dessertByType: {} as Record<string, MealItem[]>,
     dessertAllocationByType: {} as Record<string, number[]>,
+    saladsByType: {} as Record<string, MealItem[]>,
+    saladAllocationByType: {} as Record<string, number[]>,
+    freshFruitsByType: {} as Record<string, MealItem[]>,
+    freshFruitAllocationByType: {} as Record<string, number[]>,
+    customMealTypeNames: [] as string[],
+    customAddonNames: [] as string[],
+    customAddonsByType: {} as Record<string, Record<string, MealItem[]>>,
     choicePercentagesByType: {} as Record<string, { c1: number; c2: number }>,
     servingTimes: {} as Record<string, { start: string; end: string }>,
   });
@@ -365,6 +422,13 @@ export default function MealPlanning() {
   const [activeItemsTab, setActiveItemsTab] = useState<string>("");
   const [createStep, setCreateStep] = useState(1);
   const [activeMealTab, setActiveMealTab] = useState<string>("Breakfast");
+  const [addMealTypeInput, setAddMealTypeInput] = useState("");
+  const [addMealTypeOpen, setAddMealTypeOpen] = useState(false);
+  const [addAddonInput, setAddAddonInput] = useState("");
+  const [addAddonOpen, setAddAddonOpen] = useState(false);
+  const [removeMealTypeMode, setRemoveMealTypeMode] = useState(false);
+  const [hiddenBuiltinTypes, setHiddenBuiltinTypes] = useState<string[]>([]);
+  const [hiddenAddonTypes, setHiddenAddonTypes] = useState<string[]>([]);
 
   const currentDayMeals = useMemo(() => meals.filter((m) => m.day === selectedDay && cardMatchesDate(m, viewDate)), [meals, selectedDay, viewDate]);
   const effectiveItemsTab = (activeItemsTab && (createData.mealTypes.includes(activeItemsTab) || activeItemsTab === "special-meals" || activeItemsTab === "dessert"))
@@ -402,6 +466,13 @@ export default function MealPlanning() {
       setActiveItemsTab("");
       setActiveMealTab("Breakfast");
       setCreateErrors([]);
+      setAddMealTypeInput("");
+      setAddMealTypeOpen(false);
+      setAddAddonInput("");
+      setAddAddonOpen(false);
+      setRemoveMealTypeMode(false);
+      setHiddenBuiltinTypes([]);
+      setHiddenAddonTypes([]);
     }
   };
 
@@ -441,6 +512,13 @@ export default function MealPlanning() {
       }));
       const dessertItems = (createData.dessertByType[mealType] || []).filter((it) => it.name.trim() !== "");
       const firstDessert = dessertItems[0] ?? { name: "", weight: 0, calories: 0 };
+      const saladItems = (createData.saladsByType[mealType] || []).filter((it) => it.name.trim() !== "");
+      const freshFruitItems = (createData.freshFruitsByType[mealType] || []).filter((it) => it.name.trim() !== "");
+      const customAddonData: Record<string, MealItem[]> = {};
+      for (const addonName of createData.customAddonNames) {
+        const items = (createData.customAddonsByType[addonName]?.[mealType] || []).filter((it) => it.name.trim() !== "");
+        if (items.length > 0) customAddonData[addonName] = items;
+      }
 
       const totalKcal = choices.reduce((sum, c) => sum + c.items.reduce((inner, it) => inner + (it.calories || 0), 0), 0) || 500;
 
@@ -452,10 +530,14 @@ export default function MealPlanning() {
         effectiveTo: createData.effectiveTo || undefined,
         mealType,
         flightType: createData.flightType,
+        route: createData.route || undefined,
         forType: createData.forType || "Passengers",
         choices,
         specialMeals,
         dessert: firstDessert,
+        salads: saladItems.length > 0 ? saladItems : undefined,
+        freshFruits: freshFruitItems.length > 0 ? freshFruitItems : undefined,
+        customAddons: Object.keys(customAddonData).length > 0 ? customAddonData : undefined,
         servingTime,
         totalKcal,
         createdDate: new Date().toISOString().split('T')[0],
@@ -488,6 +570,7 @@ export default function MealPlanning() {
       effectiveFrom: meal.effectiveFrom ?? "",
       effectiveTo: meal.effectiveTo ?? "",
       flightType: meal.flightType,
+      route: meal.route ?? "",
       forType: meal.forType,
       mealTypes: [meal.mealType],
       choices: meal.choices,
@@ -498,6 +581,13 @@ export default function MealPlanning() {
       ],
       dessertByType: { [meal.mealType]: meal.dessert.name ? [meal.dessert] : [] },
       dessertAllocationByType: { [meal.mealType]: meal.dessert.name ? [100] : [] },
+      saladsByType: { [meal.mealType]: meal.salads ?? [] },
+      saladAllocationByType: { [meal.mealType]: (meal.salads ?? []).map(() => 100) },
+      freshFruitsByType: { [meal.mealType]: meal.freshFruits ?? [] },
+      freshFruitAllocationByType: { [meal.mealType]: (meal.freshFruits ?? []).map(() => 100) },
+      customMealTypeNames: mealSlots.some(s => s.name === meal.mealType) ? [] : [meal.mealType],
+      customAddonNames: Object.keys(meal.customAddons ?? {}),
+      customAddonsByType: Object.fromEntries(Object.entries(meal.customAddons ?? {}).map(([k, v]) => [k, { [meal.mealType]: v }])),
       choicePercentagesByType: { [meal.mealType]: { c1: meal.choices[0]?.percentage ?? 60, c2: meal.choices[1]?.percentage ?? 40 } },
       servingTimes: { [meal.mealType]: meal.servingTime },
     });
@@ -588,7 +678,7 @@ export default function MealPlanning() {
 
               <div className="space-y-5">
                 {/* ── Basic Info ── */}
-                <div className="grid grid-cols-4 gap-4">
+                <div className="grid grid-cols-5 gap-4">
                   <div>
                     <Label>Day</Label>
                     <select
@@ -641,7 +731,7 @@ export default function MealPlanning() {
                             checked={createData.flightType.join(",") === (type === "Both" ? "Domestic,International" : type)}
                             onChange={(e) => {
                               const val = e.target.value;
-                              setCreateData({ ...createData, flightType: val === "Both" ? ["Domestic", "International"] : [val] });
+                              setCreateData({ ...createData, flightType: val === "Both" ? ["Domestic", "International"] : [val], route: "" });
                             }}
                             className="h-4 w-4"
                           />
@@ -649,6 +739,28 @@ export default function MealPlanning() {
                         </label>
                       ))}
                     </div>
+                  </div>
+                  <div>
+                    <Label>Route</Label>
+                    {createData.flightType.length === 0 ? (
+                      <p className="mt-2 text-xs text-muted-foreground italic">Select flight type first</p>
+                    ) : (
+                      <select
+                        value={createData.route}
+                        onChange={(e) => setCreateData({ ...createData, route: e.target.value })}
+                        className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                      >
+                        <option value="">All routes</option>
+                        {(createData.flightType.includes("Domestic") && createData.flightType.includes("International")
+                          ? [...DOMESTIC_ROUTES, ...INTERNATIONAL_ROUTES]
+                          : createData.flightType.includes("Domestic")
+                          ? DOMESTIC_ROUTES
+                          : INTERNATIONAL_ROUTES
+                        ).map((r) => (
+                          <option key={r} value={r}>{r}</option>
+                        ))}
+                      </select>
+                    )}
                   </div>
                   <div>
                     <Label>For</Label>
@@ -677,19 +789,21 @@ export default function MealPlanning() {
                   <div className="text-sm font-semibold mb-3">Meal Configuration</div>
                   {/* ── Meal type toggle buttons ── */}
                   <div className="flex flex-wrap gap-2 mb-4">
-                    {mealTypeOptions.length === 0 && (
+                    {mealTypeOptions.length === 0 && createData.customMealTypeNames.length === 0 && (
                       <span className="text-xs text-muted-foreground">
-                        No meals configured. Add them in <strong>Configuration → Meal Config</strong>.
+                        No meals configured. Add them in <strong>Configuration → Meal Config</strong> or use + Add New.
                       </span>
                     )}
-                    {mealTypeOptions.map((t) => {
+                    {[...mealTypeOptions.filter(t => !hiddenBuiltinTypes.includes(t)), ...createData.customMealTypeNames].map((t) => {
                       const isSelected = createData.mealTypes.includes(t);
                       const isActive = activeMealTab === t;
+                      const isBuiltin = mealTypeOptions.includes(t);
                       return (
                         <button
                           key={t}
                           type="button"
                           onClick={() => {
+                            if (removeMealTypeMode) return;
                             if (!isSelected) {
                               const copy = { ...createData };
                               const seedRow = [{ name: "", weight: 0, calories: 0 }];
@@ -699,6 +813,10 @@ export default function MealPlanning() {
                               ];
                               copy.dessertByType = { ...copy.dessertByType, [t]: copy.dessertByType[t] ?? [] };
                               copy.dessertAllocationByType = { ...copy.dessertAllocationByType, [t]: copy.dessertAllocationByType[t] ?? [] };
+                              copy.saladsByType = { ...copy.saladsByType, [t]: copy.saladsByType[t] ?? [] };
+                              copy.saladAllocationByType = { ...copy.saladAllocationByType, [t]: copy.saladAllocationByType[t] ?? [] };
+                              copy.freshFruitsByType = { ...copy.freshFruitsByType, [t]: copy.freshFruitsByType[t] ?? [] };
+                              copy.freshFruitAllocationByType = { ...copy.freshFruitAllocationByType, [t]: copy.freshFruitAllocationByType[t] ?? [] };
                               copy.choicePercentagesByType = { ...copy.choicePercentagesByType, [t]: copy.choicePercentagesByType[t] ?? { c1: 60, c2: 40 } };
                               copy.specialMealsByType = { ...copy.specialMealsByType, [t]: copy.specialMealsByType[t] ?? [] };
                               copy.servingTimes = { ...copy.servingTimes, [t]: copy.servingTimes[t] ?? defaultServingFor(t) };
@@ -710,7 +828,9 @@ export default function MealPlanning() {
                             }
                           }}
                           className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${
-                            isSelected && isActive
+                            removeMealTypeMode
+                              ? "bg-background text-muted-foreground border-border cursor-default"
+                              : isSelected && isActive
                               ? "bg-primary text-primary-foreground border-primary"
                               : isSelected
                               ? "bg-primary/10 text-primary border-primary/30 hover:bg-primary/20"
@@ -720,41 +840,221 @@ export default function MealPlanning() {
                           }`}
                         >
                           {t}
-                          {isSelected && (
+                          {removeMealTypeMode ? (
                             <span
-                              className="ml-0.5 text-base leading-none opacity-60 hover:opacity-100"
+                              className="ml-0.5 w-4 h-4 rounded-full bg-red-500 text-white text-xs flex items-center justify-center leading-none hover:bg-red-600"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 const newMealTypes = createData.mealTypes.filter((mt) => mt !== t);
+                                if (isBuiltin) {
+                                  setHiddenBuiltinTypes(prev => [...prev, t]);
+                                } else {
+                                  setCreateData({ ...createData, mealTypes: newMealTypes, customMealTypeNames: createData.customMealTypeNames.filter(n => n !== t) });
+                                  if (isActive) setActiveMealTab(newMealTypes[0] ?? "");
+                                  return;
+                                }
                                 setCreateData({ ...createData, mealTypes: newMealTypes });
-                                setActiveMealTab(isActive ? (newMealTypes[0] ?? "Breakfast") : activeMealTab);
+                                if (isActive) setActiveMealTab(newMealTypes[0] ?? "");
                               }}
-                            >
-                              ×
-                            </span>
+                            >×</span>
+                          ) : (
+                            isSelected && (
+                              <span
+                                className="ml-0.5 text-base leading-none opacity-60 hover:opacity-100"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const newMealTypes = createData.mealTypes.filter((mt) => mt !== t);
+                                  setCreateData({ ...createData, mealTypes: newMealTypes });
+                                  setActiveMealTab(isActive ? (newMealTypes[0] ?? "Breakfast") : activeMealTab);
+                                }}
+                              >×</span>
+                            )
                           )}
                         </button>
                       );
                     })}
-                    <div className="w-px bg-border mx-1 self-stretch" />
-                    {(["special-meals", "dessert"] as const).map((t) => (
+                    {/* +Add New meal type */}
+                    {!removeMealTypeMode && addMealTypeOpen ? (
+                      <div className="flex items-center gap-1">
+                        <input
+                          autoFocus
+                          type="text"
+                          value={addMealTypeInput}
+                          onChange={(e) => setAddMealTypeInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              const name = addMealTypeInput.trim();
+                              if (name && !mealTypeOptions.includes(name) && !createData.customMealTypeNames.includes(name)) {
+                                setCreateData({ ...createData, customMealTypeNames: [...createData.customMealTypeNames, name] });
+                              }
+                              setAddMealTypeInput("");
+                              setAddMealTypeOpen(false);
+                            }
+                            if (e.key === "Escape") { setAddMealTypeInput(""); setAddMealTypeOpen(false); }
+                          }}
+                          placeholder="Type name…"
+                          className="h-7 w-28 rounded border border-border px-2 text-sm"
+                        />
+                        <button
+                          type="button"
+                          className="text-xs px-2 py-1 rounded border bg-primary text-primary-foreground"
+                          onClick={() => {
+                            const name = addMealTypeInput.trim();
+                            if (name && !mealTypeOptions.includes(name) && !createData.customMealTypeNames.includes(name)) {
+                              setCreateData({ ...createData, customMealTypeNames: [...createData.customMealTypeNames, name] });
+                            }
+                            setAddMealTypeInput("");
+                            setAddMealTypeOpen(false);
+                          }}
+                        >Add</button>
+                        <button type="button" className="text-xs px-1 py-1 text-muted-foreground" onClick={() => { setAddMealTypeInput(""); setAddMealTypeOpen(false); }}>✕</button>
+                      </div>
+                    ) : (
                       <button
-                        key={t}
                         type="button"
-                        onClick={() => setActiveMealTab(t)}
-                        className={`px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${
-                          activeMealTab === t
+                        onClick={() => setAddMealTypeOpen(true)}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium border border-dashed border-primary/50 text-primary/70 hover:bg-primary/5 transition-colors"
+                      >
+                        + Add New
+                      </button>
+                    )}
+                    <div className="w-px bg-border mx-1 self-stretch" />
+                    {(["special-meals", "dessert", "salads", "fresh-fruits"] as const)
+                      .filter(t => !hiddenAddonTypes.includes(t))
+                      .map((t) => {
+                        const label = t === "special-meals" ? "Special Meals" : t === "dessert" ? "Dessert" : t === "salads" ? "Salads" : "Fresh Fruits";
+                        return (
+                          <button
+                            key={t}
+                            type="button"
+                            onClick={() => { if (!removeMealTypeMode) setActiveMealTab(t); }}
+                            className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${
+                              removeMealTypeMode
+                                ? "bg-background text-muted-foreground border-border cursor-default"
+                                : activeMealTab === t
+                                ? "bg-primary text-primary-foreground border-primary"
+                                : "bg-background text-muted-foreground border-border hover:bg-muted"
+                            }`}
+                          >
+                            {label}
+                            {removeMealTypeMode && (
+                              <span
+                                className="ml-0.5 w-4 h-4 rounded-full bg-red-500 text-white text-xs flex items-center justify-center leading-none hover:bg-red-600"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setHiddenAddonTypes(prev => [...prev, t]);
+                                  if (activeMealTab === t) setActiveMealTab("special-meals");
+                                }}
+                              >×</span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    {createData.customAddonNames.map((name) => (
+                      <button
+                        key={name}
+                        type="button"
+                        onClick={() => { if (!removeMealTypeMode) setActiveMealTab(`addon-${name}`); }}
+                        className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${
+                          removeMealTypeMode
+                            ? "bg-background text-muted-foreground border-border cursor-default"
+                            : activeMealTab === `addon-${name}`
                             ? "bg-primary text-primary-foreground border-primary"
                             : "bg-background text-muted-foreground border-border hover:bg-muted"
                         }`}
                       >
-                        {t === "special-meals" ? "Special Meals" : "Dessert"}
+                        {name}
+                        {removeMealTypeMode ? (
+                          <span
+                            className="ml-0.5 w-4 h-4 rounded-full bg-red-500 text-white text-xs flex items-center justify-center leading-none hover:bg-red-600"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const newNames = createData.customAddonNames.filter((n) => n !== name);
+                              const newByType = { ...createData.customAddonsByType };
+                              delete newByType[name];
+                              setCreateData({ ...createData, customAddonNames: newNames, customAddonsByType: newByType });
+                              if (activeMealTab === `addon-${name}`) setActiveMealTab("dessert");
+                            }}
+                          >×</span>
+                        ) : (
+                          <span
+                            className="ml-0.5 text-base leading-none opacity-60 hover:opacity-100"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const newNames = createData.customAddonNames.filter((n) => n !== name);
+                              const newByType = { ...createData.customAddonsByType };
+                              delete newByType[name];
+                              setCreateData({ ...createData, customAddonNames: newNames, customAddonsByType: newByType });
+                              if (activeMealTab === `addon-${name}`) setActiveMealTab("dessert");
+                            }}
+                          >×</span>
+                        )}
                       </button>
                     ))}
+                    {/* +Add New add-on */}
+                    {addAddonOpen ? (
+                      <div className="flex items-center gap-1">
+                        <input
+                          autoFocus
+                          type="text"
+                          value={addAddonInput}
+                          onChange={(e) => setAddAddonInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              const name = addAddonInput.trim();
+                              const fixed = ["Special Meals","Dessert","Salads","Fresh Fruits"];
+                              if (name && !fixed.includes(name) && !createData.customAddonNames.includes(name)) {
+                                setCreateData({ ...createData, customAddonNames: [...createData.customAddonNames, name] });
+                                setActiveMealTab(`addon-${name}`);
+                              }
+                              setAddAddonInput("");
+                              setAddAddonOpen(false);
+                            }
+                            if (e.key === "Escape") { setAddAddonInput(""); setAddAddonOpen(false); }
+                          }}
+                          placeholder="Type name…"
+                          className="h-7 w-28 rounded border border-border px-2 text-sm"
+                        />
+                        <button
+                          type="button"
+                          className="text-xs px-2 py-1 rounded border bg-primary text-primary-foreground"
+                          onClick={() => {
+                            const name = addAddonInput.trim();
+                            const fixed = ["Special Meals","Dessert","Salads","Fresh Fruits"];
+                            if (name && !fixed.includes(name) && !createData.customAddonNames.includes(name)) {
+                              setCreateData({ ...createData, customAddonNames: [...createData.customAddonNames, name] });
+                              setActiveMealTab(`addon-${name}`);
+                            }
+                            setAddAddonInput("");
+                            setAddAddonOpen(false);
+                          }}
+                        >Add</button>
+                        <button type="button" className="text-xs px-1 py-1 text-muted-foreground" onClick={() => { setAddAddonInput(""); setAddAddonOpen(false); }}>✕</button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setAddAddonOpen(true)}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium border border-dashed border-primary/50 text-primary/70 hover:bg-primary/5 transition-colors"
+                      >
+                        + Add New
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setRemoveMealTypeMode((prev) => !prev)}
+                      className={`px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${
+                        removeMealTypeMode
+                          ? "bg-red-500 text-white border-red-500"
+                          : "bg-background text-red-600 border-red-300 hover:bg-red-50"
+                      }`}
+                    >
+                      {removeMealTypeMode ? "Done" : "Remove"}
+                    </button>
                   </div>
 
                   {/* ── Content panel for regular meal types ── */}
-                  {mealTypeOptions.map((type) => {
+                  {[...mealTypeOptions.filter(t => !hiddenBuiltinTypes.includes(t)), ...createData.customMealTypeNames].map((type) => {
                     if (activeMealTab !== type) return null;
                     const isIncluded = createData.mealTypes.includes(type);
                     if (!isIncluded) {
@@ -798,33 +1098,94 @@ export default function MealPlanning() {
                           </div>
                           {activeItems.map((item, itemIdx) => (
                             <div key={itemIdx} className="flex gap-2 items-center mb-2">
-                              <select
-                                value={item.name}
-                                onChange={(e) => {
-                                  const found = (FOOD_ITEMS[type] || []).find((fi) => fi.name === e.target.value);
-                                  const copy = { ...createData };
-                                  const updated = copy.choiceItems[activeChoiceForItems][type].map((it, i) =>
-                                    i === itemIdx ? (withProfile(found)) : it
-                                  );
-                                  copy.choiceItems = [
-                                    activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
-                                    activeChoiceForItems === 1 ? { ...copy.choiceItems[1], [type]: updated } : copy.choiceItems[1],
-                                  ];
-                                  setCreateData(copy);
-                                }}
-                                className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
-                              >
-                                <option value="">Select item…</option>
-                                {(FOOD_ITEMS[type] || []).map((fi) => (
-                                  <option key={fi.name} value={fi.name}>{fi.name}</option>
-                                ))}
-                              </select>
-                              <div className="w-20 rounded border border-border bg-muted/30 px-2 py-1.5 text-sm text-center tabular-nums text-muted-foreground">
-                                {item.weight > 0 ? `${item.weight}g` : "—"}
-                              </div>
-                              <div className="w-16 rounded border border-border bg-muted/30 px-2 py-1.5 text-sm text-center tabular-nums text-muted-foreground">
-                                {item.calories > 0 ? item.calories : "—"}
-                              </div>
+                              {(FOOD_ITEMS[type] || []).length > 0 ? (
+                                <select
+                                  value={item.name}
+                                  onChange={(e) => {
+                                    const found = (FOOD_ITEMS[type] || []).find((fi) => fi.name === e.target.value);
+                                    const copy = { ...createData };
+                                    const updated = copy.choiceItems[activeChoiceForItems][type].map((it, i) =>
+                                      i === itemIdx ? (withProfile(found)) : it
+                                    );
+                                    copy.choiceItems = [
+                                      activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
+                                      activeChoiceForItems === 1 ? { ...copy.choiceItems[1], [type]: updated } : copy.choiceItems[1],
+                                    ];
+                                    setCreateData(copy);
+                                  }}
+                                  className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
+                                >
+                                  <option value="">Select item…</option>
+                                  {(FOOD_ITEMS[type] || []).map((fi) => (
+                                    <option key={fi.name} value={fi.name}>{fi.name}</option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <input
+                                  type="text"
+                                  value={item.name}
+                                  onChange={(e) => {
+                                    const copy = { ...createData };
+                                    const updated = copy.choiceItems[activeChoiceForItems][type].map((it, i) =>
+                                      i === itemIdx ? { ...it, name: e.target.value } : it
+                                    );
+                                    copy.choiceItems = [
+                                      activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
+                                      activeChoiceForItems === 1 ? { ...copy.choiceItems[1], [type]: updated } : copy.choiceItems[1],
+                                    ];
+                                    setCreateData(copy);
+                                  }}
+                                  placeholder="Item name…"
+                                  className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
+                                />
+                              )}
+                              {(FOOD_ITEMS[type] || []).length > 0 ? (
+                                <>
+                                  <div className="w-20 rounded border border-border bg-muted/30 px-2 py-1.5 text-sm text-center tabular-nums text-muted-foreground">
+                                    {item.weight > 0 ? `${item.weight}g` : "—"}
+                                  </div>
+                                  <div className="w-16 rounded border border-border bg-muted/30 px-2 py-1.5 text-sm text-center tabular-nums text-muted-foreground">
+                                    {item.calories > 0 ? item.calories : "—"}
+                                  </div>
+                                </>
+                              ) : (
+                                <>
+                                  <input
+                                    type="number"
+                                    value={item.weight || ""}
+                                    onChange={(e) => {
+                                      const copy = { ...createData };
+                                      const updated = copy.choiceItems[activeChoiceForItems][type].map((it, i) =>
+                                        i === itemIdx ? { ...it, weight: Number(e.target.value) } : it
+                                      );
+                                      copy.choiceItems = [
+                                        activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
+                                        activeChoiceForItems === 1 ? { ...copy.choiceItems[1], [type]: updated } : copy.choiceItems[1],
+                                      ];
+                                      setCreateData(copy);
+                                    }}
+                                    placeholder="g"
+                                    className="w-20 rounded border border-border bg-background px-2 py-1.5 text-sm text-center"
+                                  />
+                                  <input
+                                    type="number"
+                                    value={item.calories || ""}
+                                    onChange={(e) => {
+                                      const copy = { ...createData };
+                                      const updated = copy.choiceItems[activeChoiceForItems][type].map((it, i) =>
+                                        i === itemIdx ? { ...it, calories: Number(e.target.value) } : it
+                                      );
+                                      copy.choiceItems = [
+                                        activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
+                                        activeChoiceForItems === 1 ? { ...copy.choiceItems[1], [type]: updated } : copy.choiceItems[1],
+                                      ];
+                                      setCreateData(copy);
+                                    }}
+                                    placeholder="kcal"
+                                    className="w-16 rounded border border-border bg-background px-2 py-1.5 text-sm text-center"
+                                  />
+                                </>
+                              )}
                               <button
                                 type="button"
                                 className="w-16 text-right text-red-600 text-sm shrink-0"
@@ -933,7 +1294,7 @@ export default function MealPlanning() {
                   })}
 
                   {/* ── Special Meals Panel ── */}
-                  {activeMealTab === "special-meals" && (
+                  {activeMealTab === "special-meals" && !hiddenAddonTypes.includes("special-meals") && (
                     <div className="space-y-3">
                       {createData.mealTypes.length === 0 ? (
                         <div className="text-sm text-muted-foreground text-center py-8 border rounded-lg bg-muted/20">
@@ -1203,7 +1564,7 @@ export default function MealPlanning() {
                   )}
 
                   {/* ── Dessert Panel ── */}
-                  {activeMealTab === "dessert" && (
+                  {activeMealTab === "dessert" && !hiddenAddonTypes.includes("dessert") && (
                     <div className="space-y-3">
                       {createData.mealTypes.length === 0 ? (
                         <div className="text-sm text-muted-foreground text-center py-4 border rounded-lg bg-muted/20">
@@ -1280,6 +1641,266 @@ export default function MealPlanning() {
                                   const copy = { ...createData };
                                   copy.dessertByType = { ...copy.dessertByType, [type]: [...(copy.dessertByType[type] || []), { name: "", weight: 0, calories: 0 }] };
                                   copy.dessertAllocationByType = { ...copy.dessertAllocationByType, [type]: [...(copy.dessertAllocationByType[type] || []), 100] };
+                                  setCreateData(copy);
+                                }}
+                              >
+                                + Add Item
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+
+                  {/* ── Salads Panel ── */}
+                  {activeMealTab === "salads" && !hiddenAddonTypes.includes("salads") && (
+                    <div className="space-y-3">
+                      {createData.mealTypes.length === 0 ? (
+                        <div className="text-sm text-muted-foreground text-center py-4 border rounded-lg bg-muted/20">
+                          Enable meal types to configure salads
+                        </div>
+                      ) : (
+                        createData.mealTypes.map((type) => {
+                          const saladItems = createData.saladsByType[type] || [];
+                          return (
+                            <div key={type} className="rounded-lg border p-3 space-y-2">
+                              <div className="font-semibold text-sm">{type}</div>
+                              {saladItems.map((sItem, idx) => (
+                                <div key={idx} className="flex gap-2 items-center">
+                                  <select
+                                    value={sItem.name}
+                                    onChange={(e) => {
+                                      const found = SALAD_ITEMS.find((s) => s.name === e.target.value);
+                                      const copy = { ...createData };
+                                      copy.saladsByType = {
+                                        ...copy.saladsByType,
+                                        [type]: copy.saladsByType[type].map((it, i) =>
+                                          i === idx ? (withProfile(found)) : it
+                                        ),
+                                      };
+                                      setCreateData(copy);
+                                    }}
+                                    className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
+                                  >
+                                    <option value="">Select salad…</option>
+                                    {SALAD_ITEMS.map((s) => (
+                                      <option key={s.name} value={s.name}>{s.name}</option>
+                                    ))}
+                                  </select>
+                                  {sItem.name && (
+                                    <div className="text-xs text-muted-foreground whitespace-nowrap">
+                                      {sItem.weight}g · {sItem.calories} kcal
+                                    </div>
+                                  )}
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <Input
+                                      type="number"
+                                      min={1}
+                                      max={100}
+                                      value={(createData.saladAllocationByType[type] || [])[idx] ?? 100}
+                                      onChange={(e) => {
+                                        const copy = { ...createData };
+                                        const arr = [...(copy.saladAllocationByType[type] || [])];
+                                        arr[idx] = Number(e.target.value);
+                                        copy.saladAllocationByType = { ...copy.saladAllocationByType, [type]: arr };
+                                        setCreateData(copy);
+                                      }}
+                                      className="w-16 h-7 text-xs"
+                                    />
+                                    <span className="text-xs text-muted-foreground">%</span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="text-red-500 text-sm shrink-0"
+                                    onClick={() => {
+                                      const copy = { ...createData };
+                                      copy.saladsByType = { ...copy.saladsByType, [type]: copy.saladsByType[type].filter((_, i) => i !== idx) };
+                                      copy.saladAllocationByType = { ...copy.saladAllocationByType, [type]: (copy.saladAllocationByType[type] || []).filter((_, i) => i !== idx) };
+                                      setCreateData(copy);
+                                    }}
+                                  >
+                                    × Remove
+                                  </button>
+                                </div>
+                              ))}
+                              <button
+                                type="button"
+                                className="text-blue-600 text-sm"
+                                onClick={() => {
+                                  const copy = { ...createData };
+                                  copy.saladsByType = { ...copy.saladsByType, [type]: [...(copy.saladsByType[type] || []), { name: "", weight: 0, calories: 0 }] };
+                                  copy.saladAllocationByType = { ...copy.saladAllocationByType, [type]: [...(copy.saladAllocationByType[type] || []), 100] };
+                                  setCreateData(copy);
+                                }}
+                              >
+                                + Add Item
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+
+                  {/* ── Custom Add-on Panels ── */}
+                  {createData.customAddonNames.map((addonName) => activeMealTab === `addon-${addonName}` && (
+                    <div key={addonName} className="space-y-3">
+                      {createData.mealTypes.length === 0 ? (
+                        <div className="text-sm text-muted-foreground text-center py-4 border rounded-lg bg-muted/20">
+                          Enable meal types to configure {addonName}
+                        </div>
+                      ) : (
+                        createData.mealTypes.map((type) => {
+                          const addonItems = createData.customAddonsByType[addonName]?.[type] || [];
+                          return (
+                            <div key={type} className="rounded-lg border p-3 space-y-2">
+                              <div className="font-semibold text-sm">{type}</div>
+                              {addonItems.map((aItem, idx) => (
+                                <div key={idx} className="flex gap-2 items-center">
+                                  <input
+                                    type="text"
+                                    value={aItem.name}
+                                    onChange={(e) => {
+                                      const copy = { ...createData };
+                                      const updated = (copy.customAddonsByType[addonName]?.[type] || []).map((it, i) => i === idx ? { ...it, name: e.target.value } : it);
+                                      copy.customAddonsByType = { ...copy.customAddonsByType, [addonName]: { ...(copy.customAddonsByType[addonName] || {}), [type]: updated } };
+                                      setCreateData(copy);
+                                    }}
+                                    placeholder="Item name…"
+                                    className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
+                                  />
+                                  <input
+                                    type="number"
+                                    value={aItem.weight || ""}
+                                    onChange={(e) => {
+                                      const copy = { ...createData };
+                                      const updated = (copy.customAddonsByType[addonName]?.[type] || []).map((it, i) => i === idx ? { ...it, weight: Number(e.target.value) } : it);
+                                      copy.customAddonsByType = { ...copy.customAddonsByType, [addonName]: { ...(copy.customAddonsByType[addonName] || {}), [type]: updated } };
+                                      setCreateData(copy);
+                                    }}
+                                    placeholder="g"
+                                    className="w-20 rounded border border-border bg-background px-2 py-1.5 text-sm text-center"
+                                  />
+                                  <input
+                                    type="number"
+                                    value={aItem.calories || ""}
+                                    onChange={(e) => {
+                                      const copy = { ...createData };
+                                      const updated = (copy.customAddonsByType[addonName]?.[type] || []).map((it, i) => i === idx ? { ...it, calories: Number(e.target.value) } : it);
+                                      copy.customAddonsByType = { ...copy.customAddonsByType, [addonName]: { ...(copy.customAddonsByType[addonName] || {}), [type]: updated } };
+                                      setCreateData(copy);
+                                    }}
+                                    placeholder="kcal"
+                                    className="w-16 rounded border border-border bg-background px-2 py-1.5 text-sm text-center"
+                                  />
+                                  <button
+                                    type="button"
+                                    className="text-red-500 text-sm shrink-0"
+                                    onClick={() => {
+                                      const copy = { ...createData };
+                                      const updated = (copy.customAddonsByType[addonName]?.[type] || []).filter((_, i) => i !== idx);
+                                      copy.customAddonsByType = { ...copy.customAddonsByType, [addonName]: { ...(copy.customAddonsByType[addonName] || {}), [type]: updated } };
+                                      setCreateData(copy);
+                                    }}
+                                  >× Remove</button>
+                                </div>
+                              ))}
+                              <button
+                                type="button"
+                                className="text-blue-600 text-sm"
+                                onClick={() => {
+                                  const copy = { ...createData };
+                                  const existing = copy.customAddonsByType[addonName]?.[type] || [];
+                                  copy.customAddonsByType = { ...copy.customAddonsByType, [addonName]: { ...(copy.customAddonsByType[addonName] || {}), [type]: [...existing, { name: "", weight: 0, calories: 0 }] } };
+                                  setCreateData(copy);
+                                }}
+                              >+ Add Item</button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  ))}
+
+                  {/* ── Fresh Fruits Panel ── */}
+                  {activeMealTab === "fresh-fruits" && !hiddenAddonTypes.includes("fresh-fruits") && (
+                    <div className="space-y-3">
+                      {createData.mealTypes.length === 0 ? (
+                        <div className="text-sm text-muted-foreground text-center py-4 border rounded-lg bg-muted/20">
+                          Enable meal types to configure fresh fruits
+                        </div>
+                      ) : (
+                        createData.mealTypes.map((type) => {
+                          const fruitItems = createData.freshFruitsByType[type] || [];
+                          return (
+                            <div key={type} className="rounded-lg border p-3 space-y-2">
+                              <div className="font-semibold text-sm">{type}</div>
+                              {fruitItems.map((fItem, idx) => (
+                                <div key={idx} className="flex gap-2 items-center">
+                                  <select
+                                    value={fItem.name}
+                                    onChange={(e) => {
+                                      const found = FRESH_FRUIT_ITEMS.find((f) => f.name === e.target.value);
+                                      const copy = { ...createData };
+                                      copy.freshFruitsByType = {
+                                        ...copy.freshFruitsByType,
+                                        [type]: copy.freshFruitsByType[type].map((it, i) =>
+                                          i === idx ? (withProfile(found)) : it
+                                        ),
+                                      };
+                                      setCreateData(copy);
+                                    }}
+                                    className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
+                                  >
+                                    <option value="">Select fruit…</option>
+                                    {FRESH_FRUIT_ITEMS.map((f) => (
+                                      <option key={f.name} value={f.name}>{f.name}</option>
+                                    ))}
+                                  </select>
+                                  {fItem.name && (
+                                    <div className="text-xs text-muted-foreground whitespace-nowrap">
+                                      {fItem.weight}g · {fItem.calories} kcal
+                                    </div>
+                                  )}
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <Input
+                                      type="number"
+                                      min={1}
+                                      max={100}
+                                      value={(createData.freshFruitAllocationByType[type] || [])[idx] ?? 100}
+                                      onChange={(e) => {
+                                        const copy = { ...createData };
+                                        const arr = [...(copy.freshFruitAllocationByType[type] || [])];
+                                        arr[idx] = Number(e.target.value);
+                                        copy.freshFruitAllocationByType = { ...copy.freshFruitAllocationByType, [type]: arr };
+                                        setCreateData(copy);
+                                      }}
+                                      className="w-16 h-7 text-xs"
+                                    />
+                                    <span className="text-xs text-muted-foreground">%</span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="text-red-500 text-sm shrink-0"
+                                    onClick={() => {
+                                      const copy = { ...createData };
+                                      copy.freshFruitsByType = { ...copy.freshFruitsByType, [type]: copy.freshFruitsByType[type].filter((_, i) => i !== idx) };
+                                      copy.freshFruitAllocationByType = { ...copy.freshFruitAllocationByType, [type]: (copy.freshFruitAllocationByType[type] || []).filter((_, i) => i !== idx) };
+                                      setCreateData(copy);
+                                    }}
+                                  >
+                                    × Remove
+                                  </button>
+                                </div>
+                              ))}
+                              <button
+                                type="button"
+                                className="text-blue-600 text-sm"
+                                onClick={() => {
+                                  const copy = { ...createData };
+                                  copy.freshFruitsByType = { ...copy.freshFruitsByType, [type]: [...(copy.freshFruitsByType[type] || []), { name: "", weight: 0, calories: 0 }] };
+                                  copy.freshFruitAllocationByType = { ...copy.freshFruitAllocationByType, [type]: [...(copy.freshFruitAllocationByType[type] || []), 100] };
                                   setCreateData(copy);
                                 }}
                               >
@@ -1416,6 +2037,56 @@ export default function MealPlanning() {
                             ))}
                             <div className="text-xs font-semibold border-t pt-1 mt-1">
                               Total: {dItems.reduce((s, it) => s + (it.calories || 0), 0)} kcal
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Salads card */}
+                    {(() => {
+                      const sItems = (createData.saladsByType[mealType] || []).filter((it) => it.name.trim());
+                      if (sItems.length === 0) return null;
+                      return (
+                        <div className="rounded-lg border border-green-200 w-52 shrink-0">
+                          <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-green-100 text-green-800">
+                            Salads
+                          </div>
+                          <div className="p-3 space-y-1">
+                            {sItems.map((it, i) => (
+                              <div key={i} className="text-xs">
+                                <span className="font-medium">{it.name}</span>
+                                {it.weight > 0 && <span className="text-muted-foreground"> – {it.weight}g</span>}
+                                {it.calories > 0 && <span className="text-muted-foreground"> · {it.calories} kcal</span>}
+                              </div>
+                            ))}
+                            <div className="text-xs font-semibold border-t pt-1 mt-1">
+                              Total: {sItems.reduce((s, it) => s + (it.calories || 0), 0)} kcal
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Fresh Fruits card */}
+                    {(() => {
+                      const fItems = (createData.freshFruitsByType[mealType] || []).filter((it) => it.name.trim());
+                      if (fItems.length === 0) return null;
+                      return (
+                        <div className="rounded-lg border border-orange-200 w-52 shrink-0">
+                          <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-orange-100 text-orange-800">
+                            Fresh Fruits
+                          </div>
+                          <div className="p-3 space-y-1">
+                            {fItems.map((it, i) => (
+                              <div key={i} className="text-xs">
+                                <span className="font-medium">{it.name}</span>
+                                {it.weight > 0 && <span className="text-muted-foreground"> – {it.weight}g</span>}
+                                {it.calories > 0 && <span className="text-muted-foreground"> · {it.calories} kcal</span>}
+                              </div>
+                            ))}
+                            <div className="text-xs font-semibold border-t pt-1 mt-1">
+                              Total: {fItems.reduce((s, it) => s + (it.calories || 0), 0)} kcal
                             </div>
                           </div>
                         </div>
@@ -2131,6 +2802,9 @@ export default function MealPlanning() {
                                   {meal.flightType.map((ft) => (
                                     <span key={ft} className="px-2 py-0.5 text-xs rounded-full bg-primary/10 text-primary">{ft}</span>
                                   ))}
+                                  {meal.route && (
+                                    <span className="px-2 py-0.5 text-xs rounded-full bg-slate-100 text-slate-700 font-medium">{meal.route}</span>
+                                  )}
                                   <span className={`px-2 py-0.5 text-xs rounded-full ${(meal.effectiveFrom || meal.effectiveTo) ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-600"}`}>
                                     {rangeLabel(meal.effectiveFrom, meal.effectiveTo) || "All Dates"}
                                   </span>
@@ -2237,6 +2911,62 @@ export default function MealPlanning() {
                                       </CardContent>
                                     </Card>
                                   )}
+
+                                  {/* Salads card */}
+                                  {meal.salads && meal.salads.length > 0 && (
+                                    <Card className="border border-green-200 w-56 shrink-0 bg-card">
+                                      <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-green-100 text-green-800">Salads</div>
+                                      <CardContent className="p-3 space-y-2">
+                                        <ol className="text-xs space-y-1 list-decimal list-inside">
+                                          {meal.salads.map((item, idx) => (
+                                            <li key={idx} className="leading-relaxed">
+                                              <span className="font-medium">{item.name}</span>
+                                              {item.weight > 0 && <span className="text-muted-foreground"> – {item.weight}g</span>}
+                                            </li>
+                                          ))}
+                                        </ol>
+                                        <div className="text-xs font-semibold border-t pt-1.5">Total: {meal.salads.reduce((s, it) => s + (it.calories || 0), 0)} kcal</div>
+                                      </CardContent>
+                                    </Card>
+                                  )}
+
+                                  {/* Fresh Fruits card */}
+                                  {meal.freshFruits && meal.freshFruits.length > 0 && (
+                                    <Card className="border border-orange-200 w-56 shrink-0 bg-card">
+                                      <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-orange-100 text-orange-800">Fresh Fruits</div>
+                                      <CardContent className="p-3 space-y-2">
+                                        <ol className="text-xs space-y-1 list-decimal list-inside">
+                                          {meal.freshFruits.map((item, idx) => (
+                                            <li key={idx} className="leading-relaxed">
+                                              <span className="font-medium">{item.name}</span>
+                                              {item.weight > 0 && <span className="text-muted-foreground"> – {item.weight}g</span>}
+                                            </li>
+                                          ))}
+                                        </ol>
+                                        <div className="text-xs font-semibold border-t pt-1.5">Total: {meal.freshFruits.reduce((s, it) => s + (it.calories || 0), 0)} kcal</div>
+                                      </CardContent>
+                                    </Card>
+                                  )}
+
+                                  {/* Custom add-on cards */}
+                                  {meal.customAddons && Object.entries(meal.customAddons).map(([addonName, items]) => (
+                                    items.length > 0 && (
+                                      <Card key={addonName} className="border border-slate-200 w-56 shrink-0 bg-card">
+                                        <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-slate-100 text-slate-800">{addonName}</div>
+                                        <CardContent className="p-3 space-y-2">
+                                          <ol className="text-xs space-y-1 list-decimal list-inside">
+                                            {items.map((item, idx) => (
+                                              <li key={idx} className="leading-relaxed">
+                                                <span className="font-medium">{item.name}</span>
+                                                {item.weight > 0 && <span className="text-muted-foreground"> – {item.weight}g</span>}
+                                              </li>
+                                            ))}
+                                          </ol>
+                                          <div className="text-xs font-semibold border-t pt-1.5">Total: {items.reduce((s, it) => s + (it.calories || 0), 0)} kcal</div>
+                                        </CardContent>
+                                      </Card>
+                                    )
+                                  ))}
                                 </div>
                               </div>
                             );
@@ -2274,6 +3004,7 @@ export default function MealPlanning() {
                 <h4 className="font-semibold">{selectedMeal.mealType}</h4>
                 <p className="text-sm text-muted-foreground">
                   {selectedMeal.forType} • {selectedMeal.flightType.join(", ")}
+                  {selectedMeal.route && ` • ${selectedMeal.route}`}
                 </p>
               </div>
 
@@ -2318,6 +3049,41 @@ export default function MealPlanning() {
                   {selectedMeal.dessert.name} — {selectedMeal.dessert.weight}g
                 </p>
               </div>
+
+              {selectedMeal.salads && selectedMeal.salads.length > 0 && (
+                <div className="border-b pb-3">
+                  <h5 className="font-semibold text-sm mb-2">Salads</h5>
+                  <ul className="ml-4 space-y-1 text-sm">
+                    {selectedMeal.salads.map((item) => (
+                      <li key={item.name}>{item.name} — {item.weight}g</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {selectedMeal.freshFruits && selectedMeal.freshFruits.length > 0 && (
+                <div className="border-b pb-3">
+                  <h5 className="font-semibold text-sm mb-2">Fresh Fruits</h5>
+                  <ul className="ml-4 space-y-1 text-sm">
+                    {selectedMeal.freshFruits.map((item) => (
+                      <li key={item.name}>{item.name} — {item.weight}g</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {selectedMeal.customAddons && Object.entries(selectedMeal.customAddons).map(([addonName, items]) => (
+                items.length > 0 && (
+                  <div key={addonName} className="border-b pb-3">
+                    <h5 className="font-semibold text-sm mb-2">{addonName}</h5>
+                    <ul className="ml-4 space-y-1 text-sm">
+                      {items.map((item) => (
+                        <li key={item.name}>{item.name}{item.weight > 0 ? ` — ${item.weight}g` : ""}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )
+              ))}
 
               <div className="flex justify-between items-end pt-4 border-t">
                 <p className="text-sm text-muted-foreground">

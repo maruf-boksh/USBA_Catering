@@ -99,9 +99,9 @@ export default function CookingTemp() {
   // Per-batch inputs for the combined "Record Test — All" form (keyed by entry id).
   const [qcAllRows, setQcAllRows] = useState<Record<string, { measured: number | ""; cookedBy: string }>>({});
 
-  // Fail justification panel
-  const [failJustOpen, setFailJustOpen] = useState(false);
+  // Fail state
   const [failReason, setFailReason] = useState("");
+  const [recookConfirmOpen, setRecookConfirmOpen] = useState(false);
 
   // ── Mobile App View state ─────────────────────────────────────────────────
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -127,8 +127,8 @@ export default function CookingTemp() {
     setQcMeasured(0);
     setQcCookedBy("");
     setQcBatchNo(entry.id);
-    setFailJustOpen(false);
     setFailReason("");
+    setRecookConfirmOpen(false);
     setQcOpen(true);
   };
 
@@ -180,11 +180,15 @@ export default function CookingTemp() {
       }]);
       toast.success(`${qcTarget.id} passed QC — ${qcTarget.producedQty.toLocaleString()} units added to inventory.`);
     } else {
-      updateProductionEntryStatus(qcTarget.id, "In Preparation");
-      toast.error(`${qcTarget.id} failed sensory check — sent back to In Preparation.`);
+      updateProductionEntryStatus(qcTarget.id, "Re-Cook", {
+        qcFailedAt: stamp,
+        qcFailedBy: `${CURRENT_USER} (${role})`,
+        qcFailReason: failReason.trim(),
+      });
+      toast.error(`${qcTarget.id} failed sensory check — sent to Re-Cook.`);
     }
     setQcOpen(false);
-    setFailJustOpen(false);
+    setRecookConfirmOpen(false);
     setFailReason("");
   };
 
@@ -836,157 +840,174 @@ export default function CookingTemp() {
       <Dialog
         open={qcOpen}
         onOpenChange={(open) => {
-          if (!open) { setQcOpen(false); setFailJustOpen(false); setFailReason(""); }
+          if (!open) { setQcOpen(false); setRecookConfirmOpen(false); setFailReason(""); }
         }}
       >
         <DialogContent className="max-w-lg">
-          {!failJustOpen ? (
-            <>
-              <DialogHeader>
-                <DialogTitle>Record Test — {qcTarget?.id}</DialogTitle>
-                <DialogDescription>
-                  Item and standard temperature are auto-filled from saved configuration. Enter batch number, measured temperature, and the chef who cooked this batch.
-                </DialogDescription>
-              </DialogHeader>
+          <DialogHeader>
+            <DialogTitle>Record Test — {qcTarget?.id}</DialogTitle>
+            <DialogDescription>
+              Item and standard temperature are auto-filled from saved configuration. Enter batch number, measured temperature, and the chef who cooked this batch.
+            </DialogDescription>
+          </DialogHeader>
 
-              {qcTarget && (
-                <div className="rounded-md border border-border bg-muted/30 p-3 text-sm">
-                  <div className="font-semibold">{qcTarget.outputItemName ?? qcTarget.bom}</div>
-                  <div className="text-xs text-muted-foreground mt-0.5">
-                    BOM: {qcTarget.bom} · Qty: <span className="font-medium tabular-nums">{qcTarget.producedQty.toLocaleString()}</span>
-                  </div>
-                </div>
-              )}
-
-              <div className="space-y-3">
-                {/* Auto-filled fields */}
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="rounded-md border border-border/50 bg-muted/20 px-3 py-2">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Item</div>
-                    <div className="text-sm font-medium truncate">{qcTarget?.outputItemName ?? qcTarget?.bom ?? "—"}</div>
-                  </div>
-                  <div className="rounded-md border border-border/50 bg-muted/20 px-3 py-2">
-                    <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Standard °C</div>
-                    <div className="text-sm font-medium tabular-nums">≥{qcTemp}°C</div>
-                  </div>
-                </div>
-
-                {/* User inputs */}
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-                      Batch No <span className="text-destructive">*</span>
-                    </Label>
-                    <Input
-                      value={qcBatchNo}
-                      readOnly
-                      tabIndex={-1}
-                      className="mt-1 tabular-nums bg-muted/50 cursor-not-allowed"
-                      placeholder="Batch number"
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-                      Measured °C <span className="text-destructive">*</span>
-                    </Label>
-                    <Input
-                      type="number"
-                      value={qcMeasured}
-                      onChange={(e) => setQcMeasured(Number(e.target.value))}
-                      className="mt-1 tabular-nums"
-                    />
-                  </div>
-                  <div className="col-span-2">
-                    <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-                      Cooked By <span className="text-destructive">*</span>
-                    </Label>
-                    <select
-                      value={qcCookedBy}
-                      onChange={(e) => setQcCookedBy(e.target.value)}
-                      className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    >
-                      <option value="">— Select chef —</option>
-                      {CHEFS.map((chef) => (
-                        <option key={chef} value={chef}>{chef}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
+          {qcTarget && (
+            <div className="rounded-md border border-border bg-muted/30 p-3 text-sm">
+              <div className="font-semibold">{qcTarget.outputItemName ?? qcTarget.bom}</div>
+              <div className="text-xs text-muted-foreground mt-0.5">
+                BOM: {qcTarget.bom} · Qty: <span className="font-medium tabular-nums">{qcTarget.producedQty.toLocaleString()}</span>
               </div>
+            </div>
+          )}
 
-              <DialogFooter className="gap-2">
-                <Button variant="outline" onClick={() => setQcOpen(false)}>Cancel</Button>
-                <Button
-                  variant="outline"
-                  className="border-destructive/40 text-destructive hover:bg-destructive/10"
-                  onClick={() => setFailJustOpen(true)}
-                >
-                  <XIcon className="h-4 w-4 mr-1.5" /> Fail (Send Back)
-                </Button>
-                <Button
-                  className="bg-success text-success-foreground hover:bg-success/90"
-                  onClick={() => signOff(true)}
-                >
-                  <Check className="h-4 w-4 mr-1.5" /> Pass and Complete
-                  <PackageCheck className="h-4 w-4 ml-1.5" />
-                </Button>
-              </DialogFooter>
-            </>
-          ) : (
-            <>
-              <DialogHeader>
-                <DialogTitle className="text-destructive">Rejection Justification</DialogTitle>
-                <DialogDescription>
-                  Review the temperature comparison and provide a reason before sending this batch back.
-                </DialogDescription>
-              </DialogHeader>
-
-              {/* Temperature comparison */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-center">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Standard Temp</div>
-                  <div className="text-2xl font-bold text-foreground tabular-nums">≥{qcTemp}°C</div>
-                  <div className="text-[10px] text-muted-foreground mt-1">HACCP minimum</div>
-                </div>
-                <div className={`rounded-md border px-4 py-3 text-center ${qcMeasured >= qcTemp ? "border-success/40 bg-success/10" : "border-destructive/40 bg-destructive/10"}`}>
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Measured Temp</div>
-                  <div className={`text-2xl font-bold tabular-nums ${qcMeasured >= qcTemp ? "text-success" : "text-destructive"}`}>
-                    {qcMeasured}°C
-                  </div>
-                  <div className={`text-[10px] mt-1 font-medium ${qcMeasured >= qcTemp ? "text-success" : "text-destructive"}`}>
-                    {qcMeasured >= qcTemp
-                      ? `+${qcMeasured - qcTemp}°C above standard`
-                      : `${qcTemp - qcMeasured}°C below standard`}
-                  </div>
-                </div>
+          <div className="space-y-3">
+            {/* Auto-filled fields */}
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded-md border border-border/50 bg-muted/20 px-3 py-2">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Item</div>
+                <div className="text-sm font-medium truncate">{qcTarget?.outputItemName ?? qcTarget?.bom ?? "—"}</div>
               </div>
+              <div className="rounded-md border border-border/50 bg-muted/20 px-3 py-2">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Standard °C</div>
+                <div className="text-sm font-medium tabular-nums">≥{qcTemp}°C</div>
+              </div>
+            </div>
 
+            {/* User inputs */}
+            <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-                  Reason for Rejection <span className="text-destructive">*</span>
+                  Batch No <span className="text-destructive">*</span>
                 </Label>
-                <Textarea
-                  value={failReason}
-                  onChange={(e) => setFailReason(e.target.value)}
-                  placeholder="Describe why this batch is being sent back (e.g. temperature insufficient, texture unacceptable, contamination risk)..."
-                  className="mt-1 resize-none"
-                  rows={4}
+                <Input
+                  value={qcBatchNo}
+                  readOnly
+                  tabIndex={-1}
+                  className="mt-1 tabular-nums bg-muted/50 cursor-not-allowed"
+                  placeholder="Batch number"
                 />
               </div>
-
-              <DialogFooter className="gap-2">
-                <Button variant="outline" onClick={() => setFailJustOpen(false)}>
-                  <ChevronLeft className="h-4 w-4 mr-1" /> Back
-                </Button>
-                <Button
-                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                  onClick={() => signOff(false)}
+              <div>
+                <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+                  Measured °C <span className="text-destructive">*</span>
+                </Label>
+                <Input
+                  type="number"
+                  value={qcMeasured}
+                  onChange={(e) => setQcMeasured(Number(e.target.value))}
+                  className={`mt-1 tabular-nums ${qcMeasured > 0 && qcMeasured < qcTemp ? "border-destructive focus-visible:ring-destructive" : ""}`}
+                />
+                {qcMeasured > 0 && (
+                  <p className={`text-[10px] mt-0.5 font-medium ${qcMeasured >= qcTemp ? "text-green-600" : "text-destructive"}`}>
+                    {qcMeasured >= qcTemp
+                      ? `✓ ${qcMeasured - qcTemp}°C above standard`
+                      : `✗ ${qcTemp - qcMeasured}°C below standard`}
+                  </p>
+                )}
+              </div>
+              <div className="col-span-2">
+                <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+                  Cooked By <span className="text-destructive">*</span>
+                </Label>
+                <select
+                  value={qcCookedBy}
+                  onChange={(e) => setQcCookedBy(e.target.value)}
+                  className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                 >
-                  <XIcon className="h-4 w-4 mr-1.5" /> Confirm & Reject Batch
-                </Button>
-              </DialogFooter>
-            </>
-          )}
+                  <option value="">— Select chef —</option>
+                  {CHEFS.map((chef) => (
+                    <option key={chef} value={chef}>{chef}</option>
+                  ))}
+                </select>
+              </div>
+              {qcMeasured > 0 && qcMeasured < qcTemp && (
+                <div className="col-span-2">
+                  <Label className="text-xs uppercase tracking-wider text-destructive">
+                    Justification — temp below HACCP standard <span className="text-destructive">*</span>
+                  </Label>
+                  <Textarea
+                    value={failReason}
+                    onChange={(e) => setFailReason(e.target.value)}
+                    placeholder="Explain why the temperature is below standard (e.g. sensor issue, re-heat required)..."
+                    className="mt-1 resize-none border-destructive/40 focus-visible:ring-destructive/40"
+                    rows={3}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setQcOpen(false)}>Cancel</Button>
+            <Button
+              variant="outline"
+              className="border-destructive/40 text-destructive hover:bg-destructive/10"
+              onClick={() => {
+                if (!qcCookedBy) { toast.error("Please select who cooked this batch."); return; }
+                if (qcMeasured > 0 && qcMeasured < qcTemp && !failReason.trim()) {
+                  toast.error("Justification is required when temperature is below standard."); return;
+                }
+                setRecookConfirmOpen(true);
+              }}
+            >
+              <XIcon className="h-4 w-4 mr-1.5" /> Fail (Send Back)
+            </Button>
+            <Button
+              className="bg-success text-success-foreground hover:bg-success/90"
+              onClick={() => signOff(true)}
+            >
+              <Check className="h-4 w-4 mr-1.5" /> Pass and Complete
+              <PackageCheck className="h-4 w-4 ml-1.5" />
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Re-Cook Confirmation Dialog */}
+      <Dialog open={recookConfirmOpen} onOpenChange={setRecookConfirmOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-destructive">Confirm — Send to Re-Cook</DialogTitle>
+            <DialogDescription>
+              This batch will be returned for re-cooking. The sensory test log will be saved with your sign-off.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            {qcTarget && (
+              <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Batch</div>
+                <div className="font-semibold">{qcTarget.outputItemName ?? qcTarget.bom}</div>
+                <div className="text-xs text-muted-foreground font-mono">{qcTarget.id}</div>
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-md border border-border bg-muted/30 px-3 py-2.5 text-center">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Standard</div>
+                <div className="text-xl font-bold tabular-nums">≥{qcTemp}°C</div>
+                <div className="text-[10px] text-muted-foreground">HACCP minimum</div>
+              </div>
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-center">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Measured</div>
+                <div className="text-xl font-bold text-destructive tabular-nums">{qcMeasured}°C</div>
+                <div className="text-[10px] text-destructive font-medium">{qcTemp - qcMeasured}°C below standard</div>
+              </div>
+            </div>
+            {failReason && (
+              <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Justification</div>
+                <div className="text-sm">{failReason}</div>
+              </div>
+            )}
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setRecookConfirmOpen(false)}>Cancel</Button>
+            <Button
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => signOff(false)}
+            >
+              <XIcon className="h-4 w-4 mr-1.5" /> Send to Re-Cook
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

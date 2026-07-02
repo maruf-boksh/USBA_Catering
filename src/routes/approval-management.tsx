@@ -24,7 +24,7 @@ import {
   FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, ArrowLeft, Layers, UserCog, Users,
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
   PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane, MailQuestion, PlaneLanding, PlaneTakeoff,
-  BadgeDollarSign, Wrench, MessageSquare, CornerUpLeft, LayoutGrid, Timer,
+  BadgeDollarSign, Wrench, MessageSquare, CornerUpLeft, LayoutGrid, Timer, Trash2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -41,6 +41,7 @@ import { getQuotations, setQuotationStatus } from "@/lib/quotations";
 import { getStockAdjustments, setStockAdjustmentStatus } from "@/lib/stock-adjustments";
 import { useRole } from "@/lib/roles";
 import { type PersonalHygieneRecord, PHSignOffPanel, PHFormGrid, phNotOkCount } from "@/routes/personal-hygiene-monitoring";
+import { type WastageEntry, type WastageApprovalStep } from "@/routes/wastage-management";
 
 type Category =
   | "Flight Orders"
@@ -60,7 +61,8 @@ type Category =
   | "Maintenance"
   | "Return Items"
   | "Galley Loading"
-  | "Personal Hygiene";
+  | "Personal Hygiene"
+  | "Wastage Entry";
 
 // Shared type with dispatch-monitoring.tsx via "galley_loading" sessionStorage key
 type SignOffLog = { name: string; designation: string; signedAt: string };
@@ -130,6 +132,7 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Return Items",         label: "Return Items",       icon: PackageCheck    },
   { key: "Galley Loading",       label: "Galley Loading",     icon: LayoutGrid      },
   { key: "Personal Hygiene",    label: "Personal Hygiene",   icon: Users           },
+  { key: "Wastage Entry",       label: "Wastage Reports",    icon: Trash2          },
 ];
 
 // Overview grid — categories grouped into business sections (mirrors the
@@ -145,6 +148,7 @@ const APPROVAL_SECTIONS: { label: string; keys: Category[] }[] = [
   { label: "Consumable Returns Approval", keys: ["Return Items"] },
   { label: "Galley Loading Approval",     keys: ["Galley Loading"]   },
   { label: "Food Safety Approval",        keys: ["Personal Hygiene"] },
+  { label: "Wastage Management Approval", keys: ["Wastage Entry"]   },
 ];
 const CATEGORY_BY_KEY = new Map(CATEGORIES.map((c) => [c.key, c]));
 
@@ -302,6 +306,7 @@ export default function ApprovalManagementPage() {
     wfPurchaseOrders, updatePurchaseOrder,
     productionEntries, updateProductionEntryStatus,
     maintenanceApprovals, updateMaintenanceApproval,
+    applyStockDeltas,
   } = useWorkflow();
   const flightOrders = useFlightOrders();
 
@@ -385,13 +390,23 @@ export default function ApprovalManagementPage() {
   const [phDetailOpen, setPhDetailOpen]     = useState(false);
   const [phDetailRecord, setPhDetailRecord] = useState<PersonalHygieneRecord | null>(null);
 
+  // ── Wastage entries (shared via localStorage with wastage-management) ────────
+  const [wastageEntries, setWastageEntries] = usePersistedState<WastageEntry[]>(
+    "wastage-entries",
+    [],
+  );
+  const [wastageDetailOpen, setWastageDetailOpen] = useState(false);
+  const [wastageDetailEntry, setWastageDetailEntry] = useState<WastageEntry | null>(null);
+  const [wastageRejectOpen, setWastageRejectOpen] = useState(false);
+  const [wastageRejectReason, setWastageRejectReason] = useState("");
+
   const phStamp = () => {
     const n = new Date();
     return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")} ${String(n.getHours()).padStart(2,"0")}:${String(n.getMinutes()).padStart(2,"0")}`;
   };
 
   const phVerify = (rec: PersonalHygieneRecord) => {
-    const verifiedBy  = `${role} (SE Food Safety & Hygiene)`;
+    const verifiedBy  = "Senior Executive";
     const verifiedAt  = phStamp();
     setPhRecords(prev => prev.map(r => r.id === rec.id ? { ...r, status: "verified", verifiedBy, verifiedAt } : r));
     setPhDetailOpen(false);
@@ -399,7 +414,7 @@ export default function ApprovalManagementPage() {
   };
 
   const phApprove = (rec: PersonalHygieneRecord) => {
-    const approvedBy = `${role} (GM-Catering)`;
+    const approvedBy = "GM/Admin";
     const approvedAt = phStamp();
     setPhRecords(prev => prev.map(r => r.id === rec.id ? { ...r, status: "approved", approvedBy, approvedAt } : r));
     setPhDetailOpen(false);
@@ -746,8 +761,35 @@ export default function ApprovalManagementPage() {
       });
   }, [phRecords]);
 
+  const wastageItems: ApprovalItem[] = useMemo(() => {
+    return wastageEntries
+      .filter((e) => e.status !== "Final Approved")
+      .map((e) => {
+        const approvalStatus: ApprovalStatus =
+          e.status === "Rejected" ? "Rejected" : "Pending";
+        const stageLabel =
+          e.status === "Pending In-Charge" ? "Pending Production In-Charge" :
+          e.status === "Pending GM"        ? "Pending GM Catering" :
+          e.status === "Pending Final"     ? "Pending Final Authorization" :
+          e.status;
+        return {
+          id: `WDD-AP-${e.id}`,
+          category: "Wastage Entry" as Category,
+          refId: e.id,
+          title: `${e.wastageType} Wastage — ${e.itemName}`,
+          requestedBy: e.preparedBy,
+          requestedAt: e.preparedAt,
+          summary: `${e.disposalQty} ${e.disposalQtyUnit} · ${e.disposalReason} · ${stageLabel}`,
+          status: approvalStatus,
+          processedBy: e.status === "Rejected" ? e.approvalSteps.at(-1)?.by : undefined,
+          processedAt: e.status === "Rejected" ? e.approvalSteps.at(-1)?.at : undefined,
+          rejectionReason: e.status === "Rejected" ? e.approvalSteps.at(-1)?.comment : undefined,
+        };
+      });
+  }, [wastageEntries]);
+
   const allItems = useMemo(() => {
-    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...personalHygieneItems, ...items];
+    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...personalHygieneItems, ...wastageItems, ...items];
     // Overlay "Reviewed" (returned for correction) onto still-pending requests.
     return base.map((it) => {
       const rv = reviews[reviewKey(it.category, it.refId)];
@@ -756,7 +798,7 @@ export default function ApprovalManagementPage() {
       }
       return it;
     });
-  }, [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, items, reviews]);
+  }, [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, returnApprovalItems, personalHygieneItems, wastageItems, items, reviews]);
 
   const counts = useMemo(() => {
     const pendingByCat = new Map<Category, number>();
@@ -1032,6 +1074,61 @@ export default function ApprovalManagementPage() {
       if (!silent) toast.success(`${it.refId} — Return items approved for Airport Store.`);
       return;
     }
+    if (it.category === "Wastage Entry") {
+      const entry = wastageEntries.find((e) => e.id === it.refId);
+      if (!entry) { if (!silent) toast.error(`Wastage ${it.refId} not found.`); return; }
+      const at = stamp();
+      const approver = `${role}`;
+      let nextStatus = entry.status;
+      let stepName = "";
+      let designation = "";
+      if (entry.status === "Pending In-Charge") {
+        nextStatus = "Pending GM";
+        stepName = "Production In-Charge";
+        designation = "In-Charge (Production)";
+      } else if (entry.status === "Pending GM") {
+        nextStatus = "Pending Final";
+        stepName = "GM Catering";
+        designation = "General Manager-Catering";
+      } else if (entry.status === "Pending Final") {
+        nextStatus = "Final Approved";
+        stepName = "Final Authorization";
+        designation = "MD/CEO";
+        // Apply stock delta for production wastage
+        if (entry.wastageType === "Production" && entry.stockItemName) {
+          applyStockDeltas([{
+            itemId: entry.stockItemName,
+            delta: -entry.disposalQty,
+            date: at,
+            reference: entry.id,
+            label: "Wastage Disposal",
+          }]);
+        }
+      }
+      if (!stepName) { if (!silent) toast.error(`${it.refId} is already in final state.`); return; }
+      const newStep: WastageApprovalStep = {
+        step: stepName,
+        by: approver,
+        designation,
+        action: nextStatus === "Final Approved" ? "Approved" : "Approved",
+        at,
+      };
+      setWastageEntries((prev) =>
+        prev.map((e) =>
+          e.id === it.refId
+            ? { ...e, status: nextStatus as WastageEntry["status"], approvalSteps: [...e.approvalSteps, newStep] }
+            : e,
+        ),
+      );
+      if (!silent) {
+        if (nextStatus === "Final Approved") {
+          toast.success(`${it.refId} — Final Approval granted. Wastage report closed.`);
+        } else {
+          toast.success(`${it.refId} — ${stepName} approved. Advanced to ${nextStatus}.`);
+        }
+      }
+      return;
+    }
     setItems((p) =>
       p.map((x) =>
         x.id === it.id
@@ -1102,6 +1199,27 @@ export default function ApprovalManagementPage() {
           ra.id === it.refId
             ? { ...ra, status: "Declined", processedBy: `${role} (GM/Admin)`, processedAt: stamp(), declineReason: reason }
             : ra,
+        ),
+      );
+    } else if (it.category === "Wastage Entry") {
+      const entry = wastageEntries.find((e) => e.id === it.refId);
+      const stepName =
+        entry?.status === "Pending In-Charge" ? "Production In-Charge" :
+        entry?.status === "Pending GM"        ? "GM Catering" :
+                                                "Final Authorization";
+      const rejectStep: WastageApprovalStep = {
+        step: stepName,
+        by: `${role}`,
+        designation: "GM/Admin",
+        action: "Rejected",
+        at: stamp(),
+        comment: reason,
+      };
+      setWastageEntries((prev) =>
+        prev.map((e) =>
+          e.id === it.refId
+            ? { ...e, status: "Rejected" as WastageEntry["status"], approvalSteps: [...e.approvalSteps, rejectStep] }
+            : e,
         ),
       );
     } else {
@@ -1319,6 +1437,27 @@ export default function ApprovalManagementPage() {
           ra.id === detailItem.refId
             ? { ...ra, status: "Declined", processedBy: `${role} (GM/Admin)`, processedAt: stamp(), declineReason: reason }
             : ra,
+        ),
+      );
+    } else if (detailItem.category === "Wastage Entry") {
+      const entry = wastageEntries.find((e) => e.id === detailItem.refId);
+      const stepName =
+        entry?.status === "Pending In-Charge" ? "Production In-Charge" :
+        entry?.status === "Pending GM"        ? "GM Catering" :
+                                                "Final Authorization";
+      const rejectStep: WastageApprovalStep = {
+        step: stepName,
+        by: `${role}`,
+        designation: "GM/Admin",
+        action: "Rejected",
+        at: stamp(),
+        comment: reason,
+      };
+      setWastageEntries((prev) =>
+        prev.map((e) =>
+          e.id === detailItem.refId
+            ? { ...e, status: "Rejected" as WastageEntry["status"], approvalSteps: [...e.approvalSteps, rejectStep] }
+            : e,
         ),
       );
     } else {
@@ -1814,7 +1953,395 @@ export default function ApprovalManagementPage() {
             );
           })()}
 
-          {activeTab !== "Dispatch" && activeTab !== "Galley Loading" && activeTab !== "Personal Hygiene" && (<><Card className="brand-accent-border-left">
+          {/* ── Wastage Entry subtab ─────────────────────────────────────────── */}
+          {activeTab === "Wastage Entry" && (() => {
+            const inCharge = wastageEntries.filter((e) => e.status === "Pending In-Charge");
+            const gm       = wastageEntries.filter((e) => e.status === "Pending GM");
+            const final    = wastageEntries.filter((e) => e.status === "Pending Final");
+            const rejected = wastageEntries.filter((e) => e.status === "Rejected");
+            const approved = wastageEntries.filter((e) => e.status === "Final Approved");
+
+            const WastageStageTable = ({
+              stageEntries, stageLabel, stageColor,
+            }: {
+              stageEntries: WastageEntry[];
+              stageLabel: string;
+              stageColor: string;
+            }) => (
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className={`text-sm font-semibold uppercase tracking-wider flex items-center gap-2 ${stageColor}`}>
+                    <Clock className="h-4 w-4" /> {stageLabel}
+                  </h3>
+                  <span className="text-xs text-muted-foreground">{stageEntries.length} item{stageEntries.length !== 1 ? "s" : ""}</span>
+                </div>
+                {stageEntries.length === 0 ? (
+                  <p className="text-sm text-muted-foreground text-center py-6">No records at this stage.</p>
+                ) : (
+                  <div className="border border-border rounded-md overflow-hidden">
+                    <Table>
+                      <TableHeader className="bg-muted/40">
+                        <TableRow>
+                          <TableHead className="text-xs uppercase tracking-wider">ID</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Type</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Qty</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Prepared By</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider text-right">Actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {stageEntries.map((e) => (
+                          <TableRow key={e.id} className="hover:bg-muted/30">
+                            <TableCell className="font-mono text-xs font-semibold text-primary">{e.id}</TableCell>
+                            <TableCell className="text-xs tabular-nums">{e.reportingDate}</TableCell>
+                            <TableCell>
+                              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-orange-100 text-orange-700">
+                                {e.wastageType}
+                              </span>
+                            </TableCell>
+                            <TableCell className="text-xs font-medium max-w-[120px] truncate">{e.itemName}</TableCell>
+                            <TableCell className="text-xs tabular-nums">{e.disposalQty} {e.disposalQtyUnit}</TableCell>
+                            <TableCell className="text-xs">{e.preparedBy}</TableCell>
+                            <TableCell className="text-right">
+                              <div className="flex gap-1.5 justify-end">
+                                <Button
+                                  size="icon"
+                                  variant="outline"
+                                  className="h-7 w-7 text-muted-foreground hover:text-primary hover:border-primary/40"
+                                  onClick={() => { setWastageDetailEntry(e); setWastageDetailOpen(true); setWastageRejectOpen(false); setWastageRejectReason(""); }}
+                                  title="View details"
+                                >
+                                  <Eye className="h-3.5 w-3.5" />
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </div>
+            );
+
+            return (
+              <Card className="brand-accent-border-left">
+                <CardContent className="pt-5 space-y-6">
+                  <WastageStageTable stageEntries={inCharge} stageLabel="Pending Production In-Charge Review" stageColor="text-amber-600" />
+                  <WastageStageTable stageEntries={gm}       stageLabel="Pending GM Catering Review"          stageColor="text-blue-600"  />
+                  <WastageStageTable stageEntries={final}    stageLabel="Pending Final Authorization"          stageColor="text-violet-600" />
+
+                  {/* Approved */}
+                  {approved.length > 0 && (
+                    <div>
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-sm font-semibold uppercase tracking-wider flex items-center gap-2 text-emerald-700">
+                          <CheckCircle2 className="h-4 w-4" /> Final Approved
+                        </h3>
+                        <span className="text-xs text-muted-foreground">{approved.length} record{approved.length !== 1 ? "s" : ""}</span>
+                      </div>
+                      <div className="border border-border rounded-md overflow-hidden">
+                        <Table>
+                          <TableHeader className="bg-muted/40">
+                            <TableRow>
+                              <TableHead className="text-xs uppercase tracking-wider">ID</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Qty</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Final Auth By</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider text-right">Actions</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {approved.map((e) => {
+                              const finalStep = e.approvalSteps.find((s) => s.step === "Final Authorization");
+                              return (
+                                <TableRow key={e.id} className="hover:bg-muted/30">
+                                  <TableCell className="font-mono text-xs font-semibold text-emerald-700">{e.id}</TableCell>
+                                  <TableCell className="text-xs tabular-nums">{e.reportingDate}</TableCell>
+                                  <TableCell className="text-xs font-medium">{e.itemName}</TableCell>
+                                  <TableCell className="text-xs tabular-nums">{e.disposalQty} {e.disposalQtyUnit}</TableCell>
+                                  <TableCell className="text-xs">{finalStep?.by ?? "—"}</TableCell>
+                                  <TableCell className="text-right">
+                                    <Button
+                                      size="icon" variant="outline"
+                                      className="h-7 w-7 text-muted-foreground hover:text-emerald-600 hover:border-emerald-400"
+                                      onClick={() => { setWastageDetailEntry(e); setWastageDetailOpen(true); }}
+                                      title="View record"
+                                    >
+                                      <Eye className="h-3.5 w-3.5" />
+                                    </Button>
+                                  </TableCell>
+                                </TableRow>
+                              );
+                            })}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Rejected */}
+                  {rejected.length > 0 && (
+                    <div>
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className="text-sm font-semibold uppercase tracking-wider flex items-center gap-2 text-red-600">
+                          <XIcon className="h-4 w-4" /> Rejected
+                        </h3>
+                        <span className="text-xs text-muted-foreground">{rejected.length} record{rejected.length !== 1 ? "s" : ""}</span>
+                      </div>
+                      <div className="border border-border rounded-md overflow-hidden">
+                        <Table>
+                          <TableHeader className="bg-muted/40">
+                            <TableRow>
+                              <TableHead className="text-xs uppercase tracking-wider">ID</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Rejected By</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Reason</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider text-right">Actions</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {rejected.map((e) => {
+                              const rejectStep = e.approvalSteps.findLast((s) => s.action === "Rejected");
+                              return (
+                                <TableRow key={e.id} className="hover:bg-muted/30">
+                                  <TableCell className="font-mono text-xs font-semibold text-red-600">{e.id}</TableCell>
+                                  <TableCell className="text-xs tabular-nums">{e.reportingDate}</TableCell>
+                                  <TableCell className="text-xs font-medium">{e.itemName}</TableCell>
+                                  <TableCell className="text-xs">{rejectStep?.by ?? "—"}</TableCell>
+                                  <TableCell className="text-xs max-w-[160px] truncate">{rejectStep?.comment ?? "—"}</TableCell>
+                                  <TableCell className="text-right">
+                                    <Button
+                                      size="icon" variant="outline"
+                                      className="h-7 w-7 text-muted-foreground hover:text-red-600 hover:border-red-400"
+                                      onClick={() => { setWastageDetailEntry(e); setWastageDetailOpen(true); }}
+                                      title="View record"
+                                    >
+                                      <Eye className="h-3.5 w-3.5" />
+                                    </Button>
+                                  </TableCell>
+                                </TableRow>
+                              );
+                            })}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            );
+          })()}
+
+          {/* ── Wastage Detail Modal (inside approval management) ──────────────── */}
+          {wastageDetailEntry && (
+            <Dialog open={wastageDetailOpen} onOpenChange={setWastageDetailOpen}>
+              <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-2">
+                    <Trash2 className="h-5 w-5 text-red-500" />
+                    {wastageDetailEntry.id} — Wastage Disposal Report
+                  </DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 py-1 text-sm">
+                  {/* Header */}
+                  <div className="grid grid-cols-3 gap-2 p-3 bg-muted/30 rounded-md text-xs border border-border">
+                    <div><span className="text-muted-foreground">Date: </span><strong>{wastageDetailEntry.reportingDate}</strong></div>
+                    <div><span className="text-muted-foreground">Type: </span><strong>{wastageDetailEntry.wastageType}</strong></div>
+                    <div><span className="text-muted-foreground">Stage: </span>
+                      <span className="font-semibold text-amber-700">
+                        {wastageDetailEntry.status === "Pending In-Charge" ? "Pending Production In-Charge" :
+                         wastageDetailEntry.status === "Pending GM"        ? "Pending GM Catering" :
+                         wastageDetailEntry.status === "Pending Final"     ? "Pending Final Authorization" :
+                         wastageDetailEntry.status}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Key disposal info */}
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    {[
+                      ["Item (RM/PM/FG)", wastageDetailEntry.itemName],
+                      ["Disposal Qty",    `${wastageDetailEntry.disposalQty} ${wastageDetailEntry.disposalQtyUnit}`],
+                      ["Disposal Reason", wastageDetailEntry.disposalReason],
+                      ["Batch Code",      wastageDetailEntry.batchCode],
+                      ["Prod. Date",      wastageDetailEntry.productionDate],
+                      ["Batch Size",      wastageDetailEntry.packageBatchSize],
+                      ["Reprocessing",    wastageDetailEntry.reprocessingPossibility],
+                      ["Disposal Method", wastageDetailEntry.disposalMethod],
+                    ].map(([k, v]) => (
+                      <div key={k} className="flex gap-1">
+                        <span className="text-muted-foreground min-w-[110px]">{k}:</span>
+                        <strong>{v}</strong>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Root cause */}
+                  <div>
+                    <p className="text-xs font-bold mb-1">Root Cause:</p>
+                    <p className="text-sm bg-muted/30 p-2 rounded-md">{wastageDetailEntry.rootCause}</p>
+                  </div>
+
+                  {/* Responsible persons */}
+                  {wastageDetailEntry.responsiblePersons.length > 0 && (
+                    <div>
+                      <p className="text-xs font-bold mb-1">Responsible Persons:</p>
+                      <div className="border border-border rounded-md overflow-hidden">
+                        <Table>
+                          <TableHeader className="bg-muted/40">
+                            <TableRow>
+                              <TableHead className="text-xs">ID</TableHead>
+                              <TableHead className="text-xs">Name</TableHead>
+                              <TableHead className="text-xs">Designation</TableHead>
+                              <TableHead className="text-xs">Section</TableHead>
+                              <TableHead className="text-xs">Penalty</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {wastageDetailEntry.responsiblePersons.map((p, i) => (
+                              <TableRow key={i}>
+                                <TableCell className="text-xs font-mono">{p.empId || "—"}</TableCell>
+                                <TableCell className="text-xs font-medium">{p.name}</TableCell>
+                                <TableCell className="text-xs">{p.designation}</TableCell>
+                                <TableCell className="text-xs">{p.section}</TableCell>
+                                <TableCell className="text-xs">{p.penaltyAmount > 0 ? `Tk. ${p.penaltyAmount.toLocaleString()}/-` : "—"}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Corrective actions */}
+                  {wastageDetailEntry.correctiveActionPlan.length > 0 && (
+                    <div>
+                      <p className="text-xs font-bold mb-1">Corrective Action Plan:</p>
+                      <ol className="list-decimal list-inside space-y-1 pl-1">
+                        {wastageDetailEntry.correctiveActionPlan.map((a, i) => (
+                          <li key={i} className="text-xs">{a}</li>
+                        ))}
+                      </ol>
+                    </div>
+                  )}
+
+                  {/* Compensation */}
+                  <div className={cn(
+                    "p-2 rounded-md border text-xs",
+                    wastageDetailEntry.eligibleForCompensation ? "bg-emerald-50 border-emerald-200" : "bg-red-50 border-red-200",
+                  )}>
+                    <strong>Compensation: {wastageDetailEntry.eligibleForCompensation ? "Yes" : "No"}</strong>
+                    <span className="text-muted-foreground ml-2">{wastageDetailEntry.compensationJustification}</span>
+                  </div>
+
+                  {/* Approval log */}
+                  <div>
+                    <p className="text-xs font-bold mb-1 flex items-center gap-1.5"><History className="h-3.5 w-3.5" /> Approval Log</p>
+                    <div className="border border-border rounded-md overflow-hidden">
+                      <Table>
+                        <TableHeader className="bg-muted/40">
+                          <TableRow>
+                            <TableHead className="text-xs">Step</TableHead>
+                            <TableHead className="text-xs">By</TableHead>
+                            <TableHead className="text-xs">Action</TableHead>
+                            <TableHead className="text-xs">Date</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {wastageDetailEntry.approvalSteps.map((s, i) => (
+                            <TableRow key={i}>
+                              <TableCell className="text-xs font-medium">{s.step}</TableCell>
+                              <TableCell className="text-xs">{s.by}</TableCell>
+                              <TableCell>
+                                <span className={cn("text-[10px] font-semibold px-2 py-0.5 rounded-full",
+                                  s.action === "Submitted" ? "bg-blue-100 text-blue-700" :
+                                  s.action === "Approved"  ? "bg-emerald-100 text-emerald-700" :
+                                  s.action === "Rejected"  ? "bg-red-100 text-red-700" :
+                                  "bg-amber-100 text-amber-700"
+                                )}>{s.action}</span>
+                              </TableCell>
+                              <TableCell className="text-xs tabular-nums">{s.at}</TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  </div>
+
+                  {/* Reject form (inline toggle) */}
+                  {wastageRejectOpen && (
+                    <div className="p-3 border border-red-200 bg-red-50 rounded-md space-y-2">
+                      <p className="text-xs font-bold text-red-700">Rejection Reason <span className="text-red-500">*</span></p>
+                      <Textarea
+                        className="text-sm"
+                        value={wastageRejectReason}
+                        onChange={(e) => setWastageRejectReason(e.target.value)}
+                        placeholder="Provide a clear reason for rejection..."
+                      />
+                      <div className="flex gap-2 justify-end">
+                        <Button size="sm" variant="outline" onClick={() => { setWastageRejectOpen(false); setWastageRejectReason(""); }}>
+                          Cancel
+                        </Button>
+                        <Button
+                          size="sm"
+                          className="bg-red-600 text-white hover:bg-red-700"
+                          onClick={() => {
+                            if (!wastageRejectReason.trim()) { toast.error("Rejection reason is required."); return; }
+                            const it = wastageItems.find((x) => x.refId === wastageDetailEntry?.id);
+                            if (it) rejectItem(it, wastageRejectReason.trim());
+                            setWastageDetailOpen(false);
+                            setWastageRejectOpen(false);
+                            setWastageRejectReason("");
+                            setWastageDetailEntry(null);
+                          }}
+                        >
+                          <XIcon className="h-3.5 w-3.5 mr-1" /> Confirm Reject
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <DialogFooter className="gap-2 flex-wrap">
+                  <Button variant="outline" onClick={() => { setWastageDetailOpen(false); setWastageRejectOpen(false); setWastageRejectReason(""); }}>
+                    Close
+                  </Button>
+                  {["Pending In-Charge", "Pending GM", "Pending Final"].includes(wastageDetailEntry.status) && !wastageRejectOpen && (
+                    <>
+                      <Button
+                        variant="outline"
+                        className="border-destructive/40 text-destructive hover:bg-destructive/10"
+                        onClick={() => setWastageRejectOpen(true)}
+                      >
+                        <XIcon className="h-4 w-4 mr-1.5" /> Reject
+                      </Button>
+                      <Button
+                        className="bg-emerald-600 text-white hover:bg-emerald-700"
+                        onClick={() => {
+                          const it = wastageItems.find((x) => x.refId === wastageDetailEntry?.id);
+                          if (it) approve(it);
+                          setWastageDetailOpen(false);
+                          setWastageDetailEntry(null);
+                        }}
+                      >
+                        <Check className="h-4 w-4 mr-1.5" />
+                        {wastageDetailEntry.status === "Pending In-Charge" ? "Approve — Send to GM" :
+                         wastageDetailEntry.status === "Pending GM"        ? "Approve — Send to Final Auth" :
+                                                                             "Final Approve"}
+                      </Button>
+                    </>
+                  )}
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          )}
+
+          {activeTab !== "Dispatch" && activeTab !== "Galley Loading" && activeTab !== "Personal Hygiene" && activeTab !== "Wastage Entry" && (<><Card className="brand-accent-border-left">
             <CardContent className="pt-5">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-sm font-semibold uppercase tracking-wider">
