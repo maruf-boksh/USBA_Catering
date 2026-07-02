@@ -1,4 +1,6 @@
-﻿export const flights = [
+﻿import { GALLEY_STOCK_DEFS } from "@/lib/galley-catalog";
+
+export const flights = [
   { id: "BS-101", flight: "BS-101", sector: "DAC-CGP", aircraft: "ATR 72-600", dep: "08:30", arr: "09:30", pax: 68, adult: 60, child: 6, infant: 2, crew: 4, type: "Domestic", window: "Breakfast", duration: "1h 0m", status: "Scheduled" },
   { id: "BS-203", flight: "BS-203", sector: "DAC-DXB", aircraft: "B737-800", dep: "12:15", arr: "16:45", pax: 168, adult: 150, child: 14, infant: 4, crew: 8, type: "International", window: "Lunch", duration: "4h 30m", status: "Boarding" },
   { id: "BS-307", flight: "BS-307", sector: "DAC-KUL", aircraft: "A330-300", dep: "23:50", arr: "06:20", pax: 282, adult: 260, child: 18, infant: 4, crew: 12, type: "International", window: "Dinner", duration: "5h 30m", status: "Scheduled" },
@@ -644,16 +646,24 @@ export type ConsumableCategory =
 export type ConsumableItem = {
   id: string;
   name: string;
-  category: ConsumableCategory;
+  category: ConsumableCategory | string;
   uom: string;
   stock: number;
   reorder: number;
   unitCost: number;
   binLocation?: string;
   status: "OK" | "Low" | "Critical";
+  // Galley-sheet fields (present on items that are galley Handing/Taking lines).
+  // The galley plan's Beverages/Amenities/Equipment tabs read these from the
+  // inventory store so the sheet is driven by inventory data, not hardcoded.
+  galleyGroup?: "Beverages" | "Amenities" | "Equipment";
+  galleySection?: string;
+  galleyUnit?: string;
+  rollupTo?: string;
+  auto?: boolean;
 };
 
-export const consumableItems: ConsumableItem[] = [
+const SEED_CONSUMABLES: ConsumableItem[] = [
   { id: "CNS-001", name: "Dinner Napkin (Y-class)",          category: "Napkin",      uom: "Pcs",  stock: 6400, reorder: 3000, unitCost: 0.6,  binLocation: "A1-R1-S1", status: "OK" },
   { id: "CNS-002", name: "Dinner Napkin (B-class)",          category: "Napkin",      uom: "Pcs",  stock: 1200, reorder: 1500, unitCost: 0.9,  binLocation: "A1-R1-S2", status: "Low" },
   { id: "CNS-003", name: "Cocktail Napkin",                  category: "Napkin",      uom: "Pcs",  stock: 980,  reorder: 1200, unitCost: 0.4,  binLocation: "A1-R1-S3", status: "Low" },
@@ -672,6 +682,37 @@ export const consumableItems: ConsumableItem[] = [
   { id: "CNS-016", name: "Meal Box (Foil Lid)",              category: "Packaging",   uom: "Pcs",  stock: 2600, reorder: 2000, unitCost: 6.5,  binLocation: "A7-R1-S1", status: "OK" },
   { id: "CNS-017", name: "Aluminum Foil Sheet",              category: "Packaging",   uom: "Pcs",  stock: 1800, reorder: 1500, unitCost: 0.9,  binLocation: "A7-R1-S2", status: "OK" },
 ];
+
+// Galley Handing/Taking sheet stock lines (Beverages/Amenities/Equipment),
+// promoted into the consumables inventory so the galley plan reads its item
+// lists from inventory data. `id` = the plan quantity key so the plan, the
+// sheet, and the allocation/deduction all share one identifier. Auto-subtotal
+// lines carry no stock (computed) and are excluded here.
+function seededStatus(stock: number, reorder: number): "OK" | "Low" | "Critical" {
+  if (stock < reorder * 0.5) return "Critical";
+  if (stock < reorder) return "Low";
+  return "OK";
+}
+const GALLEY_STOCK_CONSUMABLES: ConsumableItem[] = GALLEY_STOCK_DEFS.map((d) => {
+  const stock = 1000;
+  const reorder = 150;
+  return {
+    id: d.key,
+    name: d.label,
+    category: d.section,
+    uom: d.unit ?? "Pcs",
+    stock,
+    reorder,
+    unitCost: d.unitCost ?? 0,
+    status: seededStatus(stock, reorder),
+    galleyGroup: d.group as "Beverages" | "Amenities" | "Equipment",
+    galleySection: d.section,
+    galleyUnit: d.unit,
+    rollupTo: d.rollupTo,
+  };
+});
+
+export const consumableItems: ConsumableItem[] = [...SEED_CONSUMABLES, ...GALLEY_STOCK_CONSUMABLES];
 
 export type ConsumableUsage = {
   id: string;
@@ -2279,6 +2320,28 @@ export type Airline = {
 export const airlines: Airline[] = [
   { id: "AIR-001", code: "USB",   iata: "BS", name: "US-Bangla Airlines", country: "Bangladesh", status: "Active" },
   { id: "AIR-002", code: "ASTRA", iata: "2A", name: "Air Astra",          country: "Bangladesh", status: "Active" },
+];
+
+// Aircraft master (fleet) — each tail number is tagged to the airline that
+// operates it (airlineId → Airline.id). `type` strings match the models used
+// across flight data so downstream logic (e.g. galley stowage) resolves them.
+export type Aircraft = {
+  id: string;
+  registration: string;   // tail number (e.g. S2-AJA)
+  type: string;           // model / variant
+  manufacturer: string;
+  airlineId: string;      // FK → Airline.id — the operating airline
+  seats: number;
+  status: "Active" | "Inactive";
+};
+
+export const aircraftFleet: Aircraft[] = [
+  { id: "ACF-001", registration: "S2-AJA", type: "B737-800",   manufacturer: "Boeing",       airlineId: "AIR-001", seats: 164, status: "Active" },
+  { id: "ACF-002", registration: "S2-AJT", type: "B737 MAX 8", manufacturer: "Boeing",       airlineId: "AIR-001", seats: 174, status: "Active" },
+  { id: "ACF-003", registration: "S2-AGA", type: "ATR 72-600", manufacturer: "ATR",          airlineId: "AIR-001", seats: 72,  status: "Active" },
+  { id: "ACF-004", registration: "S2-AGE", type: "DASH 8",     manufacturer: "De Havilland", airlineId: "AIR-001", seats: 74,  status: "Active" },
+  { id: "ACF-005", registration: "S2-AFM", type: "A330-300",   manufacturer: "Airbus",       airlineId: "AIR-001", seats: 436, status: "Active" },
+  { id: "ACF-006", registration: "S2-STB", type: "ATR 72-600", manufacturer: "ATR",          airlineId: "AIR-002", seats: 72,  status: "Active" },
 ];
 
 export const activeAirlines = airlines.filter((a) => a.status === "Active");

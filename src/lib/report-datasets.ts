@@ -261,7 +261,7 @@ export const REPORT_DATASETS: ReportDataset[] = [
   {
     key: "consumables",
     label: "Consumable Stock",
-    route: "/airline-consumables",
+    route: "/inventory",
     columns: [
       col("id", "Item ID"),
       col("name", "Item"),

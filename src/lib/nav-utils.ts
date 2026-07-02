@@ -37,7 +37,6 @@ const PATH_META: Record<string, PathMeta> = {
   "/cooking-temp": { label: "Cooking Temp & Sensory", parent: "Food Safety & QC" },
   "/dispatch-monitoring": { label: "Dispatch Monitoring", parent: "Food Safety & QC" },
   "/dispatch": { label: "Packaging & Dispatch" },
-  "/airline-consumables": { label: "Consumables Inventory", parent: "Airline Consumables" },
   "/consumable-usage": { label: "Usage Tracking", parent: "Airline Consumables" },
   "/consumable-allocation": { label: "Flight Allocation", parent: "Airline Consumables" },
   "/airline-equipments": { label: "Equipment Assets", parent: "Airline Equipments" },

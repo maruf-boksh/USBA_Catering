@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { CateringShell } from "@/layouts/CateringShell";
 
@@ -32,11 +32,11 @@ import HygieneMonitoringPage from "@/routes/hygiene-monitoring";
 import CookingTempPage from "@/routes/cooking-temp";
 import DispatchMonitoringPage from "@/routes/dispatch-monitoring";
 import DispatchPage from "@/routes/dispatch";
-import AirlineConsumablesPage from "@/routes/airline-consumables";
 import ConsumableUsagePage from "@/routes/consumable-usage";
 import ConsumableAllocationPage from "@/routes/consumable-allocation";
 import ConsumableReturnsPage from "@/routes/consumable-returns";
 import GalleyPlanningPage from "@/routes/galley-planning";
+import GalleyLoadingStandardsPage from "@/routes/galley-loading-standards";
 import AirlineEquipmentsPage from "@/routes/airline-equipments";
 import AssetAssignmentPage from "@/routes/asset-assignment";
 import AssetDisposalPage from "@/routes/asset-disposal";
@@ -52,6 +52,7 @@ import ConfigItemPage from "@/routes/config-item";
 import ConfigSupplierPage from "@/routes/config-supplier";
 import ConfigCompanyPage from "@/routes/config-company";
 import ConfigAirlinePage from "@/routes/config-airline";
+import ConfigAircraftPage from "@/routes/config-aircraft";
 import ConfigOfficePage from "@/routes/config-office";
 import ConfigWarehousePage from "@/routes/config-warehouse";
 import ConfigPricePage from "@/routes/config-price";
@@ -113,11 +114,13 @@ export function App() {
             <Route path="/cooking-temp" element={<CookingTempPage />} />
             <Route path="/dispatch-monitoring" element={<DispatchMonitoringPage />} />
             <Route path="/dispatch" element={<DispatchPage />} />
-            <Route path="/airline-consumables" element={<AirlineConsumablesPage />} />
             <Route path="/consumable-usage" element={<ConsumableUsagePage />} />
             <Route path="/consumable-allocation" element={<ConsumableAllocationPage />} />
             <Route path="/consumable-returns" element={<ConsumableReturnsPage />} />
             <Route path="/galley-planning" element={<GalleyPlanningPage />} />
+            {/* Consumables inventory was merged into Inventory & Store — redirect the old route. */}
+            <Route path="/airline-consumables" element={<Navigate to="/inventory" replace />} />
+            <Route path="/galley-loading-standards" element={<GalleyLoadingStandardsPage />} />
             <Route path="/airline-equipments" element={<AirlineEquipmentsPage />} />
             <Route path="/asset-assignment" element={<AssetAssignmentPage />} />
             <Route path="/asset-disposal" element={<AssetDisposalPage />} />
@@ -133,6 +136,7 @@ export function App() {
             <Route path="/config-supplier" element={<ConfigSupplierPage />} />
             <Route path="/config-company" element={<ConfigCompanyPage />} />
             <Route path="/config-airline" element={<ConfigAirlinePage />} />
+            <Route path="/config-aircraft" element={<ConfigAircraftPage />} />
             <Route path="/config-office" element={<ConfigOfficePage />} />
             <Route path="/config-warehouse" element={<ConfigWarehousePage />} />
             <Route path="/config-price" element={<ConfigPricePage />} />

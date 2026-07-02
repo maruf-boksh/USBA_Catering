@@ -264,13 +264,6 @@ const SRC: Record<string, Group> = {
     kpis: [["kpi-total-skus", "Total SKUs"], ["kpi-total-stock", "Total Stock"], ["kpi-stock-value", "Stock Value"], ["kpi-in-reorder", "In Reorder"], ["kpi-healthy-skus", "Healthy SKUs"], ["kpi-total-usage", "Total Usage"], ["kpi-flights-served", "Flights Served"], ["kpi-categories", "Categories"]],
     sections: [["section-stock-on-hand-by-category", "Stock On Hand by Category"], ["section-usage-by-cabin-class", "Usage by Cabin Class"], ["section-reorder-required", "Reorder Required"]],
   },
-  "/airline-consumables": {
-    columns: [["col:sl", "SL"], ["col:code", "Code"], ["col:item", "Item"], ["col:category", "Category"], ["col:uom", "UoM"], ["col:stock", "Stock"], ["col:reorder", "Reorder"], ["col:unit-cost", "Unit Cost"], ["col:value", "Value"], ["col:bin", "Bin"], ["col:status", "Status"]],
-    kpis: [["kpi-total-items", "Total Items"], ["kpi-low-stock", "Low Stock"], ["kpi-critical", "Critical"], ["kpi-stock-value", "Stock Value"]],
-    actions: [["action-new-item", "New Item"], ["action-save", "Save"]],
-    fields: [["field-item-code", "Item Code"], ["field-item-name", "Item Name"], ["field-category", "Category"], ["field-uom", "UoM"], ["field-opening-stock", "Opening Stock"], ["field-reorder-level", "Reorder Level"], ["field-unit-cost", "Unit Cost (৳)"], ["field-bin-location", "Bin Location"]],
-    sections: [["section-register-consumable-item", "Register Consumable Item"]],
-  },
   "/consumable-usage": {
     columns: [["col:sl", "SL"], ["col:usage-id", "Usage ID"], ["col:date", "Date"], ["col:flight", "Flight"], ["col:sector", "Sector"], ["col:class", "Class"], ["col:item", "Item"], ["col:qty", "Qty"], ["col:value", "Value"]],
     kpis: [["kpi-usage-entries", "Usage Entries"], ["kpi-flights-covered", "Flights Covered"], ["kpi-total-units-loaded", "Total Units Loaded"], ["kpi-total-value", "Total Value"]],
