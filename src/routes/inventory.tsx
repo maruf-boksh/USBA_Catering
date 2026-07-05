@@ -18,7 +18,8 @@ import {
   isBatchTrackedForInventory, findItemProfileFor,
   subscribeAllocationMethod, getAllocationVersion,
   equipmentAssets as EQP_SEED,
-  type BatchLot, type AllocationMethod, type EquipmentAsset,
+  consumableItems as CONSUMABLE_SEED,
+  type BatchLot, type AllocationMethod, type EquipmentAsset, type ConsumableItem,
 } from "@/lib/sample-data";
 import { KpiCard } from "@/components/common/KpiCard";
 import { getItemStockByWarehouse } from "@/lib/inventory-stock";
@@ -130,6 +131,46 @@ export default function Inventory() {
     }),
   );
   const [equipmentAssets] = usePersistedState<EquipmentAsset[]>("airline-equipments-assets", EQP_SEED);
+  // Airline consumables (galley store) — read-only here so the unified Stock
+  // Overview + valuation include them. The galley Inventory / Flight Allocation
+  // / Returns pages remain the source of truth and write to this same store.
+  const [consumables] = usePersistedState<ConsumableItem[]>("airline-consumables-items", CONSUMABLE_SEED);
+  // Backfill seed items an older persisted store may lack (galley items were
+  // added to the seed later) so the Stock Overview stays complete.
+  const consumablesFull = useMemo(() => {
+    const have = new Set(consumables.map((c) => c.id));
+    const missing = CONSUMABLE_SEED.filter((c) => !have.has(c.id));
+    return missing.length ? [...consumables, ...missing] : consumables;
+  }, [consumables]);
+  // Airline consumables projected as read-only inventory rows (item type
+  // "Airline Consumable") so they roll into Stock Overview, valuation and the
+  // low/critical counts. Status mirrors the galley page: Critical < ½ reorder,
+  // Low < reorder, else OK.
+  const consumableInventoryRows = useMemo<Item[]>(() =>
+    consumablesFull.map((c) => ({
+      id: c.id,
+      name: c.name,
+      category: c.category as string,
+      uom: c.uom,
+      stock: c.stock,
+      reorder: c.reorder,
+      batch: "—",
+      expiry: "—",
+      storage: "Dry",
+      status: c.stock < c.reorder * 0.5 ? "Critical" : c.stock < c.reorder ? "Low" : "OK",
+      batches: [],
+      officeId: "OFF-001",
+      warehouseId: "WH-001",
+      itemType: "Airline Consumable",
+      threshold: 0,
+      subCategory: "",
+    })),
+    [consumablesFull],
+  );
+  const consumableStockValue = useMemo(
+    () => consumablesFull.reduce((s, c) => s + c.stock * c.unitCost, 0),
+    [consumablesFull],
+  );
   const [newItemOpen, setNewItemOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [viewOpen, setViewOpen] = useState(false);
@@ -316,9 +357,11 @@ export default function Inventory() {
     setViewOpen(true);
   };
 
-  const lowStockCount = items.filter((i) => i.status === "Low").length;
-  const criticalCount = items.filter((i) => i.status === "Critical").length;
-  const okCount = items.filter((i) => i.status === "OK").length;
+  // Counts span kitchen stock + airline consumables (both roll into this report).
+  const statusPool = [...items, ...consumableInventoryRows];
+  const lowStockCount = statusPool.filter((i) => i.status === "Low").length;
+  const criticalCount = statusPool.filter((i) => i.status === "Critical").length;
+  const okCount = statusPool.filter((i) => i.status === "OK").length;
 
   // Unified stock-movement ledger. Every flow that touches an item feeds the
   // In/Out columns and the per-item "Item Details" drill-down:
@@ -513,11 +556,21 @@ export default function Inventory() {
     return true;
   });
 
+  const filteredConsumableRows = consumableInventoryRows.filter(i => {
+    if (filterOffice && i.officeId !== filterOffice) return false;
+    if (filterWarehouse && i.warehouseId !== filterWarehouse) return false;
+    if (filterType && effType(i) !== filterType) return false;
+    if (filterCategory && effCategory(i) !== filterCategory) return false;
+    if (filterSubCategory && effSubCategory(i) !== filterSubCategory) return false;
+    if (filterStatus && i.status !== filterStatus) return false;
+    return true;
+  });
+
   return (
     <>
       <PageHeader
         title="Stock Overview"
-        subtitle="Kitchen store item master — batch tracking, reorder levels and storage status"
+        subtitle="Unified store — kitchen stock plus airline consumables (filter Item Type: Airline Consumable), with reorder levels, valuation and status"
       />
 
       <div className="grid grid-cols-1 sm:grid-cols-5 gap-4 mb-6">
@@ -533,8 +586,8 @@ export default function Inventory() {
         <div data-arrival-id="inv-value">
           <KpiCard
             label="Stock Value"
-            value={`৳ ${Math.round(inventoryValue(items)).toLocaleString()}`}
-            sub="on-hand valuation"
+            value={`৳ ${Math.round(inventoryValue(items) + consumableStockValue).toLocaleString()}`}
+            sub="incl. airline consumables"
             icon={Boxes}
             tone="success"
           />
@@ -642,7 +695,7 @@ export default function Inventory() {
       <div data-arrival-id="inv-alerts">
       <DataTable
         title="inventory"
-        data={[...filteredItems, ...filteredAssetRows]}
+        data={[...filteredItems, ...filteredAssetRows, ...filteredConsumableRows]}
         columns={cols}
         searchKeys={["name", "category", "status", "batch"]}
         selectable={false}

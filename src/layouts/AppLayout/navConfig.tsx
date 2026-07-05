@@ -41,6 +41,7 @@ import {
   Coffee,
   Clock,
   Plane,
+  PlaneTakeoff,
   LayoutGrid,
   ScanBarcode,
   Wrench,
@@ -113,6 +114,24 @@ export const NAV_MODULES: NavModule[] = [
     ],
   },
 
+  // ── Procurement (top-level, directly below Production) ──────────────────────
+  {
+    key: 'supply',
+    label: 'Procurement',
+    icon: I(ShoppingCart),
+    children: [
+      { key: '/supply-chain-overview',  label: 'Procurement Dashboard',  icon: I(LayoutDashboard) },
+      { key: '/purchase-requisition',   label: 'Purchase Requisition',   icon: I(FileText) },
+      { key: '/request-for-quotation',  label: 'Request for Quotation',  icon: I(MailQuestion) },
+      { key: '/quotation-entry',        label: 'Quotation Entry',        icon: I(ClipboardList) },
+      { key: '/comparative-statement',  label: 'Comparative Statement',  icon: I(Scale) },
+      { key: '/procurement',            label: 'Purchase Orders',        icon: I(ShoppingCart) },
+      { key: '/receive-item',           label: 'Receive Items',          icon: I(Truck) },
+      { key: '/purchase-return',        label: 'Purchase Return',        icon: I(Undo2) },
+      { key: '/purchase-reports',       label: 'Purchase Reports',       icon: I(LineChart) },
+    ],
+  },
+
   // ── 3. Inventory & Store ───────────────────────────────────────────────────
   {
     key: 'inventory',
@@ -162,9 +181,11 @@ export const NAV_MODULES: NavModule[] = [
     children: [
       { key: '/airline-consumables-overview', label: 'Galley Dashboard',  icon: I(LayoutDashboard) },
       { key: '/galley-planning',              label: 'Galley Plan',       icon: I(LayoutGrid) },
-      { key: '/airline-consumables',   label: 'Inventory',         icon: I(Boxes) },
+      { key: '/galley-qc',                    label: 'Loading QC & Sign-Off', icon: I(ClipboardCheck) },
       { key: '/consumable-allocation', label: 'Flight Allocation', icon: I(Plane) },
       { key: '/consumable-returns',    label: 'Returns',           icon: I(Undo2) },
+      { key: '/galley-loading-standards', label: 'Loading Standards', icon: I(Scale) },
+      { key: '/galley-stowage',           label: 'Aircraft Stowage Plan', icon: I(Boxes) },
     ],
   },
 
@@ -226,6 +247,7 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/config-supplier',   label: 'Supplier Profile', icon: I(Truck) },
       { key: '/config-company',    label: 'Company Profile',  icon: I(Building2) },
       { key: '/config-airline',    label: 'Airline',          icon: I(Plane) },
+      { key: '/config-aircraft',   label: 'Aircraft',         icon: I(PlaneTakeoff) },
       { key: '/config-office',     label: 'Office',           icon: I(Building2) },
       { key: '/config-warehouse',  label: 'Warehouse',        icon: I(Warehouse) },
       { key: '/config-price',      label: 'Price Setup',      icon: I(BadgeDollarSign) },
@@ -236,28 +258,12 @@ export const NAV_MODULES: NavModule[] = [
     ],
   },
 
-  // ── 14. Archive (Supply Chain + Accounts) ──────────────────────────────────
+  // ── 15. Archive (Accounts) ──────────────────────────────────────────────────
   {
     key: 'archive',
     label: 'Archive',
     icon: I(Archive),
     children: [
-      {
-        key: 'supply',
-        label: 'Supply Chain',
-        icon: I(ShoppingCart),
-        children: [
-          { key: '/supply-chain-overview',  label: 'Supply Chain Dashboard', icon: I(LayoutDashboard) },
-          { key: '/purchase-requisition',   label: 'Purchase Requisition',   icon: I(FileText) },
-          { key: '/request-for-quotation',  label: 'Request for Quotation',  icon: I(MailQuestion) },
-          { key: '/quotation-entry',        label: 'Quotation Entry',        icon: I(ClipboardList) },
-          { key: '/comparative-statement',  label: 'Comparative Statement',  icon: I(Scale) },
-          { key: '/procurement',            label: 'Purchase Orders',        icon: I(ShoppingCart) },
-          { key: '/receive-item',           label: 'Receive Items',          icon: I(Truck) },
-          { key: '/purchase-return',        label: 'Purchase Return',        icon: I(Undo2) },
-          { key: '/purchase-reports',       label: 'Purchase Reports',       icon: I(LineChart) },
-        ],
-      },
       {
         key: 'accounts',
         label: 'Accounts',

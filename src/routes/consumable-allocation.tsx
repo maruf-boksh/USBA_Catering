@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
-import { Plane, Layers, Coins, Plus, ArrowLeft, Save, Clock, X, Search } from "lucide-react";
+import { Plane, Layers, Coins, Plus, ArrowLeft, Save, Clock, X, Search, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import {
   consumableUsage as SEED_USAGE,
@@ -34,6 +34,11 @@ type AllocRecord = {
   flight: string;
   sector: string;
   lines: AllocLine[];
+  // Source location the stock was transferred from (galley-forwarded allocs).
+  officeId?: string;
+  warehouseId?: string;
+  officeName?: string;
+  warehouseName?: string;
 };
 
 type DraftAllocLine = {
@@ -87,7 +92,7 @@ export default function FlightAllocationPage() {
     <>
       <PageHeader
         title="Flight Allocation"
-        subtitle="Consumables grouped by flight — what was loaded on each leg, with cabin-class split and total value"
+        subtitle="Consumables loaded per flight. Most allocations flow from a forwarded Galley Plan; use Ad-hoc Allocation only for off-plan loads (unplanned flights, top-ups, corrections)."
         actions={
           <Button
             variant={view !== "list" ? "outline" : "default"}
@@ -95,7 +100,7 @@ export default function FlightAllocationPage() {
           >
             {view !== "list"
               ? <><ArrowLeft className="h-4 w-4 mr-1" /> Back to List</>
-              : <><Plus className="h-4 w-4 mr-1" /> New Allocation</>}
+              : <><Plus className="h-4 w-4 mr-1" /> Ad-hoc Allocation</>}
           </Button>
         }
       />
@@ -107,6 +112,7 @@ export default function FlightAllocationPage() {
         <AllocationCreate
           nextId={nextId}
           inventoryItems={inventoryItems}
+          allocations={allocations}
           onSave={addAllocation}
         />
       )}
@@ -141,6 +147,13 @@ function AllocationList({
       uom: l.uom,
     })),
   );
+
+  // Source warehouse per flight (galley-forwarded allocs carry it) — shown on
+  // the flight group header so the transfer origin is visible in the ledger.
+  const sourceByFlight = new Map<string, string>();
+  for (const a of allocations) {
+    if (a.warehouseName && !sourceByFlight.has(a.flight)) sourceByFlight.set(a.flight, a.warehouseName);
+  }
 
   const allRows = [...allocRows, ...SEED_USAGE];
 
@@ -265,6 +278,11 @@ function AllocationList({
                         <span className="ml-3 text-[11px] text-muted-foreground tabular-nums">
                           {rows.length} item{rows.length === 1 ? "" : "s"}
                         </span>
+                        {sourceByFlight.get(flight) && (
+                          <span className="ml-3 text-[11px] text-muted-foreground">
+                            · From <span className="font-medium text-foreground">{sourceByFlight.get(flight)}</span>
+                          </span>
+                        )}
                       </TableCell>
                       <TableCell className="text-right tabular-nums font-semibold text-primary">
                         ৳ {Math.round(flightValue).toLocaleString()}
@@ -306,10 +324,12 @@ const emptyDraftLine = (): DraftAllocLine => ({ itemId: "", qty: "" });
 function AllocationCreate({
   nextId,
   inventoryItems,
+  allocations,
   onSave,
 }: {
   nextId: string;
   inventoryItems: ConsumableItem[];
+  allocations: AllocRecord[];
   onSave: (r: AllocRecord) => void;
 }) {
   const today = new Date().toISOString().slice(0, 10);
@@ -317,13 +337,21 @@ function AllocationCreate({
   const [scheduledTime, setScheduledTime] = useState("");
   const [flight, setFlight] = useState("");
   const [lines, setLines] = useState<DraftAllocLine[]>([emptyDraftLine()]);
+  const [ack, setAck] = useState(false);
 
   const flightsAtTime = FLIGHT_SCHEDULES.filter((f) => f.time === scheduledTime);
   const selectedSchedule = FLIGHT_SCHEDULES.find((f) => f.flight === flight);
 
+  // Duplicate guard: an allocation for this flight may already exist — a
+  // galley-forwarded one (id "FA-G…") especially, since that already deducted
+  // stock. Recording another here is an *additional* load, so we surface it.
+  const existingForFlight = flight ? allocations.filter((a) => a.flight === flight) : [];
+  const galleyForwarded = existingForFlight.some((a) => a.id.startsWith("FA-G"));
+
   const handleTimeChange = (time: string) => {
     setScheduledTime(time);
     setFlight("");
+    setAck(false);
   };
 
   const updateLine = (idx: number, patch: Partial<DraftAllocLine>) => {
@@ -337,6 +365,10 @@ function AllocationCreate({
   const save = () => {
     if (!scheduledTime) { toast.error("Select a flight time."); return; }
     if (!flight) { toast.error("Select a flight number."); return; }
+    if (galleyForwarded && !ack) {
+      toast.error(`${flight} already has a galley-forwarded allocation. Tick the acknowledgement to record an additional ad-hoc load.`);
+      return;
+    }
     if (lines.length === 0) { toast.error("Add at least one item."); return; }
 
     for (let i = 0; i < lines.length; i++) {
@@ -374,7 +406,7 @@ function AllocationCreate({
     <Card>
       <CardContent className="pt-6">
         <div className="flex items-center justify-between mb-6">
-          <h3 className="text-sm font-semibold uppercase tracking-wider">New Flight Allocation</h3>
+          <h3 className="text-sm font-semibold uppercase tracking-wider">New Ad-hoc Allocation</h3>
         </div>
 
         {/* Header fields */}
@@ -406,7 +438,7 @@ function AllocationCreate({
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Flight Number *</Label>
             <select
               value={flight}
-              onChange={(e) => setFlight(e.target.value)}
+              onChange={(e) => { setFlight(e.target.value); setAck(false); }}
               className={selectCls}
               disabled={!scheduledTime}
             >
@@ -425,6 +457,37 @@ function AllocationCreate({
             </div>
           </div>
         </div>
+
+        {/* Duplicate-load warning */}
+        {existingForFlight.length > 0 && (
+          <div className={`mb-6 rounded-md border px-4 py-3 ${galleyForwarded ? "border-amber-300 bg-amber-50" : "border-sky-200 bg-sky-50"}`}>
+            <div className="flex items-start gap-2">
+              <AlertTriangle className={`h-4 w-4 mt-0.5 shrink-0 ${galleyForwarded ? "text-amber-600" : "text-sky-600"}`} />
+              <div className="text-xs">
+                <p className={`font-semibold ${galleyForwarded ? "text-amber-800" : "text-sky-800"}`}>
+                  {flight} already has {existingForFlight.length} allocation{existingForFlight.length === 1 ? "" : "s"} on record
+                  {galleyForwarded ? " — including one forwarded from a Galley Plan." : "."}
+                </p>
+                <p className="text-muted-foreground mt-0.5">
+                  {galleyForwarded
+                    ? "That plan already issued its consumables from stock. Anything you add here is an additional ad-hoc load and will deduct stock again."
+                    : "Recording another allocation here will deduct stock again for this flight."}
+                </p>
+                {galleyForwarded && (
+                  <label className="mt-2 flex items-center gap-2 text-amber-800 font-medium cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={ack}
+                      onChange={(e) => setAck(e.target.checked)}
+                      className="h-3.5 w-3.5 accent-amber-600"
+                    />
+                    I understand — this is an additional ad-hoc load, not the planned one.
+                  </label>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Item lines */}
         <div className="mb-5">
@@ -494,7 +557,7 @@ function AllocationCreate({
 
         {/* Save and Issue button */}
         <div className="flex justify-end mt-6 pt-4 border-t border-border">
-          <Button onClick={save}>
+          <Button onClick={save} disabled={galleyForwarded && !ack}>
             <Save className="h-4 w-4 mr-1.5" /> Save and Issue
           </Button>
         </div>

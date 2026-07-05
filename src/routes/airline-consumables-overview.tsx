@@ -4,11 +4,11 @@ import { KpiCard } from "@/components/common/KpiCard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Coffee, Boxes, AlertTriangle, CheckCircle2, Send, Wallet, TrendingDown,
-  Plane, LayoutGrid, Clock,
+  Plane, LayoutGrid, Clock, Scale, Recycle, PackageCheck,
 } from "lucide-react";
 import { consumableItems, type ConsumableItem } from "@/lib/sample-data";
 import {
-  loadDispatchEntries, loadGalleyRecords,
+  flights, loadDispatchEntries, loadGalleyRecords,
   type GalleyStatus,
 } from "@/routes/dispatch-monitoring";
 import {
@@ -46,6 +46,28 @@ function readItems(): ConsumableItem[] {
     return raw ? (JSON.parse(raw) as ConsumableItem[]) : consumableItems;
   } catch { return consumableItems; }
 }
+
+// ── Flight reconciliation stores ─────────────────────────────────────────────
+// Planned = galley plan consumable qty (loadGalleyRecords). Loaded = what was
+// transferred to the flight (consumable-allocations, incl. ad-hoc). Returned =
+// consumable-returns for that flight. Consumed = Loaded − Returned.
+type AllocLine = { itemId: string; qty: number };
+type AllocRecord = { flight: string; date: string; lines: AllocLine[] };
+type ReturnLine = { itemId: string; qty: number; reusableQty?: number; lineType?: "item" | "meal" };
+type ReturnRecord = { flight: string; date: string; lines: ReturnLine[] };
+
+function readLS<T>(key: string): T[] {
+  try {
+    const raw = localStorage.getItem(`harvest-data-v1:${key}`);
+    return raw ? (JSON.parse(raw) as T[]) : [];
+  } catch { return []; }
+}
+
+type ReconRow = {
+  key: string; flight: string; date: string;
+  planned: number; loaded: number; returned: number; reusable: number; consumed: number;
+  rate: number | null; // consumed / loaded
+};
 
 export default function AirlineConsumablesOverviewPage() {
   const stats = useMemo(() => {
@@ -85,10 +107,69 @@ export default function AirlineConsumablesOverviewPage() {
       .map((r) => ({ ...r, deficit: r.reorder - r.stock }))
       .sort((a, b) => b.deficit - a.deficit).slice(0, 8);
 
+    // ── Per-flight reconciliation: planned → loaded → returned → consumed ────
+    const consumableIds = new Set(items.map((i) => i.id));
+    const flightNo = (flightId: string) => flights.find((f) => f.id === flightId)?.flight ?? flightId;
+    const rowKey = (flight: string, date: string) => `${flight}__${date}`;
+    const recon = new Map<string, ReconRow>();
+    const ensure = (flight: string, date: string): ReconRow => {
+      const k = rowKey(flight, date);
+      let row = recon.get(k);
+      if (!row) {
+        row = { key: k, flight, date, planned: 0, loaded: 0, returned: 0, reusable: 0, consumed: 0, rate: null };
+        recon.set(k, row);
+      }
+      return row;
+    };
+
+    // Planned — sum the galley plan's consumable (stock) line quantities.
+    for (const rec of galleyRecords) {
+      const row = ensure(flightNo(rec.flightId), rec.date);
+      let planned = 0;
+      for (const [k, v] of Object.entries(rec.galleyPlan)) {
+        if (consumableIds.has(k)) planned += Number(v) || 0;
+      }
+      row.planned += planned;
+    }
+    // Loaded — allocations transferred to the flight (galley-forwarded + ad-hoc).
+    for (const a of readLS<AllocRecord>("consumable-allocations")) {
+      if (!a.flight) continue;
+      const row = ensure(a.flight, a.date);
+      row.loaded += (a.lines ?? []).reduce((s, l) => s + (Number(l.qty) || 0), 0);
+    }
+    // Returned — consumable return lines (meal lines excluded).
+    for (const r of readLS<ReturnRecord>("consumable-returns")) {
+      if (!r.flight) continue;
+      const row = ensure(r.flight, r.date);
+      for (const l of r.lines ?? []) {
+        if (l.lineType === "meal") continue;
+        row.returned += Number(l.qty) || 0;
+        row.reusable += Number(l.reusableQty) || 0;
+      }
+    }
+    const reconciliation = [...recon.values()]
+      .map((row) => {
+        const consumed = Math.max(0, row.loaded - row.returned);
+        return { ...row, consumed, rate: row.loaded > 0 ? consumed / row.loaded : null };
+      })
+      .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.flight.localeCompare(b.flight)));
+
+    const reconTotals = reconciliation.reduce(
+      (t, r) => ({
+        planned: t.planned + r.planned,
+        loaded: t.loaded + r.loaded,
+        returned: t.returned + r.returned,
+        consumed: t.consumed + r.consumed,
+      }),
+      { planned: 0, loaded: 0, returned: 0, consumed: 0 },
+    );
+    const avgRate = reconTotals.loaded > 0 ? reconTotals.consumed / reconTotals.loaded : null;
+
     return {
       dispatches, galleyPlans, awaitingPlan, allocations, statusChart,
       totalSKUs, totalStock, stockValue, lowStock, ok,
       categoryChart, reorderItems,
+      reconciliation, reconTotals, avgRate,
     };
   }, []);
 
@@ -158,6 +239,85 @@ export default function AirlineConsumablesOverviewPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* ── Flight reconciliation band ───────────────────────────────────── */}
+      <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-muted-foreground mb-2">Flight Reconciliation</p>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+        <KpiCard label="Planned Units"  value={stats.reconTotals.planned.toLocaleString()}  icon={LayoutGrid}   tone="navy" sub="From galley plans" />
+        <KpiCard label="Loaded Units"   value={stats.reconTotals.loaded.toLocaleString()}   icon={Send}         tone="navy" sub="Allocated to flights" />
+        <KpiCard label="Returned Units" value={stats.reconTotals.returned.toLocaleString()} icon={Recycle}      tone="success" sub="Credited back" />
+        <KpiCard
+          label="Consumed Units"
+          value={stats.reconTotals.consumed.toLocaleString()}
+          icon={PackageCheck}
+          tone="navy"
+          sub={stats.avgRate != null ? `${Math.round(stats.avgRate * 100)}% of loaded` : "—"}
+        />
+      </div>
+
+      <Card className="mb-6">
+        <CardHeader>
+          <CardTitle className="text-sm uppercase tracking-wider flex items-center gap-2">
+            <Scale className="h-4 w-4 text-sky-700" /> Per-Flight Reconciliation
+          </CardTitle>
+          <p className="text-xs text-muted-foreground mt-1">
+            Planned (galley plan) → Loaded (allocations, incl. ad-hoc) → Returned → Consumed (Loaded − Returned). Totals are consumable units across all lines.
+          </p>
+        </CardHeader>
+        <CardContent className="px-0 pb-0">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm min-w-[720px]">
+              <thead className="bg-muted/50 border-b border-border text-xs uppercase tracking-wider text-muted-foreground">
+                <tr>
+                  <th className="p-3 text-left font-semibold">Flight</th>
+                  <th className="p-3 text-left font-semibold">Date</th>
+                  <th className="p-3 text-right font-semibold">Planned</th>
+                  <th className="p-3 text-right font-semibold">Loaded</th>
+                  <th className="p-3 text-right font-semibold">Variance</th>
+                  <th className="p-3 text-right font-semibold">Returned</th>
+                  <th className="p-3 text-right font-semibold">Consumed</th>
+                  <th className="p-3 text-right font-semibold">Rate</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stats.reconciliation.length === 0 ? (
+                  <tr><td colSpan={8} className="p-6 text-center text-muted-foreground">No flights allocated, returned or planned yet.</td></tr>
+                ) : stats.reconciliation.map((r) => {
+                  // Variance = Loaded − Planned (over-allocation / ad-hoc without a plan).
+                  const variance = r.loaded - r.planned;
+                  const rate = r.rate;
+                  const rateCls =
+                    rate == null ? "bg-muted text-muted-foreground"
+                    : rate >= 0.9 ? "bg-emerald-100 text-emerald-800"
+                    : rate >= 0.6 ? "bg-amber-100 text-amber-800"
+                    : "bg-red-100 text-red-800";
+                  return (
+                    <tr key={r.key} className="border-b border-border/50 last:border-b-0 hover:bg-muted/30">
+                      <td className="p-3 font-medium">{r.flight}</td>
+                      <td className="p-3 text-muted-foreground tabular-nums">{r.date}</td>
+                      <td className="p-3 text-right tabular-nums">{r.planned ? r.planned.toLocaleString() : "—"}</td>
+                      <td className="p-3 text-right tabular-nums">{r.loaded ? r.loaded.toLocaleString() : "—"}</td>
+                      <td className={`p-3 text-right tabular-nums font-medium ${variance === 0 ? "text-muted-foreground" : variance > 0 ? "text-amber-600" : "text-red-600"}`}>
+                        {variance === 0 ? "0" : variance > 0 ? `+${variance.toLocaleString()}` : variance.toLocaleString()}
+                      </td>
+                      <td className="p-3 text-right tabular-nums">
+                        {r.returned ? r.returned.toLocaleString() : "—"}
+                        {r.reusable > 0 && <span className="text-[10px] text-emerald-600 ml-1">({r.reusable} reusable)</span>}
+                      </td>
+                      <td className="p-3 text-right tabular-nums font-semibold">{r.consumed ? r.consumed.toLocaleString() : "—"}</td>
+                      <td className="p-3 text-right">
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${rateCls}`}>
+                          {rate == null ? "—" : `${Math.round(rate * 100)}%`}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
 
       <Card className="mb-6">
         <CardHeader>

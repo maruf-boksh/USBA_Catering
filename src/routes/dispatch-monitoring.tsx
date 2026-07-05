@@ -14,17 +14,25 @@ import {
 } from "@/components/ui/select";
 import { toast } from "sonner";
 import {
-  Plus, Truck, Pencil, Trash2, ThermometerSun, ShieldCheck,
-  AlertOctagon, AlertTriangle, PlaneTakeoff, PlaneLanding,
+  Plus, Minus, Truck, Pencil, Trash2, ThermometerSun, ShieldCheck,
+  AlertOctagon, AlertTriangle, PlaneTakeoff, PlaneLanding, Warehouse,
   Clock, User, CheckCircle2, Eye, Smartphone, ChevronRight, QrCode, X as CloseIcon, Timer, Play,
 } from "lucide-react";
-import { flights as FLIGHT_BOARD, seedFlightOrders } from "@/lib/sample-data";
+import {
+  flights as FLIGHT_BOARD, seedFlightOrders, activeOffices, activeWarehousesByOffice,
+  aircraftFleet as AIRCRAFT_SEED, airlines as AIRLINE_SEED,
+  type Aircraft, type Airline,
+} from "@/lib/sample-data";
 import { getFlightOrders } from "@/lib/flight-orders-store";
 import { INITIAL_RECORDS as DISPATCH_SEED_RECORDS } from "@/routes/dispatch";
 import { useRole } from "@/lib/roles";
 import { useWorkflow } from "@/lib/workflow-store";
 import { useDispatchMonitoringSettings } from "@/lib/dispatch-monitoring-settings";
 import { KpiCard } from "@/components/common/KpiCard";
+import { loadStandardsForAircraft, computeStandard, isMealMixKey, galleyAircraftTypes } from "@/lib/galley-standards";
+import { usePersistedState } from "@/lib/use-persisted-state";
+import { AircraftFields } from "@/routes/config-aircraft";
+import { getGalleySections, computeAutoTotals, loadGalleyItems } from "@/lib/galley-items";
 
 // Flight options for the dispatch-monitoring form. The operational flight board
 // (`FLIGHT_BOARD`) only carries a handful of flights, so we merge in every
@@ -64,18 +72,18 @@ export const flights: FlightOption[] = (() => {
 
 // ── Constants ───────────────────────────────────────────────────────────────
 const MEAL_TYPES = ["Regular", "Vegetarian (VGML)", "Child Meal (CHML)", "Diabetic (DBML)", "Kosher (KSML)", "Crew Meal", "Special"];
-const APT_EXECUTIVES = ["M. Hossain", "T. Ahmed", "K. Sultana", "A. Chowdhury", "R. Islam"];
+export const APT_EXECUTIVES = ["M. Hossain", "T. Ahmed", "K. Sultana", "A. Chowdhury", "R. Islam"];
 const APT_DESIGNATIONS = ["APT Executive", "Sr. APT Executive", "Airport Supervisor", "Ground Operations Officer"];
 const FS_HYGIENE_EXECUTIVES = ["F. Begum", "A. Khan", "S. Islam", "R. Akter", "N. Hossain"];
-const HOC_NAMES = ["Cmd. A. Rahman", "M. Jahangir", "S. Karim", "R. Ahmed"];
-const APT_EXEC_DESIG: Record<string, string> = {
+export const HOC_NAMES = ["Cmd. A. Rahman", "M. Jahangir", "S. Karim", "R. Ahmed"];
+export const APT_EXEC_DESIG: Record<string, string> = {
   "M. Hossain": "Sr. APT Executive",
   "T. Ahmed": "APT Executive",
   "K. Sultana": "Airport Supervisor",
   "A. Chowdhury": "Ground Operations Officer",
   "R. Islam": "APT Executive",
 };
-const HOC_DESIG: Record<string, string> = {
+export const HOC_DESIG: Record<string, string> = {
   "Cmd. A. Rahman": "Head of Catering",
   "M. Jahangir": "Catering Supervisor",
   "S. Karim": "Head of Catering",
@@ -135,6 +143,9 @@ export type GalleyLoadingRecord = {
   };
   galleyStatus: GalleyStatus;
   forwardedAt: string;
+  /** Office / warehouse the consumables were transferred FROM on forward. */
+  sourceOfficeId?: string;
+  sourceWarehouseId?: string;
   loadingStartedAt?: string;
   loadingCompletedAt?: string;
   loadingDurationSec?: number;
@@ -2582,20 +2593,29 @@ function GalleySecTitle({ children }: { children: React.ReactNode }) {
 export type GalleyPlan = Record<string, string>;
 
 export function buildInitialGalley(entry: DispatchEntry, flight: FlightOption | undefined): GalleyPlan {
+  // Beverage/amenity/equipment quantities auto-fill from the loading standard
+  // for THIS flight's aircraft type. Meals come from Dispatch, not the standard.
+  const std = loadStandardsForAircraft(flight?.aircraft);
   const pax = flight?.pax ?? totalQty(entry.mealLines);
   const crew = flight?.crew ?? 7;
   const child = flight?.child ?? 0;
   const eyPax = Math.max(0, pax - child);
+  // These figures only SEED the computed meal-summary + stowage numbers — the
+  // actual meal breakdown is integrated from Dispatch (Order → Meal Planning →
+  // Dispatch), so the split is fixed catering-policy defaults, not a standard.
   const cockpit = 2;
   const cabin = Math.max(0, crew - cockpit);
-  const depChicken = Math.round(eyPax * 0.4);
+  const chickenShare = 0.40;
+  const vegShare = 0.025;
+  const arrShare = 0.35;
+  const depChicken = Math.round(eyPax * chickenShare);
   const depBeef = eyPax - depChicken;
-  const depVeg = Math.max(1, Math.round(eyPax * 0.025));
-  const arrEyPax = Math.round(eyPax * 0.35);
-  const arrChicken = Math.round(arrEyPax * 0.4);
+  const depVeg = Math.max(1, Math.round(eyPax * vegShare));
+  const arrEyPax = Math.round(eyPax * arrShare);
+  const arrChicken = Math.round(arrEyPax * chickenShare);
   const arrBeef = arrEyPax - arrChicken;
 
-  return {
+  const base: GalleyPlan = {
     depZenithLoad: String(pax),
     arrZenithLoad: String(Math.round(pax * 0.3)),
     traySetupDep: String(pax + Math.round(pax * 0.04)),
@@ -2618,7 +2638,7 @@ export function buildInitialGalley(entry: DispatchEntry, flight: FlightOption | 
     totalDepMeal: String(eyPax),
     arrChicken: String(arrChicken),
     arrBeef: String(arrBeef),
-    arrVeg: String(Math.max(1, Math.round(arrEyPax * 0.025))),
+    arrVeg: String(Math.max(1, Math.round(arrEyPax * vegShare))),
     arrChilled: "0", arrDiabetic: "0",
     totalArrMeal: String(arrEyPax),
     bcDepPassMeal: "0", bcArrPassMeal: "0",
@@ -2678,26 +2698,52 @@ export function buildInitialGalley(entry: DispatchEntry, flight: FlightOption | 
     banana: String(crew), apple: String(crew),
     preparedBy: "", physicallyHandedBy: "", flightCheckedBy: "", handedOverBy: "",
   };
+  // Loading Standards (the editable scales master) override the hardcoded
+  // defaults above for every quantity they cover. Meal Mix parameters were
+  // already consumed above and are not plan keys.
+  for (const s of std) {
+    if (!isMealMixKey(s.key)) base[s.key] = String(computeStandard(s, pax, crew));
+  }
+  return base;
 }
 
 export function GalleyPlanningModal({
   entry,
   flight,
+  initialPlan,
   onClose,
-  onForward,
+  onSaveDraft,
 }: {
   entry: DispatchEntry;
   flight: FlightOption | undefined;
+  /** Existing plan (forwarded record or saved draft) — re-planning starts from
+   *  the last issued sheet instead of wiping it back to defaults. */
+  initialPlan?: GalleyPlan;
   onClose: () => void;
-  onForward: (plan: GalleyPlan, signOff: GalleyLoadingRecord["signOff"]) => void;
+  /** Save persists a draft with the chosen transfer source; the plan is
+   *  forwarded to aircraft loading later from the list page (sign-off is
+   *  captured on the Loading QC & Sign-Off page). */
+  onSaveDraft?: (
+    plan: GalleyPlan,
+    source: { officeId: string; warehouseId: string },
+  ) => void;
 }) {
   type GTab = "overview" | "meals" | "beverages" | "amenities" | "equipment";
   const [tab, setTab] = useState<GTab>("overview");
-  const [g, setG] = useState<GalleyPlan>(() => buildInitialGalley(entry, flight));
+  const [g, setG] = useState<GalleyPlan>(() => ({ ...buildInitialGalley(entry, flight), ...(initialPlan ?? {}) }));
   const sg = (k: string, v: string) => setG((prev) => ({ ...prev, [k]: v }));
 
-  // Load Summary is connected from Order Management; Meals integrate from the
-  // Dispatch (packaging) record. Beverages/Amenities/Equipment stay manual.
+  // Stock source: which office / warehouse the consumables are transferred FROM
+  // when the plan is forwarded to the aircraft. Defaults to the central store.
+  const [source, setSource] = useState({ officeId: "OFF-001", warehouseId: "WH-001" });
+  const warehouseChoices = activeWarehousesByOffice(source.officeId);
+  const changeOffice = (officeId: string) => {
+    const whs = activeWarehousesByOffice(officeId);
+    const keep = whs.some((w) => w.id === source.warehouseId);
+    setSource({ officeId, warehouseId: keep ? source.warehouseId : whs[0]?.id ?? "" });
+  };
+
+  // Connected records: Load Summary from Order Management, Meals from Dispatch.
   const flightNo = flight?.flight ?? entry.flightId;
   const order = useMemo(() => {
     const list = getFlightOrders().filter((o) => o.orderType !== "crew" && o.flight === flightNo);
@@ -2705,6 +2751,114 @@ export function GalleyPlanningModal({
   }, [flightNo, entry.packagingDate]);
   const dispatchSection = useMemo(() => dispatchSectionForFlight(flightNo), [flightNo]);
   const specialTotal = (dispatchSection?.vgml ?? 0) + (dispatchSection?.chml ?? 0) + (dispatchSection?.spml ?? 0);
+
+  // Load counts default from the connected order but are EDITABLE — an updated
+  // record (revised PAX/crew/special meals) can arrive after the flight was
+  // scheduled. Editing PAX/Crew re-derives the standard-driven quantities for
+  // the new load; Special Meals is an informational override.
+  const [planPax, setPlanPax] = useState<number>(order?.pax ?? flight?.pax ?? totalQty(entry.mealLines));
+  const [planCrew, setPlanCrew] = useState<number>(order?.crew ?? flight?.crew ?? 7);
+  // Default to the dispatched breakdown sum (VGML+CHML+SPML) so the summary
+  // matches the Meals-tab total; fall back to the order-level count.
+  const [specialMeals, setSpecialMeals] = useState<number>(specialTotal || order?.specialMeals || 0);
+
+  // Aircraft type for this plan — drives which loading standard fills the
+  // beverage/amenity/equipment quantities. Editable from the header, and a new
+  // aircraft can be registered on the fly (shared with Configuration > Aircraft).
+  // Starts UNSELECTED — the beverage/amenity/equipment (loading) tabs only appear
+  // once an aircraft type is chosen, so their per-aircraft standard is applied.
+  const [aircraftType, setAircraftType] = useState("");
+  const [aircraftTypes, setAircraftTypes] = useState(() => {
+    const list = galleyAircraftTypes();
+    return flight?.aircraft && !list.includes(flight.aircraft)
+      ? [...list, flight.aircraft].sort((a, b) => a.localeCompare(b))
+      : list;
+  });
+  const [aircraftRows, setAircraftRows] = usePersistedState<Aircraft[]>("config-aircraft-rows", AIRCRAFT_SEED);
+  const [airlineList] = usePersistedState<Airline[]>("config-airline-rows", AIRLINE_SEED);
+  const [showAddAircraft, setShowAddAircraft] = useState(false);
+
+  // Re-derive the whole loading sheet from a load + aircraft type — buildInitialGalley
+  // pulls THAT aircraft's Loading Standard (loadStandardsForAircraft) for the
+  // beverage/amenity/equipment scales and integrates meals from Dispatch. Both
+  // the aircraft-type selector and the editable load counts run through this, so
+  // the sheet stays connected to the aircraft's standard.
+  const rebuildPlan = (pax: number, crew: number, aircraft: string) => {
+    const effFlight = {
+      ...(flight ?? {}),
+      pax, crew,
+      child: flight?.child ?? 0,
+      adult: Math.max(0, pax - (flight?.child ?? 0)),
+      aircraft,
+    } as FlightOption;
+    setG(buildInitialGalley(entry, effFlight));
+  };
+
+  // Switch the plan to another aircraft type: re-derive the sheet from that
+  // type's loading standard (meals still flow from Dispatch inside buildInitialGalley).
+  const applyAircraft = (type: string) => {
+    setAircraftType(type);
+    rebuildPlan(planPax, planCrew, type);
+  };
+  const onAircraftCreated = (a: Aircraft) => {
+    setAircraftRows((prev) => [a, ...prev]);
+    setAircraftTypes((prev) =>
+      prev.includes(a.type) ? prev : [...prev, a.type].sort((x, y) => x.localeCompare(y)),
+    );
+    applyAircraft(a.type);
+    setShowAddAircraft(false);
+    toast.success(`Aircraft "${a.registration}" added — plan set to the ${a.type} loading standard.`);
+  };
+
+  // Re-derive the whole plan when the load counts are overridden, so the
+  // standard-driven quantities scale to the updated PAX/Crew.
+  const applyLoad = (pax: number, crew: number) => {
+    setPlanPax(pax);
+    setPlanCrew(crew);
+    rebuildPlan(pax, crew, aircraftType);
+  };
+
+  // On first open of a FRESH plan, reconcile the seeded quantities to the
+  // connected load counts (the seed uses the flight schedule PAX/crew; the order
+  // may carry revised numbers). A resumed/forwarded plan keeps its saved plan.
+  useEffect(() => {
+    if (!initialPlan) applyLoad(planPax, planCrew);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // If the aircraft is cleared while on a loading tab, fall back to Load Summary.
+  useEffect(() => {
+    if (!aircraftType && (tab === "beverages" || tab === "amenities" || tab === "equipment")) setTab("overview");
+  }, [aircraftType, tab]);
+
+  // Editable tabs render straight from the Galley Item Master — items added on
+  // the Galley Items page appear here without code changes.
+  const galleyItems = useMemo(() => loadGalleyItems(), []);
+  const sheetSections = useMemo(() => getGalleySections(galleyItems), [galleyItems]);
+  // Auto-total fields are the sum of the items that roll up to them (never
+  // hand-keyed) and merged into the plan on save/forward.
+  const derivedTotals = computeAutoTotals(g, galleyItems);
+  const finalPlan = (): GalleyPlan => ({ ...g, ...derivedTotals });
+
+  // Meals integrate from Dispatch but are RESCALED to the (possibly overridden)
+  // load counts: a percent-based passenger line recomputes off planPax, other
+  // lines scale proportionally; crew meals scale off the original crew count.
+  const scaledMeals = useMemo(() => {
+    if (!dispatchSection) return null;
+    const origPax = dispatchSection.paxLines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
+    const paxLines = dispatchSection.paxLines.map((l) => ({
+      ...l,
+      qty: l.percent != null
+        ? Math.round(planPax * (l.percent / 100))
+        : origPax > 0 ? Math.round((Number(l.qty) || 0) * planPax / origPax) : (Number(l.qty) || 0),
+    }));
+    const origCrew = flight?.crew ?? 0;
+    const crewMeals = (dispatchSection.crewMeals ?? []).map((c) => ({
+      ...c,
+      qty: origCrew > 0 ? String(Math.round((Number(c.qty) || 0) * planCrew / origCrew)) : c.qty,
+    }));
+    return { origPax, paxLines, crewMeals };
+  }, [dispatchSection, planPax, planCrew, flight?.crew]);
 
   // Read-only field (connected value, not editable) for the connected tabs.
   const RO = ({ label, value }: { label: string; value: string | number }) => (
@@ -2716,67 +2870,111 @@ export function GalleyPlanningModal({
     </div>
   );
 
-  const signPreparedBy = APT_EXECUTIVES[0];
-  const signPhysicallyBy = APT_EXECUTIVES[1];
-  const signCheckedBy = APT_EXECUTIVES[2];
-  const signHandedBy = HOC_NAMES[0];
-  const [signedAt] = useState(() => nowTimeStr());
+  // Sign-off (handing/taking accountability) is captured later, at the physical
+  // hand-off, on the Loading QC & Sign-Off page — not here at planning time.
 
   function GF({ label, k, unit }: { label: string; k: string; unit?: string }) {
+    // Load counts are adjustable with −/＋ steppers (clamped at 0) as well as by
+    // typing directly. Non-numeric entries fall back to 0 when stepping.
+    const step = (delta: number) => sg(k, String(Math.max(0, (Number(g[k]) || 0) + delta)));
+    const stepBtn = "h-7 w-7 shrink-0 flex items-center justify-center rounded-md border border-input bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors";
     return (
       <div>
         <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">{label}</p>
         <div className="flex items-center gap-1">
+          <button type="button" onClick={() => step(-1)} className={stepBtn} aria-label={`Decrease ${label}`}>
+            <Minus className="h-3 w-3" />
+          </button>
           <input
             type="text"
             value={g[k] ?? ""}
             onChange={(e) => sg(k, e.target.value)}
-            className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
+            className="w-full h-7 px-2 text-xs text-center border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
           />
+          <button type="button" onClick={() => step(1)} className={stepBtn} aria-label={`Increase ${label}`}>
+            <Plus className="h-3 w-3" />
+          </button>
           {unit && <span className="text-[10px] text-muted-foreground shrink-0">{unit}</span>}
         </div>
       </div>
     );
   }
 
+  // Renders every sheet section of an item-master group as an editable grid;
+  // auto-total fields render read-only with their computed value.
+  const renderItemGroup = (group: "Beverages" | "Amenities" | "Equipment") => (
+    <div className="space-y-5">
+      {sheetSections.filter((sec) => sec.group === group).map((sec) => (
+        <div key={sec.title}>
+          <GalleySecTitle>{sec.title}</GalleySecTitle>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {sec.fields.map((f) =>
+              f.auto
+                ? <RO key={f.k} label={`${f.label} (Auto)`} value={derivedTotals[f.k] ?? "0"} />
+                : <GF key={f.k} k={f.k} label={f.label} unit={f.unit} />,
+            )}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+
   // Standard galley-loading sequence: load summary → meals → beverages →
   // amenities/consumables → equipment.
+  // Load Summary + Meals always show; the loading sections appear only once an
+  // aircraft type is selected (their quantities come from that type's standard).
   const TABS: { key: GTab; label: string }[] = [
     { key: "overview", label: "Load Summary" },
     { key: "meals", label: "Meals" },
-    { key: "beverages", label: "Beverages & Tea" },
-    { key: "amenities", label: "Amenities & Consumables" },
-    { key: "equipment", label: "Equipment" },
   ];
+  if (aircraftType) {
+    TABS.push(
+      { key: "beverages", label: "Beverages & Tea" },
+      { key: "amenities", label: "Amenities & Consumables" },
+      { key: "equipment", label: "Equipment" },
+    );
+  }
 
   return (
+    <>
     <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
-      <DialogContent className="w-full max-w-5xl max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
+      <DialogContent className="w-full max-w-[95vw] lg:max-w-5xl max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
 
         {/* Header */}
         <div className="bg-gradient-to-r from-sky-700 to-sky-600 text-white px-6 pt-5 pb-0 shrink-0">
           <div className="flex items-start justify-between mb-3">
             <div>
-              <p className="text-[10px] text-sky-200 uppercase tracking-widest font-semibold">US-Bangla Airlines · Handing / Taking Sheet</p>
-              <h2 className="text-lg font-bold mt-0.5">Galley Planning</h2>
+              <h2 className="text-lg font-bold">Galley Planning</h2>
               <div className="flex flex-wrap items-center gap-2.5 mt-1 text-xs">
                 <span className="font-bold text-white bg-sky-800/60 px-2 py-0.5 rounded-full">
                   {flight?.flight ?? entry.flightId}
                 </span>
                 <span className="text-sky-100">{flight?.sector ?? "—"}</span>
                 <span className="text-sky-200">{entry.packagingDate}</span>
-                {flight?.aircraft && (
-                  <span className="bg-sky-800/50 px-2 py-0.5 rounded-full text-sky-100">{flight.aircraft}</span>
-                )}
-                <span className="text-sky-300">PAX: {flight?.pax ?? totalQty(entry.mealLines)}</span>
-                <span className="text-sky-300">Crew: {flight?.crew ?? "—"}</span>
+                {/* Aircraft type — editable; sets this plan's loading standard.
+                    "+ Add" registers a new aircraft (also to Configuration). */}
+                <span className="flex items-center gap-1">
+                  <select
+                    value={aircraftType}
+                    onChange={(e) => applyAircraft(e.target.value)}
+                    title="Aircraft type — sets the loading standard for this plan"
+                    className="bg-sky-800/50 text-sky-50 text-xs rounded-full pl-2 pr-1 py-0.5 border border-sky-400/40 focus:outline-none focus:ring-1 focus:ring-white/60 cursor-pointer max-w-[150px]"
+                  >
+                    <option value="" className="text-slate-800">Select aircraft…</option>
+                    {aircraftTypes.map((t) => (
+                      <option key={t} value={t} className="text-slate-800">{t}</option>
+                    ))}
+                  </select>
+                </span>
+                <span className="text-sky-300">PAX: {planPax}</span>
+                <span className="text-sky-300">Crew: {planCrew}</span>
               </div>
             </div>
             <button onClick={onClose} className="text-sky-200 hover:text-white p-1 rounded transition-colors mt-0.5">
               <CloseIcon className="h-5 w-5" />
             </button>
           </div>
-          <div className="flex gap-0.5">
+          <div className="flex flex-wrap items-center gap-0.5">
             {TABS.map(({ key, label }) => (
               <button
                 key={key}
@@ -2788,7 +2986,38 @@ export function GalleyPlanningModal({
                 {label}
               </button>
             ))}
+            {!aircraftType && (
+              <span className="ml-2 text-[10px] text-sky-200 italic">Select an aircraft to load beverages, amenities &amp; equipment</span>
+            )}
           </div>
+        </div>
+
+        {/* Stock source — where the transferred consumables are drawn from */}
+        <div className="shrink-0 border-b bg-white px-6 py-2.5 flex flex-wrap items-center gap-x-5 gap-y-2">
+          <span className="text-[10px] font-bold uppercase tracking-widest text-sky-700 flex items-center gap-1.5">
+            <Warehouse className="h-3.5 w-3.5" /> Transfer From
+          </span>
+          <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <span className="uppercase tracking-wider font-semibold">Office</span>
+            <select
+              value={source.officeId}
+              onChange={(e) => changeOffice(e.target.value)}
+              className="h-7 px-1.5 text-[11px] border border-input rounded-md bg-background focus:ring-1 focus:ring-ring focus:outline-none"
+            >
+              {activeOffices.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <span className="uppercase tracking-wider font-semibold">Warehouse</span>
+            <select
+              value={source.warehouseId}
+              onChange={(e) => setSource((s) => ({ ...s, warehouseId: e.target.value }))}
+              className="h-7 px-1.5 text-[11px] border border-input rounded-md bg-background focus:ring-1 focus:ring-ring focus:outline-none"
+            >
+              {warehouseChoices.length === 0 && <option value="">No warehouses</option>}
+              {warehouseChoices.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+            </select>
+          </label>
         </div>
 
         {/* Tab content */}
@@ -2799,9 +3028,6 @@ export function GalleyPlanningModal({
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <GalleySecTitle>Flight Order</GalleySecTitle>
-                  <span className="text-[10px] text-sky-700 bg-sky-50 border border-sky-100 rounded-full px-2 py-0.5 font-semibold">
-                    Connected from Order Management
-                  </span>
                 </div>
                 {order ? (
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -2821,12 +3047,38 @@ export function GalleyPlanningModal({
                 )}
               </div>
               <div>
-                <GalleySecTitle>Load Counts</GalleySecTitle>
+                <GalleySecTitle>
+                  Load Counts
+                  <span className="ml-2 text-[9px] font-normal normal-case tracking-normal text-muted-foreground">Editable — override if an updated record arrives</span>
+                </GalleySecTitle>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <RO label="Passengers (PAX)" value={order?.pax ?? flight?.pax ?? "—"} />
-                  <RO label="Crew" value={order?.crew ?? flight?.crew ?? "—"} />
-                  <RO label="Special Meals" value={order?.specialMeals ?? "—"} />
-                  <RO label="Total Meals (PAX + Crew)" value={order ? order.pax + order.crew : (flight ? flight.pax + flight.crew : "—")} />
+                  {/* Editable, inline (not a nested component) to keep input focus
+                      through the plan-recompute re-render. */}
+                  <div>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Passengers (PAX)</p>
+                    <input
+                      type="number" min={0} value={planPax}
+                      onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) applyLoad(Math.max(0, v), planCrew); }}
+                      className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Crew</p>
+                    <input
+                      type="number" min={0} value={planCrew}
+                      onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) applyLoad(planPax, Math.max(0, v)); }}
+                      className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Special Meals</p>
+                    <input
+                      type="number" min={0} value={specialMeals}
+                      onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) setSpecialMeals(Math.max(0, v)); }}
+                      className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
+                    />
+                  </div>
+                  <RO label="Total Meals (PAX + Crew + Special)" value={planPax + planCrew + specialMeals} />
                 </div>
               </div>
             </div>
@@ -2836,18 +3088,15 @@ export function GalleyPlanningModal({
             <div className="space-y-5">
               <div className="flex items-center justify-between">
                 <GalleySecTitle>Meals</GalleySecTitle>
-                <span className="text-[10px] text-sky-700 bg-sky-50 border border-sky-100 rounded-full px-2 py-0.5 font-semibold">
-                  Integrated from Dispatch
-                </span>
               </div>
-              {dispatchSection ? (
+              {dispatchSection && scaledMeals ? (
                 <>
                   <div>
                     <GalleySecTitle>Passenger Meals</GalleySecTitle>
                     <div className="rounded-lg border border-border overflow-hidden">
-                      {dispatchSection.paxLines.length === 0 ? (
+                      {scaledMeals.paxLines.length === 0 ? (
                         <div className="px-3 py-2 text-xs text-muted-foreground">No passenger meal lines.</div>
-                      ) : dispatchSection.paxLines.map((l, i) => (
+                      ) : scaledMeals.paxLines.map((l, i) => (
                         <div key={i} className={`flex items-center justify-between px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
                           <span className="text-slate-700">{l.itemName}{l.percent != null ? ` · ${l.percent}%` : ""}</span>
                           <span className="font-semibold tabular-nums">{l.qty}</span>
@@ -2855,11 +3104,11 @@ export function GalleyPlanningModal({
                       ))}
                     </div>
                   </div>
-                  {dispatchSection.crewMeals && dispatchSection.crewMeals.length > 0 && (
+                  {scaledMeals.crewMeals.length > 0 && (
                     <div>
                       <GalleySecTitle>Crew Meals</GalleySecTitle>
                       <div className="rounded-lg border border-border overflow-hidden">
-                        {dispatchSection.crewMeals.map((c, i) => (
+                        {scaledMeals.crewMeals.map((c, i) => (
                           <div key={i} className={`flex items-center justify-between px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
                             <span className="text-slate-700">{c.type}</span>
                             <span className="font-semibold tabular-nums">{c.qty}</span>
@@ -2871,9 +3120,14 @@ export function GalleyPlanningModal({
                   <div>
                     <GalleySecTitle>Special Meals</GalleySecTitle>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      <RO label="VGML — Veg / Vegan" value={dispatchSection.vgml ?? 0} />
-                      <RO label="CHML — Child" value={dispatchSection.chml ?? 0} />
-                      <RO label="SPML — Special" value={dispatchSection.spml ?? 0} />
+                      {/* Only special-meal types actually loaded are shown (zero-count types hidden). */}
+                      {[
+                        { label: "VGML — Veg / Vegan", qty: dispatchSection.vgml ?? 0 },
+                        { label: "CHML — Child", qty: dispatchSection.chml ?? 0 },
+                        { label: "SPML — Special", qty: dispatchSection.spml ?? 0 },
+                      ].filter((s) => s.qty > 0).map((s) => (
+                        <RO key={s.label} label={s.label} value={s.qty} />
+                      ))}
                       <RO label="Total Special" value={specialTotal} />
                     </div>
                   </div>
@@ -2886,218 +3140,31 @@ export function GalleyPlanningModal({
             </div>
           )}
 
-          {tab === "beverages" && (
-            <div className="space-y-5">
-              <div>
-                <GalleySecTitle>Hot & Cold Beverage</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="coke225" label="Coke 2.25 Ltr" unit="btl" />
-                  <GF k="pepsi225" label="Pepsi 2.25 Ltr" unit="btl" />
-                  <GF k="sprite225" label="Sprite 2.25 Ltr" unit="btl" />
-                  <GF k="sevenUp225" label="7 UP 2.25 Ltr" unit="btl" />
-                  <GF k="totalColdBev" label="Total Cold Beverage" />
-                  <GF k="cokeCanBC" label="Coke Can 250ml (BC & Crew)" unit="cans" />
-                  <GF k="spriteCanBC" label="Sprite Can 250ml (BC & Crew)" unit="cans" />
-                  <GF k="dietCanBC" label="Diet Can 250ml (BC & Crew)" unit="cans" />
-                  <GF k="totalCanBC" label="Total Coke / Sprite / Diet Can" />
-                  <GF k="water250Pax" label="Water 250ml for Passenger (1:2)" unit="btls" />
-                  <GF k="water500Crew" label="Water 500ml for Crew" unit="btls" />
-                  <GF k="appleJuice1L" label="Apple Juice 1 Ltr" unit="btl" />
-                  <GF k="mangoJuice1L" label="Mango Juice 1 Ltr" unit="btl" />
-                  <GF k="orangeJuice1L" label="Orange Juice 1 Ltr" unit="btl" />
-                  <GF k="totalJuice" label="Total Juice 1 Ltr" />
-                </div>
-              </div>
-              <div>
-                <GalleySecTitle>Tea, Coffee & Others</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="coffee50g" label="Coffee (Per Btl 50g)" unit="btl" />
-                  <GF k="coffeeMate400g" label="Coffee Mate 400g (80 cups)" unit="btl" />
-                  <GF k="teaBag50pcs" label="Tea Bag (Per Box 50 pcs)" unit="box" />
-                  <GF k="greenTea" label="Green Tea" unit="pcs" />
-                  <GF k="zeroCal" label="Zero Cal" unit="pcs" />
-                  <GF k="milkPowder" label="Milk Powder" unit="kg" />
-                  <GF k="sugar" label="Sugar" unit="kg" />
-                  <GF k="paperCup" label="Paper Cup" unit="pcs" />
-                  <GF k="saltPkt" label="Salt PKT" unit="pcs" />
-                  <GF k="pepperPkt" label="Pepper PKT" unit="pcs" />
-                  <GF k="teaPot" label="Tea Pot" unit="pcs" />
-                  <GF k="disposableSpoon" label="Disposable Spoon" unit="pcs" />
-                  <GF k="extraCottage" label="Extra Cottage" unit="pcs" />
-                  <GF k="sanitizerBtl" label="Sanitizer BTL" unit="btl" />
-                </div>
-              </div>
-              <div>
-                <GalleySecTitle>Beverages — BC / Lounge</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="soda" label="Soda" />
-                  <GF k="lemon" label="Lemoned" />
-                  <GF k="ginger" label="Ginger" />
-                  <GF k="tonic" label="Tonic" />
-                </div>
-              </div>
-            </div>
-          )}
+          {tab === "beverages" && renderItemGroup("Beverages")}
 
-          {tab === "amenities" && (
-            <div className="space-y-5">
-              <div>
-                <GalleySecTitle>Tissues & Napkins</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="wetTissue" label="Wet Tissue (As per Pax + Crew)" unit="pcs" />
-                  <GF k="napkinPaper" label="Napkin Paper (PKT)" unit="pkts" />
-                  <GF k="facialTissue" label="Facial Tissue (Box)" unit="box" />
-                  <GF k="kitchenTowel" label="Kitchen Towel" unit="pcs" />
-                  <GF k="babyWipes" label="Baby Wipes" unit="pcs" />
-                </div>
-              </div>
-              <div>
-                <GalleySecTitle>Bedding & Covers</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="blanket" label="Blanket" unit="pcs" />
-                  <GF k="headRestCover" label="Head Rest Cover" unit="pcs" />
-                  <GF k="pillowCoverSmall" label="Pillow Cover (Small)" unit="pcs" />
-                  <GF k="pillowCoverBig" label="Pillow Cover (Big)" unit="pcs" />
-                </div>
-              </div>
-              <div>
-                <GalleySecTitle>Hygiene & Cleaning</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="handWash" label="Hand Wash (BTL)" unit="btl" />
-                  <GF k="toiletRoll" label="Toilet Roll" unit="pcs" />
-                  <GF k="aerosol" label="Aerosol" unit="pcs" />
-                  <GF k="celeste" label="Celeste" unit="pcs" />
-                  <GF k="airFreshener" label="Air Freshener" unit="pcs" />
-                  <GF k="surgicalGloves" label="Surgical Hand Gloves (Pair)" unit="pairs" />
-                  <GF k="ovenGloves" label="Oven Gloves" unit="pcs" />
-                  <GF k="surgicalMask" label="Surgical Face Mask" unit="pcs" />
-                  <GF k="oneShot" label="One Shot" unit="pcs" />
-                </div>
-              </div>
-              <div>
-                <GalleySecTitle>Safety & Sickness</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="safetyCard" label="Safety Instruction Card" unit="pcs" />
-                  <GF k="sicknessBag" label="Sickness Bag" unit="pcs" />
-                </div>
-              </div>
-              <div>
-                <GalleySecTitle>Medical Kits</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="dailyMedeline" label="Daily Medeline (Set)" unit="pcs" />
-                  <GF k="emkBox" label="EMK BOX" unit="pc" />
-                  <GF k="upkBox" label="UPK BOX" unit="pcs" />
-                  <GF k="fanBox" label="FAN BOX" unit="pcs" />
-                </div>
-              </div>
-              <div>
-                <GalleySecTitle>Forms & Cards</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="healthDeclForm" label="RD Health Declaration Form" unit="pcs" />
-                  <GF k="baggageDeclForm" label="Baggage Declaration Form" unit="pcs" />
-                  <GF k="bdEdCard" label="Bangladeshi ED Card" unit="pcs" />
-                  <GF k="commentsCard" label="Comments Card" unit="pcs" />
-                </div>
-              </div>
-            </div>
-          )}
+          {tab === "amenities" && renderItemGroup("Amenities")}
 
-          {tab === "equipment" && (
-            <div className="space-y-5">
-              <div>
-                <GalleySecTitle>Meal Cart & Wastage Cart</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="fullMealCart" label="Full Meal Cart" />
-                  <GF k="halfMealCart" label="Half Meal Cart" />
-                  <GF k="fullWastageCart" label="Full Wastage Cart" />
-                  <GF k="halfWastageCart" label="Half Wastage Cart" />
-                  <GF k="standardCabinet" label="Standard Cabinet" />
-                  <GF k="ovenCase" label="Oven Case" />
-                </div>
-              </div>
-              <div>
-                <GalleySecTitle>Ceramic & Glassware</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="ceramicMealBowl" label="Ceramic Meal Bowl" />
-                  <GF k="ceramicDessertBowl" label="Ceramic Dessert Bowl" />
-                  <GF k="ceramicButterBowl" label="Ceramic Butter Bowl" />
-                  <GF k="ceramicNutBowl" label="Ceramic Nut Bowl" />
-                  <GF k="teaCupSaucer" label="Tea Cup & Saucer" />
-                  <GF k="tumblerGlass" label="Tumbler Glass" />
-                  <GF k="snacksPlate" label="Snacks Plate" />
-                </div>
-              </div>
-              <div>
-                <GalleySecTitle>Cutlery & Service Items</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="teaSpoon" label="Tea Spoon" />
-                  <GF k="dinnerFork" label="Dinner Fork" />
-                  <GF k="dinnerSpoon" label="Dinner Spoon" />
-                  <GF k="dinnerKnife" label="Dinner Knife" />
-                  <GF k="longSpoon" label="Long Spoon" />
-                  <GF k="iceTong" label="Ice Tong" />
-                  <GF k="iceBucket" label="Ice Bucket" />
-                  <GF k="roundTraySteel" label="Round Tray (Steel)" />
-                  <GF k="serviceTrayBig" label="Service Tray (Big)" />
-                </div>
-              </div>
-              <div>
-                <GalleySecTitle>Fresh Fruits for Passengers &amp; Crew</GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <GF k="banana" label="Banana" unit="pcs" />
-                  <GF k="apple" label="Apple" unit="pcs" />
-                </div>
-              </div>
-            </div>
-          )}
+          {tab === "equipment" && renderItemGroup("Equipment")}
         </div>
 
-        {/* Sign-off footer */}
+        {/* Footer */}
         <div className="border-t bg-white px-6 py-4 shrink-0">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-sky-700 mb-2">Sign-Off</p>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-            {[
-              { label: "Dispatch Sheet Prepared By", name: signPreparedBy, desig: APT_EXEC_DESIG[signPreparedBy] ?? "APT Executive", clr: "sky" },
-              { label: "Physically Handed Over By", name: signPhysicallyBy, desig: APT_EXEC_DESIG[signPhysicallyBy] ?? "APT Executive", clr: "sky" },
-              { label: "Flight Checked Over By", name: signCheckedBy, desig: APT_EXEC_DESIG[signCheckedBy] ?? "APT Executive", clr: "sky" },
-              { label: "Flight Handed Over By", name: signHandedBy, desig: HOC_DESIG[signHandedBy] ?? "Head of Catering", clr: "violet" },
-            ].map(({ label, name, desig, clr }) => (
-              <div key={label}>
-                <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">{label}</p>
-                <div className={`text-[9px] ${clr === "violet" ? "text-violet-700 bg-violet-50 border-violet-100" : "text-sky-700 bg-sky-50 border-sky-100"} border rounded px-1.5 py-1 leading-snug`}>
-                  <span className="font-semibold">{name}</span>
-                  <span className="text-slate-400 mx-0.5">·</span>
-                  <span>{desig}</span>
-                  <br />
-                  <span className="tabular-nums text-slate-500">{signedAt}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <p className="text-[11px] text-muted-foreground italic">
-              Sign-off auto-recorded on forwarding
-            </p>
-            <div className="flex items-center gap-2">
+          <div className="flex items-center justify-end flex-wrap gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <Button variant="outline" onClick={onClose}>Close</Button>
               <Button
                 className="bg-sky-600 hover:bg-sky-700 text-white"
-                onClick={() => toast.success("Galley plan saved successfully")}
-              >
-                Save Galley Plan
-              </Button>
-              <Button
-                className="bg-violet-600 hover:bg-violet-700 text-white"
                 onClick={() => {
-                  onForward(g, {
-                    preparedBy: { name: signPreparedBy, designation: APT_EXEC_DESIG[signPreparedBy] ?? "APT Executive", signedAt: signedAt },
-                    physicallyHandedBy: { name: signPhysicallyBy, designation: APT_EXEC_DESIG[signPhysicallyBy] ?? "APT Executive", signedAt: signedAt },
-                    flightCheckedBy: { name: signCheckedBy, designation: APT_EXEC_DESIG[signCheckedBy] ?? "APT Executive", signedAt: signedAt },
-                    handedOverBy: { name: signHandedBy, designation: HOC_DESIG[signHandedBy] ?? "Head of Catering", signedAt: signedAt },
-                  });
+                  if (!source.warehouseId) {
+                    toast.error("Select the office and warehouse to transfer stock from.");
+                    return;
+                  }
+                  if (onSaveDraft) onSaveDraft(finalPlan(), source);
+                  else toast.success("Galley plan saved successfully");
+                  onClose();
                 }}
               >
-                Forward To Aircraft
+                Save
               </Button>
             </div>
           </div>
@@ -3105,5 +3172,22 @@ export function GalleyPlanningModal({
 
       </DialogContent>
     </Dialog>
+
+    {/* Add Aircraft — reuses the Configuration > Aircraft form. The new aircraft
+        is a real fleet entry and its type is applied to this plan. */}
+    <Dialog open={showAddAircraft} onOpenChange={setShowAddAircraft}>
+      <DialogContent className="w-full max-w-[95vw] sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Add Aircraft</DialogTitle>
+        </DialogHeader>
+        <AircraftFields
+          mode="create"
+          nextId={`ACF-${String(aircraftRows.length + 1).padStart(3, "0")}`}
+          airlines={airlineList}
+          onSave={onAircraftCreated}
+        />
+      </DialogContent>
+    </Dialog>
+    </>
   );
 }

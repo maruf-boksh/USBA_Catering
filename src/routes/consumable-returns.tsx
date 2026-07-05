@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
@@ -14,7 +14,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  Plus, ArrowLeft, Save, Undo2, PackageCheck, Recycle, Trash2, X, Clock, Eye, Pencil, Search,
+  Plus, ArrowLeft, Save, Undo2, PackageCheck, Recycle, Trash2, X, Clock, Eye, Search,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -105,8 +105,7 @@ const selectCls =
 // ── Page ───────────────────────────────────────────────────────────────────
 
 export default function ConsumableReturnsPage() {
-  const [view, setView] = useState<"list" | "create" | "edit">("list");
-  const [editTarget, setEditTarget] = useState<ConsumableReturn | null>(null);
+  const [view, setView] = useState<"list" | "create">("list");
 
   const [returns, setReturns] = usePersistedState<ConsumableReturn[]>("consumable-returns", []);
   const [inventoryItems, setInventoryItems] = usePersistedState<ConsumableItem[]>(
@@ -114,54 +113,40 @@ export default function ConsumableReturnsPage() {
     consumableItems,
   );
   const [usage] = usePersistedState<ConsumableUsage[]>("consumable-usage", SEED_USAGE);
-  const [returnApprovals, setReturnApprovals] = usePersistedState<ReturnApprovalRecord[]>(
-    "consumable-return-approvals",
-    [],
-  );
 
   const nextId = `CR-${String(7000 + returns.length + 1).padStart(4, "0")}`;
-  const nextApprovalId = `RA-${String(8000 + returnApprovals.length + 1).padStart(4, "0")}`;
+
+  // Add the reusable portion of a return straight back into the consumable
+  // inventory, so it shows in Inventory & Store → Stock Overview immediately
+  // (non-reusable / meal lines are wastage and are not restocked).
+  const creditReusableToStock = (lines: ReturnLine[]) => {
+    setInventoryItems((prev) => {
+      const updated = [...prev];
+      for (const l of lines) {
+        if (l.lineType === "meal" || !l.reusable) continue;
+        const rq = Number(l.qty) || 0;
+        if (rq <= 0) continue;
+        const idx = updated.findIndex((it) => it.id === l.itemId);
+        if (idx === -1) continue;
+        const item = updated[idx];
+        const newStock = item.stock + rq;
+        updated[idx] = {
+          ...item,
+          stock: newStock,
+          status: newStock < item.reorder * 0.5 ? "Critical" : newStock < item.reorder ? "Low" : "OK",
+        };
+      }
+      return updated;
+    });
+  };
 
   const addReturn = (r: ConsumableReturn) => {
-    // Create approval record for all lines — approver will enter Reusable QTY
-    const approvalId = nextApprovalId;
-    const approvalRecord: ReturnApprovalRecord = {
-      id: approvalId,
-      returnId: r.id,
-      flight: r.flight,
-      sector: r.sector,
-      date: r.date,
-      returnedBy: r.returnedBy,
-      status: "Pending",
-      lines: r.lines.map((l) => ({
-        itemId: l.itemId,
-        itemName: l.itemName,
-        lineType: l.lineType ?? "item",
-        uom: l.uom,
-        returnQty: l.qty,
-        reusableQty: 0,
-      })),
-    };
-    setReturnApprovals((prev) => [approvalRecord, ...prev]);
-    setReturns((prev) => [{ ...r, approvalId, forwardToAirportStore: true }, ...prev]);
+    creditReusableToStock(r.lines);
+    setReturns((prev) => [r, ...prev]);
     setView("list");
   };
 
-  const updateReturn = (updated: ConsumableReturn) => {
-    setReturns((prev) => prev.map((r) => (r.id === editTarget!.id ? updated : r)));
-    setEditTarget(null);
-    setView("list");
-  };
-
-  const handleEdit = (r: ConsumableReturn) => {
-    setEditTarget(r);
-    setView("edit");
-  };
-
-  const handleBack = () => {
-    setEditTarget(null);
-    setView("list");
-  };
+  const handleBack = () => setView("list");
 
   return (
     <>
@@ -180,15 +165,13 @@ export default function ConsumableReturnsPage() {
         }
       />
 
-      {view === "list" && <ReturnList returns={returns} approvals={returnApprovals} onEdit={handleEdit} />}
-      {(view === "create" || view === "edit") && (
+      {view === "list" && <ReturnList returns={returns} />}
+      {view === "create" && (
         <ReturnCreate
-          key={editTarget?.id ?? "create"}
           nextId={nextId}
           inventoryItems={inventoryItems}
           usageLog={usage}
-          onSave={view === "edit" ? updateReturn : addReturn}
-          editRecord={editTarget ?? undefined}
+          onSave={addReturn}
         />
       )}
 
@@ -200,15 +183,9 @@ export default function ConsumableReturnsPage() {
 
 function ReturnList({
   returns,
-  approvals,
-  onEdit,
 }: {
   returns: ConsumableReturn[];
-  approvals: ReturnApprovalRecord[];
-  onEdit: (r: ConsumableReturn) => void;
 }) {
-  const getApproval = (r: ConsumableReturn) =>
-    r.approvalId ? approvals.find((a) => a.id === r.approvalId) : undefined;
   const [viewRecord, setViewRecord] = useState<ConsumableReturn | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -298,25 +275,6 @@ function ReturnList({
                   <div>{viewRecord.sector}</div>
                 </div>
               </div>
-              {/* Approval status if forwarded to airport store */}
-              {viewRecord.forwardToAirportStore && (() => {
-                const appr = viewRecord.approvalId ? approvals.find(a => a.id === viewRecord.approvalId) : undefined;
-                if (!appr) return null;
-                return (
-                  <div className={cn(
-                    "rounded-md border p-3 text-xs mb-1",
-                    appr.status === "Approved"  && "border-success/30 bg-success/5 text-success",
-                    appr.status === "Declined"  && "border-destructive/30 bg-destructive/5 text-destructive",
-                    appr.status === "Pending"   && "border-warning/40 bg-warning/5 text-warning-foreground",
-                  )}>
-                    <div className="font-semibold uppercase tracking-wider text-[10px] mb-1">
-                      Airport Store Approval — {appr.status}
-                    </div>
-                    {appr.processedBy && <div>Processed by {appr.processedBy} · {appr.processedAt}</div>}
-                    {appr.declineReason && <div className="mt-1"><span className="font-medium">Reason:</span> {appr.declineReason}</div>}
-                  </div>
-                );
-              })()}
               <div className="border border-border rounded-md overflow-hidden">
                 <Table>
                   <TableHeader className="bg-muted/40">
@@ -324,13 +282,12 @@ function ReturnList({
                       <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider">Type</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider text-right">Return QTY</TableHead>
-                      <TableHead className="text-xs uppercase tracking-wider text-right">Reusable QTY</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Restocked</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {viewRecord.lines.map((l, i) => {
-                      const appr = viewRecord.approvalId ? approvals.find(a => a.id === viewRecord.approvalId) : undefined;
-                      const apprLine = appr?.lines.find(al => al.itemId === l.itemId);
+                      const restocked = l.lineType !== "meal" && l.reusable;
                       return (
                         <TableRow key={i} className="hover:bg-muted/30">
                           <TableCell>
@@ -346,14 +303,10 @@ function ReturnList({
                             {l.qty} {l.uom}
                           </TableCell>
                           <TableCell className="text-right tabular-nums text-xs whitespace-nowrap">
-                            {appr?.status === "Approved" && apprLine ? (
-                              <span className={apprLine.reusableQty > 0 ? "text-success font-semibold" : "text-muted-foreground"}>
-                                {apprLine.reusableQty} {l.uom}
-                              </span>
-                            ) : appr?.status === "Declined" ? (
-                              <span className="text-destructive text-[10px]">Declined</span>
+                            {restocked ? (
+                              <span className="text-success font-semibold">{l.qty} {l.uom}</span>
                             ) : (
-                              <span className="text-muted-foreground text-[10px]">Pending</span>
+                              <span className="text-muted-foreground text-[10px]">{l.lineType === "meal" ? "—" : "Wastage"}</span>
                             )}
                           </TableCell>
                         </TableRow>
@@ -433,15 +386,13 @@ function ReturnList({
               <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Issued QTY</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Return QTY</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">Airport Store (Reusable QTY)</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">Wastage</TableHead>
               <TableHead className="text-xs uppercase tracking-wider text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {filteredReturns.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={10} className="text-center text-sm text-muted-foreground py-8">
+                <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-8">
                   {returns.length === 0 ? "No consumable returns logged yet." : "No records match the current filters."}
                 </TableCell>
               </TableRow>
@@ -495,66 +446,6 @@ function ReturnList({
                         {l.qty} {l.uom}
                       </TableCell>
 
-                      {/* Airport Store (Reusable QTY) — per line when approved, status badge on first line */}
-                      <TableCell>
-                        {r.forwardToAirportStore && (() => {
-                          const appr = getApproval(r);
-                          if (!appr) return null;
-                          if (appr.status === "Approved") {
-                            const apprLine = appr.lines.find(al => al.itemId === l.itemId);
-                            return (
-                              <span className={cn("text-xs tabular-nums", apprLine && apprLine.reusableQty > 0 ? "text-success font-semibold" : "text-muted-foreground")}>
-                                {apprLine ? `${apprLine.reusableQty} ${l.uom}` : "—"}
-                              </span>
-                            );
-                          }
-                          if (li !== 0) return null;
-                          return (
-                            <div>
-                              <Badge
-                                variant="outline"
-                                className={cn(
-                                  "text-[10px]",
-                                  appr.status === "Declined" && "border-destructive/40 bg-destructive/10 text-destructive",
-                                  appr.status === "Pending"  && "border-warning/40 bg-warning/10 text-warning-foreground",
-                                )}
-                              >
-                                {appr.status}
-                              </Badge>
-                              {appr.status === "Declined" && appr.declineReason && (
-                                <div className="text-[10px] text-destructive mt-0.5 max-w-[160px] truncate">
-                                  {appr.declineReason}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })()}
-                      </TableCell>
-
-                      {/* Wastage — only when Approved */}
-                      <TableCell>
-                        {r.forwardToAirportStore && (() => {
-                          const appr = getApproval(r);
-                          if (!appr || appr.status !== "Approved") return null;
-                          const apprLine = appr.lines.find(al => al.itemId === l.itemId);
-                          if (!apprLine) return null;
-                          const wastage = l.qty - apprLine.reusableQty;
-                          if (wastage <= 0) return <span className="text-xs text-muted-foreground">—</span>;
-                          return (
-                            <div>
-                              <span className="text-xs tabular-nums text-destructive font-semibold">
-                                {wastage} {l.uom}
-                              </span>
-                              {apprLine.partialReason && (
-                                <div className="text-[10px] text-muted-foreground mt-0.5 italic max-w-[180px] truncate" title={apprLine.partialReason}>
-                                  {apprLine.partialReason}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })()}
-                      </TableCell>
-
                       {/* Actions — only first line */}
                       <TableCell className="text-right">
                         {li === 0 && (
@@ -566,14 +457,6 @@ function ReturnList({
                               className="text-muted-foreground hover:text-primary transition-colors"
                             >
                               <Eye className="h-4 w-4" />
-                            </button>
-                            <button
-                              type="button"
-                              title="Edit"
-                              onClick={() => onEdit(r)}
-                              className="text-muted-foreground hover:text-primary transition-colors"
-                            >
-                              <Pencil className="h-4 w-4" />
                             </button>
                           </div>
                         )}
@@ -643,36 +526,53 @@ function ReturnCreate({
   const flightsAtTime = FLIGHT_SCHEDULES.filter((f) => f.time === scheduledTime);
   const selectedSchedule = FLIGHT_SCHEDULES.find((f) => f.flight === flight);
 
+  // Items/meals ISSUED to the selected flight — the options the return-line
+  // dropdown offers (you return against what was issued). Not pre-listed; the
+  // handler picks each from the DDL.
+  type IssuedOption = {
+    value: string; itemId: string; lineType: "item" | "meal"; name: string; issuedQty: number; uom: string;
+  };
+  const issuedOptions = useMemo<IssuedOption[]>(() => {
+    if (!flight) return [];
+    const items = usageLog
+      .filter((u) => u.flight === flight)
+      .map((u) => {
+        const inv = inventoryItems.find((it) => it.id === u.itemId);
+        return {
+          value: `item:${u.itemId}`, itemId: u.itemId, lineType: "item" as const,
+          name: inv?.name ?? u.itemId, issuedQty: u.qty, uom: inv?.uom ?? "Pcs",
+        };
+      });
+    const meals = mealOrders
+      .filter((m) => m.flight === flight)
+      .map((m) => ({
+        value: `meal:${m.id}`, itemId: m.id, lineType: "meal" as const,
+        name: `${m.mealType} — ${m.menuStandard} (${m.serviceGroup})`, issuedQty: m.items, uom: "Pcs",
+      }));
+    return [...items, ...meals];
+  }, [flight, usageLog, inventoryItems]);
+
   const handleTimeChange = (time: string) => {
     setScheduledTime(time);
     setFlight("");
   };
 
+  // Selecting a flight resets to a single empty line — the handler adds only the
+  // items actually being returned, each chosen from the issued-items DDL.
   const handleFlightChange = (flightNo: string) => {
     setFlight(flightNo);
-    if (flightNo) {
-      const issued = usageLog.filter((u) => u.flight === flightNo);
-      const issuedMeals = mealOrders.filter((m) => m.flight === flightNo);
-      const itemLines: DraftLine[] = issued.map((u) => ({
-        itemId: u.itemId,
-        qty: "",
-        issuedQty: u.qty,
-        lineType: "item" as const,
-        reusable: false,
-      }));
-      const mealLines: DraftLine[] = issuedMeals.map((m) => ({
-        itemId: m.id,
-        qty: "",
-        issuedQty: m.items,
-        lineType: "meal" as const,
-        mealName: `${m.mealType} — ${m.menuStandard} (${m.serviceGroup})`,
-        reusable: false,
-      }));
-      const allLines = [...itemLines, ...mealLines];
-      setLines(allLines.length > 0 ? allLines : [emptyLine()]);
-    } else {
-      setLines([emptyLine()]);
-    }
+    setLines([emptyLine()]);
+  };
+
+  const pickIssued = (idx: number, value: string) => {
+    const opt = issuedOptions.find((o) => o.value === value);
+    if (!opt) { updateLine(idx, { itemId: "", issuedQty: undefined, mealName: undefined }); return; }
+    updateLine(idx, {
+      itemId: opt.itemId,
+      lineType: opt.lineType,
+      mealName: opt.lineType === "meal" ? opt.name : undefined,
+      issuedQty: opt.issuedQty,
+    });
   };
 
   const updateLine = (idx: number, patch: Partial<DraftLine>) => {
@@ -737,12 +637,13 @@ function ReturnCreate({
       sector: selectedSchedule?.sector ?? "",
       returnedBy: isEdit ? editRecord!.returnedBy : CURRENT_USER,
       savedAt: isEdit ? editRecord!.savedAt : new Date().toISOString(),
-      forwardToAirportStore: true,
       lines: returnLines,
     });
 
+    const reusableCount = returnLines.filter((l) => l.lineType !== "meal" && l.reusable).length;
     toast.success(
-      `${recordId} ${isEdit ? "updated" : "sent for approval"} — ${returnLines.length} line${returnLines.length !== 1 ? "s" : ""} for ${flight}.`,
+      `${recordId} saved — ${returnLines.length} line${returnLines.length !== 1 ? "s" : ""} for ${flight}` +
+      (reusableCount > 0 ? ` · ${reusableCount} reusable item${reusableCount !== 1 ? "s" : ""} added to Stock Overview.` : "."),
     );
   };
 
@@ -832,7 +733,7 @@ function ReturnCreate({
                     )}>
                       {line.lineType === "meal" ? "Meal" : "Item"}
                     </span>
-                    {lines.length > 1 && line.lineType === "item" && (
+                    {lines.length > 1 && (
                       <button
                         className="absolute top-3 right-3 text-muted-foreground hover:text-destructive transition-colors"
                         onClick={() => removeLine(idx)}
@@ -842,32 +743,33 @@ function ReturnCreate({
                       </button>
                     )}
                     <div className="grid grid-cols-1 md:grid-cols-5 gap-x-6 gap-y-3 mt-5">
-                      {/* Name / Item selector */}
+                      {/* Issued-item selector (DDL of what was issued to the flight) */}
                       <div className="md:col-span-2">
-                        {line.lineType === "meal" ? (
-                          <>
-                            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Meal</Label>
-                            <div className="mt-1 h-9 flex items-center px-3 rounded-md border border-indigo-200 bg-indigo-50/50 text-sm font-medium text-indigo-800">
-                              {line.mealName ?? line.itemId}
-                            </div>
-                          </>
-                        ) : (
-                          <>
-                            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item *</Label>
-                            <select
-                              value={line.itemId}
-                              onChange={(e) => updateLine(idx, { itemId: e.target.value })}
-                              className={selectCls}
-                            >
-                              <option value="">Select item…</option>
-                              {inventoryItems.map((it) => (
-                                <option key={it.id} value={it.id}>
-                                  {it.name} ({it.id})
-                                </option>
-                              ))}
-                            </select>
-                          </>
-                        )}
+                        <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item *</Label>
+                        <select
+                          value={line.itemId ? `${line.lineType}:${line.itemId}` : ""}
+                          onChange={(e) => pickIssued(idx, e.target.value)}
+                          className={selectCls}
+                          disabled={!flight}
+                        >
+                          <option value="">
+                            {!flight ? "Select a flight first…" : issuedOptions.length === 0 ? "No issued items for this flight" : "Select issued item…"}
+                          </option>
+                          {/* Keep the current selection visible even if not in the list (edit) */}
+                          {line.itemId && !issuedOptions.some((o) => o.value === `${line.lineType}:${line.itemId}`) && (
+                            <option value={`${line.lineType}:${line.itemId}`}>
+                              {line.mealName ?? inv?.name ?? line.itemId}
+                            </option>
+                          )}
+                          {issuedOptions.map((o) => {
+                            const takenByOther = lines.some((l, i) => i !== idx && l.itemId && `${l.lineType}:${l.itemId}` === o.value);
+                            return (
+                              <option key={o.value} value={o.value} disabled={takenByOther}>
+                                {o.name} · issued {o.issuedQty} {o.uom}{o.lineType === "meal" ? " (Meal)" : ""}
+                              </option>
+                            );
+                          })}
+                        </select>
                       </div>
                       {/* Issued QTY */}
                       <div>
@@ -933,7 +835,7 @@ function ReturnCreate({
           {/* Bottom button */}
           <div className="flex justify-end mt-6 pt-4 border-t border-border">
             <Button onClick={save}>
-              <Save className="h-4 w-4 mr-1.5" /> {isEdit ? "Update Return" : "Send for Approval"}
+              <Save className="h-4 w-4 mr-1.5" /> Save Return
             </Button>
           </div>
         </CardContent>
