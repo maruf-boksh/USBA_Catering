@@ -20,6 +20,10 @@ import { consumableItems, type ConsumableItem } from "@/lib/sample-data";
 import { officeName, warehouseName } from "@/components/common/LocationPicker";
 import { printGalleySheet } from "@/lib/galley-sheet";
 import { getGalleySections, loadGalleyItems } from "@/lib/galley-items";
+import {
+  loadDrafts, persistDrafts, type GalleyDraft,
+} from "@/lib/galley-drafts";
+import { getAuthUser } from "@/lib/auth";
 // Galley planning was relocated out of Dispatch Monitoring into this module.
 // The plan editor (GalleyPlanningModal) and its data plumbing still live in
 // dispatch-monitoring.tsx (exported); this page is the new launch surface.
@@ -96,20 +100,7 @@ function allocateConsumables(
   return lines.length;
 }
 
-// ── Draft plans ──────────────────────────────────────────────────────────────
-// "Save Galley Plan" persists a working draft per dispatch entry (separate from
-// the forwarded records that Dispatch Monitoring executes against).
-type GalleyDraft = { plan: GalleyPlan; savedAt: string };
-const DRAFT_KEY = "galley_plan_drafts";
-function loadDrafts(): Record<string, GalleyDraft> {
-  try { return JSON.parse(sessionStorage.getItem(DRAFT_KEY) ?? "{}") as Record<string, GalleyDraft>; }
-  catch { return {}; }
-}
-function persistDrafts(d: Record<string, GalleyDraft>) {
-  try { sessionStorage.setItem(DRAFT_KEY, JSON.stringify(d)); } catch { /* non-fatal */ }
-}
-
-const STATUS_LABEL: Record<GalleyStatus, string> = {
+export const STATUS_LABEL: Record<GalleyStatus, string> = {
   forwarded: "Forwarded",
   loading: "Loading",
   completed: "Loaded",
@@ -126,12 +117,12 @@ const STATUS_CLASS: Record<GalleyStatus, string> = {
 const badgeCls = "h-5 px-1.5 text-[10px] font-bold uppercase tracking-wider";
 
 /** Row status incl. the two pre-forward states. */
-type RowStatus = GalleyStatus | "draft" | "not_planned";
-const ROW_STATUS_LABEL: Record<RowStatus, string> = {
+export type RowStatus = GalleyStatus | "draft" | "not_planned";
+export const ROW_STATUS_LABEL: Record<RowStatus, string> = {
   ...STATUS_LABEL, draft: "Draft", not_planned: "Not Planned",
 };
 
-function rowStatusBadge(status: RowStatus) {
+export function rowStatusBadge(status: RowStatus) {
   if (status === "not_planned") {
     return <Badge variant="outline" className={`${badgeCls} bg-slate-100 text-slate-600 border-slate-300`}>Not Planned</Badge>;
   }
@@ -156,7 +147,7 @@ function ViewRow({ label, value, unit }: { label: string; value: string; unit?: 
   );
 }
 
-function GalleySheetViewModal({
+export function GalleySheetViewModal({
   rec, flight, onClose,
 }: {
   rec: GalleyLoadingRecord;
@@ -300,19 +291,36 @@ export default function GalleyPlanningPage() {
     return hay.includes(query.trim().toLowerCase());
   });
 
-  const saveDraft = (entryId: string, plan: GalleyPlan) => {
+  const saveDraft = (
+    entryId: string, plan: GalleyPlan,
+    source: { officeId: string; warehouseId: string },
+  ) => {
     setDrafts((prev) => {
-      const next = { ...prev, [entryId]: { plan, savedAt: nowTimeStr() } };
+      const next = { ...prev, [entryId]: { plan, savedAt: nowTimeStr(), source } };
       persistDrafts(next);
       return next;
     });
-    toast.success("Galley plan draft saved — resume any time from this page.");
+    toast.success("Galley plan saved — forward it to aircraft from this page.");
+  };
+
+  // The forwarded record starts with only the preparer stamped (the forwarding
+  // user). The physical hand-off signatories are captured later on the Loading
+  // QC & Sign-Off page.
+  const initialSignOff = (): GalleyLoadingRecord["signOff"] => {
+    const authUser = getAuthUser();
+    const blank = { name: "", designation: "", signedAt: "" };
+    return {
+      preparedBy: { name: authUser?.name ?? "—", designation: authUser?.role ?? "APT Executive", signedAt: nowTimeStr() },
+      physicallyHandedBy: { ...blank },
+      flightCheckedBy: { ...blank },
+      handedOverBy: { ...blank },
+    };
   };
 
   // Persist a finalized galley plan as a "forwarded" loading record — the same
   // hand-off Dispatch Monitoring then executes (Start Loading → QC → approve).
   const forward = (
-    entryId: string, plan: GalleyPlan, signOff: GalleyLoadingRecord["signOff"],
+    entryId: string, plan: GalleyPlan,
     source: { officeId: string; warehouseId: string },
   ) => {
     const entry = entries.find((e) => e.id === entryId);
@@ -324,7 +332,7 @@ export default function GalleyPlanningPage() {
       flightLabel: flightLabel(entry.flightId),
       date: entry.packagingDate,
       galleyPlan: plan,
-      signOff,
+      signOff: initialSignOff(),
       galleyStatus: "forwarded",
       forwardedAt: nowTimeStr(),
       sourceOfficeId: source.officeId,
@@ -356,6 +364,20 @@ export default function GalleyPlanningPage() {
     }
     setPlanEntryId(null);
     toast.success(`Galley plan forwarded to aircraft loading${allocMsg}.`);
+  };
+
+  // Forward a saved draft straight from the list, using the sign-off + transfer
+  // source captured when it was saved (falling back to sensible defaults for a
+  // draft saved before those were stored).
+  const forwardDraft = (entryId: string) => {
+    const draft = drafts[entryId];
+    if (!draft) return;
+    const source = draft.source ?? { officeId: "OFF-001", warehouseId: "WH-001" };
+    if (!source.warehouseId) {
+      toast.error("No transfer warehouse on this draft — re-open, pick one, and save.");
+      return;
+    }
+    forward(entryId, draft.plan, source);
   };
 
   const planEntry = planEntryId ? entries.find((e) => e.id === planEntryId) : undefined;
@@ -447,10 +469,19 @@ export default function GalleyPlanningPage() {
                             <Button variant="outline" size="sm" className="h-7 px-2.5 text-xs" onClick={() => setViewEntryId(e.id)}>
                               <Eye className="h-3 w-3 mr-1" /> View
                             </Button>
+                          ) : status === "draft" ? (
+                            // A saved plan can be re-opened or forwarded to aircraft.
+                            <>
+                              <Button variant="outline" size="sm" className="h-7 px-2.5 text-xs" onClick={() => setPlanEntryId(e.id)}>
+                                <LayoutGrid className="h-3 w-3 mr-1" /> Resume Draft
+                              </Button>
+                              <Button size="sm" className="h-7 px-2.5 text-xs bg-violet-600 hover:bg-violet-700 text-white" onClick={() => forwardDraft(e.id)}>
+                                <Send className="h-3 w-3 mr-1" /> Forward
+                              </Button>
+                            </>
                           ) : (
                             <Button size="sm" className="h-7 px-2.5 text-xs" onClick={() => setPlanEntryId(e.id)}>
-                              <LayoutGrid className="h-3 w-3 mr-1" />
-                              {status === "draft" ? "Resume Draft" : "Plan Galley"}
+                              <LayoutGrid className="h-3 w-3 mr-1" /> Plan Galley
                             </Button>
                           )}
                         </div>
@@ -470,8 +501,7 @@ export default function GalleyPlanningPage() {
           flight={planFlight}
           initialPlan={recByEntry.get(planEntry.id)?.galleyPlan ?? drafts[planEntry.id]?.plan}
           onClose={() => setPlanEntryId(null)}
-          onForward={(plan, signOff, source) => forward(planEntry.id, plan, signOff, source)}
-          onSaveDraft={(plan) => saveDraft(planEntry.id, plan)}
+          onSaveDraft={(plan, source) => saveDraft(planEntry.id, plan, source)}
         />
       )}
 

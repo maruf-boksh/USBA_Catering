@@ -180,9 +180,11 @@ export const NAV_MODULES: NavModule[] = [
     children: [
       { key: '/airline-consumables-overview', label: 'Galley Dashboard',  icon: I(LayoutDashboard) },
       { key: '/galley-planning',              label: 'Galley Plan',       icon: I(LayoutGrid) },
+      { key: '/galley-qc',                    label: 'Loading QC & Sign-Off', icon: I(ClipboardCheck) },
       { key: '/consumable-allocation', label: 'Flight Allocation', icon: I(Plane) },
       { key: '/consumable-returns',    label: 'Returns',           icon: I(Undo2) },
       { key: '/galley-loading-standards', label: 'Loading Standards', icon: I(Scale) },
+      { key: '/galley-stowage',           label: 'Aircraft Stowage Plan', icon: I(Boxes) },
     ],
   },
 

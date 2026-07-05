@@ -36,6 +36,8 @@ import ConsumableUsagePage from "@/routes/consumable-usage";
 import ConsumableAllocationPage from "@/routes/consumable-allocation";
 import ConsumableReturnsPage from "@/routes/consumable-returns";
 import GalleyPlanningPage from "@/routes/galley-planning";
+import GalleyQcPage from "@/routes/galley-qc";
+import GalleyStowagePage from "@/routes/galley-stowage";
 import GalleyLoadingStandardsPage from "@/routes/galley-loading-standards";
 import AirlineEquipmentsPage from "@/routes/airline-equipments";
 import AssetAssignmentPage from "@/routes/asset-assignment";
@@ -118,6 +120,8 @@ export function App() {
             <Route path="/consumable-allocation" element={<ConsumableAllocationPage />} />
             <Route path="/consumable-returns" element={<ConsumableReturnsPage />} />
             <Route path="/galley-planning" element={<GalleyPlanningPage />} />
+            <Route path="/galley-qc" element={<GalleyQcPage />} />
+            <Route path="/galley-stowage" element={<GalleyStowagePage />} />
             {/* Consumables inventory was merged into Inventory & Store — redirect the old route. */}
             <Route path="/airline-consumables" element={<Navigate to="/inventory" replace />} />
             <Route path="/galley-loading-standards" element={<GalleyLoadingStandardsPage />} />

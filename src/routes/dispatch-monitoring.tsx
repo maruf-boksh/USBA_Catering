@@ -26,12 +26,10 @@ import {
 import { getFlightOrders } from "@/lib/flight-orders-store";
 import { INITIAL_RECORDS as DISPATCH_SEED_RECORDS } from "@/routes/dispatch";
 import { useRole } from "@/lib/roles";
-import { getAuthUser } from "@/lib/auth";
 import { useWorkflow } from "@/lib/workflow-store";
 import { useDispatchMonitoringSettings } from "@/lib/dispatch-monitoring-settings";
 import { KpiCard } from "@/components/common/KpiCard";
-import { printGalleySheet } from "@/lib/galley-sheet";
-import { loadStandardsForAircraft, computeStandard, standardFactor, isMealMixKey, galleyAircraftTypes } from "@/lib/galley-standards";
+import { loadStandardsForAircraft, computeStandard, isMealMixKey, galleyAircraftTypes } from "@/lib/galley-standards";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { AircraftFields } from "@/routes/config-aircraft";
 import { getGalleySections, computeAutoTotals, loadGalleyItems } from "@/lib/galley-items";
@@ -74,18 +72,18 @@ export const flights: FlightOption[] = (() => {
 
 // ── Constants ───────────────────────────────────────────────────────────────
 const MEAL_TYPES = ["Regular", "Vegetarian (VGML)", "Child Meal (CHML)", "Diabetic (DBML)", "Kosher (KSML)", "Crew Meal", "Special"];
-const APT_EXECUTIVES = ["M. Hossain", "T. Ahmed", "K. Sultana", "A. Chowdhury", "R. Islam"];
+export const APT_EXECUTIVES = ["M. Hossain", "T. Ahmed", "K. Sultana", "A. Chowdhury", "R. Islam"];
 const APT_DESIGNATIONS = ["APT Executive", "Sr. APT Executive", "Airport Supervisor", "Ground Operations Officer"];
 const FS_HYGIENE_EXECUTIVES = ["F. Begum", "A. Khan", "S. Islam", "R. Akter", "N. Hossain"];
-const HOC_NAMES = ["Cmd. A. Rahman", "M. Jahangir", "S. Karim", "R. Ahmed"];
-const APT_EXEC_DESIG: Record<string, string> = {
+export const HOC_NAMES = ["Cmd. A. Rahman", "M. Jahangir", "S. Karim", "R. Ahmed"];
+export const APT_EXEC_DESIG: Record<string, string> = {
   "M. Hossain": "Sr. APT Executive",
   "T. Ahmed": "APT Executive",
   "K. Sultana": "Airport Supervisor",
   "A. Chowdhury": "Ground Operations Officer",
   "R. Islam": "APT Executive",
 };
-const HOC_DESIG: Record<string, string> = {
+export const HOC_DESIG: Record<string, string> = {
   "Cmd. A. Rahman": "Head of Catering",
   "M. Jahangir": "Catering Supervisor",
   "S. Karim": "Head of Catering",
@@ -2602,13 +2600,14 @@ export function buildInitialGalley(entry: DispatchEntry, flight: FlightOption | 
   const crew = flight?.crew ?? 7;
   const child = flight?.child ?? 0;
   const eyPax = Math.max(0, pax - child);
-  // Meal split uses standard defaults (meals are integrated from Dispatch, so
-  // these only seed the computed meal-summary + stowage figures).
-  const cockpit = Math.round(standardFactor(std, "mix.cockpitCrew", 2));
+  // These figures only SEED the computed meal-summary + stowage numbers — the
+  // actual meal breakdown is integrated from Dispatch (Order → Meal Planning →
+  // Dispatch), so the split is fixed catering-policy defaults, not a standard.
+  const cockpit = 2;
   const cabin = Math.max(0, crew - cockpit);
-  const chickenShare = standardFactor(std, "mix.depChickenPct", 40) / 100;
-  const vegShare = standardFactor(std, "mix.depVegPct", 2.5) / 100;
-  const arrShare = standardFactor(std, "mix.arrLoadPct", 35) / 100;
+  const chickenShare = 0.40;
+  const vegShare = 0.025;
+  const arrShare = 0.35;
   const depChicken = Math.round(eyPax * chickenShare);
   const depBeef = eyPax - depChicken;
   const depVeg = Math.max(1, Math.round(eyPax * vegShare));
@@ -2713,7 +2712,6 @@ export function GalleyPlanningModal({
   flight,
   initialPlan,
   onClose,
-  onForward,
   onSaveDraft,
 }: {
   entry: DispatchEntry;
@@ -2722,12 +2720,13 @@ export function GalleyPlanningModal({
    *  the last issued sheet instead of wiping it back to defaults. */
   initialPlan?: GalleyPlan;
   onClose: () => void;
-  onForward: (
+  /** Save persists a draft with the chosen transfer source; the plan is
+   *  forwarded to aircraft loading later from the list page (sign-off is
+   *  captured on the Loading QC & Sign-Off page). */
+  onSaveDraft?: (
     plan: GalleyPlan,
-    signOff: GalleyLoadingRecord["signOff"],
     source: { officeId: string; warehouseId: string },
   ) => void;
-  onSaveDraft?: (plan: GalleyPlan) => void;
 }) {
   type GTab = "overview" | "meals" | "beverages" | "amenities" | "equipment";
   const [tab, setTab] = useState<GTab>("overview");
@@ -2744,12 +2743,31 @@ export function GalleyPlanningModal({
     setSource({ officeId, warehouseId: keep ? source.warehouseId : whs[0]?.id ?? "" });
   };
 
+  // Connected records: Load Summary from Order Management, Meals from Dispatch.
+  const flightNo = flight?.flight ?? entry.flightId;
+  const order = useMemo(() => {
+    const list = getFlightOrders().filter((o) => o.orderType !== "crew" && o.flight === flightNo);
+    return list.find((o) => o.date === entry.packagingDate) ?? list[0];
+  }, [flightNo, entry.packagingDate]);
+  const dispatchSection = useMemo(() => dispatchSectionForFlight(flightNo), [flightNo]);
+  const specialTotal = (dispatchSection?.vgml ?? 0) + (dispatchSection?.chml ?? 0) + (dispatchSection?.spml ?? 0);
+
+  // Load counts default from the connected order but are EDITABLE — an updated
+  // record (revised PAX/crew/special meals) can arrive after the flight was
+  // scheduled. Editing PAX/Crew re-derives the standard-driven quantities for
+  // the new load; Special Meals is an informational override.
+  const [planPax, setPlanPax] = useState<number>(order?.pax ?? flight?.pax ?? totalQty(entry.mealLines));
+  const [planCrew, setPlanCrew] = useState<number>(order?.crew ?? flight?.crew ?? 7);
+  // Default to the dispatched breakdown sum (VGML+CHML+SPML) so the summary
+  // matches the Meals-tab total; fall back to the order-level count.
+  const [specialMeals, setSpecialMeals] = useState<number>(specialTotal || order?.specialMeals || 0);
+
   // Aircraft type for this plan — drives which loading standard fills the
   // beverage/amenity/equipment quantities. Editable from the header, and a new
   // aircraft can be registered on the fly (shared with Configuration > Aircraft).
-  const planPax = flight?.pax ?? totalQty(entry.mealLines);
-  const planCrew = flight?.crew ?? 7;
-  const [aircraftType, setAircraftType] = useState(flight?.aircraft ?? "");
+  // Starts UNSELECTED — the beverage/amenity/equipment (loading) tabs only appear
+  // once an aircraft type is chosen, so their per-aircraft standard is applied.
+  const [aircraftType, setAircraftType] = useState("");
   const [aircraftTypes, setAircraftTypes] = useState(() => {
     const list = galleyAircraftTypes();
     return flight?.aircraft && !list.includes(flight.aircraft)
@@ -2760,17 +2778,27 @@ export function GalleyPlanningModal({
   const [airlineList] = usePersistedState<Airline[]>("config-airline-rows", AIRLINE_SEED);
   const [showAddAircraft, setShowAddAircraft] = useState(false);
 
-  // Switch the plan to another aircraft type: re-apply that type's loading
-  // standard onto the standard-covered quantities (meals are left alone — they
-  // flow from Dispatch, not the aircraft standard).
+  // Re-derive the whole loading sheet from a load + aircraft type — buildInitialGalley
+  // pulls THAT aircraft's Loading Standard (loadStandardsForAircraft) for the
+  // beverage/amenity/equipment scales and integrates meals from Dispatch. Both
+  // the aircraft-type selector and the editable load counts run through this, so
+  // the sheet stays connected to the aircraft's standard.
+  const rebuildPlan = (pax: number, crew: number, aircraft: string) => {
+    const effFlight = {
+      ...(flight ?? {}),
+      pax, crew,
+      child: flight?.child ?? 0,
+      adult: Math.max(0, pax - (flight?.child ?? 0)),
+      aircraft,
+    } as FlightOption;
+    setG(buildInitialGalley(entry, effFlight));
+  };
+
+  // Switch the plan to another aircraft type: re-derive the sheet from that
+  // type's loading standard (meals still flow from Dispatch inside buildInitialGalley).
   const applyAircraft = (type: string) => {
     setAircraftType(type);
-    const std = loadStandardsForAircraft(type);
-    setG((prev) => {
-      const next = { ...prev };
-      for (const s of std) if (!isMealMixKey(s.key)) next[s.key] = String(computeStandard(s, planPax, planCrew));
-      return next;
-    });
+    rebuildPlan(planPax, planCrew, type);
   };
   const onAircraftCreated = (a: Aircraft) => {
     setAircraftRows((prev) => [a, ...prev]);
@@ -2782,6 +2810,27 @@ export function GalleyPlanningModal({
     toast.success(`Aircraft "${a.registration}" added — plan set to the ${a.type} loading standard.`);
   };
 
+  // Re-derive the whole plan when the load counts are overridden, so the
+  // standard-driven quantities scale to the updated PAX/Crew.
+  const applyLoad = (pax: number, crew: number) => {
+    setPlanPax(pax);
+    setPlanCrew(crew);
+    rebuildPlan(pax, crew, aircraftType);
+  };
+
+  // On first open of a FRESH plan, reconcile the seeded quantities to the
+  // connected load counts (the seed uses the flight schedule PAX/crew; the order
+  // may carry revised numbers). A resumed/forwarded plan keeps its saved plan.
+  useEffect(() => {
+    if (!initialPlan) applyLoad(planPax, planCrew);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // If the aircraft is cleared while on a loading tab, fall back to Load Summary.
+  useEffect(() => {
+    if (!aircraftType && (tab === "beverages" || tab === "amenities" || tab === "equipment")) setTab("overview");
+  }, [aircraftType, tab]);
+
   // Editable tabs render straight from the Galley Item Master — items added on
   // the Galley Items page appear here without code changes.
   const galleyItems = useMemo(() => loadGalleyItems(), []);
@@ -2791,15 +2840,25 @@ export function GalleyPlanningModal({
   const derivedTotals = computeAutoTotals(g, galleyItems);
   const finalPlan = (): GalleyPlan => ({ ...g, ...derivedTotals });
 
-  // Load Summary is connected from Order Management; Meals integrate from the
-  // Dispatch (packaging) record. Beverages/Amenities/Equipment stay manual.
-  const flightNo = flight?.flight ?? entry.flightId;
-  const order = useMemo(() => {
-    const list = getFlightOrders().filter((o) => o.orderType !== "crew" && o.flight === flightNo);
-    return list.find((o) => o.date === entry.packagingDate) ?? list[0];
-  }, [flightNo, entry.packagingDate]);
-  const dispatchSection = useMemo(() => dispatchSectionForFlight(flightNo), [flightNo]);
-  const specialTotal = (dispatchSection?.vgml ?? 0) + (dispatchSection?.chml ?? 0) + (dispatchSection?.spml ?? 0);
+  // Meals integrate from Dispatch but are RESCALED to the (possibly overridden)
+  // load counts: a percent-based passenger line recomputes off planPax, other
+  // lines scale proportionally; crew meals scale off the original crew count.
+  const scaledMeals = useMemo(() => {
+    if (!dispatchSection) return null;
+    const origPax = dispatchSection.paxLines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
+    const paxLines = dispatchSection.paxLines.map((l) => ({
+      ...l,
+      qty: l.percent != null
+        ? Math.round(planPax * (l.percent / 100))
+        : origPax > 0 ? Math.round((Number(l.qty) || 0) * planPax / origPax) : (Number(l.qty) || 0),
+    }));
+    const origCrew = flight?.crew ?? 0;
+    const crewMeals = (dispatchSection.crewMeals ?? []).map((c) => ({
+      ...c,
+      qty: origCrew > 0 ? String(Math.round((Number(c.qty) || 0) * planCrew / origCrew)) : c.qty,
+    }));
+    return { origPax, paxLines, crewMeals };
+  }, [dispatchSection, planPax, planCrew, flight?.crew]);
 
   // Read-only field (connected value, not editable) for the connected tabs.
   const RO = ({ label, value }: { label: string; value: string | number }) => (
@@ -2811,50 +2870,8 @@ export function GalleyPlanningModal({
     </div>
   );
 
-  // Sign-off is no longer four fixed people. The preparer is the logged-in
-  // user (real accountability); the other three signatories are chosen from
-  // the airport / catering roster at forward time.
-  const authUser = getAuthUser();
-  const preparedByName = authUser?.name ?? APT_EXECUTIVES[0];
-  const preparedByDesig = APT_EXEC_DESIG[preparedByName] ?? authUser?.role ?? "APT Executive";
-  const [signPhysicallyBy, setSignPhysicallyBy] = useState(APT_EXECUTIVES[1]);
-  const [signCheckedBy, setSignCheckedBy] = useState(APT_EXECUTIVES[2]);
-  const [signHandedBy, setSignHandedBy] = useState(HOC_NAMES[0]);
-  const [signedAt] = useState(() => nowTimeStr());
-
-  const aptDesig = (name: string) => APT_EXEC_DESIG[name] ?? "APT Executive";
-  const hocDesig = (name: string) => HOC_DESIG[name] ?? "Head of Catering";
-  const signOff: GalleyLoadingRecord["signOff"] = {
-    preparedBy: { name: preparedByName, designation: preparedByDesig, signedAt },
-    physicallyHandedBy: { name: signPhysicallyBy, designation: aptDesig(signPhysicallyBy), signedAt },
-    flightCheckedBy: { name: signCheckedBy, designation: aptDesig(signCheckedBy), signedAt },
-    handedOverBy: { name: signHandedBy, designation: hocDesig(signHandedBy), signedAt },
-  };
-
-  // Signatory picker cell (roster-backed dropdown) used in the sign-off footer.
-  function SignPicker({ label, value, onChange, options, tone }: {
-    label: string; value: string; onChange: (v: string) => void; options: readonly string[]; tone: "sky" | "violet";
-  }) {
-    const desig = tone === "violet" ? hocDesig(value) : aptDesig(value);
-    const toneCls = tone === "violet"
-      ? "text-violet-700 bg-violet-50 border-violet-100"
-      : "text-sky-700 bg-sky-50 border-sky-100";
-    return (
-      <div>
-        <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">{label}</p>
-        <select
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className={`w-full h-7 px-1 text-[11px] font-semibold border rounded focus:ring-1 focus:ring-ring focus:outline-none ${toneCls}`}
-        >
-          {options.map((o) => <option key={o} value={o}>{o}</option>)}
-        </select>
-        <p className="text-[9px] text-slate-500 mt-0.5 leading-snug px-0.5">
-          {desig} <span className="text-slate-300">·</span> <span className="tabular-nums">{signedAt}</span>
-        </p>
-      </div>
-    );
-  }
+  // Sign-off (handing/taking accountability) is captured later, at the physical
+  // hand-off, on the Loading QC & Sign-Off page — not here at planning time.
 
   function GF({ label, k, unit }: { label: string; k: string; unit?: string }) {
     // Load counts are adjustable with −/＋ steppers (clamped at 0) as well as by
@@ -2904,13 +2921,19 @@ export function GalleyPlanningModal({
 
   // Standard galley-loading sequence: load summary → meals → beverages →
   // amenities/consumables → equipment.
+  // Load Summary + Meals always show; the loading sections appear only once an
+  // aircraft type is selected (their quantities come from that type's standard).
   const TABS: { key: GTab; label: string }[] = [
     { key: "overview", label: "Load Summary" },
     { key: "meals", label: "Meals" },
-    { key: "beverages", label: "Beverages & Tea" },
-    { key: "amenities", label: "Amenities & Consumables" },
-    { key: "equipment", label: "Equipment" },
   ];
+  if (aircraftType) {
+    TABS.push(
+      { key: "beverages", label: "Beverages & Tea" },
+      { key: "amenities", label: "Amenities & Consumables" },
+      { key: "equipment", label: "Equipment" },
+    );
+  }
 
   return (
     <>
@@ -2921,8 +2944,7 @@ export function GalleyPlanningModal({
         <div className="bg-gradient-to-r from-sky-700 to-sky-600 text-white px-6 pt-5 pb-0 shrink-0">
           <div className="flex items-start justify-between mb-3">
             <div>
-              <p className="text-[10px] text-sky-200 uppercase tracking-widest font-semibold">US-Bangla Airlines · Handing / Taking Sheet</p>
-              <h2 className="text-lg font-bold mt-0.5">Galley Planning</h2>
+              <h2 className="text-lg font-bold">Galley Planning</h2>
               <div className="flex flex-wrap items-center gap-2.5 mt-1 text-xs">
                 <span className="font-bold text-white bg-sky-800/60 px-2 py-0.5 rounded-full">
                   {flight?.flight ?? entry.flightId}
@@ -2938,29 +2960,21 @@ export function GalleyPlanningModal({
                     title="Aircraft type — sets the loading standard for this plan"
                     className="bg-sky-800/50 text-sky-50 text-xs rounded-full pl-2 pr-1 py-0.5 border border-sky-400/40 focus:outline-none focus:ring-1 focus:ring-white/60 cursor-pointer max-w-[150px]"
                   >
-                    {aircraftTypes.length === 0 && <option value="">No aircraft</option>}
+                    <option value="" className="text-slate-800">Select aircraft…</option>
                     {aircraftTypes.map((t) => (
                       <option key={t} value={t} className="text-slate-800">{t}</option>
                     ))}
                   </select>
-                  <button
-                    type="button"
-                    onClick={() => setShowAddAircraft(true)}
-                    title="Register a new aircraft"
-                    className="flex items-center gap-0.5 bg-sky-800/50 hover:bg-sky-800/90 text-sky-50 text-[10px] font-semibold rounded-full px-1.5 py-1 border border-sky-400/40 transition-colors"
-                  >
-                    <Plus className="h-3 w-3" /> Add
-                  </button>
                 </span>
-                <span className="text-sky-300">PAX: {flight?.pax ?? totalQty(entry.mealLines)}</span>
-                <span className="text-sky-300">Crew: {flight?.crew ?? "—"}</span>
+                <span className="text-sky-300">PAX: {planPax}</span>
+                <span className="text-sky-300">Crew: {planCrew}</span>
               </div>
             </div>
             <button onClick={onClose} className="text-sky-200 hover:text-white p-1 rounded transition-colors mt-0.5">
               <CloseIcon className="h-5 w-5" />
             </button>
           </div>
-          <div className="flex flex-wrap gap-0.5">
+          <div className="flex flex-wrap items-center gap-0.5">
             {TABS.map(({ key, label }) => (
               <button
                 key={key}
@@ -2972,6 +2986,9 @@ export function GalleyPlanningModal({
                 {label}
               </button>
             ))}
+            {!aircraftType && (
+              <span className="ml-2 text-[10px] text-sky-200 italic">Select an aircraft to load beverages, amenities &amp; equipment</span>
+            )}
           </div>
         </div>
 
@@ -3001,9 +3018,6 @@ export function GalleyPlanningModal({
               {warehouseChoices.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
             </select>
           </label>
-          <span className="text-[10px] text-muted-foreground ml-auto hidden md:block">
-            Stock is deducted from this location on <strong>Forward to Aircraft</strong>.
-          </span>
         </div>
 
         {/* Tab content */}
@@ -3014,9 +3028,6 @@ export function GalleyPlanningModal({
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <GalleySecTitle>Flight Order</GalleySecTitle>
-                  <span className="text-[10px] text-sky-700 bg-sky-50 border border-sky-100 rounded-full px-2 py-0.5 font-semibold">
-                    Connected from Order Management
-                  </span>
                 </div>
                 {order ? (
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -3036,12 +3047,38 @@ export function GalleyPlanningModal({
                 )}
               </div>
               <div>
-                <GalleySecTitle>Load Counts</GalleySecTitle>
+                <GalleySecTitle>
+                  Load Counts
+                  <span className="ml-2 text-[9px] font-normal normal-case tracking-normal text-muted-foreground">Editable — override if an updated record arrives</span>
+                </GalleySecTitle>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <RO label="Passengers (PAX)" value={order?.pax ?? flight?.pax ?? "—"} />
-                  <RO label="Crew" value={order?.crew ?? flight?.crew ?? "—"} />
-                  <RO label="Special Meals" value={order?.specialMeals ?? "—"} />
-                  <RO label="Total Meals (PAX + Crew)" value={order ? order.pax + order.crew : (flight ? flight.pax + flight.crew : "—")} />
+                  {/* Editable, inline (not a nested component) to keep input focus
+                      through the plan-recompute re-render. */}
+                  <div>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Passengers (PAX)</p>
+                    <input
+                      type="number" min={0} value={planPax}
+                      onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) applyLoad(Math.max(0, v), planCrew); }}
+                      className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Crew</p>
+                    <input
+                      type="number" min={0} value={planCrew}
+                      onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) applyLoad(planPax, Math.max(0, v)); }}
+                      className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Special Meals</p>
+                    <input
+                      type="number" min={0} value={specialMeals}
+                      onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) setSpecialMeals(Math.max(0, v)); }}
+                      className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
+                    />
+                  </div>
+                  <RO label="Total Meals (PAX + Crew + Special)" value={planPax + planCrew + specialMeals} />
                 </div>
               </div>
             </div>
@@ -3051,18 +3088,15 @@ export function GalleyPlanningModal({
             <div className="space-y-5">
               <div className="flex items-center justify-between">
                 <GalleySecTitle>Meals</GalleySecTitle>
-                <span className="text-[10px] text-sky-700 bg-sky-50 border border-sky-100 rounded-full px-2 py-0.5 font-semibold">
-                  Integrated from Dispatch
-                </span>
               </div>
-              {dispatchSection ? (
+              {dispatchSection && scaledMeals ? (
                 <>
                   <div>
                     <GalleySecTitle>Passenger Meals</GalleySecTitle>
                     <div className="rounded-lg border border-border overflow-hidden">
-                      {dispatchSection.paxLines.length === 0 ? (
+                      {scaledMeals.paxLines.length === 0 ? (
                         <div className="px-3 py-2 text-xs text-muted-foreground">No passenger meal lines.</div>
-                      ) : dispatchSection.paxLines.map((l, i) => (
+                      ) : scaledMeals.paxLines.map((l, i) => (
                         <div key={i} className={`flex items-center justify-between px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
                           <span className="text-slate-700">{l.itemName}{l.percent != null ? ` · ${l.percent}%` : ""}</span>
                           <span className="font-semibold tabular-nums">{l.qty}</span>
@@ -3070,11 +3104,11 @@ export function GalleyPlanningModal({
                       ))}
                     </div>
                   </div>
-                  {dispatchSection.crewMeals && dispatchSection.crewMeals.length > 0 && (
+                  {scaledMeals.crewMeals.length > 0 && (
                     <div>
                       <GalleySecTitle>Crew Meals</GalleySecTitle>
                       <div className="rounded-lg border border-border overflow-hidden">
-                        {dispatchSection.crewMeals.map((c, i) => (
+                        {scaledMeals.crewMeals.map((c, i) => (
                           <div key={i} className={`flex items-center justify-between px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
                             <span className="text-slate-700">{c.type}</span>
                             <span className="font-semibold tabular-nums">{c.qty}</span>
@@ -3086,9 +3120,14 @@ export function GalleyPlanningModal({
                   <div>
                     <GalleySecTitle>Special Meals</GalleySecTitle>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      <RO label="VGML — Veg / Vegan" value={dispatchSection.vgml ?? 0} />
-                      <RO label="CHML — Child" value={dispatchSection.chml ?? 0} />
-                      <RO label="SPML — Special" value={dispatchSection.spml ?? 0} />
+                      {/* Only special-meal types actually loaded are shown (zero-count types hidden). */}
+                      {[
+                        { label: "VGML — Veg / Vegan", qty: dispatchSection.vgml ?? 0 },
+                        { label: "CHML — Child", qty: dispatchSection.chml ?? 0 },
+                        { label: "SPML — Special", qty: dispatchSection.spml ?? 0 },
+                      ].filter((s) => s.qty > 0).map((s) => (
+                        <RO key={s.label} label={s.label} value={s.qty} />
+                      ))}
                       <RO label="Total Special" value={specialTotal} />
                     </div>
                   </div>
@@ -3108,73 +3147,24 @@ export function GalleyPlanningModal({
           {tab === "equipment" && renderItemGroup("Equipment")}
         </div>
 
-        {/* Sign-off footer */}
+        {/* Footer */}
         <div className="border-t bg-white px-6 py-4 shrink-0">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-sky-700 mb-2">Sign-Off</p>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-            {/* Preparer = the logged-in user (not selectable). */}
-            <div>
-              <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Dispatch Sheet Prepared By</p>
-              <div className="text-[9px] text-sky-700 bg-sky-50 border-sky-100 border rounded px-1.5 py-1 leading-snug">
-                <span className="font-semibold">{preparedByName}</span>
-                <span className="text-slate-400 mx-0.5">·</span>
-                <span>{preparedByDesig}</span>
-                <br />
-                <span className="tabular-nums text-slate-500">{signedAt}</span>
-                <span className="text-sky-600 font-semibold ml-1">· you</span>
-              </div>
-            </div>
-            <SignPicker label="Physically Handed Over By" value={signPhysicallyBy} onChange={setSignPhysicallyBy} options={APT_EXECUTIVES} tone="sky" />
-            <SignPicker label="Flight Checked Over By" value={signCheckedBy} onChange={setSignCheckedBy} options={APT_EXECUTIVES} tone="sky" />
-            <SignPicker label="Flight Handed Over By" value={signHandedBy} onChange={setSignHandedBy} options={HOC_NAMES} tone="violet" />
-          </div>
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <p className="text-[11px] text-muted-foreground italic">
-              Prepared by the signed-in user · handlers selected above · time recorded on forwarding
-            </p>
+          <div className="flex items-center justify-end flex-wrap gap-2">
             <div className="flex items-center gap-2 flex-wrap">
               <Button variant="outline" onClick={onClose}>Close</Button>
               <Button
-                variant="outline"
-                onClick={() =>
-                  printGalleySheet(finalPlan(), {
-                    flightNo: flight?.flight ?? entry.flightId,
-                    sector: flight?.sector ?? "—",
-                    date: entry.packagingDate,
-                    aircraft: aircraftType || flight?.aircraft,
-                    pax: flight?.pax,
-                    crew: flight?.crew,
-                    signOff: [
-                      { label: "Dispatch Sheet Prepared By", ...signOff.preparedBy },
-                      { label: "Physically Handed Over By", ...signOff.physicallyHandedBy },
-                      { label: "Flight Checked Over By", ...signOff.flightCheckedBy },
-                      { label: "Flight Handed Over By", ...signOff.handedOverBy },
-                    ],
-                  })
-                }
-              >
-                Print Sheet
-              </Button>
-              <Button
                 className="bg-sky-600 hover:bg-sky-700 text-white"
-                onClick={() => {
-                  if (onSaveDraft) onSaveDraft(finalPlan());
-                  else toast.success("Galley plan saved successfully");
-                }}
-              >
-                Save Galley Plan
-              </Button>
-              <Button
-                className="bg-violet-600 hover:bg-violet-700 text-white"
                 onClick={() => {
                   if (!source.warehouseId) {
                     toast.error("Select the office and warehouse to transfer stock from.");
                     return;
                   }
-                  onForward(finalPlan(), signOff, source);
+                  if (onSaveDraft) onSaveDraft(finalPlan(), source);
+                  else toast.success("Galley plan saved successfully");
+                  onClose();
                 }}
               >
-                Forward To Aircraft
+                Save
               </Button>
             </div>
           </div>
