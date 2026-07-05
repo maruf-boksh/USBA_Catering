@@ -24,7 +24,7 @@ import {
   FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, ArrowLeft, Layers, UserCog, Users,
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
   PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane, MailQuestion, PlaneLanding, PlaneTakeoff,
-  BadgeDollarSign, Wrench, MessageSquare, CornerUpLeft, LayoutGrid, Timer, Trash2,
+  BadgeDollarSign, Wrench, MessageSquare, CornerUpLeft, LayoutGrid, Timer, Trash2, Undo2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -42,6 +42,7 @@ import { getStockAdjustments, setStockAdjustmentStatus } from "@/lib/stock-adjus
 import { useRole } from "@/lib/roles";
 import { type PersonalHygieneRecord, PHSignOffPanel, PHFormGrid, phNotOkCount } from "@/routes/personal-hygiene-monitoring";
 import { type WastageEntry, type WastageApprovalStep } from "@/routes/wastage-management";
+import { SEED_RETURNS, type PurchaseReturn } from "@/routes/purchase-return";
 
 type Category =
   | "Flight Orders"
@@ -60,6 +61,7 @@ type Category =
   | "Dispatch"
   | "Maintenance"
   | "Return Items"
+  | "Purchase Return"
   | "Galley Loading"
   | "Personal Hygiene"
   | "Wastage Entry";
@@ -130,6 +132,7 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Dispatch",             label: "Dispatch",           icon: Truck           },
   { key: "Maintenance",          label: "Maintenance",        icon: Wrench          },
   { key: "Return Items",         label: "Return Items",       icon: PackageCheck    },
+  { key: "Purchase Return",      label: "Purchase Returns",   icon: Undo2           },
   { key: "Galley Loading",       label: "Galley Loading",     icon: LayoutGrid      },
   { key: "Personal Hygiene",    label: "Personal Hygiene",   icon: Users           },
   { key: "Wastage Entry",       label: "Wastage Reports",    icon: Trash2          },
@@ -140,7 +143,7 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
 const APPROVAL_SECTIONS: { label: string; keys: Category[] }[] = [
   { label: "Operations Approval",     keys: ["Flight Orders", "Crew Orders"] },
   { label: "Dispatch Approval",       keys: ["Dispatch"] },
-  { label: "Procurement Approval",    keys: ["Request for Quotation", "Quotation", "Purchase Requisition", "Purchase Order", "Goods Receipt"] },
+  { label: "Procurement Approval",    keys: ["Request for Quotation", "Quotation", "Purchase Requisition", "Purchase Order", "Goods Receipt", "Purchase Return"] },
   { label: "Inventory Approval",      keys: ["Demand Request", "Transfer Request", "Stock Adjustment"] },
   { label: "Production Approval",     keys: ["Production Order", "Bill of Materials"] },
   { label: "Administration Approval", keys: ["User Account"] },
@@ -314,6 +317,12 @@ export default function ApprovalManagementPage() {
   const [returnApprovals, setReturnApprovals] = usePersistedState<ReturnApprovalRecord[]>(
     "consumable-return-approvals",
     [],
+  );
+  // Purchase Returns — shared with the Purchase Return page via the same persisted
+  // key. Same default (SEED_RETURNS) so neither page overwrites the other's seed.
+  const [purchaseReturns, setPurchaseReturns] = usePersistedState<PurchaseReturn[]>(
+    "purchase-return-rows",
+    SEED_RETURNS,
   );
   const [consumableInventory, setConsumableInventory] = usePersistedState<ConsumableItem[]>(
     "airline-consumables-items",
@@ -739,6 +748,36 @@ export default function ApprovalManagementPage() {
       });
   }, [returnApprovals]);
 
+  // Purchase Returns awaiting approval — a return is raised (Submitted) either
+  // from the Purchase Return page or auto-initiated from a QC rejection; the
+  // approver here decides it. Drafts are not yet submitted, so they don't queue.
+  const purchaseReturnItems: ApprovalItem[] = useMemo(() => {
+    return purchaseReturns
+      .filter((pr) => pr.status !== "Draft")
+      .map((pr) => {
+        const approvalStatus: ApprovalStatus =
+          pr.status === "Approved" || pr.status === "Completed" ? "Approved"
+          : pr.status === "Rejected" ? "Rejected"
+          : "Pending";
+        const reasons = Array.from(new Set(pr.lines.map((l) => l.reason)));
+        return {
+          id: `PR-RET-AP-${pr.id}`,
+          category: "Purchase Return" as Category,
+          refId: pr.id,
+          title: `Purchase Return — ${pr.supplier}`,
+          requestedBy: pr.supplier,
+          requestedAt: pr.date,
+          summary: `${pr.lines.length} line${pr.lines.length === 1 ? "" : "s"} · ${reasons.slice(0, 3).join(", ")} · GRN ${pr.grnRef ?? "—"} · PO ${pr.poRef}`,
+          amount: pr.totalValue,
+          itemsCount: pr.lines.length,
+          status: approvalStatus,
+          processedBy: pr.processedBy,
+          processedAt: pr.processedAt,
+          rejectionReason: pr.status === "Rejected" ? pr.remarks : undefined,
+        };
+      });
+  }, [purchaseReturns]);
+
   const personalHygieneItems: ApprovalItem[] = useMemo(() => {
     return phRecords
       .filter(r => r.status !== "approved" || r.approvedAt)
@@ -789,7 +828,7 @@ export default function ApprovalManagementPage() {
   }, [wastageEntries]);
 
   const allItems = useMemo(() => {
-    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...personalHygieneItems, ...wastageItems, ...items];
+    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...personalHygieneItems, ...wastageItems, ...items];
     // Overlay "Reviewed" (returned for correction) onto still-pending requests.
     return base.map((it) => {
       const rv = reviews[reviewKey(it.category, it.refId)];
@@ -798,7 +837,7 @@ export default function ApprovalManagementPage() {
       }
       return it;
     });
-  }, [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, returnApprovalItems, personalHygieneItems, wastageItems, items, reviews]);
+  }, [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, personalHygieneItems, wastageItems, items, reviews]);
 
   const counts = useMemo(() => {
     const pendingByCat = new Map<Category, number>();
@@ -1074,6 +1113,17 @@ export default function ApprovalManagementPage() {
       if (!silent) toast.success(`${it.refId} — Return items approved for Airport Store.`);
       return;
     }
+    if (it.category === "Purchase Return") {
+      setPurchaseReturns((prev) =>
+        prev.map((pr) =>
+          pr.id === it.refId
+            ? { ...pr, status: "Approved", processedBy: `${role} (GM/Admin)`, processedAt: stamp() }
+            : pr,
+        ),
+      );
+      if (!silent) toast.success(`${it.refId} — Purchase return approved for dispatch to supplier.`);
+      return;
+    }
     if (it.category === "Wastage Entry") {
       const entry = wastageEntries.find((e) => e.id === it.refId);
       if (!entry) { if (!silent) toast.error(`Wastage ${it.refId} not found.`); return; }
@@ -1199,6 +1249,14 @@ export default function ApprovalManagementPage() {
           ra.id === it.refId
             ? { ...ra, status: "Declined", processedBy: `${role} (GM/Admin)`, processedAt: stamp(), declineReason: reason }
             : ra,
+        ),
+      );
+    } else if (it.category === "Purchase Return") {
+      setPurchaseReturns((prev) =>
+        prev.map((pr) =>
+          pr.id === it.refId
+            ? { ...pr, status: "Rejected", processedBy: `${role} (GM/Admin)`, processedAt: stamp(), remarks: reason }
+            : pr,
         ),
       );
     } else if (it.category === "Wastage Entry") {

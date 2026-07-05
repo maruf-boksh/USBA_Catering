@@ -169,7 +169,7 @@ const SRC: Record<string, Group> = {
     columns: [["col:id", "PO #"], ["col:vendor", "Vendor"], ["col:requisitionRef", "Req Ref"], ["col:officeId", "Office / Warehouse"], ["col:items", "Items"], ["col:amount", "Amount (৳)"], ["col:date", "Date"], ["col:status", "Status"]],
     kpis: [["kpi-open-pos", "Open POs"], ["kpi-pending-approval", "Pending Approval"], ["kpi-active-vendors", "Active Vendors"]],
     actions: [["action-export", "Export"], ["action-new-po", "New PO"], ["action-create-po", "Create PO"], ["action-add-item", "Add Item"], ["action-save-draft", "Save Draft"], ["action-submit-for-approval", "Submit for Approval"]],
-    fields: [["field-requisition-ref", "Requisition Ref"], ["field-vendor", "Vendor"], ["field-delivery-date", "Delivery Date"], ["field-notes", "Notes"]],
+    fields: [["field-requisition-ref", "Requisition Ref"], ["field-vendor", "Vendor"], ["field-delivery-date", "Est. Receive Date"], ["field-notes", "Notes"]],
     sections: [["section-requisitions-from-store", "Requisitions from Store"], ["section-purchase-orders", "Purchase Orders"]],
   },
   "/receive-item": {

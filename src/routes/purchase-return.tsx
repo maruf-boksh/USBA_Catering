@@ -17,7 +17,8 @@ import {
   CheckCircle2, FileText,
 } from "lucide-react";
 import { toast } from "sonner";
-import { activeItems, vendors } from "@/lib/sample-data";
+import { activeItems, vendors, receiveItems } from "@/lib/sample-data";
+import { useWorkflow } from "@/lib/workflow-store";
 
 type ReturnStatus = "Draft" | "Submitted" | "Approved" | "Completed" | "Rejected";
 
@@ -36,18 +37,23 @@ type ReturnLine = {
   notes?: string;
 };
 
-type PurchaseReturn = {
+export type PurchaseReturn = {
   id: string;
   date: string;
+  /** Source Goods Receipt the return is raised against. */
+  grnRef?: string;
   poRef: string;
   supplier: string;
   lines: ReturnLine[];
   totalValue: number;
   status: ReturnStatus;
   remarks?: string;
+  /** Stamped when approved/rejected in Approval Management. */
+  processedBy?: string;
+  processedAt?: string;
 };
 
-const SEED_RETURNS: PurchaseReturn[] = [
+export const SEED_RETURNS: PurchaseReturn[] = [
   {
     id: "RT-2026-0014",
     date: "2026-05-19",
@@ -115,7 +121,7 @@ export default function PurchaseReturnPage() {
     <>
       <PageHeader
         title="Purchase Return"
-        subtitle="Send received stock back to suppliers — defective, short-shipped, wrong items or near-expiry"
+        subtitle="Send received stock back to suppliers — defective, short-shipped, wrong items or near-expiry. Submitted returns are approved in Approval Management."
         actions={
           <Button
             variant={view === "create" ? "outline" : "default"}
@@ -145,6 +151,7 @@ function ReturnList({ rows, editors }: {
   const cols: Column<PurchaseReturn>[] = [
     { key: "id", header: "Return #", render: (r) => <span className="font-mono text-xs">{r.id}</span> },
     { key: "date", header: "Date" },
+    { key: "grnRef" as keyof PurchaseReturn, header: "GRN Ref", render: (r) => <span className="font-mono text-xs">{r.grnRef ?? "—"}</span> },
     { key: "poRef", header: "PO Ref", render: (r) => <span className="font-mono text-xs">{r.poRef}</span> },
     { key: "supplier", header: "Supplier" },
     { key: "lines", header: "Items", render: (r) => `${r.lines.length}` },
@@ -192,7 +199,7 @@ function ReturnList({ rows, editors }: {
         actions={(r) => (
           <RowActions
             row={r}
-            actions={["view", "edit", "print", "approve", "reject"]}
+            actions={["view", "edit", "print"]}
             onSave={editors.onSave}
             editDetail={({ save, close }) => <ReturnFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
           />
@@ -202,11 +209,258 @@ function ReturnList({ rows, editors }: {
   );
 }
 
+// A received Goods Receipt the return can be raised against — unifies live
+// workflow GRNs with the seed receipts, each carrying its received lines.
+type GrnOption = {
+  grnId: string;
+  poRef: string;
+  vendor: string;
+  receivedBy: string;
+  date: string;
+  lines: { key: string; itemName: string; uom: string; qty: number }[];
+};
+
+const costOf = (name: string) =>
+  activeItems.find((i) => i.name.toLowerCase() === name.toLowerCase())?.costPrice ?? 0;
+
+// Per-line selection state in the GRN-driven return form.
+type PickLine = { checked: boolean; qty: number; unitPrice: number; reason: ReturnReason; note: string };
+
+/**
+ * GRN-driven Purchase Return create form. The user picks a Goods Receipt from a
+ * dropdown; the system loads that GRN's received items and details, and the user
+ * ticks the lines (with qty / reason / note) to return.
+ */
 function ReturnCreate({ nextId, onSave }: { nextId: string; onSave: (r: PurchaseReturn) => void }) {
+  const { grns } = useWorkflow();
+  const today = new Date().toISOString().slice(0, 10);
+
+  const grnOptions: GrnOption[] = useMemo(() => {
+    const fromWf: GrnOption[] = grns.map((g) => ({
+      grnId: g.id, poRef: g.poRef, vendor: g.vendor, receivedBy: g.receivedBy, date: g.date,
+      lines: g.lines.map((l, i) => ({ key: `${g.id}-L${i}`, itemName: l.name, uom: l.uom, qty: l.qty })),
+    }));
+    const fromSeed: GrnOption[] = receiveItems.map((s) => ({
+      grnId: s.id, poRef: s.po, vendor: s.vendor, receivedBy: s.receivedBy, date: "—",
+      lines: [{ key: `${s.id}-L0`, itemName: s.item, uom: s.uom, qty: s.qty }],
+    }));
+    return [...fromWf, ...fromSeed];
+  }, [grns]);
+
+  const [grnRef, setGrnRef] = useState("");
+  const [picks, setPicks] = useState<Record<string, PickLine>>({});
+  const [remarks, setRemarks] = useState("");
+
+  const grn = grnOptions.find((g) => g.grnId === grnRef);
+
+  const selectGrn = (id: string) => {
+    setGrnRef(id);
+    const g = grnOptions.find((o) => o.grnId === id);
+    const next: Record<string, PickLine> = {};
+    g?.lines.forEach((l) => {
+      next[l.key] = { checked: false, qty: l.qty, unitPrice: costOf(l.itemName), reason: "Defective", note: "" };
+    });
+    setPicks(next);
+  };
+
+  const setPick = (key: string, patch: Partial<PickLine>) =>
+    setPicks((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
+
+  const totalValue = useMemo(
+    () => (grn?.lines ?? []).reduce((s, l) => {
+      const p = picks[l.key];
+      return p?.checked ? s + p.qty * p.unitPrice : s;
+    }, 0),
+    [grn, picks],
+  );
+
+  const save = (status: ReturnStatus) => {
+    if (!grn) { toast.error("Select a GRN to return against."); return; }
+    const lines: ReturnLine[] = grn.lines
+      .filter((l) => picks[l.key]?.checked && picks[l.key].qty > 0)
+      .map((l) => {
+        const p = picks[l.key];
+        return {
+          id: l.key, itemName: l.itemName, uom: l.uom,
+          qty: p.qty, unitPrice: p.unitPrice, reason: p.reason,
+          notes: p.note.trim() || undefined,
+        };
+      });
+    if (lines.length === 0) { toast.error("Tick at least one item to return."); return; }
+    onSave({
+      id: nextId,
+      date: today,
+      grnRef: grn.grnId,
+      poRef: grn.poRef,
+      supplier: grn.vendor,
+      lines,
+      totalValue,
+      status,
+      remarks: remarks.trim() || undefined,
+    });
+    toast.success(status === "Draft"
+      ? `${nextId} saved as draft.`
+      : `${nextId} submitted to ${grn.vendor} — awaiting approval.`);
+  };
+
+  const selectCls =
+    "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
   return (
     <Card>
       <CardContent className="pt-6">
-        <ReturnFields mode="create" nextId={nextId} onSave={onSave} />
+        <div className="flex items-center justify-between mb-6">
+          <h3 className="text-sm font-semibold uppercase tracking-wider">New Purchase Return</h3>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => save("Draft")}>
+              <Save className="h-4 w-4 mr-1.5" /> Save Draft
+            </Button>
+            <Button onClick={() => save("Submitted")}>
+              <Send className="h-4 w-4 mr-1.5" /> Submit
+            </Button>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-4 mb-6">
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Return #</Label>
+            <Input value={nextId} disabled className="mt-1 font-mono" />
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Date</Label>
+            <Input value={today} disabled className="mt-1 tabular-nums" />
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">GRN Reference *</Label>
+            <select value={grnRef} onChange={(e) => selectGrn(e.target.value)} className={`${selectCls} font-mono`}>
+              <option value="">Select a GRN…</option>
+              {grnOptions.map((g) => (
+                <option key={g.grnId} value={g.grnId}>{g.grnId} — {g.vendor}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {grn ? (
+          <>
+            {/* GRN details (read-only) */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-3 mb-5 rounded-md border border-border bg-muted/30 px-4 py-3">
+              {[
+                ["Supplier", grn.vendor],
+                ["PO Reference", grn.poRef],
+                ["Received By", grn.receivedBy],
+                ["Received On", grn.date],
+              ].map(([k, v]) => (
+                <div key={k}>
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{k}</p>
+                  <p className="text-sm font-medium">{v || "—"}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="mb-2">
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+                Select Items to Return <span className="text-muted-foreground/70">— tick the lines being returned</span>
+              </Label>
+            </div>
+            <div className="rounded-md border border-border overflow-x-auto mb-6">
+              <table className="w-full text-sm min-w-[760px]">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="p-2 text-left font-semibold w-10" />
+                    <th className="p-2 text-left font-semibold">Item</th>
+                    <th className="p-2 text-left font-semibold w-16">UoM</th>
+                    <th className="p-2 text-left font-semibold w-24">Received</th>
+                    <th className="p-2 text-left font-semibold w-24">Return Qty</th>
+                    <th className="p-2 text-left font-semibold w-28">Unit Price (৳)</th>
+                    <th className="p-2 text-left font-semibold w-36">Reason</th>
+                    <th className="p-2 text-left font-semibold">Note</th>
+                    <th className="p-2 text-right font-semibold w-28">Line Value (৳)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {grn.lines.map((l) => {
+                    const p = picks[l.key] ?? { checked: false, qty: l.qty, unitPrice: 0, reason: "Defective" as ReturnReason, note: "" };
+                    return (
+                      <tr key={l.key} className={`border-t border-border/50 ${p.checked ? "" : "opacity-60"}`}>
+                        <td className="p-2 text-center">
+                          <input
+                            type="checkbox"
+                            checked={p.checked}
+                            onChange={(e) => setPick(l.key, { checked: e.target.checked })}
+                            className="h-4 w-4 accent-primary"
+                          />
+                        </td>
+                        <td className="p-2 font-medium">{l.itemName}</td>
+                        <td className="p-2 text-muted-foreground text-xs">{l.uom}</td>
+                        <td className="p-2 tabular-nums text-muted-foreground">{l.qty}</td>
+                        <td className="p-2">
+                          <Input
+                            type="number" min={0} max={l.qty}
+                            value={p.qty || ""}
+                            disabled={!p.checked}
+                            onChange={(e) => setPick(l.key, { qty: Math.min(l.qty, Number(e.target.value)) })}
+                            className="h-8 text-xs"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <Input
+                            type="number"
+                            value={p.unitPrice || ""}
+                            readOnly
+                            tabIndex={-1}
+                            className="h-8 text-xs bg-muted/50 text-muted-foreground cursor-default"
+                          />
+                        </td>
+                        <td className="p-2">
+                          <select
+                            value={p.reason}
+                            disabled={!p.checked}
+                            onChange={(e) => setPick(l.key, { reason: e.target.value as ReturnReason })}
+                            className="w-full h-8 rounded-md border border-input bg-background px-2 text-xs disabled:opacity-50"
+                          >
+                            {RETURN_REASONS.map((r) => <option key={r}>{r}</option>)}
+                          </select>
+                        </td>
+                        <td className="p-2">
+                          <Input
+                            value={p.note}
+                            disabled={!p.checked}
+                            onChange={(e) => setPick(l.key, { note: e.target.value })}
+                            placeholder="optional"
+                            className="h-8 text-xs"
+                          />
+                        </td>
+                        <td className="p-2 text-right tabular-nums font-medium">
+                          {p.checked ? (p.qty * p.unitPrice).toLocaleString() : "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  <tr className="border-t border-border bg-muted/30 font-semibold">
+                    <td colSpan={8} className="p-2 text-right uppercase text-[10px] tracking-wider">Total Return Value</td>
+                    <td className="p-2 text-right tabular-nums">৳ {totalValue.toLocaleString()}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div>
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Remarks</Label>
+              <Textarea
+                value={remarks}
+                onChange={(e) => setRemarks(e.target.value)}
+                rows={3}
+                className="mt-1"
+                placeholder="Pickup arrangement, credit-note expectations, supplier communication notes…"
+              />
+            </div>
+          </>
+        ) : (
+          <div className="rounded-md border border-dashed border-border py-10 text-center text-sm text-muted-foreground">
+            Select a GRN reference above to load its received items.
+          </div>
+        )}
       </CardContent>
     </Card>
   );

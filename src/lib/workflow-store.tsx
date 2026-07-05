@@ -109,6 +109,8 @@ export type WfTransferNote = {
   warehouseId?: string;
 };
 
+export type WfGRNQcStatus = "Pending" | "Accepted" | "On Hold" | "Rejected";
+
 export type WfGRNLine = {
   itemId: string;
   name: string;
@@ -116,8 +118,19 @@ export type WfGRNLine = {
   uom: string;
   temp: string;
   expiry: string;
-  qcStatus: "Accepted" | "On Hold" | "Rejected";
+  /** Set on receipt to "Pending"; the Quality Control module inspects the line
+   *  and moves it to Accepted / On Hold / Rejected. Only "Accepted" lines post
+   *  to the Stock Overview ledger. */
+  qcStatus: WfGRNQcStatus;
+  /** Inspection details captured in Quality Control. */
+  qcCompliedQty?: "Yes" | "No";
+  qcRemarks?: string;
+  /** Rejection reason (on Rejected) — mirrors the Purchase Return reasons. */
+  qcReason?: string;
 };
+
+/** Inspection fields recorded alongside a QC decision. */
+export type WfGRNQcDetails = Partial<Pick<WfGRNLine, "temp" | "qcCompliedQty" | "qcRemarks" | "qcReason">>;
 
 export type WfGRN = {
   id: string;
@@ -129,6 +142,10 @@ export type WfGRN = {
   linkedDemandRef?: string;
   officeId?: string;
   warehouseId?: string;
+  /** True for a spot/direct purchase received without a prior PO. */
+  direct?: boolean;
+  /** Justification captured for a direct purchase (audit trail). */
+  note?: string;
 };
 
 export type StockDelta = {
@@ -310,6 +327,9 @@ type WorkflowCtx = {
 
   grns: WfGRN[];
   addGRN: (grn: WfGRN) => void;
+  /** QC inspection outcome for a single received line (by GRN id + line index),
+   *  with optional captured inspection details (temp / complied qty / remarks / reason). */
+  updateGRNLineQC: (grnId: string, lineIdx: number, status: WfGRNQcStatus, details?: WfGRNQcDetails) => void;
 
   transferNotes: WfTransferNote[];
   addTransferNote: (tn: WfTransferNote) => void;
@@ -359,7 +379,7 @@ const WorkflowContext = createContext<WorkflowCtx>({
   demands: [], addDemands: () => {}, updateDemandStatus: () => {},
   wfRequisitions: [], addRequisition: () => {}, updateRequisitionStatus: () => {}, updateRequisition: () => {},
   wfPurchaseOrders: [], addPurchaseOrder: () => {}, updatePOStatus: () => {}, updatePurchaseOrder: () => {}, deletePurchaseOrder: () => {},
-  grns: [], addGRN: () => {},
+  grns: [], addGRN: () => {}, updateGRNLineQC: () => {},
   transferNotes: [], addTransferNote: () => {}, acknowledgeTransfer: () => {},
   stockDeltas: [], applyStockDeltas: () => {},
   prdStatuses: {}, prdProgress: {}, setPRDStatus: () => {},
@@ -430,7 +450,26 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     }))
   );
 
-  const [grns, setGRNs] = useState<WfGRN[]>([]);
+  const [grns, setGRNs] = useState<WfGRN[]>([
+    // Recently received deliveries awaiting Quality Control inspection.
+    {
+      id: "GRN-6001", poRef: "PO-2025-0452", vendor: "Green Valley Foods",
+      receivedBy: "M. Karim", date: "2026-07-05 09:10",
+      officeId: "OFF-001", warehouseId: "WH-001",
+      lines: [
+        { itemId: "l0", name: "Basmati Rice", qty: 200, uom: "Kg", temp: "Ambient", expiry: "2026-12-31", qcStatus: "Pending" },
+        { itemId: "l1", name: "Sunflower Oil 5L", qty: 40, uom: "Can", temp: "Ambient", expiry: "2027-03-15", qcStatus: "Pending" },
+      ],
+    },
+    {
+      id: "GRN-6002", poRef: "PO-2025-0453", vendor: "Halal Meats Co.",
+      receivedBy: "S. Ahmed", date: "2026-07-05 10:25",
+      officeId: "OFF-001", warehouseId: "WH-001",
+      lines: [
+        { itemId: "l0", name: "Mutton Leg", qty: 60, uom: "Kg", temp: "-2°C", expiry: "2026-07-12", qcStatus: "Pending" },
+      ],
+    },
+  ]);
   const [transferNotes, setTransferNotes] = useState<WfTransferNote[]>([
     {
       id: "TN-50001",
@@ -601,6 +640,12 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
 
       grns,
       addGRN: (grn) => setGRNs(prev => [grn, ...prev]),
+      updateGRNLineQC: (grnId, lineIdx, status, details) =>
+        setGRNs(prev => prev.map(g =>
+          g.id === grnId
+            ? { ...g, lines: g.lines.map((l, i) => i === lineIdx ? { ...l, qcStatus: status, ...(details ?? {}) } : l) }
+            : g,
+        )),
 
       transferNotes,
       addTransferNote: (tn) => setTransferNotes(prev => [tn, ...prev]),

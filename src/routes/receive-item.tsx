@@ -5,8 +5,9 @@ import { RowActions } from "@/components/common/RowActions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X } from "lucide-react";
-import { receiveItems } from "@/lib/sample-data";
+import { Textarea } from "@/components/ui/textarea";
+import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X, Zap } from "lucide-react";
+import { receiveItems, vendors, activeItems } from "@/lib/sample-data";
 import { KpiCard } from "@/components/common/KpiCard";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
@@ -32,16 +33,18 @@ type GRNRow = {
   warehouseId?: string;
 };
 
-// GRN form line state
+// GRN form line state. QC outcome is NOT set here — received lines start
+// "Pending" and are inspected in the Quality Control module.
 type FormLine = {
   id: string;
   name: string;
   qty: number;
   uom: string;
-  temp: string;
   expiry: string;
-  qcStatus: "Accepted" | "On Hold" | "Rejected";
 };
+
+// Store/receiving personnel who can sign for an inbound delivery.
+const RECEIVERS = ["M. Karim", "S. Ahmed", "F. Begum", "K. Rahman", "N. Islam"];
 
 function seedToRow(s: SeedGRN): GRNRow {
   return {
@@ -81,11 +84,70 @@ export default function ReceiveItem() {
   const [grnWarehouseId, setGrnWarehouseId] = useState("WH-001");
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
-  const [formLines, setFormLines] = useState<FormLine[]>([{ id: "l0", name: "", qty: 1, uom: "Kg", temp: "", expiry: "", qcStatus: "Accepted" }]);
+  const [formLines, setFormLines] = useState<FormLine[]>([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "" }]);
 
-  // Selectable POs (not closed/delivered)
+  // ── Direct Purchase (spot buy — no prior PO) ────────────────────────────────
+  const [directOpen, setDirectOpen] = useState(false);
+  const [dpVendor, setDpVendor] = useState("");
+  const [dpReceivedBy, setDpReceivedBy] = useState("");
+  const [dpOfficeId, setDpOfficeId] = useState("OFF-001");
+  const [dpWarehouseId, setDpWarehouseId] = useState("WH-001");
+  const [dpJustification, setDpJustification] = useState("");
+  const [dpLines, setDpLines] = useState<FormLine[]>([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "" }]);
+
+  const dpAddLine = () =>
+    setDpLines(prev => [...prev, { id: `d${Date.now()}`, name: "", qty: 1, uom: "Kg", expiry: "" }]);
+  const dpRemoveLine = (id: string) => setDpLines(prev => prev.filter(l => l.id !== id));
+  const dpUpdateLine = <K extends keyof FormLine>(id: string, field: K, value: FormLine[K]) =>
+    setDpLines(prev => prev.map(l => l.id === id ? { ...l, [field]: value } : l));
+  // Item comes from the item master; UOM auto-fills from it (read-only).
+  const dpItemOptions = useMemo(() => activeItems.slice(0, 120), []);
+  const dpPickItem = (id: string, itemName: string) => {
+    const it = dpItemOptions.find(i => i.name === itemName);
+    setDpLines(prev => prev.map(l => l.id === id ? { ...l, name: itemName, uom: it?.uom ?? l.uom } : l));
+  };
+
+  const resetDirect = () => {
+    setDpVendor(""); setDpReceivedBy(""); setDpOfficeId("OFF-001"); setDpWarehouseId("WH-001");
+    setDpJustification(""); setDpLines([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "" }]);
+  };
+
+  // Record a direct purchase as a GRN (no PO). Like any receipt, its lines start
+  // "Pending" and flow through Quality Control → Stock Overview — the standard
+  // process — but the PO Ref is a generated DP reference marking it as direct.
+  const saveDirect = () => {
+    if (!dpVendor) { toast.error("Select a vendor."); return; }
+    if (!dpReceivedBy) { toast.error("Received By is required."); return; }
+    if (!dpWarehouseId) { toast.error("Warehouse is required."); return; }
+    if (!dpJustification.trim()) { toast.error("A justification is required for a direct receive."); return; }
+    if (dpLines.some(l => !l.name.trim())) { toast.error("All item rows must have an item name."); return; }
+
+    const stamp = Date.now().toString().slice(-5);
+    const grnId = `GRN-${stamp}`;
+    const dpRef = `DP-${new Date().getFullYear()}-${stamp}`;
+    const lines: WfGRNLine[] = dpLines.map(l => ({
+      itemId: l.id, name: l.name, qty: l.qty, uom: l.uom, temp: "", expiry: l.expiry, qcStatus: "Pending",
+    }));
+    addGRN({
+      id: grnId,
+      poRef: dpRef,
+      vendor: dpVendor,
+      receivedBy: dpReceivedBy,
+      date: new Date().toLocaleString(),
+      lines,
+      officeId: dpOfficeId,
+      warehouseId: dpWarehouseId,
+      direct: true,
+      note: dpJustification.trim(),
+    });
+    toast.success(`Direct receive ${dpRef} recorded — ${lines.length} line(s) sent to Quality Control.`);
+    setDirectOpen(false);
+    resetDirect();
+  };
+
+  // Only APPROVED POs can be received against.
   const selectablePOs = useMemo(
-    () => wfPurchaseOrders.filter(p => !["Closed", "Draft", "Rejected"].includes(p.status)),
+    () => wfPurchaseOrders.filter(p => p.status === "Approved"),
     [wfPurchaseOrders]
   );
 
@@ -98,7 +160,7 @@ export default function ReceiveItem() {
   const handleSelectPO = (poId: string) => {
     setSelectedPORef(poId);
     if (!poId) {
-      setFormLines([{ id: "l0", name: "", qty: 1, uom: "Kg", temp: "", expiry: "", qcStatus: "Accepted" }]);
+      setFormLines([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "" }]);
       return;
     }
     const po = wfPurchaseOrders.find(p => p.id === poId);
@@ -113,20 +175,14 @@ export default function ReceiveItem() {
         name: l.name,
         qty: l.qty,
         uom: l.uom,
-        temp: "",
         expiry: "",
-        qcStatus: "Accepted",
       })));
       toast.success(`${po.lineItems.length} item${po.lineItems.length === 1 ? "" : "s"} loaded from ${po.id}.`);
     } else {
       // PO without line items — start a clean single empty row.
-      setFormLines([{ id: "l0", name: "", qty: 1, uom: "Kg", temp: "", expiry: "", qcStatus: "Accepted" }]);
+      setFormLines([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "" }]);
       toast.info(`${po?.id ?? poId} has no item details. Add rows manually.`);
     }
-  };
-
-  const addLine = () => {
-    setFormLines(prev => [...prev, { id: `l${Date.now()}`, name: "", qty: 1, uom: "Kg", temp: "", expiry: "", qcStatus: "Accepted" }]);
   };
 
   const removeLine = (id: string) => setFormLines(prev => prev.filter(l => l.id !== id));
@@ -143,14 +199,16 @@ export default function ReceiveItem() {
     if (formLines.some(l => !l.name.trim())) { toast.error("All item rows must have an item name."); return; }
 
     const grnId = `GRN-${Date.now().toString().slice(-5)}`;
+    // Received lines start "Pending" — the Quality Control module inspects and
+    // accepts/holds/rejects them; only accepted lines post to Stock Overview.
     const lines: WfGRNLine[] = formLines.map(l => ({
       itemId: l.id,
       name: l.name,
       qty: l.qty,
       uom: l.uom,
-      temp: l.temp,
+      temp: "",
       expiry: l.expiry,
-      qcStatus: l.qcStatus,
+      qcStatus: "Pending",
     }));
 
     // Find linked demand via PO → Requisition → Demand chain
@@ -171,25 +229,23 @@ export default function ReceiveItem() {
 
     addGRN(grn);
 
-    // The GRN itself is the purchase's stock-IN source — the Stock Overview
-    // ledger reads accepted GRN lines directly (see lib/stock-ledger.ts), so we
-    // no longer push a separate stockDelta here (that would double-count the
-    // receipt as both a GRN line and a loose delta).
-    const acceptedCount = lines.filter(l => l.qcStatus === "Accepted").length;
+    // Stock is NOT posted here — the Stock Overview ledger reads only ACCEPTED
+    // GRN lines (see lib/stock-ledger.ts), and acceptance now happens in the
+    // Quality Control module. Received lines leave here as "Pending".
 
-    // Fulfill the linked demand
+    // Fulfill the linked demand — the goods have physically arrived.
     if (linkedDemand) {
       updateDemandStatus(linkedDemand.id, "Fulfilled", { grnRef: grnId });
-      toast.success(`GRN ${grnId} saved. Demand ${linkedDemand.id} fulfilled. Stock updated. Kitchen notified.`);
+      toast.success(`GRN ${grnId} saved — ${lines.length} line(s) sent to Quality Control. Demand ${linkedDemand.id} fulfilled.`);
     } else {
-      toast.success(`GRN ${grnId} saved. Stock updated for ${acceptedCount} accepted item(s).`);
+      toast.success(`GRN ${grnId} saved — ${lines.length} line(s) sent to Quality Control for inspection.`);
     }
 
     // Reset form
     setGrnOpen(false);
     setSelectedPORef("");
     setReceivedBy("");
-    setFormLines([{ id: "l0", name: "", qty: 1, uom: "Kg", temp: "", expiry: "", qcStatus: "Accepted" }]);
+    setFormLines([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "" }]);
   };
 
   // Build display rows from seed + workflow GRNs
@@ -215,7 +271,6 @@ export default function ReceiveItem() {
     { key: "item", header: "Item" },
     { key: "qty", header: "Qty" },
     { key: "uom", header: "UOM" },
-    { key: "temp", header: "Temp °C" },
     { key: "expiry", header: "Expiry" },
     { key: "receivedBy", header: "Received By" },
     {
@@ -224,14 +279,15 @@ export default function ReceiveItem() {
           r.status === "Accepted" ? "bg-green-600 text-white" :
           r.status === "Rejected" ? "bg-red-600 text-white" :
           r.status === "On Hold" ? "bg-amber-400 text-white" :
+          r.status === "Pending" ? "bg-slate-200 text-slate-700" :
           "bg-muted text-foreground";
         return <span className={`px-3 py-1 rounded-full text-xs font-semibold ${cls}`}>{r.status}</span>;
       },
     },
   ];
 
+  const pendingQc = allRows.filter(r => r.status === "Pending").length;
   const accepted = allRows.filter(r => r.status === "Accepted").length;
-  const onHold = allRows.filter(r => r.status === "On Hold").length;
   const rejected = allRows.filter(r => r.status === "Rejected").length;
 
   return (
@@ -239,12 +295,19 @@ export default function ReceiveItem() {
       <PageHeader
         title="Receive Items — Inbound GRN"
         subtitle="Goods Receipt Note — inspect and accept inbound vendor deliveries into the store"
-        actions={<Button onClick={() => setGrnOpen(true)}><Plus className="h-4 w-4 mr-1" /> New GRN</Button>}
+        actions={
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => setDirectOpen(true)}>
+              <Zap className="h-4 w-4 mr-1" /> Direct Receive
+            </Button>
+            <Button onClick={() => setGrnOpen(true)}><Plus className="h-4 w-4 mr-1" /> New GRN</Button>
+          </div>
+        }
       />
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
         <KpiCard label="Receipts Today" value={allRows.length} icon={Truck} tone="navy" />
+        <KpiCard label="Pending QC" value={pendingQc} icon={ClipboardCheck} tone="warning" />
         <KpiCard label="Accepted" value={accepted} icon={PackageCheck} tone="success" />
-        <KpiCard label="On Hold" value={onHold} icon={ClipboardCheck} tone="warning" />
         <KpiCard label="Rejected" value={rejected} icon={AlertOctagon} tone="red" />
       </div>
       <div className="mb-4">
@@ -292,7 +355,16 @@ export default function ReceiveItem() {
             </div>
             <div className="col-span-2">
               <Label>Received By *</Label>
-              <Input value={receivedBy} onChange={(e) => setReceivedBy(e.target.value)} className="mt-1" placeholder="Name of person receiving" />
+              <select
+                value={receivedBy}
+                onChange={(e) => setReceivedBy(e.target.value)}
+                className="w-full mt-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
+              >
+                <option value="">Select receiver...</option>
+                {RECEIVERS.map((r) => (
+                  <option key={r} value={r}>{r}</option>
+                ))}
+              </select>
             </div>
             <LocationPicker
               officeId={grnOfficeId}
@@ -305,9 +377,6 @@ export default function ReceiveItem() {
           <div className="mt-2">
             <div className="flex items-center justify-between mb-2">
               <Label>Items Received</Label>
-              <Button size="sm" variant="outline" onClick={addLine}>
-                <Plus className="h-3.5 w-3.5 mr-1" /> Add Row
-              </Button>
             </div>
             <div className="rounded-md border border-border overflow-hidden">
               <table className="w-full text-sm">
@@ -316,9 +385,7 @@ export default function ReceiveItem() {
                     <th className="p-2 text-left font-semibold">Item</th>
                     <th className="p-2 text-left font-semibold w-20">Qty</th>
                     <th className="p-2 text-left font-semibold w-16">UOM</th>
-                    <th className="p-2 text-left font-semibold w-24">Temp °C</th>
                     <th className="p-2 text-left font-semibold w-28">Expiry</th>
-                    <th className="p-2 text-left font-semibold w-28">QC Status</th>
                     <th className="w-8" />
                   </tr>
                 </thead>
@@ -344,16 +411,9 @@ export default function ReceiveItem() {
                       <td className="p-2">
                         <Input
                           value={line.uom}
-                          onChange={(e) => updateLine(line.id, "uom", e.target.value)}
-                          className="h-7 text-xs w-16"
-                        />
-                      </td>
-                      <td className="p-2">
-                        <Input
-                          value={line.temp}
-                          onChange={(e) => updateLine(line.id, "temp", e.target.value)}
-                          className="h-7 text-xs"
-                          placeholder="e.g. 4°C"
+                          readOnly
+                          tabIndex={-1}
+                          className="h-7 text-xs w-16 bg-muted/50 text-muted-foreground cursor-default"
                         />
                       </td>
                       <td className="p-2">
@@ -363,17 +423,6 @@ export default function ReceiveItem() {
                           onChange={(e) => updateLine(line.id, "expiry", e.target.value)}
                           className="h-7 text-xs"
                         />
-                      </td>
-                      <td className="p-2">
-                        <select
-                          value={line.qcStatus}
-                          onChange={(e) => updateLine(line.id, "qcStatus", e.target.value as FormLine["qcStatus"])}
-                          className="h-7 text-xs rounded border border-input bg-background px-2 w-full"
-                        >
-                          <option>Accepted</option>
-                          <option>On Hold</option>
-                          <option>Rejected</option>
-                        </select>
                       </td>
                       <td className="p-2">
                         <button type="button" onClick={() => removeLine(line.id)} className="text-muted-foreground hover:text-destructive">
@@ -386,13 +435,142 @@ export default function ReceiveItem() {
               </table>
             </div>
             <p className="mt-1.5 text-[11px] text-muted-foreground">
-              Accepted items will increment Stock Overview. Demand linked to this PO will be marked Fulfilled and Kitchen notified.
+              Received lines go to <span className="font-medium">Quality Control</span> for inspection — accepted items there increment Stock Overview. Demand linked to this PO will be marked Fulfilled.
             </p>
           </div>
 
           <DialogFooter>
             <Button variant="outline" onClick={() => setGrnOpen(false)}>Cancel</Button>
             <Button onClick={saveGRN}>Save GRN</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Direct Purchase Dialog — spot buy with no prior PO */}
+      <Dialog open={directOpen} onOpenChange={(v) => { if (!v) { setDirectOpen(false); resetDirect(); } }}>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Zap className="h-4 w-4 text-amber-500" /> Direct Receive — Spot Buy
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <Label>Vendor *</Label>
+              <select
+                value={dpVendor}
+                onChange={(e) => setDpVendor(e.target.value)}
+                className="w-full mt-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
+              >
+                <option value="">Select a vendor...</option>
+                {vendors.map((v) => <option key={v.id} value={v.name}>{v.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <Label>Received By *</Label>
+              <select
+                value={dpReceivedBy}
+                onChange={(e) => setDpReceivedBy(e.target.value)}
+                className="w-full mt-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
+              >
+                <option value="">Select receiver...</option>
+                {RECEIVERS.map((r) => <option key={r} value={r}>{r}</option>)}
+              </select>
+            </div>
+            <LocationPicker
+              officeId={dpOfficeId}
+              warehouseId={dpWarehouseId}
+              onChange={(n) => { setDpOfficeId(n.officeId); setDpWarehouseId(n.warehouseId); }}
+            />
+            <div className="col-span-2">
+              <Label>Justification *</Label>
+              <Textarea
+                value={dpJustification}
+                onChange={(e) => setDpJustification(e.target.value)}
+                rows={2}
+                className="mt-1"
+                placeholder="Why this was received directly (urgency, no vendor contract, one-off, etc.)"
+              />
+            </div>
+          </div>
+
+          {/* Line items — entered manually for a direct buy */}
+          <div className="mt-2">
+            <div className="flex items-center justify-between mb-2">
+              <Label>Items Received</Label>
+              <Button size="sm" variant="outline" onClick={dpAddLine}>
+                <Plus className="h-3.5 w-3.5 mr-1" /> Add Row
+              </Button>
+            </div>
+            <div className="rounded-md border border-border overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="p-2 text-left font-semibold">Item</th>
+                    <th className="p-2 text-left font-semibold w-20">Qty</th>
+                    <th className="p-2 text-left font-semibold w-20">UOM</th>
+                    <th className="p-2 text-left font-semibold w-28">Expiry</th>
+                    <th className="w-8" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {dpLines.map(line => (
+                    <tr key={line.id} className="border-t border-border/50">
+                      <td className="p-2">
+                        <select
+                          value={line.name}
+                          onChange={(e) => dpPickItem(line.id, e.target.value)}
+                          className="w-full h-7 text-xs rounded-md border border-input bg-background px-2"
+                        >
+                          <option value="">Select item…</option>
+                          {dpItemOptions.map((it) => (
+                            <option key={it.id} value={it.name}>{it.name}</option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="p-2">
+                        <Input
+                          type="number" min={0}
+                          value={line.qty}
+                          onChange={(e) => dpUpdateLine(line.id, "qty", Number(e.target.value))}
+                          className="h-7 text-xs"
+                        />
+                      </td>
+                      <td className="p-2">
+                        <Input
+                          value={line.uom}
+                          readOnly
+                          tabIndex={-1}
+                          className="h-7 text-xs w-16 bg-muted/50 text-muted-foreground cursor-default"
+                        />
+                      </td>
+                      <td className="p-2">
+                        <Input
+                          type="date"
+                          value={line.expiry}
+                          onChange={(e) => dpUpdateLine(line.id, "expiry", e.target.value)}
+                          className="h-7 text-xs"
+                        />
+                      </td>
+                      <td className="p-2">
+                        <button type="button" onClick={() => dpRemoveLine(line.id)} className="text-muted-foreground hover:text-destructive">
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-1.5 text-[11px] text-muted-foreground">
+              Recorded as a GRN with a <span className="font-medium">DP</span> reference and routed through <span className="font-medium">Quality Control</span> — accepted items increment Stock Overview, same as any receipt.
+            </p>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setDirectOpen(false); resetDirect(); }}>Cancel</Button>
+            <Button onClick={saveDirect}><Zap className="h-4 w-4 mr-1.5" /> Record Direct Receive</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

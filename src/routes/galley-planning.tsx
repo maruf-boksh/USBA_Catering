@@ -29,7 +29,7 @@ import { getAuthUser } from "@/lib/auth";
 // dispatch-monitoring.tsx (exported); this page is the new launch surface.
 import {
   flights, flightLabel, nowTimeStr,
-  loadDispatchEntries, loadGalleyRecords, saveGalleyRecords,
+  loadDispatchEntries, loadGalleyRecords, saveGalleyRecords, scaleDispatchMeals,
   GalleyPlanningModal,
   type DispatchEntry, type FlightOption, type GalleyLoadingRecord, type GalleyPlan, type GalleyStatus,
 } from "@/routes/dispatch-monitoring";
@@ -155,7 +155,15 @@ export function GalleySheetViewModal({
   onClose: () => void;
 }) {
   const allSections = getGalleySections();
-  const groups = (["Meals", "Beverages", "Amenities", "Equipment"] as const).map((group) => ({
+  // Meals are integrated live from Dispatch (Order → Meal Planning → Dispatch),
+  // not the fixed catalog fields — so the sheet always reflects the real meal
+  // plan. Load counts are recovered from the plan (buildInitialGalley stores
+  // depZenithLoad = PAX and totalMealLoad = PAX + Crew), falling back to the
+  // flight schedule. Beverages/Amenities/Equipment stay from the saved snapshot.
+  const planPax = Number(rec.galleyPlan.depZenithLoad) || flight?.pax || 0;
+  const planCrew = Math.max(0, (Number(rec.galleyPlan.totalMealLoad) || 0) - planPax) || flight?.crew || 0;
+  const meals = scaleDispatchMeals(flight?.flight, planPax, planCrew, flight?.crew ?? planCrew)?.scaled ?? null;
+  const groups = (["Beverages", "Amenities", "Equipment"] as const).map((group) => ({
     group,
     sections: allSections.filter((s) => s.group === group),
   }));
@@ -203,6 +211,54 @@ export function GalleySheetViewModal({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto bg-slate-50/20 px-6 py-5 space-y-6">
+          {/* Meals — integrated live from Dispatch, scaled to this plan's load. */}
+          <div>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-sky-700 mb-2">Meals</p>
+            {meals ? (
+              <div className="space-y-3">
+                <div className="rounded-lg border border-border bg-white">
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-2 py-1.5 border-b border-border bg-muted/40 rounded-t-lg">
+                    Passenger Meals
+                  </p>
+                  {meals.paxLines.length === 0 ? (
+                    <p className="px-2 py-1.5 text-xs text-muted-foreground">No passenger meal lines.</p>
+                  ) : meals.paxLines.map((l, i) => (
+                    <ViewRow key={i} label={`${l.itemName}${l.percent != null ? ` · ${l.percent}%` : ""}`} value={String(l.qty)} />
+                  ))}
+                </div>
+                {meals.crewMeals.length > 0 && (
+                  <div className="rounded-lg border border-border bg-white">
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-2 py-1.5 border-b border-border bg-muted/40 rounded-t-lg">
+                      Crew Meals
+                    </p>
+                    {meals.crewMeals.map((c, i) => (
+                      <ViewRow key={i} label={c.type} value={String(c.qty)} />
+                    ))}
+                  </div>
+                )}
+                {meals.specialTotal > 0 && (
+                  <div className="rounded-lg border border-border bg-white">
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-2 py-1.5 border-b border-border bg-muted/40 rounded-t-lg">
+                      Special Meals
+                    </p>
+                    {[
+                      { label: "VGML — Veg / Vegan", qty: meals.special.vgml },
+                      { label: "CHML — Child", qty: meals.special.chml },
+                      { label: "SPML — Special", qty: meals.special.spml },
+                    ].filter((s) => s.qty > 0).map((s) => (
+                      <ViewRow key={s.label} label={s.label} value={String(s.qty)} />
+                    ))}
+                    <ViewRow label="Total Special" value={String(meals.specialTotal)} />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+                No dispatch has been built for <strong>{flight?.flight ?? rec.flightId}</strong> — the meal breakdown integrates here once the flight is dispatched in Packaging &amp; Dispatch.
+              </div>
+            )}
+          </div>
+
           {groups.map(({ group, sections }) => (
             <div key={group}>
               <p className="text-[10px] font-bold uppercase tracking-widest text-sky-700 mb-2">{group}</p>
@@ -250,6 +306,12 @@ export function GalleySheetViewModal({
                 crew: flight?.crew,
                 status: STATUS_LABEL[rec.galleyStatus],
                 signOff: signRows.map((s) => ({ label: s.label, name: s.name, designation: s.designation, signedAt: s.signedAt })),
+                meals: meals && {
+                  paxLines: meals.paxLines,
+                  crewMeals: meals.crewMeals,
+                  special: meals.special,
+                  specialTotal: meals.specialTotal,
+                },
               })
             }
           >

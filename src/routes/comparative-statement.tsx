@@ -18,6 +18,11 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { getApprovedRfqs } from "@/lib/rfqs";
+import { getQuotations } from "@/lib/quotations";
+
+// Procurement officers who can prepare a comparative statement.
+const PREPARERS = ["S. Ahmed", "M. Karim", "T. Islam", "F. Begum", "R. Hossain"];
 
 type CsStatus = "Draft" | "Pending Approval" | "Approved" | "Rejected";
 
@@ -270,15 +275,6 @@ function CsFields({
     })));
   };
 
-  const addLine = () => {
-    setLines((prev) => [...prev, {
-      id: `c-${Date.now()}`,
-      itemName: "",
-      uom: "Kg",
-      qty: 0,
-      quotes: suppliers.map((s) => ({ supplier: s, unitPrice: 0 })),
-    }]);
-  };
   const removeLine = (id: string) => setLines((prev) => prev.filter((l) => l.id !== id));
   const updateLine = (id: string, patch: Partial<CsLine>) =>
     setLines((prev) => prev.map((l) => l.id === id ? { ...l, ...patch } : l));
@@ -290,6 +286,38 @@ function CsFields({
     ));
   const award = (lineId: string, supplier: string | undefined) =>
     updateLine(lineId, { awardedSupplier: supplier });
+
+  // RFQ Reference choices come from the RFQ table — only approved RFQs can be
+  // compared. Selecting one loads its requested items as comparison rows and
+  // auto-fills each supplier's unit price from the Quotation Entry data (the
+  // supplier quotations submitted against that RFQ). The compared-supplier set
+  // is derived from whoever actually quoted the RFQ.
+  const rfqOptions = useMemo(() => getApprovedRfqs(), []);
+  const handleRfqChange = (id: string) => {
+    setRfqRef(id);
+    const rfq = rfqOptions.find((r) => r.id === id);
+    if (!rfq) return;
+    // Live supplier quotations for this RFQ — the comparison runs before award,
+    // so pending quotes are included (only rejected ones are dropped).
+    const quotes = getQuotations().filter((q) => q.rfqRef === id && q.status !== "Rejected");
+    const quotingSuppliers = Array.from(new Set(quotes.map((q) => q.supplier)));
+    const cmpSuppliers = quotingSuppliers.length ? quotingSuppliers : suppliers;
+    setSuppliers(cmpSuppliers);
+    const priceOf = (supplier: string, itemName: string) => {
+      const q = quotes.find((x) => x.supplier === supplier);
+      const line = q?.lines.find((l) => l.itemName.toLowerCase() === itemName.toLowerCase());
+      return line?.unitPrice ?? 0;
+    };
+    setLines(
+      rfq.lines.map((l, i) => ({
+        id: `rfq-${i}-${l.id}`,
+        itemName: l.itemName,
+        uom: l.uom,
+        qty: l.qty,
+        quotes: cmpSuppliers.map((s) => ({ supplier: s, unitPrice: priceOf(s, l.itemName) })),
+      })),
+    );
+  };
 
   const supplierTotals = useMemo(() => {
     const map: Record<string, number> = {};
@@ -377,21 +405,29 @@ function CsFields({
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">RFQ Reference *</Label>
-            <Input
+            <select
               value={rfqRef}
-              onChange={(e) => setRfqRef(e.target.value)}
-              placeholder="e.g. RFQ-2026-0042"
-              className="mt-1 font-mono"
-            />
+              onChange={(e) => handleRfqChange(e.target.value)}
+              className="w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm font-mono shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <option value="">Select RFQ</option>
+              {rfqOptions.map((rfq) => (
+                <option key={rfq.id} value={rfq.id}>
+                  {rfq.id} · {rfq.lines.length} item{rfq.lines.length === 1 ? "" : "s"} · {rfq.status}
+                </option>
+              ))}
+            </select>
           </div>
           <div className="md:col-span-3">
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Prepared By *</Label>
-            <Input
+            <select
               value={preparedBy}
               onChange={(e) => setPreparedBy(e.target.value)}
-              placeholder="Procurement officer name"
-              className="mt-1"
-            />
+              className="w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <option value="">Select preparer…</option>
+              {PREPARERS.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
           </div>
         </div>
 
@@ -431,11 +467,8 @@ function CsFields({
           </div>
         </div>
 
-        <div className="mb-2 flex items-center justify-between">
+        <div className="mb-2">
           <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item Comparison Matrix</Label>
-          <Button size="sm" variant="outline" onClick={addLine}>
-            <Plus className="h-3.5 w-3.5 mr-1" /> Add Item
-          </Button>
         </div>
         <div className="rounded-md border border-border overflow-hidden mb-4">
           <table className="w-full text-sm">

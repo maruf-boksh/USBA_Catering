@@ -25,7 +25,7 @@ type POLineRow = { id: string; name: string; qty: number; uom: string; unitPrice
 export default function ProcurementPage() {
   useArrivalFlash();
   const wf = useWorkflow();
-  const { wfPurchaseOrders, wfRequisitions, addPurchaseOrder, updatePurchaseOrder, deletePurchaseOrder } = wf;
+  const { wfPurchaseOrders, wfRequisitions, addPurchaseOrder, updatePurchaseOrder } = wf;
 
   // PO creation dialog state
   const [poDialogOpen, setPoDialogOpen] = useState(false);
@@ -186,7 +186,9 @@ export default function ProcurementPage() {
     { key: "status", header: "Status", render: (r) => <StatusBadge status={r.status} /> },
   ];
 
+  // Only APPROVED requisitions are ready to raise a PO against.
   const filteredReqs = wfRequisitions.filter((r) => {
+    if (r.status !== "Approved") return false;
     if (filterOffice && r.officeId !== filterOffice) return false;
     if (filterWarehouse && r.warehouseId !== filterWarehouse) return false;
     return true;
@@ -244,7 +246,7 @@ export default function ProcurementPage() {
               <Button
                 size="sm"
                 variant="outline"
-                disabled={r.status === "Approved"}
+                disabled={r.status !== "Approved"}
                 onClick={() => openPODialog(r)}
               >
                 Create PO
@@ -268,9 +270,8 @@ export default function ProcurementPage() {
           actions={(r) => (
             <RowActions
               row={r}
-              actions={["view", "edit", "print", "delete"]}
+              actions={["view", "edit", "print"]}
               onSave={(u) => updatePurchaseOrder(u.id as string, u as Partial<WfPurchaseOrder>)}
-              onDelete={(u) => deletePurchaseOrder(u.id as string)}
             />
           )}
         />
@@ -312,7 +313,7 @@ export default function ProcurementPage() {
               </select>
             </div>
             <div>
-              <Label>Delivery Date</Label>
+              <Label>Est. Receive Date</Label>
               <Input type="date" value={poDeliveryDate} onChange={(e) => setPoDeliveryDate(e.target.value)} className="mt-1" />
             </div>
             <LocationPicker

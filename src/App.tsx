@@ -6,6 +6,8 @@ import LoginPage from "@/routes/login";
 import DashboardPage from "@/routes/index";
 import OrderManagementPage from "@/routes/order-management";
 import MealPlanningPage from "@/routes/meal-planning";
+import DelayManagementPage from "@/routes/delay-management";
+import LmcPage from "@/routes/lmc";
 import BomPage from "@/routes/bom";
 import ProductionEntryPage from "@/routes/production-entry";
 import ProductionEntryNewPage from "@/routes/production-entry-new";
@@ -22,6 +24,7 @@ import QuotationEntryPage from "@/routes/quotation-entry";
 import ComparativeStatementPage from "@/routes/comparative-statement";
 import ProcurementPage from "@/routes/procurement";
 import ReceiveItemPage from "@/routes/receive-item";
+import QualityControlPage from "@/routes/quality-control";
 import PurchaseReturnPage from "@/routes/purchase-return";
 import PurchaseReportsPage from "@/routes/purchase-reports";
 import AccountsInvoicesPage from "@/routes/accounts-invoices";
@@ -38,7 +41,6 @@ import ConsumableAllocationPage from "@/routes/consumable-allocation";
 import ConsumableReturnsPage from "@/routes/consumable-returns";
 import GalleyPlanningPage from "@/routes/galley-planning";
 import GalleyQcPage from "@/routes/galley-qc";
-import GalleyStowagePage from "@/routes/galley-stowage";
 import GalleyLoadingStandardsPage from "@/routes/galley-loading-standards";
 import AirlineEquipmentsPage from "@/routes/airline-equipments";
 import AssetAssignmentPage from "@/routes/asset-assignment";
@@ -92,6 +94,8 @@ export function App() {
             <Route path="/" element={<DashboardPage />} />
             <Route path="/order-management" element={<OrderManagementPage />} />
             <Route path="/meal-planning" element={<MealPlanningPage />} />
+            <Route path="/delay-management" element={<DelayManagementPage />} />
+            <Route path="/lmc" element={<LmcPage />} />
             <Route path="/bom" element={<BomPage />} />
             <Route path="/production-entry" element={<ProductionEntryPage />} />
             <Route path="/production-entry-new" element={<ProductionEntryNewPage />} />
@@ -108,6 +112,7 @@ export function App() {
             <Route path="/comparative-statement" element={<ComparativeStatementPage />} />
             <Route path="/procurement" element={<ProcurementPage />} />
             <Route path="/receive-item" element={<ReceiveItemPage />} />
+            <Route path="/quality-control" element={<QualityControlPage />} />
             <Route path="/purchase-return" element={<PurchaseReturnPage />} />
             <Route path="/purchase-reports" element={<PurchaseReportsPage />} />
             <Route path="/accounts-invoices" element={<AccountsInvoicesPage />} />
@@ -124,7 +129,6 @@ export function App() {
             <Route path="/consumable-returns" element={<ConsumableReturnsPage />} />
             <Route path="/galley-planning" element={<GalleyPlanningPage />} />
             <Route path="/galley-qc" element={<GalleyQcPage />} />
-            <Route path="/galley-stowage" element={<GalleyStowagePage />} />
             {/* Consumables inventory was merged into Inventory & Store — redirect the old route. */}
             <Route path="/airline-consumables" element={<Navigate to="/inventory" replace />} />
             <Route path="/galley-loading-standards" element={<GalleyLoadingStandardsPage />} />
