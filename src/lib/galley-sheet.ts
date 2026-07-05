@@ -93,6 +93,14 @@ export type GalleySheetMeta = {
   crew?: number | string;
   status?: string;
   signOff?: { label: string; name: string; designation: string; signedAt: string }[];
+  /** Meals integrated from Dispatch (scaled to the plan) — printed instead of
+   *  the catalog Meals fields so print matches the on-screen sheet. */
+  meals?: {
+    paxLines: { itemName: string; percent?: number; qty: number }[];
+    crewMeals: { type: string; qty: string }[];
+    special: { vgml: number; chml: number; spml: number };
+    specialTotal: number;
+  } | null;
 };
 
 const esc = (s: unknown) =>
@@ -105,7 +113,11 @@ export function printGalleySheet(plan: GalleyPlan, meta: GalleySheetMeta) {
     return v === "" ? "—" : v;
   };
 
-  const sectionHtml = getGalleySections().map((sec) => `
+  // Meals are printed from the Dispatch-integrated snapshot (meta.meals), so the
+  // catalog Meals sections are skipped to avoid showing the fixed-share fields.
+  const sectionHtml = getGalleySections()
+    .filter((sec) => sec.group !== "Meals")
+    .map((sec) => `
     <div class="sec">
       <h3>${esc(sec.title)}</h3>
       <table>
@@ -116,6 +128,25 @@ export function printGalleySheet(plan: GalleyPlan, meta: GalleySheetMeta) {
           </tr>`).join("")}
       </table>
     </div>`).join("");
+
+  const m = meta.meals;
+  const mealRow = (lbl: string, qty: string | number) =>
+    `<tr><td class="lbl">${esc(lbl)}</td><td class="qty">${esc(qty)}</td></tr>`;
+  const mealsHtml = m ? `
+    <div class="sec">
+      <h3>Passenger Meals</h3>
+      <table>
+        ${m.paxLines.length
+          ? m.paxLines.map((l) => mealRow(`${l.itemName}${l.percent != null ? ` · ${l.percent}%` : ""}`, l.qty)).join("")
+          : mealRow("No passenger meal lines.", "—")}
+      </table>
+    </div>
+    ${m.crewMeals.length ? `<div class="sec"><h3>Crew Meals</h3><table>${m.crewMeals.map((c) => mealRow(c.type, c.qty)).join("")}</table></div>` : ""}
+    ${m.specialTotal > 0 ? `<div class="sec"><h3>Special Meals</h3><table>${
+      ([["VGML — Veg / Vegan", m.special.vgml], ["CHML — Child", m.special.chml], ["SPML — Special", m.special.spml]] as [string, number][])
+        .filter(([, q]) => q > 0).map(([lbl, q]) => mealRow(lbl, q)).join("")
+      }${mealRow("Total Special", m.specialTotal)}</table></div>` : ""}
+  ` : "";
 
   const signHtml = meta.signOff?.length ? `
     <div class="sign">
@@ -169,7 +200,7 @@ export function printGalleySheet(plan: GalleyPlan, meta: GalleySheetMeta) {
       ${meta.status ? `<span>Status <b>${esc(meta.status)}</b></span>` : ""}
     </div>
   </header>
-  <div class="cols">${sectionHtml}</div>
+  <div class="cols">${mealsHtml}${sectionHtml}</div>
   ${signHtml}
   <script>window.addEventListener('load', function () { window.print(); });</script>
 </body></html>`;

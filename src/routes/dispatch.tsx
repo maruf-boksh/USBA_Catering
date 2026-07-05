@@ -8,7 +8,7 @@ import {
   Eye, Croissant, Pill, ShieldCheck, Download,
   CheckCircle2, ThermometerSun, PlaneLanding, User, Clock,
 } from "lucide-react";
-import { flights, meals, activeWarehouses } from "@/lib/sample-data";
+import { flights, meals, activeWarehouses, activeOffices, activeWarehousesByOffice } from "@/lib/sample-data";
 import {
   dayFromDate, parseMealQty, resolveCrewDish, resolveSpecialDish,
 } from "@/lib/meal-planning-data";
@@ -28,7 +28,7 @@ import { useWorkflow } from "@/lib/workflow-store";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type DispatchStatus = "Preparing" | "Prepared" | "Ready For QC" | "Ready For Dispatch" | "Dispatched";
+export type DispatchStatus = "Preparing" | "Prepared" | "Ready For QC" | "Ready For Dispatch" | "Dispatched" | "Returned";
 
 type StatusLog = { status: DispatchStatus; by: string; date: string; time: string };
 
@@ -238,6 +238,7 @@ export const STATUS_BADGE: Record<DispatchStatus, string> = {
   "Ready For QC":       "bg-amber-100 text-amber-700",
   "Ready For Dispatch": "bg-violet-100 text-violet-700",
   "Dispatched":         "bg-emerald-100 text-emerald-700",
+  "Returned":           "bg-rose-100 text-rose-700",
 };
 const STATUS_DOT: Record<DispatchStatus, string> = {
   "Preparing":          "bg-slate-400",
@@ -245,6 +246,7 @@ const STATUS_DOT: Record<DispatchStatus, string> = {
   "Ready For QC":       "bg-amber-500",
   "Ready For Dispatch": "bg-violet-500",
   "Dispatched":         "bg-emerald-500",
+  "Returned":           "bg-rose-500",
 };
 
 const PACKAGING_BADGE: Record<PackagingStatus, string> = {
@@ -445,6 +447,30 @@ export const INITIAL_RECORDS: DispatchRecord[] = [
     }],
     dynamicItems: [],
   },
+  {
+    id: "DSP-7705", date: "2025-11-09", depTime: "07:20", kitchenName: "Flight Kitchen B", flightNos: ["BS-105"],
+    status: "Ready For Dispatch",
+    trail: [
+      { status: "Preparing",          by: "System",     date: "09 Nov 2025", time: "05:30 am" },
+      { status: "Prepared",           by: "S. Ahmed",   date: "09 Nov 2025", time: "06:15 am" },
+      { status: "Ready For QC",       by: "F. Begum",   date: "09 Nov 2025", time: "06:40 am" },
+      { status: "Ready For Dispatch", by: "A. Khan",    date: "09 Nov 2025", time: "07:00 am" },
+    ],
+    detail: {
+      flightKitchen: { name: "Flight Kitchen B", totalMeals: 7600, lunch: 1980, breakfast: 2200 },
+      bakery: [{ name: "Chicken Roll", qty: 43 }, { name: "Beef Bun", qty: 29 }],
+      amenities: [{ label: "Medicine Kits", qty: 72 }, { label: "Tissue Sets", qty: 144 }, { label: "Cutlery Sets", qty: 72 }],
+      foodSafety: { result: "Passed", checkedBy: "F. Begum", date: "09 Nov 2025", time: "06:30 am" },
+    },
+    sections: [{
+      flightNo: "BS-105", sector: "DAC-CXB",
+      paxLines: [{ itemName: "CHRS", percent: 60, qty: 43 }, { itemName: "BDBR", percent: 40, qty: 29 }],
+      vgml: 2, chml: 5, spml: 0,
+      crewMeals: [{ type: "Breakfast", qty: "4" }, { type: "Light Snacks", qty: "4" }],
+      pastry: 72, childMealsPastry: 5,
+    }],
+    dynamicItems: [],
+  },
 ];
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -496,8 +522,22 @@ export default function Dispatch() {
   // "Dispatched" these drive the Transfer Note raised into the Inventory module.
   const DEFAULT_FROM_WH = "WH-003"; // Hot Kitchen
   const DEFAULT_TO_WH   = "WH-001"; // Central Warehouse
+  const officeOfWarehouse = (whId: string) => activeWarehouses.find((w) => w.id === whId)?.officeId ?? "OFF-001";
   const [configFromWarehouse, setConfigFromWarehouse] = useState(DEFAULT_FROM_WH);
   const [configToWarehouse, setConfigToWarehouse]     = useState(DEFAULT_TO_WH);
+  // Owning office per warehouse — the warehouse dropdowns cascade from these.
+  const [configFromOffice, setConfigFromOffice] = useState(() => officeOfWarehouse(DEFAULT_FROM_WH));
+  const [configToOffice, setConfigToOffice]     = useState(() => officeOfWarehouse(DEFAULT_TO_WH));
+  const changeFromOffice = (officeId: string) => {
+    setConfigFromOffice(officeId);
+    const whs = activeWarehousesByOffice(officeId);
+    if (!whs.some((w) => w.id === configFromWarehouse)) setConfigFromWarehouse(whs[0]?.id ?? "");
+  };
+  const changeToOffice = (officeId: string) => {
+    setConfigToOffice(officeId);
+    const whs = activeWarehousesByOffice(officeId);
+    if (!whs.some((w) => w.id === configToWarehouse)) setConfigToWarehouse(whs[0]?.id ?? "");
+  };
   const [configPaxLines, setConfigPaxLines] = useState<CfgPaxLine[]>([
     { id: "p1", itemName: "", percent: 60, qty: 0 },
     { id: "p2", itemName: "", percent: 40, qty: 0 },
@@ -2567,25 +2607,45 @@ export default function Dispatch() {
                 Transfer Note is raised between these into the Inventory module. */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <Label className="text-xs font-semibold">From Warehouse</Label>
+                <Label className="text-xs font-semibold">From Office</Label>
+                <select
+                  value={configFromOffice}
+                  onChange={(e) => changeFromOffice(e.target.value)}
+                  className="h-9 mt-1 w-full rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  {activeOffices.map((o) => (
+                    <option key={o.id} value={o.id}>{o.name}</option>
+                  ))}
+                </select>
+                <Label className="text-xs font-semibold mt-2 block">From Warehouse</Label>
                 <select
                   value={configFromWarehouse}
                   onChange={(e) => setConfigFromWarehouse(e.target.value)}
                   className="h-9 mt-1 w-full rounded-md border border-input bg-background px-3 text-sm"
                 >
-                  {activeWarehouses.map((w) => (
+                  {activeWarehousesByOffice(configFromOffice).map((w) => (
                     <option key={w.id} value={w.id}>{w.name} ({w.code})</option>
                   ))}
                 </select>
               </div>
               <div>
-                <Label className="text-xs font-semibold">To Warehouse</Label>
+                <Label className="text-xs font-semibold">To Office</Label>
+                <select
+                  value={configToOffice}
+                  onChange={(e) => changeToOffice(e.target.value)}
+                  className="h-9 mt-1 w-full rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  {activeOffices.map((o) => (
+                    <option key={o.id} value={o.id}>{o.name}</option>
+                  ))}
+                </select>
+                <Label className="text-xs font-semibold mt-2 block">To Warehouse</Label>
                 <select
                   value={configToWarehouse}
                   onChange={(e) => setConfigToWarehouse(e.target.value)}
                   className="h-9 mt-1 w-full rounded-md border border-input bg-background px-3 text-sm"
                 >
-                  {activeWarehouses.map((w) => (
+                  {activeWarehousesByOffice(configToOffice).map((w) => (
                     <option key={w.id} value={w.id}>{w.name} ({w.code})</option>
                   ))}
                 </select>

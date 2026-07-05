@@ -236,9 +236,9 @@ export function saveGalleyRecords(records: GalleyLoadingRecord[]) {
 // The dish-level meal breakdown lives on the Packaging & Dispatch records
 // (persisted by dispatch.tsx). We read them directly so Meals integrate from
 // dispatch data rather than being hand-keyed.
-type DispPaxLine = { itemName: string; percent?: number; qty: number };
-type DispCrewMeal = { type: string; qty: string };
-type DispSection = {
+export type DispPaxLine = { itemName: string; percent?: number; qty: number };
+export type DispCrewMeal = { type: string; qty: string };
+export type DispSection = {
   flightNo: string; sector?: string; direction?: string;
   paxLines: DispPaxLine[]; vgml?: number; chml?: number; spml?: number;
   crewMeals?: DispCrewMeal[];
@@ -256,13 +256,53 @@ function loadDispatchRecords(): DispRecord[] {
 }
 
 /** The dispatch section (dish breakdown) for a flight, if a dispatch was built. */
-function dispatchSectionForFlight(flightNo: string | undefined): DispSection | undefined {
+export function dispatchSectionForFlight(flightNo: string | undefined): DispSection | undefined {
   if (!flightNo) return undefined;
   for (const rec of loadDispatchRecords()) {
     const sec = rec.sections?.find((s) => s.flightNo === flightNo);
     if (sec) return sec;
   }
   return undefined;
+}
+
+export type ScaledMeals = {
+  origPax: number;
+  paxLines: DispPaxLine[];
+  crewMeals: DispCrewMeal[];
+  special: { vgml: number; chml: number; spml: number };
+  specialTotal: number;
+};
+
+/** Scale a flight's Dispatch meal breakdown to a plan's load counts — the single
+ *  source of truth for the galley Meals view. The planner (live) and the
+ *  read-only handing/taking sheet both call this so they always agree.
+ *  Percent-based passenger lines recompute off planPax; fixed-qty lines scale
+ *  proportionally; crew meals scale off the flight's original crew. */
+export function scaleDispatchMeals(
+  flightNo: string | undefined, planPax: number, planCrew: number, origCrew: number,
+): { section: DispSection; scaled: ScaledMeals } | null {
+  const section = dispatchSectionForFlight(flightNo);
+  if (!section) return null;
+  const origPax = section.paxLines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
+  const paxLines = section.paxLines.map((l) => ({
+    ...l,
+    qty: l.percent != null
+      ? Math.round(planPax * (l.percent / 100))
+      : origPax > 0 ? Math.round((Number(l.qty) || 0) * planPax / origPax) : (Number(l.qty) || 0),
+  }));
+  const crewMeals = (section.crewMeals ?? []).map((c) => ({
+    ...c,
+    qty: origCrew > 0 ? String(Math.round((Number(c.qty) || 0) * planCrew / origCrew)) : c.qty,
+  }));
+  // Special meals are a subset of passengers, so they scale with planPax too.
+  const paxScale = origPax > 0 ? planPax / origPax : 1;
+  const special = {
+    vgml: Math.round((section.vgml ?? 0) * paxScale),
+    chml: Math.round((section.chml ?? 0) * paxScale),
+    spml: Math.round((section.spml ?? 0) * paxScale),
+  };
+  const specialTotal = special.vgml + special.chml + special.spml;
+  return { section, scaled: { origPax, paxLines, crewMeals, special, specialTotal } };
 }
 
 /** Read the shared dispatch-monitoring entries (seeding on first use) so other
@@ -2751,6 +2791,9 @@ export function GalleyPlanningModal({
   }, [flightNo, entry.packagingDate]);
   const dispatchSection = useMemo(() => dispatchSectionForFlight(flightNo), [flightNo]);
   const specialTotal = (dispatchSection?.vgml ?? 0) + (dispatchSection?.chml ?? 0) + (dispatchSection?.spml ?? 0);
+  // Dispatched PAX basis (sum of passenger meal lines) — special meals scale
+  // against this when the load count is overridden.
+  const origPax = dispatchSection?.paxLines.reduce((s, l) => s + (Number(l.qty) || 0), 0) ?? 0;
 
   // Load counts default from the connected order but are EDITABLE — an updated
   // record (revised PAX/crew/special meals) can arrive after the flight was
@@ -2815,6 +2858,9 @@ export function GalleyPlanningModal({
   const applyLoad = (pax: number, crew: number) => {
     setPlanPax(pax);
     setPlanCrew(crew);
+    // Special meals scale with PAX (subset of passengers), so Total Meals stays
+    // in step with the overridden load count.
+    if (origPax > 0) setSpecialMeals(Math.round(specialTotal * pax / origPax));
     rebuildPlan(pax, crew, aircraftType);
   };
 
@@ -2843,22 +2889,10 @@ export function GalleyPlanningModal({
   // Meals integrate from Dispatch but are RESCALED to the (possibly overridden)
   // load counts: a percent-based passenger line recomputes off planPax, other
   // lines scale proportionally; crew meals scale off the original crew count.
-  const scaledMeals = useMemo(() => {
-    if (!dispatchSection) return null;
-    const origPax = dispatchSection.paxLines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
-    const paxLines = dispatchSection.paxLines.map((l) => ({
-      ...l,
-      qty: l.percent != null
-        ? Math.round(planPax * (l.percent / 100))
-        : origPax > 0 ? Math.round((Number(l.qty) || 0) * planPax / origPax) : (Number(l.qty) || 0),
-    }));
-    const origCrew = flight?.crew ?? 0;
-    const crewMeals = (dispatchSection.crewMeals ?? []).map((c) => ({
-      ...c,
-      qty: origCrew > 0 ? String(Math.round((Number(c.qty) || 0) * planCrew / origCrew)) : c.qty,
-    }));
-    return { origPax, paxLines, crewMeals };
-  }, [dispatchSection, planPax, planCrew, flight?.crew]);
+  const scaledMeals = useMemo(
+    () => scaleDispatchMeals(flightNo, planPax, planCrew, flight?.crew ?? 0)?.scaled ?? null,
+    [flightNo, planPax, planCrew, flight?.crew],
+  );
 
   // Read-only field (connected value, not editable) for the connected tabs.
   const RO = ({ label, value }: { label: string; value: string | number }) => (
@@ -2941,24 +2975,23 @@ export function GalleyPlanningModal({
       <DialogContent className="w-full max-w-[95vw] lg:max-w-5xl max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
 
         {/* Header */}
-        <div className="bg-gradient-to-r from-sky-700 to-sky-600 text-white px-6 pt-5 pb-0 shrink-0">
+        <div className="bg-white px-6 pt-5 pb-0 shrink-0">
           <div className="flex items-start justify-between mb-3">
             <div>
-              <h2 className="text-lg font-bold">Galley Planning</h2>
+              <h2 className="text-lg font-bold text-slate-800">Galley Planning</h2>
               <div className="flex flex-wrap items-center gap-2.5 mt-1 text-xs">
-                <span className="font-bold text-white bg-sky-800/60 px-2 py-0.5 rounded-full">
+                <span className="font-bold text-white bg-sky-600 px-2 py-0.5 rounded-full">
                   {flight?.flight ?? entry.flightId}
                 </span>
-                <span className="text-sky-100">{flight?.sector ?? "—"}</span>
-                <span className="text-sky-200">{entry.packagingDate}</span>
-                {/* Aircraft type — editable; sets this plan's loading standard.
-                    "+ Add" registers a new aircraft (also to Configuration). */}
+                <span className="text-slate-600">{flight?.sector ?? "—"}</span>
+                <span className="text-slate-500">{entry.packagingDate}</span>
+                {/* Aircraft type — editable; sets this plan's loading standard. */}
                 <span className="flex items-center gap-1">
                   <select
                     value={aircraftType}
                     onChange={(e) => applyAircraft(e.target.value)}
                     title="Aircraft type — sets the loading standard for this plan"
-                    className="bg-sky-800/50 text-sky-50 text-xs rounded-full pl-2 pr-1 py-0.5 border border-sky-400/40 focus:outline-none focus:ring-1 focus:ring-white/60 cursor-pointer max-w-[150px]"
+                    className="bg-slate-100 text-slate-700 text-xs rounded-full pl-2 pr-1 py-0.5 border border-slate-300 focus:outline-none focus:ring-1 focus:ring-ring cursor-pointer max-w-[150px]"
                   >
                     <option value="" className="text-slate-800">Select aircraft…</option>
                     {aircraftTypes.map((t) => (
@@ -2966,28 +2999,28 @@ export function GalleyPlanningModal({
                     ))}
                   </select>
                 </span>
-                <span className="text-sky-300">PAX: {planPax}</span>
-                <span className="text-sky-300">Crew: {planCrew}</span>
+                <span className="text-slate-600">PAX: {planPax}</span>
+                <span className="text-slate-600">Crew: {planCrew}</span>
               </div>
             </div>
-            <button onClick={onClose} className="text-sky-200 hover:text-white p-1 rounded transition-colors mt-0.5">
+            <button onClick={onClose} className="text-slate-400 hover:text-slate-700 p-1 rounded transition-colors mt-0.5">
               <CloseIcon className="h-5 w-5" />
             </button>
           </div>
-          <div className="flex flex-wrap items-center gap-0.5">
+          <div className="flex flex-wrap items-center gap-0.5 border-b border-slate-200">
             {TABS.map(({ key, label }) => (
               <button
                 key={key}
                 onClick={() => setTab(key)}
-                className={`px-3.5 py-2 text-[11px] font-semibold rounded-t-md transition-colors ${
-                  tab === key ? "bg-white text-sky-700" : "text-sky-200 hover:text-white hover:bg-sky-600/50"
+                className={`px-3.5 py-2 text-[11px] font-semibold border-b-2 -mb-px transition-colors ${
+                  tab === key ? "border-sky-600 text-sky-700" : "border-transparent text-slate-500 hover:text-slate-800"
                 }`}
               >
                 {label}
               </button>
             ))}
             {!aircraftType && (
-              <span className="ml-2 text-[10px] text-sky-200 italic">Select an aircraft to load beverages, amenities &amp; equipment</span>
+              <span className="ml-2 text-[10px] text-slate-400 italic">Select an aircraft to load beverages, amenities &amp; equipment</span>
             )}
           </div>
         </div>
@@ -3120,15 +3153,15 @@ export function GalleyPlanningModal({
                   <div>
                     <GalleySecTitle>Special Meals</GalleySecTitle>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      {/* Only special-meal types actually loaded are shown (zero-count types hidden). */}
+                      {/* Scaled to the current PAX; zero-count types hidden. */}
                       {[
-                        { label: "VGML — Veg / Vegan", qty: dispatchSection.vgml ?? 0 },
-                        { label: "CHML — Child", qty: dispatchSection.chml ?? 0 },
-                        { label: "SPML — Special", qty: dispatchSection.spml ?? 0 },
+                        { label: "VGML — Veg / Vegan", qty: scaledMeals.special.vgml },
+                        { label: "CHML — Child", qty: scaledMeals.special.chml },
+                        { label: "SPML — Special", qty: scaledMeals.special.spml },
                       ].filter((s) => s.qty > 0).map((s) => (
                         <RO key={s.label} label={s.label} value={s.qty} />
                       ))}
-                      <RO label="Total Special" value={specialTotal} />
+                      <RO label="Total Special" value={scaledMeals.specialTotal} />
                     </div>
                   </div>
                 </>

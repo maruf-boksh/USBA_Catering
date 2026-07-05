@@ -23,10 +23,13 @@ import { activeItems, warehouses as ALL_WAREHOUSES, inventory, allocateFefo } fr
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import { useWorkflow, type WfTransferNote, type StockDelta } from "@/lib/workflow-store";
 import { useArrivalFlash } from "@/lib/arrival-flash";
+import { INITIAL_RECORDS as DISPATCH_RECORDS, type DispatchRecord, type DispatchStatus } from "@/routes/dispatch";
 
 
 type TransferStatus = "Pending" | "In Transit" | "Completed" | "Rejected";
 type TransferKind = "Outbound" | "Return";
+// Dispatch-linked lifecycle shown as a "Dispatch Status" badge on the row.
+type TransferDispatchStatus = "Dispatched" | "Returned" | "Re-dispatched";
 
 type TransferLine = {
   id: string;
@@ -51,7 +54,22 @@ type Transfer = {
   // from the existing `from` location string.
   officeId: string;
   warehouseId: string;
+  /** DSP-#### id when this transfer originated from a Dispatch (preserved
+   *  through Return / Re-dispatch so the link survives). */
+  dispatchRef?: string;
+  /** Dispatch lifecycle for the badge — set only on dispatch-linked transfers. */
+  dispatchStatus?: TransferDispatchStatus;
 };
+
+/** The linked dispatch id for a transfer, if any (from an explicit dispatchRef
+ *  or a DSP-prefixed TR ref). */
+const dispatchIdOf = (t: Transfer): string | undefined =>
+  t.dispatchRef ?? (t.trRef.startsWith("DSP-") ? t.trRef : undefined);
+
+const dispatchStatusCls = (s: TransferDispatchStatus) =>
+  s === "Returned" ? "border-rose-300 bg-rose-50 text-rose-700" :
+  s === "Re-dispatched" ? "border-violet-300 bg-violet-50 text-violet-700" :
+  "border-emerald-300 bg-emerald-50 text-emerald-700";
 
 // Map location name → warehouse record, used to backfill officeId/warehouseId
 // from the existing `from` strings on seed rows.
@@ -99,6 +117,17 @@ const SEED_BASE: Omit<Transfer, "officeId" | "warehouseId">[] = [
     issuedBy: "S. Ahmed", receivedBy: "M. Hossain", status: "In Transit", kind: "Outbound",
     lines: [
       { id: "L1", item: "Cooking Oil", uom: "Litre", requestedQty: 25, transferredQty: 20 },
+    ],
+  },
+  {
+    // Dispatch-originated in-transit transfer (linked to dispatch DSP-7701) —
+    // eligible for Return → "Returned" dispatch status → Re-dispatch.
+    id: "TRF-DSP-7701", date: "2026-07-05 08:10", trRef: "DSP-7701",
+    from: "Hot Kitchen", to: "Central Warehouse",
+    issuedBy: "M. Karim", receivedBy: "S. Ahmed", status: "In Transit", kind: "Outbound",
+    dispatchRef: "DSP-7701", dispatchStatus: "Dispatched",
+    lines: [
+      { id: "L1", item: "Chicken Biryani", uom: "Portion", requestedQty: 100, transferredQty: 100 },
     ],
   },
   {
@@ -189,6 +218,8 @@ function wfDispatchNoteToTransfer(wf: WfTransferNote): Transfer {
     kind: "Outbound",
     officeId: wf.officeId ?? "OFF-001",
     warehouseId: wf.warehouseId ?? "WH-001",
+    dispatchRef: wf.demandRef,
+    dispatchStatus: "Dispatched",
   };
 }
 
@@ -196,6 +227,11 @@ export default function TransferPage() {
   useArrivalFlash();
   const { transferNotes, applyStockDeltas } = useWorkflow();
   const [rows, setRows] = usePersistedState<Transfer[]>("transfer-rows", SEED);
+  // Same persisted store the Dispatch page uses — so writing "Returned" back onto
+  // a dispatch record is reflected there too (read on its next mount).
+  const [, setDispatchRecords] = usePersistedState<DispatchRecord[]>("dispatch-records", DISPATCH_RECORDS);
+  const setDispatchStatus = (dspId: string, status: DispatchStatus) =>
+    setDispatchRecords((prev) => prev.map((d) => (d.id === dspId ? { ...d, status } : d)));
   const [view, setView] = useState<"list" | "create">("list");
   const [actionTransfer, setActionTransfer] = useState<Transfer | null>(null);
   const [actionMode, setActionMode] = useState<ActionMode>("receive");
@@ -322,42 +358,48 @@ export default function TransferPage() {
   };
 
   const applyReturn = (id: string, qty: Record<string, number>, reason: string) => {
+    const target = rows.find((r) => r.id === id);
+    if (!target) { closeAction(); return; }
     const total = Object.values(qty).reduce((s, n) => s + (Number(n) || 0), 0);
     if (total <= 0) {
       toast.error("Enter a quantity to return on at least one line.");
       return;
     }
+    const dspId = dispatchIdOf(target);
+    const now = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const returnLines: TransferLine[] = target.lines
+      .filter((l) => (qty[l.id] ?? 0) > 0)
+      .map((l) => ({
+        id: l.id,
+        item: l.item,
+        uom: l.uom,
+        requestedQty: Math.min(l.transferredQty, qty[l.id]),
+        transferredQty: 0,
+      }));
+    const newId = `TRF-${String(8000 + rows.length + 1)}`;
+    const returnTags = tagsForLocation(target.to);
+    const ret: Transfer = {
+      id: newId,
+      date: now,
+      trRef: `Return of ${target.id}${reason.trim() ? ` — ${reason.trim()}` : ""}`,
+      from: target.to,
+      to: target.from,
+      issuedBy: target.receivedBy === "—" ? "(destination)" : target.receivedBy,
+      receivedBy: "—",
+      lines: returnLines,
+      status: "Pending",
+      kind: "Return",
+      officeId: returnTags.officeId,
+      warehouseId: returnTags.warehouseId,
+      // Preserve the dispatch link so the return can be re-dispatched, and stamp
+      // the "Returned" dispatch status onto the return entry itself.
+      dispatchRef: dspId,
+      dispatchStatus: dspId ? "Returned" : undefined,
+    };
+    // If every in-hand unit is being returned → original is Rejected; otherwise Completed.
+    const totalInHand = target.lines.reduce((s, l) => s + l.transferredQty, 0);
+    const fullyReturned = total >= totalInHand;
     setRows((prev) => {
-      const t = prev.find((r) => r.id === id);
-      if (!t) return prev;
-      const returnLines: TransferLine[] = t.lines
-        .filter((l) => (qty[l.id] ?? 0) > 0)
-        .map((l) => ({
-          id: l.id,
-          item: l.item,
-          uom: l.uom,
-          requestedQty: Math.min(l.transferredQty, qty[l.id]),
-          transferredQty: 0,
-        }));
-      const newId = `TRF-${String(8000 + prev.length + 1)}`;
-      const returnTags = tagsForLocation(t.to);
-      const ret: Transfer = {
-        id: newId,
-        date: new Date().toISOString().slice(0, 16).replace("T", " "),
-        trRef: `Return of ${t.id}${reason.trim() ? ` — ${reason.trim()}` : ""}`,
-        from: t.to,
-        to: t.from,
-        issuedBy: t.receivedBy === "—" ? "(destination)" : t.receivedBy,
-        receivedBy: "—",
-        lines: returnLines,
-        status: "Pending",
-        kind: "Return",
-        officeId: returnTags.officeId,
-        warehouseId: returnTags.warehouseId,
-      };
-      // If every in-hand unit is being returned → original is Rejected; otherwise Completed.
-      const totalInHand = t.lines.reduce((s, l) => s + l.transferredQty, 0);
-      const fullyReturned = total >= totalInHand;
       const updated = prev.map((r) => (
         r.id === id
           ? {
@@ -367,17 +409,62 @@ export default function TransferPage() {
                 ? r.lines
                 : r.lines.map((l) => ({ ...l, transferredQty: l.transferredQty - (qty[l.id] ?? 0) })),
               receivedBy: r.receivedBy === "—" ? "(received)" : r.receivedBy,
+              dispatchStatus: dspId ? ("Returned" as TransferDispatchStatus) : r.dispatchStatus,
             }
           : r
       ));
-      toast.success(
-        fullyReturned
-          ? `${id} rejected — return ${newId} created.`
-          : `Partial return ${newId} created. ${id} kept ${totalInHand - total} unit${(totalInHand - total) === 1 ? "" : "s"}.`,
-      );
       return [ret, ...updated];
     });
+    // Reflect the return on the linked dispatch record (Dispatch page shows "Returned").
+    if (dspId) setDispatchStatus(dspId, "Returned");
+    toast.success(
+      dspId
+        ? `${id} returned — dispatch ${dspId} marked Returned. Return ${newId} created; re-dispatch available.`
+        : fullyReturned
+        ? `${id} rejected — return ${newId} created.`
+        : `Partial return ${newId} created. ${id} kept ${totalInHand - total} unit${(totalInHand - total) === 1 ? "" : "s"}.`,
+    );
     closeAction();
+  };
+
+  // Re-dispatch a returned dispatch — send the returned quantity back out to the
+  // original destination as a fresh In-Transit transfer, and clear the dispatch
+  // "Returned" flag (back to "Dispatched").
+  const applyReDispatch = (returnId: string) => {
+    const ret = rows.find((r) => r.id === returnId);
+    if (!ret) return;
+    const dspId = dispatchIdOf(ret);
+    if (!dspId) { toast.error("This return is not linked to a dispatch."); return; }
+    const now = new Date().toISOString().slice(0, 16).replace("T", " ");
+    // Return route was dest → source; re-dispatch goes source → dest again.
+    const newFrom = ret.to;
+    const newTo = ret.from;
+    const tags = tagsForLocation(newFrom);
+    const qty = ret.lines.reduce((s, l) => s + l.requestedQty, 0);
+    const reDispatch: Transfer = {
+      id: `TRF-RD-${Date.now().toString().slice(-6)}`,
+      date: now,
+      trRef: dspId,
+      from: newFrom,
+      to: newTo,
+      issuedBy: "M. Karim",
+      receivedBy: "—",
+      lines: ret.lines.map((l) => ({ ...l, transferredQty: l.requestedQty })),
+      status: "In Transit",
+      kind: "Outbound",
+      officeId: tags.officeId,
+      warehouseId: tags.warehouseId,
+      dispatchRef: dspId,
+      dispatchStatus: "Dispatched",
+    };
+    setRows((prev) => [
+      reDispatch,
+      ...prev.map((r) => (r.id === returnId
+        ? { ...r, status: "Completed" as TransferStatus, dispatchStatus: "Re-dispatched" as TransferDispatchStatus }
+        : r)),
+    ]);
+    setDispatchStatus(dspId, "Dispatched");
+    toast.success(`${dspId} re-dispatched — ${qty} unit${qty === 1 ? "" : "s"} back in transit to ${newTo}.`);
   };
 
   const pending = combined.filter((r) => r.status === "Pending").length;
@@ -418,6 +505,7 @@ export default function TransferPage() {
             data={filtered}
             onReceive={(id) => openAction(id, "receive")}
             onReturn={(id) => openAction(id, "return")}
+            onReDispatch={applyReDispatch}
             editors={rowEditors(setRows)}
           />
         </>
@@ -635,11 +723,12 @@ function TabCount({ n, tone }: { n: number; tone: "warning" | "navy" | "success"
 }
 
 function TransferTabs({
-  data, onReceive, onReturn, editors,
+  data, onReceive, onReturn, onReDispatch, editors,
 }: {
   data: Transfer[];
   onReceive: (id: string) => void;
   onReturn: (id: string) => void;
+  onReDispatch: (id: string) => void;
   editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
 }) {
   // Transfer Out lists every active outbound transfer (pending or shipped) as a
@@ -680,7 +769,7 @@ function TransferTabs({
           editors={editors}
         />
       </TabsContent>
-      <TabsContent value="return"   className="mt-0"><TransferList data={returns}     emptyHint="No return transfers recorded." editors={editors} /></TabsContent>
+      <TabsContent value="return"   className="mt-0"><TransferList data={returns}     emptyHint="No return transfers recorded." onReDispatch={onReDispatch} editors={editors} /></TabsContent>
       <TabsContent value="received" className="mt-0"><TransferList data={received}    emptyHint="No received transfers yet." editors={editors} /></TabsContent>
     </Tabs>
   );
@@ -744,7 +833,7 @@ function TransferDetail({ t }: { t: Transfer }) {
 }
 
 function TransferList({
-  data, emptyHint, qtyBreakdown, noActions, onReceive, onReturn, editors,
+  data, emptyHint, qtyBreakdown, noActions, onReceive, onReturn, onReDispatch, editors,
 }: {
   data: Transfer[];
   emptyHint?: string;
@@ -755,6 +844,7 @@ function TransferList({
   noActions?: boolean;
   onReceive?: (id: string) => void;
   onReturn?: (id: string) => void;
+  onReDispatch?: (id: string) => void;
   editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
 }) {
   const sumReq = (r: Transfer) => r.lines.reduce((s, l) => s + l.requestedQty, 0);
@@ -824,6 +914,12 @@ function TransferList({
     },
     { key: "issuedBy", header: "Issued By" },
     { key: "receivedBy", header: "Received By" },
+    {
+      key: "dispatchStatus", header: "Dispatch Status", sortable: false,
+      render: (r) => r.dispatchStatus
+        ? <Badge variant="outline" className={`h-5 px-1.5 text-[10px] ${dispatchStatusCls(r.dispatchStatus)}`}>{r.dispatchStatus}</Badge>
+        : <span className="text-muted-foreground text-xs">—</span>,
+    },
     ...(qtyBreakdown ? qtyCols : [itemsCol]),
   ];
   if (data.length === 0 && emptyHint) {
@@ -862,6 +958,23 @@ function TransferList({
               >
                 <Undo2 className="h-3 w-3 mr-1" /> Return
               </Button>
+            </div>
+          );
+        }
+        // A dispatch-linked return that hasn't been re-dispatched yet can be sent
+        // back out for the returned quantity.
+        if (onReDispatch && r.kind === "Return" && r.dispatchStatus === "Returned") {
+          return (
+            <div className="flex items-center gap-1.5">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-2.5 text-xs border-emerald-400 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-700"
+                onClick={() => onReDispatch(r.id)}
+              >
+                <MoveRight className="h-3 w-3 mr-1" /> Re-dispatch
+              </Button>
+              <RowActions row={r} actions={["view", "print"]} detail={<TransferDetail t={r} />} />
             </div>
           );
         }

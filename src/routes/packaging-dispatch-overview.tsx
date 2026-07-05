@@ -27,6 +27,7 @@ const STATUS_HEX: Record<DispatchStatus, string> = {
   "Ready For QC":       "#F59E0B",
   "Ready For Dispatch": "#7C3AED",
   "Dispatched":         "#059669",
+  "Returned":           "#E11D48",
 };
 
 const warehouseName = (id?: string) => warehouses.find((w) => w.id === id)?.name ?? "—";

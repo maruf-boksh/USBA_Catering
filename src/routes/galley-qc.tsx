@@ -82,6 +82,16 @@ export default function GalleyQcPage() {
     return () => clearInterval(id);
   }, [hasLoading]);
 
+  // Re-read the shared store so approvals made in Approval Management (the
+  // approval owner for galley loading) reflect here without a manual reload.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const fresh = loadGalleyRecords();
+      setRecords((prev) => (JSON.stringify(prev) === JSON.stringify(fresh) ? prev : fresh));
+    }, 2000);
+    return () => clearInterval(id);
+  }, []);
+
   const persist = (next: GalleyLoadingRecord[]) => {
     saveGalleyRecords(next);
     setRecords(next);
@@ -105,12 +115,12 @@ export default function GalleyQcPage() {
     persist(records.map((r) => r.id === rec.id
       ? {
           ...r,
-          galleyStatus: "awaiting_approval" as GalleyStatus,
+          galleyStatus: "completed" as GalleyStatus,
           loadingCompletedAt: new Date().toISOString(),
           loadingDurationSec: durationSec,
         }
       : r));
-    toast.success(`Loading complete for ${rec.flightLabel} — awaiting QC approval.`);
+    toast.success(`Loading complete for ${rec.flightLabel} — ready for sign-off.`);
   };
 
   // Sign-off (handing/taking accountability) is captured here at approval, then
@@ -137,11 +147,13 @@ export default function GalleyQcPage() {
       flightCheckedBy: { name: picks.checkedBy, designation: aptDesig(picks.checkedBy), signedAt: at },
       handedOverBy: { name: picks.handedBy, designation: hocDesig(picks.handedBy), signedAt: at },
     };
+    // Sign-off moves the record to "awaiting_approval" (signed, ready for the
+    // approver). Final approval for flight is done in Approval Management.
     persist(records.map((r) => r.id === rec.id
-      ? { ...r, signOff, galleyStatus: "approved" as GalleyStatus, approvedAt: at, approvedBy: authUser?.name ?? "QC" }
+      ? { ...r, signOff, galleyStatus: "awaiting_approval" as GalleyStatus }
       : r));
     setSignOffRec(null);
-    toast.success(`${rec.flightLabel} signed off & approved — ready to fly.`);
+    toast.success(`${rec.flightLabel} signed off — sent to Approval Management for approval.`);
   };
 
   const visible = useMemo(() => records.filter((r) => {
@@ -154,6 +166,7 @@ export default function GalleyQcPage() {
 
   const awaiting = records.filter((r) => r.galleyStatus === "forwarded").length;
   const loadingNow = records.filter((r) => r.galleyStatus === "loading").length;
+  const toSignOff = records.filter((r) => r.galleyStatus === "completed").length;
   const forApproval = records.filter((r) => r.galleyStatus === "awaiting_approval").length;
   const approved = records.filter((r) => r.galleyStatus === "approved").length;
 
@@ -164,14 +177,15 @@ export default function GalleyQcPage() {
     <>
       <PageHeader
         title="Loading QC & Sign-Off"
-        subtitle="Execute galley loading against each forwarded sheet — Start → Complete (timed) → QC approve for flight. Steps sync with Dispatch Monitoring and the Loading Sheet Archive."
+        subtitle="Execute galley loading against each forwarded sheet — Start → Complete (timed) → Sign Off. Final approval for flight is done in Approval Management (Galley Loading queue)."
       />
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-        <KpiCard label="Awaiting Loading" value={awaiting}    icon={Send}       tone="warning" />
-        <KpiCard label="Loading Now"      value={loadingNow}  icon={Loader2}    tone="info" />
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
+        <KpiCard label="Awaiting Loading"  value={awaiting}    icon={Send}       tone="warning" />
+        <KpiCard label="Loading Now"       value={loadingNow}  icon={Loader2}    tone="info" />
+        <KpiCard label="Awaiting Sign-Off" value={toSignOff}   icon={PenLine}    tone="navy" />
         <KpiCard label="Awaiting Approval" value={forApproval} icon={Clock}      tone="navy" />
-        <KpiCard label="Approved"         value={approved}    icon={BadgeCheck} tone="success" />
+        <KpiCard label="Approved"          value={approved}    icon={BadgeCheck} tone="success" />
       </div>
 
       <Card>
@@ -251,9 +265,9 @@ export default function GalleyQcPage() {
                               <Check className="h-3 w-3 mr-1" /> Complete
                             </Button>
                           )}
-                          {r.galleyStatus === "awaiting_approval" && (
-                            <Button size="sm" className="h-7 px-2.5 text-xs bg-emerald-600 hover:bg-emerald-700" onClick={() => openSignOff(r)}>
-                              <PenLine className="h-3 w-3 mr-1" /> Sign Off & Approve
+                          {r.galleyStatus === "completed" && (
+                            <Button size="sm" className="h-7 px-2.5 text-xs bg-sky-600 hover:bg-sky-700" onClick={() => openSignOff(r)}>
+                              <PenLine className="h-3 w-3 mr-1" /> Sign Off
                             </Button>
                           )}
                           {r.galleyStatus === "approved" && (
@@ -284,7 +298,7 @@ export default function GalleyQcPage() {
             </DialogHeader>
             <div className="space-y-3">
               <p className="text-xs text-muted-foreground">
-                Confirm the handing / taking signatories, then approve the sheet for flight.
+                Confirm the handing / taking signatories. The sheet then goes to Approval Management for final approval.
               </p>
               <div>
                 <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold mb-0.5">Dispatch Sheet Prepared By</p>
@@ -300,8 +314,8 @@ export default function GalleyQcPage() {
             </div>
             <div className="flex justify-end gap-2 mt-2">
               <Button variant="outline" onClick={() => setSignOffRec(null)}>Cancel</Button>
-              <Button className="bg-emerald-600 hover:bg-emerald-700 text-white" onClick={confirmSignOff}>
-                <BadgeCheck className="h-3.5 w-3.5 mr-1.5" /> Approve &amp; Sign Off
+              <Button className="bg-sky-600 hover:bg-sky-700 text-white" onClick={confirmSignOff}>
+                <PenLine className="h-3.5 w-3.5 mr-1.5" /> Confirm Sign-Off
               </Button>
             </div>
           </DialogContent>

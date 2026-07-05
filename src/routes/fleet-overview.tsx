@@ -119,7 +119,7 @@ export default function FleetOverviewPage() {
   return (
     <>
       <PageHeader
-        title="Fleet Overview"
+        title="Asset Overview"
         subtitle="Airline equipment and facility assets — availability, maintenance and damage"
       />
 

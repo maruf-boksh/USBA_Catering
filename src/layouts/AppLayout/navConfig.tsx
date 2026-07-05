@@ -56,6 +56,7 @@ import {
   GitBranch,
   Trash2,
   Archive,
+  Replace,
 } from 'lucide-react';
 
 export interface NavSubItem {
@@ -97,6 +98,8 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/operations-overview', label: 'Operations Dashboard', icon: I(LayoutDashboard) },
       { key: '/order-management',    label: 'Order Management',     icon: I(Upload) },
       { key: '/meal-planning',       label: 'Menu Planning',    icon: I(UtensilsCrossed) },
+      { key: '/delay-management',    label: 'Delay Management',     icon: I(Clock) },
+      { key: '/lmc',                 label: 'Last Minute Change (LMC)', icon: I(Replace) },
     ],
   },
 
@@ -127,6 +130,7 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/comparative-statement',  label: 'Comparative Statement',  icon: I(Scale) },
       { key: '/procurement',            label: 'Purchase Orders',        icon: I(ShoppingCart) },
       { key: '/receive-item',           label: 'Receive Items',          icon: I(Truck) },
+      { key: '/quality-control',        label: 'Quality Control',        icon: I(ShieldCheck) },
       { key: '/purchase-return',        label: 'Purchase Return',        icon: I(Undo2) },
       { key: '/purchase-reports',       label: 'Purchase Reports',       icon: I(LineChart) },
     ],
@@ -185,17 +189,16 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/consumable-allocation', label: 'Flight Allocation', icon: I(Plane) },
       { key: '/consumable-returns',    label: 'Returns',           icon: I(Undo2) },
       { key: '/galley-loading-standards', label: 'Loading Standards', icon: I(Scale) },
-      { key: '/galley-stowage',           label: 'Aircraft Stowage Plan', icon: I(Boxes) },
     ],
   },
 
-  // ── 9. Fleet Operations (Airline Equipments + Maintenance & Assets) ──────────
+  // ── 9. Asset Management (Airline Equipments + Maintenance & Assets) ──────────
   {
     key: 'fleet-operations',
-    label: 'Fleet Operations',
-    icon: I(Plane),
+    label: 'Asset Management',
+    icon: I(Package),
     children: [
-      { key: '/fleet-overview',        label: 'Fleet Overview',     icon: I(LayoutDashboard) },
+      { key: '/fleet-overview',        label: 'Asset Overview',     icon: I(LayoutDashboard) },
       { key: '/airline-equipments',    label: 'Asset Registration', icon: I(Boxes) },
       { key: '/asset-assignment',      label: 'Asset Assign',       icon: I(Send) },
       { key: '/asset-disposal',        label: 'Asset Disposal',     icon: I(Trash2) },
