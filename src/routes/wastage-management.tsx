@@ -24,6 +24,8 @@ import {
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { useRole } from "@/lib/roles";
+import { useWorkflow, type WfProductionEntry } from "@/lib/workflow-store";
+import { resolveProductionItem } from "@/lib/meal-recipe";
 
 // ── Shared types (exported so approval-management can consume them) ────────────
 
@@ -192,8 +194,9 @@ type FormState = {
   stockItemName: string;
   previousStock: string;
   returnRef: string;
-  selectedReturnId: string;
+  selectedReturnIds: string[];
   selectedReturnLineIdx: number;
+  selectedRecookBatchId: string;
 };
 
 const emptyForm = (): FormState => ({
@@ -220,8 +223,9 @@ const emptyForm = (): FormState => ({
   stockItemName: "",
   previousStock: "",
   returnRef: "",
-  selectedReturnId: "",
+  selectedReturnIds: [],
   selectedReturnLineIdx: -1,
+  selectedRecookBatchId: "",
 });
 
 // ── Main Component ────────────────────────────────────────────────────────────
@@ -242,12 +246,21 @@ export default function WastageManagementPage() {
   const [stockLogOpen, setStockLogOpen] = useState(false);
   const [stockLogEntry, setStockLogEntry] = useState<WastageEntry | null>(null);
 
+  const [prodDetailOpen, setProdDetailOpen] = useState(false);
+  const [prodDetailEntry, setProdDetailEntry] = useState<WfProductionEntry | null>(null);
+
   // ── Inventory + Returns reads for form autocomplete ────────────────────────
 
   const [inventoryItems] = usePersistedState<{ id?: string; name: string; stock: number; uom?: string; }[]>("inventory-items", []);
   const [consumableReturns] = usePersistedState<{ id: string; date: string; flight?: string; sector?: string; lines: { itemId?: string; itemName: string; qty: number; uom: string; }[] }[]>("consumable-returns", []);
 
   const [stockDropOpen, setStockDropOpen] = useState(false);
+
+  const { productionEntries } = useWorkflow();
+  const recookBatches = useMemo(
+    () => productionEntries.filter((e) => e.status === "Re-Cook"),
+    [productionEntries]
+  );
 
   const todayReturns = useMemo(() => {
     const today = todayDate();
@@ -292,7 +305,7 @@ export default function WastageManagementPage() {
     if (form.disposalReason === "Other" && !form.disposalReasonCustom.trim()) {
       toast.error("Please specify the disposal reason."); return;
     }
-    if (form.wastageType === "Return Item" && !form.selectedReturnId) {
+    if (form.wastageType === "Return Item" && !form.selectedReturnIds.length) {
       toast.error("Please select a return record."); return;
     }
     if (!form.rootCause.trim()) { toast.error("Root cause is required."); return; }
@@ -342,8 +355,8 @@ export default function WastageManagementPage() {
       ...((form.wastageType === "Production" || form.wastageType === "Airport Store") && form.stockItemName.trim()
         ? { stockItemName: form.stockItemName.trim(), previousStock: Number(form.previousStock) || 0 }
         : {}),
-      ...(form.wastageType === "Return Item" && form.selectedReturnId
-        ? { returnRef: form.selectedReturnId }
+      ...(form.wastageType === "Return Item" && form.selectedReturnIds.length
+        ? { returnRef: form.selectedReturnIds.join(", ") }
         : {}),
     };
 
@@ -535,8 +548,9 @@ export default function WastageManagementPage() {
                     stockItemName: "",
                     previousStock: "",
                     returnRef: "",
-                    selectedReturnId: "",
+                    selectedReturnIds: [],
                     selectedReturnLineIdx: -1,
+                    selectedRecookBatchId: "",
                   })}
                 >
                   <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue /></SelectTrigger>
@@ -549,72 +563,147 @@ export default function WastageManagementPage() {
               </div>
             </div>
 
-            {/* Return Item — today's returns dropdown */}
+            {/* Re-Cook Batches — Production Point */}
+            {form.wastageType === "Production" && recookBatches.length > 0 && (
+              <div className="p-3 bg-orange-50 border border-orange-200 rounded-md space-y-3">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-orange-700">Re-Cook Batches</h4>
+                <div>
+                  <Label className="text-xs">Failed QC Batches — Select to populate <span className="text-red-500">*</span></Label>
+                  <div className="mt-1 border border-border rounded-md overflow-hidden bg-background">
+                    {recookBatches.map((entry) => (
+                      <label
+                        key={entry.id}
+                        className="flex items-center gap-2.5 px-3 py-2 text-xs cursor-pointer hover:bg-muted/40 border-b border-border last:border-0"
+                      >
+                        <input
+                          type="checkbox"
+                          className="h-3.5 w-3.5 accent-primary"
+                          checked={form.selectedRecookBatchId === entry.id}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              const matchedItem = inventoryItems.find(
+                                (i) => i.name.toLowerCase() === (entry.outputItemName ?? entry.bom).toLowerCase()
+                              );
+                              setForm({
+                                ...form,
+                                selectedRecookBatchId: entry.id,
+                                itemName: entry.outputItemName ?? entry.bom,
+                                stockItemName: entry.outputItemName ?? entry.bom,
+                                previousStock: String(entry.producedQty),
+                                batchCode: entry.id,
+                                productionDate: entry.date,
+                                disposalQty: String(entry.producedQty),
+                                disposalQtyUnit: matchedItem?.uom ?? form.disposalQtyUnit,
+                              });
+                              setStockDropOpen(false);
+                            } else {
+                              setForm({
+                                ...form,
+                                selectedRecookBatchId: "",
+                                itemName: "",
+                                stockItemName: "",
+                                previousStock: "",
+                                batchCode: "",
+                                productionDate: "",
+                                disposalQty: "",
+                              });
+                            }
+                          }}
+                        />
+                        <span className="font-medium">{entry.id}</span>
+                        {entry.outputItemName && <span className="text-muted-foreground">· {entry.outputItemName}</span>}
+                        {entry.qcFailReason && <span className="text-muted-foreground">({entry.qcFailReason})</span>}
+                        <span className="ml-auto text-muted-foreground tabular-nums shrink-0">{entry.producedQty.toLocaleString()} units</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Return Item — today's returns checkboxes (multi-select) */}
             {form.wastageType === "Return Item" && (
               <div className="p-3 bg-violet-50 border border-violet-200 rounded-md space-y-3">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-violet-700">Select Return Record</h4>
+                <h4 className="text-xs font-bold uppercase tracking-wider text-violet-700">Select Return Record(s)</h4>
                 <div>
                   <Label className="text-xs">Today's Return Records <span className="text-red-500">*</span></Label>
-                  <select
-                    className="mt-1 h-9 w-full rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    value={form.selectedReturnId}
-                    onChange={(e) => {
-                      const id = e.target.value;
-                      const ret = todayReturns.find((r) => r.id === id);
-                      const single = (ret?.lines.length ?? 0) === 1;
-                      setForm({
-                        ...form,
-                        selectedReturnId: id,
-                        returnRef: id,
-                        selectedReturnLineIdx: single ? 0 : -1,
-                        itemName: single ? (ret!.lines[0].itemName) : "",
-                        disposalQty: single ? String(ret!.lines[0].qty) : "",
-                        disposalQtyUnit: single ? ret!.lines[0].uom : form.disposalQtyUnit,
-                      });
-                    }}
-                  >
-                    <option value="">-- Select Return ID --</option>
-                    {todayReturns.map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.id}{r.flight ? ` · ${r.flight}` : ""}{r.sector ? ` (${r.sector})` : ""}
-                      </option>
-                    ))}
-                  </select>
-                  {todayReturns.length === 0 && (
+                  {todayReturns.length === 0 ? (
                     <p className="text-[11px] text-amber-600 mt-1 flex items-center gap-1">
                       <AlertTriangle className="h-3 w-3 shrink-0" />
                       No returns recorded today. Log consumable returns first.
                     </p>
+                  ) : (
+                    <div className="mt-1 border border-border rounded-md overflow-hidden bg-background">
+                      {todayReturns.map((r) => (
+                        <label
+                          key={r.id}
+                          className="flex items-center gap-2.5 px-3 py-2 text-xs cursor-pointer hover:bg-muted/40 border-b border-border last:border-0"
+                        >
+                          <input
+                            type="checkbox"
+                            className="h-3.5 w-3.5 accent-primary"
+                            checked={form.selectedReturnIds.includes(r.id)}
+                            onChange={(e) => {
+                              const ids = e.target.checked
+                                ? [...form.selectedReturnIds, r.id]
+                                : form.selectedReturnIds.filter((id) => id !== r.id);
+                              const allLines = ids.flatMap((id) => {
+                                const ret = todayReturns.find((x) => x.id === id);
+                                return ret?.lines ?? [];
+                              });
+                              const single = allLines.length === 1;
+                              setForm({
+                                ...form,
+                                selectedReturnIds: ids,
+                                selectedReturnLineIdx: single ? 0 : -1,
+                                itemName: single ? allLines[0].itemName : "",
+                                disposalQty: single ? String(allLines[0].qty) : "",
+                                disposalQtyUnit: single ? allLines[0].uom : form.disposalQtyUnit,
+                              });
+                            }}
+                          />
+                          <span className="font-medium">{r.id}</span>
+                          {r.flight && <span className="text-muted-foreground">· {r.flight}</span>}
+                          {r.sector && <span className="text-muted-foreground">({r.sector})</span>}
+                          <span className="ml-auto text-muted-foreground tabular-nums">{r.lines.length} line{r.lines.length !== 1 ? "s" : ""}</span>
+                        </label>
+                      ))}
+                    </div>
                   )}
                 </div>
 
-                {/* Multi-line picker */}
-                {form.selectedReturnId && (() => {
-                  const ret = todayReturns.find((r) => r.id === form.selectedReturnId);
-                  if (!ret || ret.lines.length <= 1) return null;
+                {/* Combined line picker from all selected returns */}
+                {form.selectedReturnIds.length > 0 && (() => {
+                  const allLines = form.selectedReturnIds.flatMap((id) => {
+                    const ret = todayReturns.find((r) => r.id === id);
+                    return (ret?.lines ?? []).map((line) => ({ ...line, fromId: id }));
+                  });
+                  if (allLines.length <= 1) return null;
                   return (
                     <div>
                       <Label className="text-xs">Select Return Item <span className="text-red-500">*</span></Label>
                       <div className="mt-1 border border-border rounded-md overflow-hidden">
-                        {ret.lines.map((line, idx) => (
+                        {allLines.map((line, idx) => (
                           <div
                             key={idx}
                             onMouseDown={() => setForm({
                               ...form,
-                              selectedReturnId: form.selectedReturnId,
                               selectedReturnLineIdx: idx,
                               itemName: line.itemName,
                               disposalQty: String(line.qty),
                               disposalQtyUnit: line.uom,
                             })}
                             className={cn(
-                              "px-3 py-2 text-xs cursor-pointer border-b border-border last:border-0 flex justify-between",
+                              "px-3 py-2 text-xs cursor-pointer border-b border-border last:border-0 flex justify-between items-center",
                               form.selectedReturnLineIdx === idx
                                 ? "bg-primary/10 text-primary font-semibold"
                                 : "hover:bg-muted/40",
                             )}
                           >
-                            <span>{line.itemName}</span>
+                            <div className="flex flex-col">
+                              <span>{line.itemName}</span>
+                              <span className="text-[10px] text-muted-foreground font-normal">from {line.fromId}</span>
+                            </div>
                             <span className="tabular-nums text-muted-foreground">{line.qty} {line.uom}</span>
                           </div>
                         ))}
@@ -796,8 +885,8 @@ export default function WastageManagementPage() {
               </div>
             </div>
 
-            {/* Stock QTY Summary — Production & Airport Store */}
-            {(form.wastageType === "Production" || form.wastageType === "Airport Store") && (
+            {/* Stock QTY Summary — Production, Airport Store & Return Item */}
+            {(form.wastageType === "Production" || form.wastageType === "Airport Store" || form.wastageType === "Return Item") && (
               <div className="space-y-2">
                 <div className="grid grid-cols-3 gap-2 p-2 bg-orange-50 border border-orange-200 rounded-md">
                   <div className="text-center">
@@ -1084,13 +1173,27 @@ export default function WastageManagementPage() {
                         ["08", "Disposal Method",         viewEntry.disposalMethod],
                         ["09", "Disposal Date",           viewEntry.disposalDate],
                         ["10", "Disposal Time",           viewEntry.disposalTime],
-                      ].map(([sl, name, value]) => (
-                        <TableRow key={sl}>
-                          <TableCell className="text-xs text-muted-foreground font-mono">{sl}</TableCell>
-                          <TableCell className="text-xs font-medium">{name}</TableCell>
-                          <TableCell className="text-xs text-center">{value}</TableCell>
-                        </TableRow>
-                      ))}
+                      ].map(([sl, name, value]) => {
+                        const linkedProd = sl === "03"
+                          ? productionEntries.find((e) => e.id === value)
+                          : null;
+                        return (
+                          <TableRow key={sl}>
+                            <TableCell className="text-xs text-muted-foreground font-mono">{sl}</TableCell>
+                            <TableCell className="text-xs font-medium">{name}</TableCell>
+                            <TableCell className="text-xs text-center">
+                              {linkedProd ? (
+                                <button
+                                  className="font-mono font-semibold text-primary hover:underline"
+                                  onClick={() => { setProdDetailEntry(linkedProd); setProdDetailOpen(true); }}
+                                >
+                                  {value}
+                                </button>
+                              ) : value}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
                     </TableBody>
                   </Table>
                 </div>
@@ -1335,6 +1438,160 @@ export default function WastageManagementPage() {
             </div>
             <DialogFooter>
               <Button variant="outline" size="sm" onClick={() => setStockLogOpen(false)}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {/* ── Production Order Detail Modal ─────────────────────────────────────── */}
+      {prodDetailEntry && (
+        <Dialog open={prodDetailOpen} onOpenChange={(o) => { setProdDetailOpen(o); if (!o) setProdDetailEntry(null); }}>
+          <DialogContent className="max-w-lg">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-base">
+                <Package className="h-4 w-4 text-primary" />
+                Production Order — {prodDetailEntry.id}
+              </DialogTitle>
+            </DialogHeader>
+
+            {(() => {
+              const recipe = resolveProductionItem({
+                name: prodDetailEntry.outputItemName ?? prodDetailEntry.bom,
+                code: prodDetailEntry.outputItemCode,
+              });
+              const qty = prodDetailEntry.producedQty;
+              const money = (n: number) =>
+                n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+              const sections = [
+                { label: "Raw Materials",       rows: recipe.rawMaterials       },
+                { label: "Packaging Materials", rows: recipe.packagingMaterials },
+                { label: "Other Consumption",   rows: recipe.otherConsumption   },
+              ];
+              const totalCogs = [...recipe.rawMaterials, ...recipe.packagingMaterials, ...recipe.otherConsumption]
+                .reduce((s, m) => s + m.qtyPerUnit * qty * m.rate, 0);
+              return (
+                <div className="space-y-4 py-1">
+                  {/* Summary strip */}
+                  <div className="grid grid-cols-2 gap-3 p-3 bg-muted/30 border border-border rounded-md text-xs">
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Item</p>
+                      <p className="font-semibold">{recipe.name}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">BOM / Code</p>
+                      <p>{prodDetailEntry.bom}{prodDetailEntry.outputItemCode ? ` · ${prodDetailEntry.outputItemCode}` : ""}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Production Date</p>
+                      <p>{prodDetailEntry.date}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Produced Qty</p>
+                      <p className="font-semibold tabular-nums">{qty.toLocaleString()}</p>
+                    </div>
+                    {prodDetailEntry.orderQty != null && (
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Order Qty (Planned)</p>
+                        <p className="tabular-nums">{prodDetailEntry.orderQty.toLocaleString()}</p>
+                      </div>
+                    )}
+                    <div>
+                      <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Status</p>
+                      <span className={cn(
+                        "inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border",
+                        prodDetailEntry.status === "Completed"      ? "bg-emerald-100 text-emerald-700 border-emerald-200" :
+                        prodDetailEntry.status === "Re-Cook"        ? "bg-red-100 text-red-700 border-red-200" :
+                        prodDetailEntry.status === "Ready for QC"   ? "bg-blue-100 text-blue-700 border-blue-200" :
+                        prodDetailEntry.status === "In Preparation" ? "bg-amber-100 text-amber-700 border-amber-200" :
+                                                                      "bg-muted text-muted-foreground border-border",
+                      )}>
+                        {prodDetailEntry.status}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* QC result */}
+                  {(prodDetailEntry.qcFailedAt || prodDetailEntry.qcPassedAt) && (
+                    <div className={cn(
+                      "p-3 rounded-md border text-xs space-y-1.5",
+                      prodDetailEntry.status === "Re-Cook" ? "bg-red-50 border-red-200" : "bg-emerald-50 border-emerald-200",
+                    )}>
+                      <p className={cn(
+                        "text-[10px] font-bold uppercase tracking-wider",
+                        prodDetailEntry.status === "Re-Cook" ? "text-red-700" : "text-emerald-700",
+                      )}>QC Result</p>
+                      {prodDetailEntry.qcFailedAt && (
+                        <div className="grid grid-cols-2 gap-2">
+                          <div><span className="text-muted-foreground">Failed At: </span><span className="tabular-nums">{prodDetailEntry.qcFailedAt}</span></div>
+                          {prodDetailEntry.qcFailedBy && <div><span className="text-muted-foreground">By: </span>{prodDetailEntry.qcFailedBy}</div>}
+                        </div>
+                      )}
+                      {prodDetailEntry.qcFailReason && (
+                        <div className="mt-1 p-2 bg-red-100 border border-red-200 rounded text-red-700">
+                          <span className="font-semibold">Fail Reason: </span>{prodDetailEntry.qcFailReason}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Material Requirements */}
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3">Material Requirements</p>
+                    {sections.map(({ label, rows }) =>
+                      rows.length === 0 ? null : (
+                        <div key={label} className="mb-4">
+                          <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">{label}</p>
+                          <div className="border border-border rounded-md overflow-hidden">
+                            <Table>
+                              <TableHeader className="bg-muted/40">
+                                <TableRow>
+                                  <TableHead className="text-xs uppercase tracking-wider">Item Code</TableHead>
+                                  <TableHead className="text-xs uppercase tracking-wider">Item Name</TableHead>
+                                  <TableHead className="text-xs uppercase tracking-wider">UOM</TableHead>
+                                  <TableHead className="text-xs uppercase tracking-wider text-right">Req. Qty</TableHead>
+                                  <TableHead className="text-xs uppercase tracking-wider text-right">Rate (৳)</TableHead>
+                                  <TableHead className="text-xs uppercase tracking-wider text-right">Line Cost (৳)</TableHead>
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {rows.map((m) => {
+                                  const reqQty = m.qtyPerUnit * qty;
+                                  return (
+                                    <TableRow key={m.itemCode}>
+                                      <TableCell className="font-mono text-xs">{m.itemCode}</TableCell>
+                                      <TableCell className="font-medium text-xs">{m.itemName}</TableCell>
+                                      <TableCell className="text-xs">{m.uom}</TableCell>
+                                      <TableCell className="text-xs text-right tabular-nums">{reqQty.toFixed(3)}</TableCell>
+                                      <TableCell className="text-xs text-right tabular-nums text-muted-foreground">{money(m.rate)}</TableCell>
+                                      <TableCell className="text-xs text-right tabular-nums font-medium">{money(reqQty * m.rate)}</TableCell>
+                                    </TableRow>
+                                  );
+                                })}
+                              </TableBody>
+                            </Table>
+                          </div>
+                        </div>
+                      )
+                    )}
+                  </div>
+
+                  {/* Total COGS */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-md border border-primary/30 bg-primary/5 px-4 py-3 text-xs">
+                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Total COGS — {qty.toLocaleString()} units</p>
+                      <p className="mt-1 text-base font-semibold tabular-nums text-primary">৳ {money(totalCogs)}</p>
+                    </div>
+                    <div className="rounded-md border border-border bg-muted/20 px-4 py-3 text-xs">
+                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Cost per Unit</p>
+                      <p className="mt-1 text-base font-semibold tabular-nums">৳ {qty > 0 ? money(totalCogs / qty) : "0.00"}</p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            <DialogFooter>
+              <Button variant="outline" size="sm" onClick={() => { setProdDetailOpen(false); setProdDetailEntry(null); }}>Close</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
