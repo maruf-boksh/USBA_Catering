@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { useState, useSyncExternalStore, useMemo } from "react";
+import { useState, useSyncExternalStore, useMemo, useEffect } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -177,8 +177,35 @@ export default function Inventory() {
   const [batchOpen, setBatchOpen] = useState(false);
   const [selected, setSelected] = useState<Item | null>(null);
   const [form, setForm] = useState<FormState>(emptyForm);
+  const [adjDetailOpen, setAdjDetailOpen] = useState(false);
+  const [adjDetailItem, setAdjDetailItem] = useState<Item | null>(null);
+  const [adjDetailWastageId, setAdjDetailWastageId] = useState("");
+
+  const [closingFlashIds, setClosingFlashIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem("wastage-stock-ref");
+      if (!raw) return;
+      const ref = JSON.parse(raw) as { wastageId: string; itemIds: string[] };
+      if (ref.itemIds.length === 0) return;
+      setClosingFlashIds(new Set(ref.itemIds));
+      setTimeout(() => setClosingFlashIds(new Set()), 3200);
+    } catch { /* ok */ }
+  }, []);
 
   const openBatches = (item: Item) => {
+    try {
+      const raw = sessionStorage.getItem("wastage-stock-ref");
+      if (raw) {
+        const ref = JSON.parse(raw) as { wastageId: string; itemIds: string[] };
+        if (ref.itemIds.includes(item.id)) {
+          setAdjDetailItem(item);
+          setAdjDetailWastageId(ref.wastageId);
+          setAdjDetailOpen(true);
+          return;
+        }
+      }
+    } catch { /* ok */ }
     setSelected(item);
     setBatchOpen(true);
   };
@@ -513,12 +540,14 @@ export default function Inventory() {
       key: "id" as keyof Item, header: "Closing Qty",
       render: (r) => {
         const { closing } = ledgerSummaryFor(r);
+        const isFlashed = closingFlashIds.has(r.id);
         return (
           <button
             type="button"
             onClick={() => openLedger(r)}
             className="group inline-flex items-center text-left rounded-sm px-1 py-0.5 -mx-1 hover:bg-sky-50 transition-colors"
             title="Click to see the transaction ledger"
+            style={isFlashed ? { animation: "wastage-closing-blink 0.75s ease-in-out 3" } : undefined}
           >
             <span className="tabular-nums font-semibold text-sky-700 underline decoration-dotted decoration-sky-300 underline-offset-2 group-hover:decoration-sky-500">
               {closing.toLocaleString()}
@@ -568,6 +597,12 @@ export default function Inventory() {
 
   return (
     <>
+      <style>{`
+        @keyframes wastage-closing-blink {
+          0%, 100% { background-color: transparent; border-radius: 4px; }
+          50% { background-color: rgb(167 243 208); border-radius: 4px; }
+        }
+      `}</style>
       <PageHeader
         title="Stock Overview"
         subtitle="Unified store — kitchen stock plus airline consumables (filter Item Type: Airline Consumable), with reorder levels, valuation and status"
@@ -1075,6 +1110,60 @@ export default function Inventory() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Wastage Stock Impact Dialog — opens when clicking a highlighted row after Check Stock */}
+      {adjDetailOpen && adjDetailItem && (
+        <Dialog open onOpenChange={(o) => { if (!o) { setAdjDetailOpen(false); setAdjDetailItem(null); setAdjDetailWastageId(""); try { sessionStorage.removeItem("wastage-stock-ref"); } catch { /* ok */ } } }}>
+          <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-base">
+                <FileText className="h-4 w-4 text-primary" />
+                Stock Update — {adjDetailItem.name}
+              </DialogTitle>
+            </DialogHeader>
+            <div className="space-y-3 py-1">
+              <div className="text-xs text-muted-foreground">
+                Adjustments from wastage report{" "}
+                <span className="font-mono font-semibold text-primary">{adjDetailWastageId}</span>
+              </div>
+              {(() => {
+                const adjs = getStockAdjustments().filter(
+                  (a) => a.reference === adjDetailWastageId &&
+                         a.item.toLowerCase() === adjDetailItem.name.toLowerCase()
+                );
+                if (adjs.length === 0) {
+                  return (
+                    <div className="flex items-center gap-2 text-xs text-amber-600 p-3 bg-amber-50 border border-amber-200 rounded-md">
+                      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                      No stock adjustments found for <strong>{adjDetailItem.name}</strong> under{" "}
+                      <span className="font-mono">{adjDetailWastageId}</span>.
+                    </div>
+                  );
+                }
+                return (
+                  <div className="border border-border rounded-md overflow-hidden">
+                    {adjs.map((adj, i) => (
+                      <div key={adj.id} className={`px-3 py-2.5 text-xs ${i % 2 === 0 ? "bg-muted/20" : "bg-background"} border-b border-border last:border-0`}>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="font-mono text-primary font-semibold">{adj.id}</span>
+                          <span className={`font-bold tabular-nums ${adj.adjustType === "Decrease" ? "text-red-600" : "text-emerald-600"}`}>
+                            {adj.adjustType === "Decrease" ? "−" : "+"}{adj.adjustQty} {adj.uom}
+                          </span>
+                        </div>
+                        <div className="text-muted-foreground">{adj.date} · {adj.reason}</div>
+                        {adj.remarks && <div className="text-muted-foreground italic mt-0.5">{adj.remarks}</div>}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+            </div>
+            <DialogFooter>
+              <Button variant="outline" size="sm" onClick={() => { setAdjDetailOpen(false); setAdjDetailItem(null); setAdjDetailWastageId(""); try { sessionStorage.removeItem("wastage-stock-ref"); } catch { /* ok */ } }}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </>
   );
 }

@@ -1,5 +1,7 @@
 import { useState, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { usePersistedState } from "@/lib/use-persisted-state";
+import { flagArrival } from "@/lib/arrival-flash";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Button } from "@/components/ui/button";
@@ -19,7 +21,7 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Trash2, Plus, Eye, Clock, CheckCircle2, X as XIcon,
-  AlertTriangle, Search, History, FileText, Package,
+  AlertTriangle, Search, History, FileText, Package, Download,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -122,7 +124,7 @@ const SECTIONS = [
   "QC Department",
 ];
 
-const UNITS = ["Kg", "g", "L", "ml", "Pcs", "Box", "Tray", "Bag"];
+const UNITS = ["Kg", "g", "L", "ml", "Pcs", "Units", "Box", "Tray", "Bag"];
 
 const emptyPerson = (): ResponsiblePerson => ({
   empId: "", name: "", designation: "", section: "", penaltyAmount: 0,
@@ -196,7 +198,8 @@ type FormState = {
   returnRef: string;
   selectedReturnIds: string[];
   selectedReturnLineIdx: number;
-  selectedRecookBatchId: string;
+  selectedRecookBatchIds: string[];
+  recookBatchQtys: Record<string, string>;
 };
 
 const emptyForm = (): FormState => ({
@@ -225,13 +228,15 @@ const emptyForm = (): FormState => ({
   returnRef: "",
   selectedReturnIds: [],
   selectedReturnLineIdx: -1,
-  selectedRecookBatchId: "",
+  selectedRecookBatchIds: [],
+  recookBatchQtys: {},
 });
 
 // ── Main Component ────────────────────────────────────────────────────────────
 
 export default function WastageManagementPage() {
   const { role } = useRole();
+  const navigate = useNavigate();
   const [entries, setEntries] = usePersistedState<WastageEntry[]>("wastage-entries", []);
 
   const [activeTab, setActiveTab] = useState<"all" | WastageType>("all");
@@ -550,7 +555,8 @@ export default function WastageManagementPage() {
                     returnRef: "",
                     selectedReturnIds: [],
                     selectedReturnLineIdx: -1,
-                    selectedRecookBatchId: "",
+                    selectedRecookBatchIds: [],
+                    recookBatchQtys: {},
                   })}
                 >
                   <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue /></SelectTrigger>
@@ -570,53 +576,135 @@ export default function WastageManagementPage() {
                 <div>
                   <Label className="text-xs">Failed QC Batches — Select to populate <span className="text-red-500">*</span></Label>
                   <div className="mt-1 border border-border rounded-md overflow-hidden bg-background">
-                    {recookBatches.map((entry) => (
-                      <label
-                        key={entry.id}
-                        className="flex items-center gap-2.5 px-3 py-2 text-xs cursor-pointer hover:bg-muted/40 border-b border-border last:border-0"
-                      >
-                        <input
-                          type="checkbox"
-                          className="h-3.5 w-3.5 accent-primary"
-                          checked={form.selectedRecookBatchId === entry.id}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              const matchedItem = inventoryItems.find(
-                                (i) => i.name.toLowerCase() === (entry.outputItemName ?? entry.bom).toLowerCase()
-                              );
-                              setForm({
-                                ...form,
-                                selectedRecookBatchId: entry.id,
-                                itemName: entry.outputItemName ?? entry.bom,
-                                stockItemName: entry.outputItemName ?? entry.bom,
-                                previousStock: String(entry.producedQty),
-                                batchCode: entry.id,
-                                productionDate: entry.date,
-                                disposalQty: String(entry.producedQty),
-                                disposalQtyUnit: matchedItem?.uom ?? form.disposalQtyUnit,
-                              });
-                              setStockDropOpen(false);
-                            } else {
-                              setForm({
-                                ...form,
-                                selectedRecookBatchId: "",
-                                itemName: "",
-                                stockItemName: "",
-                                previousStock: "",
-                                batchCode: "",
-                                productionDate: "",
-                                disposalQty: "",
-                              });
-                            }
-                          }}
-                        />
-                        <span className="font-medium">{entry.id}</span>
-                        {entry.outputItemName && <span className="text-muted-foreground">· {entry.outputItemName}</span>}
-                        {entry.qcFailReason && <span className="text-muted-foreground">({entry.qcFailReason})</span>}
-                        <span className="ml-auto text-muted-foreground tabular-nums shrink-0">{entry.producedQty.toLocaleString()} units</span>
-                      </label>
-                    ))}
+                    {recookBatches.map((entry) => {
+                      const isChecked = form.selectedRecookBatchIds.includes(entry.id);
+                      return (
+                        <div key={entry.id} className="border-b border-border last:border-0">
+                          <label className="flex items-center gap-2.5 px-3 py-2 text-xs cursor-pointer hover:bg-muted/40">
+                            <input
+                              type="checkbox"
+                              className="h-3.5 w-3.5 accent-primary"
+                              checked={isChecked}
+                              onChange={(e) => {
+                                const newIds = e.target.checked
+                                  ? [...form.selectedRecookBatchIds, entry.id]
+                                  : form.selectedRecookBatchIds.filter((id) => id !== entry.id);
+                                const remaining = recookBatches.filter((b) => newIds.includes(b.id));
+                                const primary = remaining[0];
+                                const newQtys = { ...form.recookBatchQtys };
+                                if (e.target.checked) {
+                                  if (newQtys[entry.id] === undefined) newQtys[entry.id] = "";
+                                } else {
+                                  delete newQtys[entry.id];
+                                }
+                                setForm({
+                                  ...form,
+                                  selectedRecookBatchIds: newIds,
+                                  recookBatchQtys: newQtys,
+                                  itemName: primary ? (primary.outputItemName ?? primary.bom) : "",
+                                  stockItemName: primary ? (primary.outputItemName ?? primary.bom) : "",
+                                  previousStock: String(remaining.reduce((s, b) => s + b.producedQty, 0)),
+                                  batchCode: newIds.length > 0 ? newIds[0] : "",
+                                  productionDate: primary ? primary.date : "",
+                                  disposalQtyUnit: "Units",
+                                  disposalDate: newIds.length > 0 ? todayDate() : "",
+                                  ...(newIds.length === 0 ? { disposalQty: "" } : {}),
+                                });
+                                setStockDropOpen(false);
+                              }}
+                            />
+                            <span className="font-medium">{entry.id}</span>
+                            {entry.outputItemName && <span className="text-muted-foreground">· {entry.outputItemName}</span>}
+                            {entry.qcFailReason && <span className="text-muted-foreground">({entry.qcFailReason})</span>}
+                            <span className="ml-auto text-muted-foreground tabular-nums shrink-0">{entry.producedQty.toLocaleString()} units</span>
+                          </label>
+                          {/* Per-batch disposal qty + inline Material QTY — visible only when this batch is checked */}
+                          {isChecked && (() => {
+                            const recipe = resolveProductionItem({ name: entry.outputItemName ?? entry.bom, code: entry.outputItemCode });
+                            const batchQty = Number(form.recookBatchQtys[entry.id]) || 0;
+                            const isMulti = form.selectedRecookBatchIds.length > 1;
+                            const hasMat = recipe.rawMaterials.length > 0 || recipe.packagingMaterials.length > 0 || recipe.otherConsumption.length > 0;
+                            const matSections = [
+                              { label: "Raw Materials",       rows: recipe.rawMaterials       },
+                              { label: "Packaging Materials", rows: recipe.packagingMaterials },
+                              { label: "Other Consumption",   rows: recipe.otherConsumption   },
+                            ];
+                            return (
+                              <>
+                                <div className="flex items-center gap-2 px-4 pb-2 pt-0.5 bg-orange-50/70">
+                                  <span className="text-[11px] text-orange-700 font-medium shrink-0">Disposal QTY for this FG:</span>
+                                  <Input
+                                    type="number"
+                                    min="0"
+                                    className="h-7 text-xs w-28"
+                                    value={form.recookBatchQtys[entry.id] ?? ""}
+                                    onChange={(e) => setForm({
+                                      ...form,
+                                      recookBatchQtys: { ...form.recookBatchQtys, [entry.id]: e.target.value },
+                                    })}
+                                    placeholder="0"
+                                  />
+                                  <span className="text-[11px] text-muted-foreground">Units</span>
+                                </div>
+                                {hasMat && (
+                                  <div className="mx-3 mb-3 border border-orange-200 rounded-md overflow-hidden">
+                                    {/* Name / Batch Code / Size header — only for multiple FGs */}
+                                    {isMulti && (
+                                      <div className="grid grid-cols-3 gap-x-3 px-3 py-2 bg-orange-100 border-b border-orange-200 text-xs">
+                                        <div><span className="text-[10px] text-muted-foreground">Name: </span><strong>{entry.outputItemName ?? entry.bom}</strong></div>
+                                        <div><span className="text-[10px] text-muted-foreground">Batch Code: </span><span className="font-mono">{entry.id}</span></div>
+                                        <div><span className="text-[10px] text-muted-foreground">Batch Size: </span><strong>{entry.producedQty.toLocaleString()} Units</strong></div>
+                                      </div>
+                                    )}
+                                    {/* QTY Before / Disposal / Current strip */}
+                                    <div className="grid grid-cols-3 border-b border-orange-200 text-center">
+                                      <div className="px-2 py-2 border-r border-orange-200">
+                                        <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">QTY Before</p>
+                                        <p className="text-xs font-bold mt-0.5">{entry.producedQty.toLocaleString()} Units</p>
+                                      </div>
+                                      <div className="px-2 py-2 border-r border-orange-200">
+                                        <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">Disposal</p>
+                                        <p className="text-xs font-bold mt-0.5 text-red-600">{batchQty > 0 ? `−${batchQty}` : "0"} Units</p>
+                                      </div>
+                                      <div className="px-2 py-2">
+                                        <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">Current QTY</p>
+                                        <p className="text-xs font-bold mt-0.5 text-primary">{entry.producedQty - batchQty} Units</p>
+                                      </div>
+                                    </div>
+                                    {batchQty === 0 ? (
+                                      <div className="px-3 py-2.5 text-xs text-muted-foreground text-center italic">
+                                        Enter Disposal QTY above to see material calculations.
+                                      </div>
+                                    ) : (
+                                      matSections.map(({ label, rows }) => rows.length === 0 ? null : (
+                                        <div key={label}>
+                                          <div className="px-3 py-1 bg-orange-50 border-b border-orange-100">
+                                            <p className="text-[9px] font-bold uppercase tracking-wider text-orange-500">{label}</p>
+                                          </div>
+                                          {rows.map((m) => (
+                                            <div key={m.itemCode} className="flex items-center justify-between px-3 py-1.5 text-xs border-b border-orange-100 last:border-0">
+                                              <span className="font-medium">{m.itemName}</span>
+                                              <span className="tabular-nums text-muted-foreground">{(m.qtyPerUnit * batchQty).toFixed(3)} {m.uom}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      ))
+                                    )}
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </div>
+                      );
+                    })}
                   </div>
+                  {form.selectedRecookBatchIds.length > 1 && (
+                    <p className="text-[11px] text-orange-600 mt-1.5 flex items-center gap-1">
+                      <AlertTriangle className="h-3 w-3 shrink-0" />
+                      {form.selectedRecookBatchIds.length} FGs selected — primary item: <strong>{form.itemName}</strong>
+                    </p>
+                  )}
                 </div>
               </div>
             )}
@@ -726,6 +814,7 @@ export default function WastageManagementPage() {
             <div>
               <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3">Disposal Details</h4>
               <div className="grid grid-cols-2 gap-4">
+                {!(form.wastageType === "Production" && form.selectedRecookBatchIds.length > 1) && (
                 <div>
                   <Label className="text-xs">01. Name of RM / PM / FG <span className="text-red-500">*</span></Label>
                   {(form.wastageType === "Production" || form.wastageType === "Airport Store") ? (
@@ -749,7 +838,7 @@ export default function WastageManagementPage() {
                               className="px-3 py-2 text-xs cursor-pointer hover:bg-muted/60 flex justify-between items-center"
                               onMouseDown={(e) => e.preventDefault()}
                               onClick={() => {
-                                setForm({ ...form, itemName: item.name, stockItemName: item.name, previousStock: String(item.stock ?? 0) });
+                                setForm({ ...form, itemName: item.name, stockItemName: item.name, previousStock: String(item.stock ?? 0), disposalQtyUnit: item.uom ?? form.disposalQtyUnit });
                                 setStockDropOpen(false);
                               }}
                             >
@@ -772,6 +861,8 @@ export default function WastageManagementPage() {
                     />
                   )}
                 </div>
+                )}
+                {!(form.wastageType === "Production" && form.selectedRecookBatchIds.length > 1) && (
                 <div>
                   <Label className="text-xs">02. Package / Batch Size</Label>
                   <div className="relative mt-1">
@@ -788,6 +879,8 @@ export default function WastageManagementPage() {
                     )}
                   </div>
                 </div>
+                )}
+                {!(form.wastageType === "Production" && form.selectedRecookBatchIds.length > 1) && (
                 <div>
                   <Label className="text-xs">03. Batch Code</Label>
                   <Input
@@ -797,6 +890,7 @@ export default function WastageManagementPage() {
                     placeholder="N/A"
                   />
                 </div>
+                )}
                 <div>
                   <Label className="text-xs">04. Production Date</Label>
                   <Input
@@ -912,6 +1006,7 @@ export default function WastageManagementPage() {
                 </p>
               </div>
             )}
+
 
             {/* Root Cause */}
             <div>
@@ -1291,9 +1386,42 @@ export default function WastageManagementPage() {
                       <AlertTriangle className="h-3 w-3" /> Stock will be updated upon Final Approval.
                     </p>
                   ) : (
-                    <p className="text-[11px] text-emerald-600 mt-1.5 flex items-center gap-1">
-                      <CheckCircle2 className="h-3 w-3" /> Stock has been updated.
-                    </p>
+                    <div className="mt-1.5 flex items-center justify-between gap-2">
+                      <p className="text-[11px] text-emerald-600 flex items-center gap-1">
+                        <CheckCircle2 className="h-3 w-3" /> Stock has been updated.
+                      </p>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 px-2 text-[11px] gap-1 border-blue-300 text-blue-700 hover:bg-blue-50"
+                        onClick={() => {
+                          const targetIds: string[] = [];
+                          try {
+                            const raw = window.localStorage.getItem("harvest-data-v1:inventory-items");
+                            const invItems: Array<{ id: string; name: string }> = raw ? JSON.parse(raw) : [];
+                            if (viewEntry.wastageType === "Production") {
+                              const recipe = resolveProductionItem({ name: viewEntry.itemName });
+                              const matNames = new Set([
+                                ...recipe.rawMaterials,
+                                ...recipe.packagingMaterials,
+                                ...recipe.otherConsumption,
+                              ].map((m) => m.itemName.toLowerCase()));
+                              invItems.forEach((i) => { if (matNames.has(i.name.toLowerCase())) targetIds.push(i.id); });
+                            }
+                            const main = invItems.find((i) => i.name.toLowerCase() === viewEntry.stockItemName!.toLowerCase());
+                            if (main) targetIds.push(main.id);
+                          } catch { /* ok */ }
+                          try {
+                            sessionStorage.setItem("wastage-stock-ref", JSON.stringify({ wastageId: viewEntry.id, itemIds: targetIds }));
+                          } catch { /* ok */ }
+                          flagArrival({ target: "inv-alerts", ids: targetIds });
+                          setViewOpen(false);
+                          navigate("/inventory");
+                        }}
+                      >
+                        <Search className="h-3 w-3" /> Check Stock
+                      </Button>
+                    </div>
                   )}
                 </div>
               )}
@@ -1361,6 +1489,64 @@ export default function WastageManagementPage() {
 
             <DialogFooter>
               <Button variant="outline" onClick={() => setViewOpen(false)}>Close</Button>
+              {viewEntry.status === "Final Approved" && (
+                <Button
+                  variant="outline"
+                  className="gap-1.5 border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+                  onClick={() => {
+                    const lines: string[] = [
+                      `WASTAGE / DAMAGED PRODUCT DISPOSAL REPORT`,
+                      `Form No: USBA-FSH-WDD  |  Rev. No: 00`,
+                      `─────────────────────────────────────────`,
+                      `Report ID    : ${viewEntry.id}`,
+                      `Reporting Date: ${viewEntry.reportingDate}`,
+                      `Wastage Type : ${viewEntry.wastageType}`,
+                      `Status       : ${viewEntry.status}`,
+                      ``,
+                      `DISPOSAL DETAILS`,
+                      `Item Name    : ${viewEntry.itemName}`,
+                      `Batch Code   : ${viewEntry.batchCode}`,
+                      `Prod. Date   : ${viewEntry.productionDate}`,
+                      `Disposal Qty : ${viewEntry.disposalQty} ${viewEntry.disposalQtyUnit}`,
+                      `Reason       : ${viewEntry.disposalReason}`,
+                      `Method       : ${viewEntry.disposalMethod}`,
+                      `Disposal Date: ${viewEntry.disposalDate}`,
+                      `Disposal Time: ${viewEntry.disposalTime}`,
+                      `Reprocessing : ${viewEntry.reprocessingPossibility}`,
+                      ``,
+                      `ROOT CAUSE`,
+                      viewEntry.rootCause,
+                      ``,
+                      `CORRECTIVE ACTION PLAN`,
+                      ...viewEntry.correctiveActionPlan.map((a, i) => `  ${i + 1}. ${a}`),
+                      ``,
+                      `COMPENSATION`,
+                      `Eligible     : ${viewEntry.eligibleForCompensation ? "Yes" : "No"}`,
+                      viewEntry.compensationJustification,
+                      ``,
+                      `RESPONSIBLE PERSONS`,
+                      ...viewEntry.responsiblePersons.map((p) =>
+                        `  ${p.name} (${p.designation}) — ${p.section}${p.penaltyAmount > 0 ? ` — Penalty: Tk. ${p.penaltyAmount}` : ""}`
+                      ),
+                      ``,
+                      `APPROVAL LOG`,
+                      ...viewEntry.approvalSteps.map((s) => `  [${s.action}] ${s.step} — ${s.by} (${s.designation}) — ${s.at}`),
+                      ``,
+                      `Prepared By  : ${viewEntry.preparedBy}`,
+                      `Prepared At  : ${viewEntry.preparedAt}`,
+                    ];
+                    const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `${viewEntry.id}-Disposal-Report.txt`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                >
+                  <Download className="h-4 w-4" /> Export
+                </Button>
+              )}
             </DialogFooter>
           </DialogContent>
         </Dialog>
@@ -1446,7 +1632,7 @@ export default function WastageManagementPage() {
       {/* ── Production Order Detail Modal ─────────────────────────────────────── */}
       {prodDetailEntry && (
         <Dialog open={prodDetailOpen} onOpenChange={(o) => { setProdDetailOpen(o); if (!o) setProdDetailEntry(null); }}>
-          <DialogContent className="max-w-lg">
+          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2 text-base">
                 <Package className="h-4 w-4 text-primary" />

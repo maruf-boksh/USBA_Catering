@@ -90,3 +90,28 @@ export function setStockAdjustmentStatus(id: string, status: AdjStatus): void {
     /* storage unavailable — non-fatal */
   }
 }
+
+/** Append a new adjustment record (auto-approved wastage disposals, etc.). */
+export function addAdjustment(adj: Adjustment): void {
+  try {
+    const current = getStockAdjustments();
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify([adj, ...current]));
+  } catch {}
+}
+
+const INV_KEY = "harvest-data-v1:inventory-items";
+
+/** Reduce an inventory item's stock by name. Safe no-op if item not found. */
+export function reduceInventoryStock(itemName: string, qty: number): void {
+  try {
+    const raw = window.localStorage.getItem(INV_KEY);
+    if (!raw) return;
+    const items = JSON.parse(raw) as Array<{ name: string; stock: number; [k: string]: unknown }>;
+    const updated = items.map((i) =>
+      i.name.toLowerCase() === itemName.toLowerCase()
+        ? { ...i, stock: Math.max(0, (i.stock as number) - qty) }
+        : i,
+    );
+    window.localStorage.setItem(INV_KEY, JSON.stringify(updated));
+  } catch {}
+}

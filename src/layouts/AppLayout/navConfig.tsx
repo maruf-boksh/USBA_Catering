@@ -210,7 +210,7 @@ export const NAV_MODULES: NavModule[] = [
     label: 'Wastage Management',
     icon: I(Trash2),
     children: [
-      { key: '/wastage-management', label: 'Wastage Reports',  icon: I(ClipboardCheck) },
+      { key: '/wastage-management', label: 'Damaged Product Disposal',  icon: I(ClipboardCheck) },
     ],
   },
 

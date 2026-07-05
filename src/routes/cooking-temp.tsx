@@ -955,6 +955,7 @@ export default function CookingTemp() {
             <Button
               className="bg-success text-success-foreground hover:bg-success/90"
               onClick={() => signOff(true)}
+              disabled={qcMeasured > 0 && qcMeasured < qcTemp}
             >
               <Check className="h-4 w-4 mr-1.5" /> Pass and Complete
               <PackageCheck className="h-4 w-4 ml-1.5" />

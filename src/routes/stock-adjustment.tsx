@@ -5,7 +5,7 @@ import { DataTable, type Column } from "@/components/common/DataTable";
 import { ReviewStatusCell } from "@/components/common/ReviewStatusCell";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
-import { Plus, SlidersHorizontal, AlertTriangle, CheckCircle, Clock } from "lucide-react";
+import { Plus, SlidersHorizontal, AlertTriangle, CheckCircle, Clock, Eye, FileText } from "lucide-react";
 import { inventory } from "@/lib/sample-data";
 import { KpiCard } from "@/components/common/KpiCard";
 import { toast } from "sonner";
@@ -20,10 +20,22 @@ import {
   INITIAL_ADJUSTMENTS, REASONS,
   type Adjustment, type AdjType,
 } from "@/lib/stock-adjustments";
+import type { WastageEntry } from "./wastage-management";
+
+function getWastageEntry(id: string): WastageEntry | null {
+  try {
+    const raw = window.localStorage.getItem("harvest-data-v1:wastage-entries");
+    if (!raw) return null;
+    const entries = JSON.parse(raw) as WastageEntry[];
+    return entries.find((e) => e.id === id) ?? null;
+  } catch { return null; }
+}
 
 export default function StockAdjustment() {
   const [adjustments, setAdjustments] = usePersistedState<Adjustment[]>("stock-adjustments", INITIAL_ADJUSTMENTS);
   const [newOpen, setNewOpen] = useState(false);
+  const [viewAdj, setViewAdj] = useState<Adjustment | null>(null);
+  const [wddEntry, setWddEntry] = useState<WastageEntry | null>(null);
   const [newItem, setNewItem] = useState("");
   const [newQty, setNewQty] = useState("");
   const [newType, setNewType] = useState<AdjType>("Decrease");
@@ -128,6 +140,11 @@ export default function StockAdjustment() {
         columns={cols}
         searchKeys={["id", "item", "itemCode", "reason", "adjustedBy", "status"]}
         selectable={false}
+        actions={(row) => (
+          <Button size="icon" variant="outline" className="h-7 w-7" onClick={() => setViewAdj(row)} title="View details">
+            <Eye className="h-3.5 w-3.5" />
+          </Button>
+        )}
       />
 
       {/* New Adjustment Dialog */}
@@ -249,6 +266,150 @@ export default function StockAdjustment() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* View Adjustment Dialog */}
+      {viewAdj && (
+        <Dialog open onOpenChange={(o) => { if (!o) setViewAdj(null); }}>
+          <DialogContent className="max-w-lg">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <SlidersHorizontal className="h-4 w-4 text-primary" />
+                Adjustment — {viewAdj.id}
+              </DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 py-1">
+              {/* Status banner */}
+              <div className={`rounded-md px-3 py-2 text-xs font-semibold flex items-center gap-2 ${
+                viewAdj.status === "Approved"         ? "bg-emerald-50 border border-emerald-200 text-emerald-700" :
+                viewAdj.status === "Pending Approval" ? "bg-amber-50 border border-amber-200 text-amber-700" :
+                                                        "bg-red-50 border border-red-200 text-red-700"
+              }`}>
+                {viewAdj.status === "Approved" ? <CheckCircle className="h-3.5 w-3.5" /> :
+                 viewAdj.status === "Pending Approval" ? <Clock className="h-3.5 w-3.5" /> :
+                 <AlertTriangle className="h-3.5 w-3.5" />}
+                {viewAdj.status}
+              </div>
+              {/* Detail grid */}
+              <div className="border border-border rounded-md overflow-hidden">
+                {([
+                  ["Adj #",         viewAdj.id,          null],
+                  ["Date",          viewAdj.date,         null],
+                  ["Item Code",     viewAdj.itemCode,     null],
+                  ["Item",          viewAdj.item,         null],
+                  ["Category",      viewAdj.category,     null],
+                  ["UOM",           viewAdj.uom,          null],
+                  ["Current Stock", String(viewAdj.currentStock), null],
+                  ["Adjustment",    `${viewAdj.adjustType === "Increase" ? "+" : "−"}${viewAdj.adjustQty} ${viewAdj.uom}`, null],
+                  ["Reason",        viewAdj.reason,       null],
+                  ["Reference",     viewAdj.reference || "—", viewAdj.reference.startsWith("WDD-") ? () => { const e = getWastageEntry(viewAdj.reference); if (e) setWddEntry(e); else toast.info("Wastage report not found."); } : null],
+                  ["Adjusted By",   viewAdj.adjustedBy,   null],
+                ] as [string, string, (() => void) | null][]).map(([label, value, onClick], i) => (
+                  <div key={label} className={`flex items-center justify-between px-3 py-2 text-xs ${i % 2 === 0 ? "bg-muted/20" : "bg-background"} border-b border-border last:border-0`}>
+                    <span className="text-muted-foreground">{label}</span>
+                    {onClick ? (
+                      <button
+                        onClick={onClick}
+                        className="font-medium text-right max-w-[55%] text-primary hover:underline cursor-pointer bg-transparent border-0 p-0 font-mono"
+                      >
+                        {value}
+                      </button>
+                    ) : (
+                      <span className={`font-medium text-right max-w-[55%] ${label === "Adjustment" ? (viewAdj.adjustType === "Increase" ? "text-emerald-700" : "text-red-600") : ""}`}>{value}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {viewAdj.remarks && (
+                <div className="rounded-md bg-muted/30 border border-border px-3 py-2 text-xs">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Remarks</p>
+                  <p>{viewAdj.remarks}</p>
+                </div>
+              )}
+            </div>
+            <DialogFooter>
+              <Button variant="outline" size="sm" onClick={() => setViewAdj(null)}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {/* Wastage Report Reference Lookup Dialog */}
+      {wddEntry && (
+        <Dialog open onOpenChange={(o) => { if (!o) setWddEntry(null); }}>
+          <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <FileText className="h-4 w-4 text-primary" />
+                Wastage Report — {wddEntry.id}
+              </DialogTitle>
+            </DialogHeader>
+            <div className="space-y-3 py-1">
+              {/* Status banner */}
+              <div className={`rounded-md px-3 py-2 text-xs font-semibold flex items-center gap-2 ${
+                wddEntry.status === "Final Approved" ? "bg-emerald-50 border border-emerald-200 text-emerald-700" :
+                wddEntry.status === "Rejected"       ? "bg-red-50 border border-red-200 text-red-700" :
+                                                       "bg-amber-50 border border-amber-200 text-amber-700"
+              }`}>
+                {wddEntry.status === "Final Approved" ? <CheckCircle className="h-3.5 w-3.5" /> :
+                 wddEntry.status === "Rejected"       ? <AlertTriangle className="h-3.5 w-3.5" /> :
+                                                        <Clock className="h-3.5 w-3.5" />}
+                {wddEntry.status}
+              </div>
+              {/* Key fields */}
+              <div className="border border-border rounded-md overflow-hidden">
+                {([
+                  ["Report ID",       wddEntry.id],
+                  ["Reporting Date",  wddEntry.reportingDate],
+                  ["Wastage Type",    wddEntry.wastageType],
+                  ["Item",            wddEntry.itemName],
+                  ["Disposal Qty",    `${wddEntry.disposalQty} ${wddEntry.disposalQtyUnit}`],
+                  ["Disposal Reason", wddEntry.disposalReason],
+                  ["Disposal Method", wddEntry.disposalMethod || "—"],
+                  ["Disposal Date",   wddEntry.disposalDate || "—"],
+                  ["Prepared By",     wddEntry.preparedBy],
+                ] as [string, string][]).map(([label, value], i) => (
+                  <div key={label} className={`flex items-center justify-between px-3 py-2 text-xs ${i % 2 === 0 ? "bg-muted/20" : "bg-background"} border-b border-border last:border-0`}>
+                    <span className="text-muted-foreground">{label}</span>
+                    <span className="font-medium text-right max-w-[55%]">{value}</span>
+                  </div>
+                ))}
+              </div>
+              {/* Root cause */}
+              {wddEntry.rootCause && (
+                <div className="rounded-md bg-muted/30 border border-border px-3 py-2 text-xs">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Root Cause</p>
+                  <p className="leading-relaxed">{wddEntry.rootCause}</p>
+                </div>
+              )}
+              {/* Approval log */}
+              {wddEntry.approvalSteps.length > 0 && (
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1.5">Approval Log</p>
+                  <div className="border border-border rounded-md overflow-hidden">
+                    {wddEntry.approvalSteps.map((step, i) => (
+                      <div key={i} className={`flex items-start justify-between px-3 py-2 text-xs ${i % 2 === 0 ? "bg-muted/20" : "bg-background"} border-b border-border last:border-0`}>
+                        <div>
+                          <p className="font-medium">{step.step}</p>
+                          <p className="text-muted-foreground text-[11px]">{step.by} · {step.at}</p>
+                        </div>
+                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                          step.action === "Approved"  ? "bg-emerald-100 text-emerald-700" :
+                          step.action === "Rejected"  ? "bg-red-100 text-red-700" :
+                          step.action === "Submitted" ? "bg-blue-100 text-blue-700" :
+                                                        "bg-amber-100 text-amber-700"
+                        }`}>{step.action}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            <DialogFooter>
+              <Button variant="outline" size="sm" onClick={() => setWddEntry(null)}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </>
   );
 }

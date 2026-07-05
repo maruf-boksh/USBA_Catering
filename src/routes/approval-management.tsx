@@ -38,7 +38,8 @@ import { useFlightOrders, updateFlightOrdersWhere, type FlightOrder } from "@/li
 import { useApprovalReviews, setReview, reviewKey } from "@/lib/approval-reviews";
 import { getRfqs, setRfqStatus } from "@/lib/rfqs";
 import { getQuotations, setQuotationStatus } from "@/lib/quotations";
-import { getStockAdjustments, setStockAdjustmentStatus } from "@/lib/stock-adjustments";
+import { getStockAdjustments, setStockAdjustmentStatus, addAdjustment, reduceInventoryStock } from "@/lib/stock-adjustments";
+import { resolveProductionItem } from "@/lib/meal-recipe";
 import { useRole } from "@/lib/roles";
 import { type PersonalHygieneRecord, PHSignOffPanel, PHFormGrid, phNotOkCount } from "@/routes/personal-hygiene-monitoring";
 import { type WastageEntry, type WastageApprovalStep } from "@/routes/wastage-management";
@@ -132,7 +133,7 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Return Items",         label: "Return Items",       icon: PackageCheck    },
   { key: "Galley Loading",       label: "Galley Loading",     icon: LayoutGrid      },
   { key: "Personal Hygiene",    label: "Personal Hygiene",   icon: Users           },
-  { key: "Wastage Entry",       label: "Wastage Reports",    icon: Trash2          },
+  { key: "Wastage Entry",       label: "Damaged Product Disposal",    icon: Trash2          },
 ];
 
 // Overview grid — categories grouped into business sections (mirrors the
@@ -1094,8 +1095,8 @@ export default function ApprovalManagementPage() {
         nextStatus = "Final Approved";
         stepName = "Final Authorization";
         designation = "MD/CEO";
-        // Apply stock delta for production wastage
-        if (entry.wastageType === "Production" && entry.stockItemName) {
+        // Apply stock delta + create stock adjustments for Production & Airport Store
+        if ((entry.wastageType === "Production" || entry.wastageType === "Airport Store") && entry.stockItemName) {
           applyStockDeltas([{
             itemId: entry.stockItemName,
             delta: -entry.disposalQty,
@@ -1103,6 +1104,51 @@ export default function ApprovalManagementPage() {
             reference: entry.id,
             label: "Wastage Disposal",
           }]);
+          reduceInventoryStock(entry.stockItemName, entry.disposalQty);
+          const allAdj = getStockAdjustments();
+          let adjSeq = allAdj.length + 1;
+          addAdjustment({
+            id: `ADJ-${String(adjSeq).padStart(4, "0")}`,
+            date: at.slice(0, 10),
+            itemCode: entry.stockItemName,
+            item: entry.itemName,
+            category: entry.wastageType,
+            uom: entry.disposalQtyUnit,
+            currentStock: entry.previousStock ?? 0,
+            adjustQty: entry.disposalQty,
+            adjustType: "Decrease",
+            reason: "Wastage",
+            reference: entry.id,
+            remarks: `${entry.disposalReason} — Wastage report ${entry.id}`,
+            adjustedBy: role,
+            status: "Approved",
+          });
+          // Production: also reduce raw materials as per BOM
+          if (entry.wastageType === "Production") {
+            const recipe = resolveProductionItem({ name: entry.itemName });
+            const allMats = [...recipe.rawMaterials, ...recipe.packagingMaterials, ...recipe.otherConsumption];
+            for (const mat of allMats) {
+              adjSeq++;
+              const matQty = Math.round(mat.qtyPerUnit * entry.disposalQty * 1000) / 1000;
+              reduceInventoryStock(mat.itemName, matQty);
+              addAdjustment({
+                id: `ADJ-${String(adjSeq).padStart(4, "0")}`,
+                date: at.slice(0, 10),
+                itemCode: mat.itemCode,
+                item: mat.itemName,
+                category: "Raw Material",
+                uom: mat.uom,
+                currentStock: 0,
+                adjustQty: matQty,
+                adjustType: "Decrease",
+                reason: "Wastage",
+                reference: entry.id,
+                remarks: `BOM disposal — ${entry.disposalQty} units of ${entry.itemName} — ${entry.id}`,
+                adjustedBy: role,
+                status: "Approved",
+              });
+            }
+          }
         }
       }
       if (!stepName) { if (!silent) toast.error(`${it.refId} is already in final state.`); return; }
