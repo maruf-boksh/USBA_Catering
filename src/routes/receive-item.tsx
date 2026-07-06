@@ -1,4 +1,6 @@
 import { useState, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
+import { flagArrival, useArrivalFlash } from "@/lib/arrival-flash";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
@@ -6,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X, Zap } from "lucide-react";
+import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X, Zap, BarChart2 } from "lucide-react";
 import { receiveItems, vendors, activeItems } from "@/lib/sample-data";
 import { KpiCard } from "@/components/common/KpiCard";
 import {
@@ -31,6 +33,7 @@ type GRNRow = {
   status: string;
   officeId?: string;
   warehouseId?: string;
+  inventoryId?: string;
 };
 
 // GRN form line state. QC outcome is NOT set here — received lines start
@@ -70,10 +73,13 @@ function wfGRNToRows(grn: WfGRN): GRNRow[] {
     status: l.qcStatus,
     officeId: grn.officeId,
     warehouseId: grn.warehouseId,
+    inventoryId: l.itemId,
   }));
 }
 
 export default function ReceiveItem() {
+  useArrivalFlash();
+  const navigate = useNavigate();
   const wf = useWorkflow();
   const { wfPurchaseOrders, wfRequisitions, demands, addGRN, updateDemandStatus, grns } = wf;
 
@@ -323,7 +329,23 @@ export default function ReceiveItem() {
         columns={cols}
         searchKeys={["id", "po", "vendor", "item", "status"]}
         selectable={false}
-        actions={(r) => <RowActions row={r} actions={["view", "print"]} />}
+        actions={(r) => (
+          <div className="flex items-center gap-1">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground gap-1"
+              onClick={() => {
+                flagArrival({ target: "inv-alerts", ids: [r.inventoryId ?? r.item] });
+                navigate("/inventory");
+              }}
+              title="Check Stock"
+            >
+              <BarChart2 className="h-3.5 w-3.5" /> Check Stock
+            </Button>
+            <RowActions row={r} actions={["view", "print"]} />
+          </div>
+        )}
       />
 
       {/* New GRN Dialog */}

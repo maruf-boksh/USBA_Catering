@@ -103,6 +103,11 @@ export type DispatchRecord = {
   detail: DispatchDetail;
   sections: FlightSection[];
   dynamicItems: DynamicItem[];
+  /** Undefined / absent on all existing records — defaults to "Production". Only
+   *  set on records created by Delay Management for a second dispatch. */
+  dispatch_type?: "Production" | "Delay Refreshment";
+  /** 1 = original production dispatch, 2 = delay refreshment dispatch. */
+  dispatch_sequence?: number;
 };
 
 type CfgPaxLine     = { id: string; itemName: string; percent: number; qty: number };
@@ -1974,6 +1979,7 @@ export default function Dispatch() {
           <option>Packaging In Progress</option>
           <option>Packaging Done</option>
           <option>Ready for Dispatch</option>
+          <option>Dispatched</option>
         </select>
       </div>
 

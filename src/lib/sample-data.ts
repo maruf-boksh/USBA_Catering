@@ -1665,6 +1665,10 @@ export const seedFlightOrders: FlightOrderRow[] = [
   // deep-link to a real, highlightable row in Order Management.
   { id: "FO-225", orderNo: "ORD-3410", flight: "BS-225", airline: "US-Bangla", sector: "DAC → DOH", date: "2026-06-02", etd: "15:40", pax: 174, crew: 8,  specialMeals: 12, status: "Production", direction: "Outbound" },
 
+  // ── Extra dispatched orders — added for Delay Management demo (seed only).
+  { id: "FO-DSP-1", orderNo: "ORD-3425", flight: "BS-411", airline: "US-Bangla", sector: "CGP → DXB", date: "2026-05-21", etd: "18:25", pax: 162, crew: 8,  specialMeals: 6,  status: "Dispatched", direction: "Outbound" },
+  { id: "FO-DSP-2", orderNo: "ORD-3426", flight: "BG-521", airline: "Air Astra",  sector: "DAC → DOH", date: "2026-05-22", etd: "09:15", pax: 196, crew: 12, specialMeals: 14, status: "Dispatched", direction: "Outbound" },
+
   // ── Procedurally-generated future demand ─────────────────────────────────
   // One ORD per future date for the next 90 days, each containing 30-40
   // flights. Deterministic so reloads produce identical data.

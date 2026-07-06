@@ -44,6 +44,7 @@ import { useRole } from "@/lib/roles";
 import { type PersonalHygieneRecord, PHSignOffPanel, PHFormGrid, phNotOkCount } from "@/routes/personal-hygiene-monitoring";
 import { type WastageEntry, type WastageApprovalStep } from "@/routes/wastage-management";
 import { SEED_RETURNS, type PurchaseReturn } from "@/routes/purchase-return";
+import { type DelayEvent, type DelayApprovalRecord } from "@/routes/delay-management";
 
 type Category =
   | "Flight Orders"
@@ -65,7 +66,8 @@ type Category =
   | "Purchase Return"
   | "Galley Loading"
   | "Personal Hygiene"
-  | "Wastage Entry";
+  | "Wastage Entry"
+  | "Delay Refreshment Fulfillment";
 
 // Shared type with dispatch-monitoring.tsx via "galley_loading" sessionStorage key
 type SignOffLog = { name: string; designation: string; signedAt: string };
@@ -137,6 +139,7 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Galley Loading",       label: "Galley Loading",     icon: LayoutGrid      },
   { key: "Personal Hygiene",    label: "Personal Hygiene",   icon: Users           },
   { key: "Wastage Entry",       label: "Damaged Product Disposal",    icon: Trash2          },
+  { key: "Delay Refreshment Fulfillment", label: "Delay Refreshment", icon: Timer           },
 ];
 
 // Overview grid — categories grouped into business sections (mirrors the
@@ -153,6 +156,7 @@ const APPROVAL_SECTIONS: { label: string; keys: Category[] }[] = [
   { label: "Galley Loading Approval",     keys: ["Galley Loading"]   },
   { label: "Food Safety Approval",        keys: ["Personal Hygiene"] },
   { label: "Wastage Management Approval", keys: ["Wastage Entry"]   },
+  { label: "Delay Refreshment Approval", keys: ["Delay Refreshment Fulfillment"] },
 ];
 const CATEGORY_BY_KEY = new Map(CATEGORIES.map((c) => [c.key, c]));
 
@@ -399,6 +403,17 @@ export default function ApprovalManagementPage() {
   );
   const [phDetailOpen, setPhDetailOpen]     = useState(false);
   const [phDetailRecord, setPhDetailRecord] = useState<PersonalHygieneRecord | null>(null);
+
+  // ── Delay approval records (shared via localStorage with delay-management) ──
+  const [delayApprovals, setDelayApprovals] = usePersistedState<DelayApprovalRecord[]>(
+    "delay-approval-records",
+    [],
+  );
+  // ── Delay events (shared via localStorage with delay-management) ────────────
+  const [delayEvents, setDelayEvents] = usePersistedState<DelayEvent[]>(
+    "delay-events",
+    [],
+  );
 
   // ── Wastage entries (shared via localStorage with wastage-management) ────────
   const [wastageEntries, setWastageEntries] = usePersistedState<WastageEntry[]>(
@@ -828,8 +843,27 @@ export default function ApprovalManagementPage() {
       });
   }, [wastageEntries]);
 
+  const delayApprovalItems: ApprovalItem[] = useMemo(() => {
+    return delayApprovals.map((da) => ({
+      id: `DA-AP-${da.id}`,
+      category: "Delay Refreshment Fulfillment" as Category,
+      refId: da.id,
+      title: `Delay Refreshment — ${da.flightNumber} (${da.sector})`,
+      requestedBy: da.submittedBy,
+      requestedAt: da.submittedAt,
+      summary: `${da.delayDurationHours}h delay · ${da.paxCount + da.crewCount} pax+crew · ${da.fulfillmentType} · ৳ ${da.totalCost.toLocaleString()}`,
+      amount: da.totalCost,
+      itemsCount: da.items.length,
+      status: da.status === "Pending" ? "Pending" : da.status === "Approved" ? "Approved" : "Rejected",
+      processedBy: da.processedBy,
+      processedAt: da.processedAt,
+      rejectionReason: da.declineReason,
+      lines: da.items.map((i) => ({ name: i.name, qty: i.qty, uom: "pcs", note: `৳ ${i.unitCost.toLocaleString()}/pcs` })),
+    })) as ApprovalItem[];
+  }, [delayApprovals]);
+
   const allItems = useMemo(() => {
-    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...personalHygieneItems, ...wastageItems, ...items];
+    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...personalHygieneItems, ...wastageItems, ...delayApprovalItems, ...items];
     // Overlay "Reviewed" (returned for correction) onto still-pending requests.
     return base.map((it) => {
       const rv = reviews[reviewKey(it.category, it.refId)];
@@ -838,7 +872,7 @@ export default function ApprovalManagementPage() {
       }
       return it;
     });
-  }, [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, personalHygieneItems, wastageItems, items, reviews]);
+  }, [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, personalHygieneItems, wastageItems, delayApprovalItems, items, reviews]);
 
   const counts = useMemo(() => {
     const pendingByCat = new Map<Category, number>();
@@ -1114,6 +1148,24 @@ export default function ApprovalManagementPage() {
       if (!silent) toast.success(`${it.refId} — Return items approved for Airport Store.`);
       return;
     }
+    if (it.category === "Delay Refreshment Fulfillment") {
+      setDelayApprovals((prev) =>
+        prev.map((da) =>
+          da.id === it.refId
+            ? { ...da, status: "Approved", processedBy: `${role} (GM/Admin)`, processedAt: stamp() }
+            : da,
+        ),
+      );
+      setDelayEvents((prev) =>
+        prev.map((de) =>
+          de.approvalId === it.refId
+            ? { ...de, status: "Approved", updatedAt: stamp() }
+            : de,
+        ),
+      );
+      if (!silent) toast.success(`${it.refId} — Delay refreshment fulfillment approved.`);
+      return;
+    }
     if (it.category === "Purchase Return") {
       setPurchaseReturns((prev) =>
         prev.map((pr) =>
@@ -1295,6 +1347,21 @@ export default function ApprovalManagementPage() {
           ra.id === it.refId
             ? { ...ra, status: "Declined", processedBy: `${role} (GM/Admin)`, processedAt: stamp(), declineReason: reason }
             : ra,
+        ),
+      );
+    } else if (it.category === "Delay Refreshment Fulfillment") {
+      setDelayApprovals((prev) =>
+        prev.map((da) =>
+          da.id === it.refId
+            ? { ...da, status: "Declined", processedBy: `${role} (GM/Admin)`, processedAt: stamp(), declineReason: reason }
+            : da,
+        ),
+      );
+      setDelayEvents((prev) =>
+        prev.map((de) =>
+          de.approvalId === it.refId
+            ? { ...de, status: "Rejected", updatedAt: stamp() }
+            : de,
         ),
       );
     } else if (it.category === "Purchase Return") {

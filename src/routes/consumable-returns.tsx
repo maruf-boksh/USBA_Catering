@@ -113,8 +113,13 @@ export default function ConsumableReturnsPage() {
     consumableItems,
   );
   const [usage] = usePersistedState<ConsumableUsage[]>("consumable-usage", SEED_USAGE);
+  const [returnApprovals, setReturnApprovals] = usePersistedState<ReturnApprovalRecord[]>(
+    "consumable-return-approvals",
+    [],
+  );
 
   const nextId = `CR-${String(7000 + returns.length + 1).padStart(4, "0")}`;
+  const nextApprovalId = `RA-${String(8000 + returnApprovals.length + 1).padStart(4, "0")}`;
 
   // Add the reusable portion of a return straight back into the consumable
   // inventory, so it shows in Inventory & Store → Stock Overview immediately
@@ -142,7 +147,26 @@ export default function ConsumableReturnsPage() {
 
   const addReturn = (r: ConsumableReturn) => {
     creditReusableToStock(r.lines);
-    setReturns((prev) => [r, ...prev]);
+    const approvalId = nextApprovalId;
+    const approvalRecord: ReturnApprovalRecord = {
+      id: approvalId,
+      returnId: r.id,
+      flight: r.flight,
+      sector: r.sector,
+      date: r.date,
+      returnedBy: r.returnedBy,
+      status: "Pending",
+      lines: r.lines.map((l) => ({
+        itemId: l.itemId,
+        itemName: l.itemName,
+        lineType: l.lineType ?? "item",
+        uom: l.uom,
+        returnQty: l.qty,
+        reusableQty: 0,
+      })),
+    };
+    setReturnApprovals((prev) => [approvalRecord, ...prev]);
+    setReturns((prev) => [{ ...r, approvalId, forwardToAirportStore: true }, ...prev]);
     setView("list");
   };
 
@@ -557,11 +581,30 @@ function ReturnCreate({
     setFlight("");
   };
 
-  // Selecting a flight resets to a single empty line — the handler adds only the
-  // items actually being returned, each chosen from the issued-items DDL.
+  // Selecting a flight auto-populates lines from issued consumable usage + meal
+  // orders for that flight; falls back to a single empty line if none found.
   const handleFlightChange = (flightNo: string) => {
     setFlight(flightNo);
-    setLines([emptyLine()]);
+    if (flightNo) {
+      const itemLines: DraftLine[] = usageLog
+        .filter((u) => u.flight === flightNo)
+        .map((u) => ({
+          itemId: u.itemId, qty: "", issuedQty: u.qty,
+          lineType: "item" as const, reusable: false, nonReusableReason: "",
+        }));
+      const mealLines: DraftLine[] = mealOrders
+        .filter((m) => m.flight === flightNo)
+        .map((m) => ({
+          itemId: m.id, qty: "", issuedQty: m.items,
+          lineType: "meal" as const,
+          mealName: `${m.mealType} — ${m.menuStandard} (${m.serviceGroup})`,
+          reusable: false, nonReusableReason: "",
+        }));
+      const all = [...itemLines, ...mealLines];
+      setLines(all.length > 0 ? all : [emptyLine()]);
+    } else {
+      setLines([emptyLine()]);
+    }
   };
 
   const pickIssued = (idx: number, value: string) => {

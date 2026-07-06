@@ -310,9 +310,6 @@ export default function WastageManagementPage() {
     if (form.disposalReason === "Other" && !form.disposalReasonCustom.trim()) {
       toast.error("Please specify the disposal reason."); return;
     }
-    if (form.wastageType === "Return Item" && !form.selectedReturnIds.length) {
-      toast.error("Please select a return record."); return;
-    }
     if (!form.rootCause.trim()) { toast.error("Root cause is required."); return; }
     if (!form.compensationJustification.trim()) {
       toast.error("Compensation justification is required (Yes or No)."); return;
@@ -360,7 +357,7 @@ export default function WastageManagementPage() {
       ...((form.wastageType === "Production" || form.wastageType === "Airport Store") && form.stockItemName.trim()
         ? { stockItemName: form.stockItemName.trim(), previousStock: Number(form.previousStock) || 0 }
         : {}),
-      ...(form.wastageType === "Return Item" && form.selectedReturnIds.length
+      ...(form.wastageType === "Airport Store" && form.selectedReturnIds.length
         ? { returnRef: form.selectedReturnIds.join(", ") }
         : {}),
     };
@@ -391,7 +388,7 @@ export default function WastageManagementPage() {
     <>
       <PageHeader
         title="Wastage Management"
-        subtitle="Production, Airport Store & Return Item Wastage — Disposal Reports & Approval Tracking"
+        subtitle="Production & Airport Store Wastage — Disposal Reports & Approval Tracking"
       />
 
       <div className="usb-livery-stripe h-1 rounded-full mb-5" aria-hidden />
@@ -411,7 +408,6 @@ export default function WastageManagementPage() {
             <TabsTrigger value="all"           className="text-xs px-3 h-7">All</TabsTrigger>
             <TabsTrigger value="Production"    className="text-xs px-3 h-7">Production</TabsTrigger>
             <TabsTrigger value="Airport Store" className="text-xs px-3 h-7">Airport Store</TabsTrigger>
-            <TabsTrigger value="Return Item"   className="text-xs px-3 h-7">Return Items</TabsTrigger>
           </TabsList>
         </Tabs>
         <div className="flex items-center gap-2">
@@ -563,7 +559,6 @@ export default function WastageManagementPage() {
                   <SelectContent>
                     <SelectItem value="Production">Production Point</SelectItem>
                     <SelectItem value="Airport Store">Airport Store</SelectItem>
-                    <SelectItem value="Return Item">Return Item</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -709,8 +704,8 @@ export default function WastageManagementPage() {
               </div>
             )}
 
-            {/* Return Item — today's returns checkboxes (multi-select) */}
-            {form.wastageType === "Return Item" && (
+            {/* Return Records — today's returns checkboxes (multi-select), shown under Airport Store */}
+            {form.wastageType === "Airport Store" && (
               <div className="p-3 bg-violet-50 border border-violet-200 rounded-md space-y-3">
                 <h4 className="text-xs font-bold uppercase tracking-wider text-violet-700">Select Return Record(s)</h4>
                 <div>
@@ -980,7 +975,7 @@ export default function WastageManagementPage() {
             </div>
 
             {/* Stock QTY Summary — Production, Airport Store & Return Item */}
-            {(form.wastageType === "Production" || form.wastageType === "Airport Store" || form.wastageType === "Return Item") && (
+            {(form.wastageType === "Production" || form.wastageType === "Airport Store") && (
               <div className="space-y-2">
                 <div className="grid grid-cols-3 gap-2 p-2 bg-orange-50 border border-orange-200 rounded-md">
                   <div className="text-center">

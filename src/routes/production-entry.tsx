@@ -1,5 +1,6 @@
 import { useNavigate, useLocation, useSearchParams, Link } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { ReviewStatusCell } from "@/components/common/ReviewStatusCell";
@@ -202,6 +203,77 @@ type ProductionEntry = WfProductionEntry;
 //   In Preparation   → first partial Production Entry is logged (auto)
 //   Ready for QC     → cumulative Production Entries reach orderQty (auto)
 //   Completed        → QC sign-off in Cooking Temp & Sensory
+
+// ─── Dispatch Timeline (read-only add-on for production order detail) ─────────
+// Minimal compatible types — avoids cross-importing from dispatch.tsx.
+type _PkgRow = { id: string; flight: string; productionOrderId?: string; dspRef?: string; packagingStatus: string };
+type _DspRow = { id: string; date: string; flightNos: string[]; status: string; dispatch_type?: string; dispatch_sequence?: number };
+
+function DispatchTimeline({ productionOrderId }: { productionOrderId: string }) {
+  const [pkgRows]  = usePersistedState<_PkgRow[]>("dispatch-packaging-rows", []);
+  const [dspRows]  = usePersistedState<_DspRow[]>("dispatch-records", []);
+  const navigate   = useNavigate();
+
+  const related = useMemo(() => {
+    const matchedPkg = pkgRows.filter((r) => r.productionOrderId === productionOrderId);
+    const dspIds     = new Set(matchedPkg.map((r) => r.dspRef).filter(Boolean) as string[]);
+    return dspRows.filter((d) => dspIds.has(d.id));
+  }, [pkgRows, dspRows, productionOrderId]);
+
+  if (related.length === 0) return null;
+
+  return (
+    <div>
+      <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+        Dispatch History
+      </div>
+      <div className="space-y-2">
+        {related.map((d) => {
+          const isDelay = d.dispatch_type === "Delay Refreshment";
+          return (
+            <div
+              key={d.id}
+              className={cn(
+                "flex items-center justify-between gap-3 rounded-md border px-3 py-2.5 text-sm",
+                isDelay ? "border-amber-200 bg-amber-50" : "border-border bg-muted/20",
+              )}
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className={cn(
+                  "h-2 w-2 rounded-full shrink-0",
+                  isDelay ? "bg-amber-500" : "bg-primary",
+                )} />
+                <div className="min-w-0">
+                  <div className="font-mono text-xs font-semibold">{d.id}</div>
+                  <div className="text-[10px] text-muted-foreground mt-0.5">
+                    {isDelay ? "Delay Refreshment" : "Production"} · {d.date}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className={cn(
+                  "text-[10px] font-semibold px-2 py-0.5 rounded-full",
+                  d.status === "Dispatched" ? "bg-emerald-100 text-emerald-700"
+                  : d.status === "Ready For Dispatch" ? "bg-violet-100 text-violet-700"
+                  : "bg-amber-100 text-amber-700",
+                )}>
+                  {d.status}
+                </span>
+                <button
+                  className="text-[10px] text-primary underline underline-offset-2 hover:no-underline"
+                  onClick={() => navigate("/dispatch")}
+                >
+                  View
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
   const [viewOpen, setViewOpen] = useState(false);
 
@@ -459,6 +531,9 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
                 </div>
               </div>
             )}
+
+            {/* Dispatch History — shows both production and delay refreshment dispatches */}
+            <DispatchTimeline productionOrderId={entry.id} />
           </div>
 
           <DialogFooter className="px-6 py-3 border-t border-border bg-muted/20">
