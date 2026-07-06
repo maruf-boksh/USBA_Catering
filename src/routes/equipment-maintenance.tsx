@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { equipmentAssets as SEED_ASSETS, type EquipmentAsset } from "@/lib/sample-data";
+import { EQUIPMENT_ASSETS_KEY } from "@/lib/equipment-assets";
 import { cn } from "@/lib/utils";
 import { useWorkflow, type WfMaintenanceApproval } from "@/lib/workflow-store";
 
@@ -50,7 +51,9 @@ function statusBadgeCls(status: WfMaintenanceApproval["status"]) {
 
 export default function EquipmentMaintenancePage() {
   const [view, setView] = useState<"list" | "create">("list");
-  const [assets, setAssets] = usePersistedState<EquipmentAsset[]>("equipment-maintenance-assets", SEED_ASSETS);
+  // Shared canonical register — same key as Registration / Assignment / Disposal
+  // so maintenance sees newly registered assets and its updates are visible there.
+  const [assets, setAssets] = usePersistedState<EquipmentAsset[]>(EQUIPMENT_ASSETS_KEY, SEED_ASSETS);
   const [selectedAsset, setSelectedAsset] = useState<EquipmentAsset | null>(null);
   const [selectedEntry, setSelectedEntry] = useState<WfMaintenanceApproval | null>(null);
   const [sendToAccountsEntry, setSendToAccountsEntry] = useState<WfMaintenanceApproval | null>(null);

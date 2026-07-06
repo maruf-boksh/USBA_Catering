@@ -38,7 +38,8 @@ import { useFlightOrders, updateFlightOrdersWhere, type FlightOrder } from "@/li
 import { useApprovalReviews, setReview, reviewKey } from "@/lib/approval-reviews";
 import { getRfqs, setRfqStatus } from "@/lib/rfqs";
 import { getQuotations, setQuotationStatus } from "@/lib/quotations";
-import { getStockAdjustments, setStockAdjustmentStatus, addAdjustment, reduceInventoryStock } from "@/lib/stock-adjustments";
+import { getStockAdjustments, setStockAdjustmentStatus, addAdjustment, reduceInventoryStock, applyInventoryStock } from "@/lib/stock-adjustments";
+import { logAudit } from "@/lib/audit-log";
 import { resolveProductionItem } from "@/lib/meal-recipe";
 import { useRole } from "@/lib/roles";
 import { type PersonalHygieneRecord, PHSignOffPanel, PHFormGrid, phNotOkCount } from "@/routes/personal-hygiene-monitoring";
@@ -1097,6 +1098,15 @@ export default function ApprovalManagementPage() {
 
   const approve = (it: ApprovalItem, opts: { silent?: boolean } = {}) => {
     const { silent = false } = opts;
+    // Record every approval in the audit trail (fires for all categories,
+    // regardless of which branch below handles the state change).
+    logAudit({
+      action: "Approved",
+      module: it.category,
+      entity: it.refId,
+      detail: it.title,
+      actor: `${role} (GM/Admin)`,
+    });
     if (it.category === "Demand Request") {
       const dr = demands.find((d) => d.id === it.refId);
       if (!dr) {
@@ -1138,12 +1148,19 @@ export default function ApprovalManagementPage() {
       return;
     }
     if (it.category === "Stock Adjustment") {
+      // Approving an adjustment commits it to the Stock Overview balance:
+      // Increase adds, Decrease removes. Guard against a double-apply if this
+      // record was already Approved.
+      const adj = getStockAdjustments().find((a) => a.id === it.refId);
+      if (adj && adj.status !== "Approved") {
+        applyInventoryStock(adj.item, adj.adjustType === "Increase" ? adj.adjustQty : -adj.adjustQty);
+      }
       setStockAdjustmentStatus(it.refId, "Approved");
       setStockAdjDecisions((p) => ({
         ...p,
         [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
       }));
-      if (!silent) toast.success(`${it.refId} approved.`);
+      if (!silent) toast.success(`${it.refId} approved — stock balance updated.`);
       return;
     }
     if (it.category === "Production Order" && it.id.startsWith("PRO-AP-")) {
@@ -1334,6 +1351,13 @@ export default function ApprovalManagementPage() {
   // Core reject for a single item (category-aware). `silent` suppresses the
   // per-item toast so bulk reject can show one summary instead.
   const rejectItem = (it: ApprovalItem, reason: string, silent = false) => {
+    logAudit({
+      action: "Rejected",
+      module: it.category,
+      entity: it.refId,
+      detail: reason ? `${it.title} — ${reason}` : it.title,
+      actor: `${role} (GM/Admin)`,
+    });
     if (it.category === "Demand Request") {
       updateDemandStatus(it.refId, "Rejected", {
         rejectedBy: role,

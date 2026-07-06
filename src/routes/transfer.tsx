@@ -22,6 +22,7 @@ import { toast } from "sonner";
 import { activeItems, warehouses as ALL_WAREHOUSES, inventory, allocateFefo } from "@/lib/sample-data";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import { useWorkflow, type WfTransferNote, type StockDelta } from "@/lib/workflow-store";
+import { applyInventoryStock } from "@/lib/stock-adjustments";
 import { useArrivalFlash } from "@/lib/arrival-flash";
 import { INITIAL_RECORDS as DISPATCH_RECORDS, type DispatchRecord, type DispatchStatus } from "@/routes/dispatch";
 
@@ -274,7 +275,17 @@ export default function TransferPage() {
     return true;
   });
 
-  const add = (t: Transfer) => { setRows((p) => [t, ...p]); setView("list"); };
+  const add = (t: Transfer) => {
+    // A regular outbound transfer that has physically shipped (In Transit) or
+    // been received (Completed) removes stock from the source store. Dispatch-
+    // linked (DSP-) transfers are finished meals handled via stock deltas, and a
+    // still-Pending transfer hasn't left yet — neither deducts here.
+    if (t.kind === "Outbound" && !dispatchIdOf(t) && (t.status === "In Transit" || t.status === "Completed")) {
+      for (const l of t.lines) applyInventoryStock(l.item, -l.transferredQty);
+    }
+    setRows((p) => [t, ...p]);
+    setView("list");
+  };
 
   const openAction = (id: string, mode: ActionMode) => {
     const t = rows.find((r) => r.id === id);
@@ -437,6 +448,11 @@ export default function TransferPage() {
     if (dspId) {
       const returnedLines = returnLines.map((l) => ({ meal: l.item, qty: l.requestedQty, uom: l.uom }));
       setDispatchStatus(dspId, "Returned", returnedLines);
+    } else {
+      // Regular transfer: the returned goods land back in the source store, so
+      // credit the returned quantity to its on-hand balance (mirrors the deduct
+      // that happened when the transfer shipped).
+      for (const l of returnLines) applyInventoryStock(l.item, l.requestedQty);
     }
     toast.success(
       dspId

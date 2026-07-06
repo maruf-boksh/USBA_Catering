@@ -14,12 +14,14 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import {
   Plus, ArrowLeft, Save, Send, Scale, Award, TrendingDown,
-  CheckCircle2, FileText,
+  CheckCircle2, FileText, ShoppingCart,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { getApprovedRfqs } from "@/lib/rfqs";
 import { getQuotations } from "@/lib/quotations";
+import { useWorkflow, type WfPurchaseOrder } from "@/lib/workflow-store";
+import { logAudit } from "@/lib/audit-log";
 
 // Procurement officers who can prepare a comparative statement.
 const PREPARERS = ["S. Ahmed", "M. Karim", "T. Islam", "F. Begum", "R. Hossain"];
@@ -46,6 +48,9 @@ type ComparativeStatement = {
   lowestTotal: number;
   status: CsStatus;
   remarks?: string;
+  /** Set once POs have been generated from the awarded lines (prevents a
+   *  duplicate PO run); stamps when the conversion happened. */
+  poGeneratedAt?: string;
 };
 
 // Each line has the same set of suppliers in `quotes` for clean table rendering.
@@ -120,12 +125,68 @@ const SEED_CS: ComparativeStatement[] = [
 export default function ComparativeStatementPage() {
   const [view, setView] = useState<"list" | "create">("list");
   const [rows, setRows] = usePersistedState<ComparativeStatement[]>("comparative-statement-rows", SEED_CS);
+  const { addPurchaseOrder } = useWorkflow();
 
   const nextId = `CS-${new Date().getFullYear()}-${String(rows.length + 22).padStart(4, "0")}`;
 
   const addCs = (cs: ComparativeStatement) => {
     setRows((prev) => [cs, ...prev]);
     setView("list");
+  };
+
+  // Convert the awarded lines of a Comparative Statement into Purchase Orders —
+  // one PO per awarded supplier, each line priced at the supplier's *awarded*
+  // quotation rate (not the item's list cost). This closes the loop from
+  // RFQ → Quotation → Comparison → Award straight into a costed PO.
+  const generatePOs = (cs: ComparativeStatement) => {
+    if (cs.poGeneratedAt) { toast.info(`POs were already generated from ${cs.id}.`); return; }
+    const awarded = cs.lines.filter((l) => l.awardedSupplier);
+    if (awarded.length === 0) { toast.error("Award every line to a supplier first."); return; }
+
+    const bySupplier = new Map<string, CsLine[]>();
+    for (const l of awarded) {
+      const arr = bySupplier.get(l.awardedSupplier!) ?? [];
+      arr.push(l);
+      bySupplier.set(l.awardedSupplier!, arr);
+    }
+
+    const year = new Date().getFullYear();
+    const today = new Date().toISOString().slice(0, 10);
+    const created: string[] = [];
+    let idx = 0;
+    for (const [supplier, sLines] of bySupplier) {
+      const lineItems = sLines.map((l) => {
+        const q = l.quotes.find((x) => x.supplier === supplier);
+        return { itemId: l.itemName, name: l.itemName, qty: l.qty, uom: l.uom, unitPrice: q?.unitPrice ?? 0 };
+      });
+      const amount = lineItems.reduce((s, li) => s + li.qty * li.unitPrice, 0);
+      const poId = `PO-${year}-${(Date.now() + idx).toString().slice(-4)}`;
+      const po: WfPurchaseOrder = {
+        id: poId,
+        vendor: supplier,
+        items: lineItems.length,
+        amount,
+        date: today,
+        status: "Pending Approval",
+        requisitionRef: cs.rfqRef || cs.id,
+        notes: `Auto-generated from Comparative Statement ${cs.id} (awarded quotation prices).`,
+        lineItems,
+      };
+      addPurchaseOrder(po);
+      logAudit({
+        action: "PO generated",
+        module: "Procurement",
+        entity: poId,
+        detail: `From ${cs.id} · ${supplier} · ${lineItems.length} line(s) · ৳${Math.round(amount).toLocaleString()}`,
+      });
+      created.push(poId);
+      idx += 1;
+    }
+
+    setRows((prev) => prev.map((r) => (r.id === cs.id ? { ...r, poGeneratedAt: new Date().toISOString() } : r)));
+    toast.success(
+      `${created.length} Purchase Order${created.length === 1 ? "" : "s"} generated from ${cs.id} — ${created.join(", ")} (Pending Approval).`,
+    );
   };
 
   return (
@@ -145,14 +206,17 @@ export default function ComparativeStatementPage() {
         }
       />
 
-      {view === "list" ? <CsList rows={rows} editors={rowEditors(setRows)} /> : <CsCreate nextId={nextId} onSave={addCs} />}
+      {view === "list"
+        ? <CsList rows={rows} editors={rowEditors(setRows)} onGeneratePO={generatePOs} />
+        : <CsCreate nextId={nextId} onSave={addCs} />}
     </>
   );
 }
 
-function CsList({ rows, editors }: {
+function CsList({ rows, editors, onGeneratePO }: {
   rows: ComparativeStatement[];
   editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
+  onGeneratePO: (cs: ComparativeStatement) => void;
 }) {
   const total = rows.length;
   const pending = rows.filter((r) => r.status === "Pending Approval").length;
@@ -192,14 +256,35 @@ function CsList({ rows, editors }: {
         columns={cols}
         searchKeys={["id", "rfqRef", "preparedBy", "status"]}
         selectable={false}
-        actions={(r) => (
-          <RowActions
-            row={r}
-            actions={["view", "edit", "print", "approve"]}
-            onSave={editors.onSave}
-            editDetail={({ save, close }) => <CsFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
-          />
-        )}
+        actions={(r) => {
+          const hasAward = r.lines.some((l) => l.awardedSupplier);
+          return (
+            <div className="flex items-center justify-end gap-1.5">
+              {r.poGeneratedAt ? (
+                <Badge variant="outline" className="text-[10px] border-success/40 bg-success/10 text-success gap-1">
+                  <CheckCircle2 className="h-3 w-3" /> PO Generated
+                </Badge>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 px-2 text-xs disabled:opacity-40"
+                  disabled={!hasAward}
+                  title={hasAward ? "Generate Purchase Order(s) from the awarded lines" : "Award lines to a supplier first"}
+                  onClick={() => onGeneratePO(r)}
+                >
+                  <ShoppingCart className="h-3.5 w-3.5 mr-1" /> Generate PO
+                </Button>
+              )}
+              <RowActions
+                row={r}
+                actions={["view", "edit", "print", "approve"]}
+                onSave={editors.onSave}
+                editDetail={({ save, close }) => <CsFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
+              />
+            </div>
+          );
+        }}
       />
     </>
   );

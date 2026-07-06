@@ -6,7 +6,8 @@ import {
   ScanBarcode, Wrench, CheckCircle2, AlertOctagon, ShieldAlert,
   AlertCircle, Calendar, MapPin, Clock, Eye,
 } from "lucide-react";
-import { equipmentAssets, damageReports, assets } from "@/lib/sample-data";
+import { damageReports as SEED_DAMAGE, assets, type DamageReport } from "@/lib/sample-data";
+import { getEquipmentAssets } from "@/lib/equipment-assets";
 import {
   ResponsiveContainer, PieChart, Pie, Cell, Tooltip, Legend,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -42,6 +43,18 @@ function daysUntil(dateStr: string, from: Date): number {
 
 export default function FleetOverviewPage() {
   const today = new Date();
+
+  // Live equipment register + damage reports (persisted), so registrations,
+  // status changes and filed damages actually move these charts — instead of
+  // the frozen seed the overview used to read.
+  const equipmentAssets = useMemo(() => getEquipmentAssets(), []);
+  const damageReports = useMemo<DamageReport[]>(() => {
+    try {
+      const raw = window.localStorage.getItem("harvest-data-v1:equipment-damage-reports");
+      if (raw != null) return JSON.parse(raw) as DamageReport[];
+    } catch { /* fall through to seed */ }
+    return SEED_DAMAGE;
+  }, []);
 
   const stats = useMemo(() => {
     const todayStr = today.toISOString().slice(0, 10);
@@ -114,7 +127,8 @@ export default function FleetOverviewPage() {
       // tables
       schedule,
     };
-  }, [today]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [today, equipmentAssets, damageReports]);
 
   return (
     <>

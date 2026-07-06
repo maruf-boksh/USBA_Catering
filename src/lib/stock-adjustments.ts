@@ -101,17 +101,33 @@ export function addAdjustment(adj: Adjustment): void {
 
 const INV_KEY = "harvest-data-v1:inventory-items";
 
-/** Reduce an inventory item's stock by name. Safe no-op if item not found. */
-export function reduceInventoryStock(itemName: string, qty: number): void {
+/**
+ * Apply a signed delta to an inventory item's on-hand stock, matched by item
+ * code (id) OR name (case-insensitive). Positive increases (receipts), negative
+ * decreases (issues / consumption); stock never drops below zero. Safe no-op if
+ * the item isn't in the persisted stock master.
+ *
+ * This is the single mutation point for the Stock Overview "Stock" column, so
+ * every operational event that should move stock — GRN/QC acceptance, item
+ * issue, warehouse transfer, stock-adjustment approval, wastage disposal —
+ * routes through here and stays consistent.
+ */
+export function applyInventoryStock(idOrName: string, delta: number): void {
   try {
     const raw = window.localStorage.getItem(INV_KEY);
     if (!raw) return;
-    const items = JSON.parse(raw) as Array<{ name: string; stock: number; [k: string]: unknown }>;
+    const key = idOrName.toLowerCase();
+    const items = JSON.parse(raw) as Array<{ id?: string; name: string; stock: number; [k: string]: unknown }>;
     const updated = items.map((i) =>
-      i.name.toLowerCase() === itemName.toLowerCase()
-        ? { ...i, stock: Math.max(0, (i.stock as number) - qty) }
+      i.id === idOrName || i.name.toLowerCase() === key
+        ? { ...i, stock: Math.max(0, (i.stock as number) + delta) }
         : i,
     );
     window.localStorage.setItem(INV_KEY, JSON.stringify(updated));
   } catch {}
+}
+
+/** Reduce an inventory item's stock by name. Safe no-op if item not found. */
+export function reduceInventoryStock(itemName: string, qty: number): void {
+  applyInventoryStock(itemName, -qty);
 }

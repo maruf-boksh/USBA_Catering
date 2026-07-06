@@ -17,9 +17,11 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import {
-  damageReports as SEED_REPORTS, equipmentAssets,
-  type DamageReport,
+  damageReports as SEED_REPORTS, equipmentAssets as SEED_ASSETS,
+  type DamageReport, type EquipmentAsset,
 } from "@/lib/sample-data";
+import { EQUIPMENT_ASSETS_KEY } from "@/lib/equipment-assets";
+import { logAudit } from "@/lib/audit-log";
 import { cn } from "@/lib/utils";
 
 type StatusChangeLog = {
@@ -44,11 +46,26 @@ export default function EquipmentDamagePage() {
   const [changeTarget, setChangeTarget] = useState<DamageReport | null>(null);
   const [reports, setReports] = usePersistedState<DamageReport[]>("equipment-damage-reports", SEED_REPORTS);
   const [statusLogs, setStatusLogs] = usePersistedState<StatusChangeLog[]>("damage-status-logs", []);
+  // Shared canonical register — so the picker lists newly registered assets and
+  // filing a report flips the asset's status to "Damaged" everywhere.
+  const [assets, setAssets] = usePersistedState<EquipmentAsset[]>(EQUIPMENT_ASSETS_KEY, SEED_ASSETS);
 
   const nextId = `DR-${String(2200 + reports.length + 1).padStart(4, "0")}`;
 
   const addReport = (r: DamageReport) => {
     setReports((prev) => [r, ...prev]);
+    // A filed damage report takes the asset out of service — flip it to
+    // "Damaged" in the shared register (unless it's already been written off).
+    setAssets((prev) =>
+      prev.map((a) => (a.id === r.assetId && a.status !== "Destroyed" ? { ...a, status: "Damaged" as const } : a)),
+    );
+    logAudit({
+      action: "Damage reported",
+      module: "Asset Management",
+      entity: `${r.id} · ${r.assetName}`,
+      detail: `${r.severity} — ${r.description}`,
+      actor: r.reportedBy,
+    });
     setView("list");
   };
 
@@ -88,7 +105,7 @@ export default function EquipmentDamagePage() {
 
       {view === "list"
         ? <DamageList reports={reports} onView={setSelectedReport} onStatusChange={setChangeTarget} />
-        : <DamageCreate nextId={nextId} onSave={addReport} />}
+        : <DamageCreate nextId={nextId} onSave={addReport} assets={assets} />}
 
       {selectedReport && (
         <DamageViewModal
@@ -475,7 +492,7 @@ function StatusChangeModal({ report, onClose, onSave }: {
   );
 }
 
-function DamageCreate({ nextId, onSave }: { nextId: string; onSave: (r: DamageReport) => void }) {
+function DamageCreate({ nextId, onSave, assets }: { nextId: string; onSave: (r: DamageReport) => void; assets: EquipmentAsset[] }) {
   const today = new Date().toISOString().slice(0, 10);
 
   const [date, setDate] = useState(today);
@@ -485,7 +502,7 @@ function DamageCreate({ nextId, onSave }: { nextId: string; onSave: (r: DamageRe
   const [description, setDescription] = useState("");
   const [status, setStatus] = useState<DamageReport["status"]>("Open");
 
-  const selectedAsset = equipmentAssets.find((a) => a.id === assetId);
+  const selectedAsset = assets.find((a) => a.id === assetId);
 
   const save = () => {
     if (!selectedAsset) { toast.error("Select the damaged asset."); return; }
@@ -530,7 +547,7 @@ function DamageCreate({ nextId, onSave }: { nextId: string; onSave: (r: DamageRe
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Asset *</Label>
             <select value={assetId} onChange={(e) => setAssetId(e.target.value)} className={selectCls}>
               <option value="">Select damaged asset…</option>
-              {equipmentAssets.map((a) => (
+              {assets.map((a) => (
                 <option key={a.id} value={a.id}>{a.name} ({a.id}) · {a.location}</option>
               ))}
             </select>

@@ -15,6 +15,8 @@ import {
 import { toast } from "sonner";
 import { receiveItems } from "@/lib/sample-data";
 import { useWorkflow, type WfGRNQcStatus } from "@/lib/workflow-store";
+import { applyInventoryStock } from "@/lib/stock-adjustments";
+import { logAudit } from "@/lib/audit-log";
 import { LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import { SEED_RETURNS } from "@/routes/purchase-return";
 
@@ -121,7 +123,15 @@ export default function QualityControl() {
       qcCompliedQty: complied,
       qcRemarks: accRemarks.trim() || undefined,
     });
-    toast.success(`${r.item} accepted — posted to Stock Overview.`);
+    // Post the accepted quantity into the Stock Overview on-hand balance.
+    applyInventoryStock(r.item, r.qty);
+    logAudit({
+      action: "GRN line accepted",
+      module: "Quality Control",
+      entity: `${r.grnId} · ${r.item}`,
+      detail: `${r.qty} ${r.uom} accepted from ${r.vendor} — posted to stock`,
+    });
+    toast.success(`${r.item} accepted — ${r.qty} ${r.uom} posted to Stock Overview.`);
     setAcceptRow(null);
   };
 
@@ -132,6 +142,12 @@ export default function QualityControl() {
       qcRemarks: rejRemarks.trim() || undefined,
     });
     const rtId = initiatePurchaseReturn(r, rejReason, rejRemarks.trim());
+    logAudit({
+      action: "GRN line rejected",
+      module: "Quality Control",
+      entity: `${r.grnId} · ${r.item}`,
+      detail: `${rejReason} — Purchase Return ${rtId} initiated to ${r.vendor}`,
+    });
     toast.error(`${r.item} rejected — Purchase Return ${rtId} initiated to ${r.vendor}.`);
     setRejectRow(null);
   };

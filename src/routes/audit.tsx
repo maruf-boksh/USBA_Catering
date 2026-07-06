@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { getAuditEvents, type AuditEvent as LiveAuditEvent } from "@/lib/audit-log";
 
 // ── Types & taxonomies ────────────────────────────────────────────────────
 
@@ -29,7 +30,7 @@ type ActionKind =
 
 type Module =
   | "Auth" | "Orders" | "Menu Planning" | "Production" | "Inventory"
-  | "Procurement" | "Accounts" | "QC" | "Dispatch" | "Config" | "Users";
+  | "Procurement" | "Accounts" | "QC" | "Dispatch" | "Config" | "Users" | "Assets";
 
 type Result = "Success" | "Failure";
 
@@ -62,6 +63,7 @@ const MODULE_META: Record<Module, { icon: React.ComponentType<{ className?: stri
   "Dispatch":     { icon: Plane,        color: "bg-teal-50 text-teal-700 border-teal-200" },
   "Config":       { icon: Settings,     color: "bg-gray-100 text-gray-700 border-gray-200" },
   "Users":        { icon: UserCog,      color: "bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200" },
+  "Assets":       { icon: Boxes,        color: "bg-cyan-50 text-cyan-700 border-cyan-200" },
 };
 
 const ACTION_META: Record<ActionKind, { icon: React.ComponentType<{ className?: string }>; color: string }> = {
@@ -338,8 +340,58 @@ const LOGS: AuditEvent[] = [
 
 const MODULE_OPTIONS: (Module | "All")[] = [
   "All", "Auth", "Orders", "Menu Planning", "Production",
-  "Inventory", "Procurement", "Accounts", "QC", "Dispatch", "Config", "Users",
+  "Inventory", "Procurement", "Accounts", "QC", "Dispatch", "Config", "Users", "Assets",
 ];
+
+// ── Live audit events → page shape ────────────────────────────────────────
+// Real events emitted by modules (lib/audit-log) carry free-text module/action
+// strings. Map them onto the page's fixed taxonomies so they render with the
+// same icons/badges and merge cleanly with the historical seed.
+
+function mapModule(m: string): Module {
+  const k = m.toLowerCase();
+  if (k.includes("procure") || k.includes("purchase")) return "Procurement";
+  if (k.includes("quality") || k === "qc") return "QC";
+  if (k.includes("dispatch") || k.includes("galley")) return "Dispatch";
+  if (k.includes("order")) return "Orders";
+  if (k.includes("menu")) return "Menu Planning";
+  if (k.includes("production")) return "Production";
+  if (k.includes("account") || k.includes("billing")) return "Accounts";
+  if (k.includes("asset") || k.includes("equipment")) return "Assets";
+  if (k.includes("user")) return "Users";
+  if (k.includes("config")) return "Config";
+  if (k.includes("stock") || k.includes("inventory") || k.includes("transfer") || k.includes("issue")) return "Inventory";
+  return "Inventory";
+}
+
+function mapAction(a: string): { action: ActionKind; severity: Severity } {
+  const k = a.toLowerCase();
+  if (/reject|fail|decline/.test(k)) return { action: "Reject", severity: "warning" };
+  if (/approv/.test(k)) return { action: "Approve", severity: "success" };
+  if (/delet|dispos|destroy|write.?off|scrap/.test(k)) return { action: "Delete", severity: "warning" };
+  if (/creat|generat|raise|new|register|receiv|post|issue/.test(k)) return { action: "Create", severity: "success" };
+  return { action: "Update", severity: "info" };
+}
+
+function toPageEvent(e: LiveAuditEvent): AuditEvent {
+  const { action, severity } = mapAction(e.action);
+  const at = e.ts.replace("T", " ").slice(0, 19);
+  return {
+    id: e.id,
+    at,
+    user: e.actor,
+    userRole: "—",
+    module: mapModule(e.module),
+    action,
+    description: e.detail ? `${e.action} — ${e.detail}` : e.action,
+    target: e.entity,
+    targetType: e.module,
+    ip: "—",
+    device: "In-app",
+    result: "Success",
+    severity,
+  };
+}
 
 const ACTION_OPTIONS: (ActionKind | "All")[] = [
   "All", "Create", "Update", "Delete", "Approve", "Reject", "View",
@@ -370,7 +422,7 @@ function relativeTime(at: string, now: Date): string {
 // ── Page ──────────────────────────────────────────────────────────────────
 
 export default function Audit() {
-  const now = useMemo(() => new Date("2026-05-24T10:00:00"), []);
+  const now = useMemo(() => new Date(), []);
   const [moduleFilter, setModuleFilter] = useState<Module | "All">("All");
   const [actionFilter, setActionFilter] = useState<ActionKind | "All">("All");
   const [severityFilter, setSeverityFilter] = useState<Severity | "All">("All");
@@ -378,8 +430,15 @@ export default function Audit() {
   const [dateTo, setDateTo] = useState("");
   const [selected, setSelected] = useState<AuditEvent | null>(null);
 
+  // Real events recorded by modules (newest-first) prepended to the historical
+  // seed, so the trail is live rather than static mock rows.
+  const allLogs = useMemo<AuditEvent[]>(
+    () => [...getAuditEvents().map(toPageEvent), ...LOGS],
+    [],
+  );
+
   const filtered = useMemo(() => {
-    return LOGS.filter((l) => {
+    return allLogs.filter((l) => {
       if (moduleFilter !== "All" && l.module !== moduleFilter) return false;
       if (actionFilter !== "All" && l.action !== actionFilter) return false;
       if (severityFilter !== "All" && l.severity !== severityFilter) return false;
@@ -387,14 +446,14 @@ export default function Audit() {
       if (dateTo && l.at.slice(0, 10) > dateTo) return false;
       return true;
     });
-  }, [moduleFilter, actionFilter, severityFilter, dateFrom, dateTo]);
+  }, [allLogs, moduleFilter, actionFilter, severityFilter, dateFrom, dateTo]);
 
-  // KPIs derived from full LOGS (not the filtered set)
-  const today = "2026-05-24";
-  const todayEvents = LOGS.filter((l) => l.at.startsWith(today));
-  const distinctUsers = new Set(LOGS.map((l) => l.user)).size;
-  const criticalEvents = LOGS.filter((l) => l.severity === "critical").length;
-  const failedEvents = LOGS.filter((l) => l.result === "Failure").length;
+  // KPIs derived from the full merged log (not the filtered set)
+  const today = new Date().toISOString().slice(0, 10);
+  const todayEvents = allLogs.filter((l) => l.at.startsWith(today));
+  const distinctUsers = new Set(allLogs.map((l) => l.user)).size;
+  const criticalEvents = allLogs.filter((l) => l.severity === "critical").length;
+  const failedEvents = allLogs.filter((l) => l.result === "Failure").length;
 
   const resetFilters = () => {
     setModuleFilter("All");
@@ -577,7 +636,7 @@ export default function Audit() {
           <RotateCw className="h-3.5 w-3.5 mr-1" /> Reset
         </Button>
         <div className="ml-auto text-[11px] text-muted-foreground tabular-nums">
-          Showing <span className="font-semibold text-foreground">{filtered.length}</span> of {LOGS.length} events
+          Showing <span className="font-semibold text-foreground">{filtered.length}</span> of {allLogs.length} events
         </div>
       </div>
 

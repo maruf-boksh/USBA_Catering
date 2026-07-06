@@ -20,6 +20,8 @@ import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover
 import { toast } from "sonner";
 import { inventory, allocateFefo, type FefoAllocation } from "@/lib/sample-data";
 import { getItemStockByWarehouse, getItemStock } from "@/lib/inventory-stock";
+import { applyInventoryStock } from "@/lib/stock-adjustments";
+import { logAudit } from "@/lib/audit-log";
 import { useWorkflow, type WfTransferNote, type WfDemandRequest } from "@/lib/workflow-store";
 import { useRole } from "@/lib/roles";
 import { getAuthUser } from "@/lib/auth";
@@ -150,6 +152,17 @@ export default function ItemIssuePage() {
       warehouseId: data.warehouseId,
     };
     addTransferNote(tn);
+
+    // Issuing consumes stock from the store — deduct each line from the Stock
+    // Overview on-hand balance (matched by item code).
+    for (const it of data.items) applyInventoryStock(it.id, -it.qty);
+    logAudit({
+      action: "Items issued",
+      module: "Inventory",
+      entity: tn.id,
+      detail: `${data.items.length} item(s) issued to ${data.issuedTo.trim()}${data.demandRef ? ` · demand ${data.demandRef}` : ""}`,
+      actor: data.issuedBy.trim(),
+    });
 
     // Connect to the demand: move it forward in its workflow
     let demandUpdate = "";

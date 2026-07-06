@@ -808,18 +808,21 @@ function LogLmcDialog({
         <div className="px-6 py-5 space-y-4">
           <div>
             <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Flight</label>
-            <Input
-              list="lmc-flight-list"
-              value={flight}
-              onChange={(e) => setFlight(e.target.value.toUpperCase())}
-              placeholder="e.g. BG-403"
-              className="h-9 mt-1 text-sm"
-            />
-            <datalist id="lmc-flight-list">
-              {flightOptions.map((f) => <option key={f.flight} value={f.flight}>{`${f.sector} · ${f.orderNo}`}</option>)}
-            </datalist>
+            <Select value={flight} onValueChange={setFlight}>
+              <SelectTrigger className="h-9 mt-1 text-sm">
+                <SelectValue placeholder="Select flight" />
+              </SelectTrigger>
+              <SelectContent className="max-h-72">
+                {flightOptions.map((f) => (
+                  <SelectItem key={f.flight} value={f.flight}>
+                    <span className="font-medium">{f.flight}</span>
+                    <span className="text-muted-foreground ml-2">{`${f.sector} · ${f.orderNo}`}</span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <p className="text-[11px] text-muted-foreground mt-1 h-4">
-              {match ? `${match.sector} · ${match.orderNo} · STD ${match.etd}` : flight ? "No matching order — logged against the flight code only." : ""}
+              {match ? `${match.sector} · ${match.orderNo} · STD ${match.etd}` : ""}
             </p>
           </div>
 

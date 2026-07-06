@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
+import { getEquipmentAssets, setEquipmentAssetStatus } from "@/lib/equipment-assets";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Button } from "@/components/ui/button";
@@ -16,7 +17,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import {
-  equipmentReturns as SEED_RETURNS, equipmentAssets,
+  equipmentReturns as SEED_RETURNS,
   type EquipmentReturn,
 } from "@/lib/sample-data";
 import { cn } from "@/lib/utils";
@@ -135,7 +136,10 @@ function ReturnCreate({ nextId, onSave }: { nextId: string; onSave: (r: Equipmen
   const [condition, setCondition] = useState<EquipmentReturn["condition"]>("Good");
   const [remarks, setRemarks] = useState("");
 
-  const selectedAsset = equipmentAssets.find((a) => a.id === assetId);
+  // Live register (read once on mount) so the picker lists current assets, not
+  // the static seed.
+  const assets = useMemo(() => getEquipmentAssets(), []);
+  const selectedAsset = assets.find((a) => a.id === assetId);
 
   const save = () => {
     if (!flight.trim()) { toast.error("Flight number is required."); return; }
@@ -151,6 +155,12 @@ function ReturnCreate({ nextId, onSave }: { nextId: string; onSave: (r: Equipmen
       condition,
       remarks: remarks.trim() || undefined,
     });
+    // Reconcile the register: a damaged return takes the asset out of service;
+    // a good/minor return puts it back in service at the store.
+    setEquipmentAssetStatus(
+      selectedAsset.id,
+      condition === "Damaged" ? "Damaged" : "In Service",
+    );
     toast.success(`${nextId} logged · ${selectedAsset.name} returned in ${condition} condition.`);
   };
 
@@ -183,7 +193,7 @@ function ReturnCreate({ nextId, onSave }: { nextId: string; onSave: (r: Equipmen
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Asset *</Label>
             <select value={assetId} onChange={(e) => setAssetId(e.target.value)} className={selectCls}>
               <option value="">Select asset…</option>
-              {equipmentAssets.map((a) => (
+              {assets.map((a) => (
                 <option key={a.id} value={a.id}>{a.name} ({a.id})</option>
               ))}
             </select>
