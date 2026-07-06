@@ -18,18 +18,22 @@ export function PageHeader({
   subtitle,
   actions,
   icon,
+  hideIcon = false,
 }: {
   title: string;
   subtitle?: string;
   actions?: ReactNode;
   icon?: ReactNode;
+  hideIcon?: boolean;
 }) {
   return (
     <div className="module-header">
       <div className="module-header__left">
-        <div className="module-header__icon" style={{ fontSize: 18, background: 'none', padding: 0, boxShadow: 'none' }}>
-          {icon ?? <LogoTile size={42} glow={false} />}
-        </div>
+        {!hideIcon && (
+          <div className="module-header__icon" style={{ fontSize: 18, background: 'none', padding: 0, boxShadow: 'none' }}>
+            {icon ?? <LogoTile size={42} glow={false} />}
+          </div>
+        )}
         <div className="module-header__text">
           <div className="module-header__title">{title}</div>
           {subtitle && <div className="module-header__subtitle">{subtitle}</div>}
