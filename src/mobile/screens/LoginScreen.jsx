@@ -103,7 +103,7 @@ export function LoginScreen({ onLogin }) {
           </svg>
         </div>
         <div style={{ textAlign: 'center' }}>
-          <div style={{ fontFamily: T.fontBrand, fontSize: 19, fontWeight: 700, color: '#fff', letterSpacing: '0.12em' }}>HARVEST</div>
+          <div style={{ fontFamily: T.fontBrand, fontSize: 19, fontWeight: 700, color: '#fff', letterSpacing: '0.12em' }}>AEROGALLEY</div>
           <div style={{ fontFamily: T.fontBrand, fontSize: 9,  fontWeight: 500, color: 'rgba(255,255,255,0.6)', letterSpacing: '0.28em', marginTop: 2 }}>CATERING</div>
         </div>
         <div style={{ fontFamily: T.fontBody, fontSize: 12, color: 'rgba(255,255,255,0.5)', marginTop: -2 }}>Operations Platform</div>
