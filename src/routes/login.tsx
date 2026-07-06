@@ -112,14 +112,14 @@ function LeftPanel() {
         {/* Logo + wordmark */}
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <LogoTile size={46} glow={false} />
-          <span className="hc-wordmark">Harvest Catering</span>
+          <span className="hc-wordmark">AeroGalley Catering</span>
         </div>
 
         {/* Editorial body */}
         <div className="hc-ed-body">
           <span className="hc-ed-kicker">— Gate to galley</span>
           <h2 className="hc-ed-hero">
-            Plot every meal<br /><em>across&nbsp;every&nbsp;route.</em>
+            Plan every meal<br /><em>across&nbsp;every&nbsp;route.</em>
           </h2>
           <p className="hc-ed-lede">
             The single system behind flight orders, production, quality control and dispatch — engineered for the people who feed the sky.
@@ -288,7 +288,7 @@ function RightPanel() {
 
           {/* Header */}
           <p className="hc-eyebrow" style={{ marginTop: 26 }}>Welcome back</p>
-          <h1 className="hc-h1">Sign in to Harvest Catering</h1>
+          <h1 className="hc-h1">Sign in to AeroGalley Catering</h1>
           <p className="hc-sub">Enter your credentials to access the catering workspace.</p>
 
           {/* Demo credentials hint */}
@@ -383,7 +383,7 @@ function RightPanel() {
 
           {/* Terms */}
           <p className="hc-terms">
-            By signing in, you agree to Harvest Catering's{" "}
+            By signing in, you agree to AeroGalley Catering's{" "}
             <button type="button">Terms of Service</button>{" "}
             and <button type="button">Privacy Policy</button>.
           </p>
@@ -457,7 +457,7 @@ function RightPanel() {
 
           {/* Terms */}
           <p className="hc-terms" style={{ marginTop: 20 }}>
-            By signing in, you agree to Harvest Catering's{" "}
+            By signing in, you agree to AeroGalley Catering's{" "}
             <button type="button">Terms of Service</button>{" "}
             and <button type="button">Privacy Policy</button>.
           </p>

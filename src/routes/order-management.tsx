@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, Fragment } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -20,8 +20,23 @@ import {
 import {
   Plus, Upload, Download, Save, FileSpreadsheet, FileText, FileType,
   History, CheckCircle2, AlertCircle, Eye, CalendarRange, X, Plane, ArrowLeft, Pencil, CircleDot,
-  Users, Utensils, CornerUpLeft, MessageSquare, Trash2,
+  Users, Utensils, CornerUpLeft, MessageSquare, Trash2, Search, ChevronDown, Check, RotateCcw,
+  HelpCircle, Wand2,
 } from "lucide-react";
+import {
+  Tooltip, TooltipContent, TooltipTrigger, TooltipProvider,
+} from "@/components/ui/tooltip";
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select";
+import {
+  Popover, PopoverContent, PopoverTrigger,
+} from "@/components/ui/popover";
+import {
+  Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem,
+} from "@/components/ui/command";
+import { Calendar } from "@/components/ui/calendar";
+import type { DateRange } from "react-day-picker";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import {
@@ -34,9 +49,9 @@ import {
 } from "@/lib/sample-data";
 import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-settings";
 import {
-  useFlightOrders, addFlightOrders, updateFlightOrder, updateFlightOrderStatus,
+  useFlightOrders, addFlightOrders, updateFlightOrder,
   amendOrder, getOrderAmendments, revertAmendment, canRevertAmendment,
-  leadHoursToDeparture, isLmcLead, hasDeparted, LMC_WINDOW_HOURS,
+  leadHoursToDeparture, isLmcLead, hasDeparted, getLmcWindowHours,
   type OrderAmendment,
 } from "@/lib/flight-orders-store";
 import { getAuthUser } from "@/lib/auth";
@@ -139,6 +154,101 @@ const AIRPORTS: { code: string; name: string }[] = [
   { code: "DEL", name: "Delhi" },
   { code: "KTM", name: "Kathmandu" },
 ];
+
+// ── Flight schedule (master) ────────────────────────────────────────────────
+// A scheduled flight is the operational timetable a flight order is created
+// against: pick a date, and the flights that operate on that weekday become
+// selectable. Selecting one auto-fills the order's Scope / Airline / sector /
+// ETD / crew (all still editable). `days` uses JS weekday numbers (0 = Sunday
+// … 6 = Saturday); a flight operates only on the days it lists.
+type ScheduledFlight = {
+  flight: string;
+  airline: string;
+  scope: "Domestic" | "International";
+  from: string; // airport code
+  to: string;   // airport code
+  etd: string;  // HH:mm (24h)
+  crew: number; // rostered cockpit + cabin crew
+  direction: FlightDirection;
+  days: number[];
+  /** The paired leg of this rotation (the return of an outbound, or vice
+   *  versa) — flight number of the counterpart in this same list. Absent when
+   *  the flight has no scheduled return, so the round-trip option is hidden. */
+  pair?: string;
+};
+
+const EVERYDAY = [0, 1, 2, 3, 4, 5, 6];
+
+const FLIGHT_SCHEDULE: ScheduledFlight[] = [
+  // Domestic — US-Bangla
+  { flight: "BS-101", airline: "US-Bangla", scope: "Domestic", from: "DAC", to: "CGP", etd: "08:30", crew: 4, direction: "Outbound", days: EVERYDAY, pair: "BS-102" },
+  { flight: "BS-102", airline: "US-Bangla", scope: "Domestic", from: "CGP", to: "DAC", etd: "10:30", crew: 4, direction: "Return", days: EVERYDAY, pair: "BS-101" },
+  { flight: "BS-117", airline: "US-Bangla", scope: "Domestic", from: "DAC", to: "ZYL", etd: "07:00", crew: 4, direction: "Outbound", days: EVERYDAY, pair: "BS-118" },
+  { flight: "BS-118", airline: "US-Bangla", scope: "Domestic", from: "ZYL", to: "DAC", etd: "09:00", crew: 4, direction: "Return", days: EVERYDAY, pair: "BS-117" },
+  { flight: "BS-141", airline: "US-Bangla", scope: "Domestic", from: "DAC", to: "CXB", etd: "10:00", crew: 4, direction: "Outbound", days: EVERYDAY, pair: "BS-142" },
+  { flight: "BS-142", airline: "US-Bangla", scope: "Domestic", from: "CXB", to: "DAC", etd: "12:00", crew: 4, direction: "Return", days: EVERYDAY, pair: "BS-141" },
+  // Domestic — Air Astra
+  { flight: "2A-231", airline: "Air Astra", scope: "Domestic", from: "DAC", to: "JSR", etd: "11:15", crew: 3, direction: "Outbound", days: [1, 3, 5, 0], pair: "2A-232" },
+  { flight: "2A-232", airline: "Air Astra", scope: "Domestic", from: "JSR", to: "DAC", etd: "13:00", crew: 3, direction: "Return", days: [1, 3, 5, 0], pair: "2A-231" },
+  // International — US-Bangla
+  { flight: "BS-203", airline: "US-Bangla", scope: "International", from: "DAC", to: "DXB", etd: "12:15", crew: 8, direction: "Outbound", days: EVERYDAY, pair: "BS-204" },
+  { flight: "BS-204", airline: "US-Bangla", scope: "International", from: "DXB", to: "DAC", etd: "20:00", crew: 8, direction: "Return", days: EVERYDAY, pair: "BS-203" },
+  { flight: "BS-225", airline: "US-Bangla", scope: "International", from: "DAC", to: "DOH", etd: "15:40", crew: 8, direction: "Outbound", days: EVERYDAY },
+  { flight: "BS-307", airline: "US-Bangla", scope: "International", from: "DAC", to: "KUL", etd: "23:50", crew: 12, direction: "Outbound", days: [1, 3, 5, 0] },
+  { flight: "BS-411", airline: "US-Bangla", scope: "International", from: "CGP", to: "DXB", etd: "18:25", crew: 8, direction: "Outbound", days: [2, 4, 6] },
+  { flight: "BS-501", airline: "US-Bangla", scope: "International", from: "DAC", to: "BKK", etd: "09:20", crew: 8, direction: "Outbound", days: EVERYDAY },
+  { flight: "BS-601", airline: "US-Bangla", scope: "International", from: "DAC", to: "SIN", etd: "14:10", crew: 10, direction: "Outbound", days: [1, 4, 6] },
+  // International — Air Astra
+  { flight: "2A-701", airline: "Air Astra", scope: "International", from: "DAC", to: "CCU", etd: "16:30", crew: 6, direction: "Outbound", days: EVERYDAY },
+];
+
+/** The scheduled counterpart (return↔outbound) of a flight number, if any. */
+function pairScheduledFlight(flightNo: string): ScheduledFlight | undefined {
+  const sf = FLIGHT_SCHEDULE.find((f) => f.flight === flightNo);
+  return sf?.pair ? FLIGHT_SCHEDULE.find((f) => f.flight === sf.pair) : undefined;
+}
+
+/** Weekday (0–6) for an ISO `YYYY-MM-DD` date, or null when unparseable. */
+function weekdayOfISO(dateISO: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateISO);
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return Number.isNaN(d.getTime()) ? null : d.getDay();
+}
+
+/** Flights that operate on the given date, sorted by departure time. */
+function scheduledFlightsForDate(dateISO: string): ScheduledFlight[] {
+  const wd = weekdayOfISO(dateISO);
+  if (wd == null) return [];
+  return FLIGHT_SCHEDULE
+    .filter((f) => f.days.includes(wd))
+    .sort((a, b) => a.etd.localeCompare(b.etd));
+}
+
+/** Local `YYYY-MM-DD` for a Date (no UTC shift). */
+function toISODate(d: Date): string {
+  const mo = String(d.getMonth() + 1).padStart(2, "0");
+  const da = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${mo}-${da}`;
+}
+
+/**
+ * The return leg's own departure date, given the outbound's date and time. A
+ * return departs the same day when it operates that weekday AND leaves later
+ * than the outbound (a turnaround); otherwise it rolls forward to the next date
+ * the return flight actually operates (an overnight / next-available return).
+ */
+function returnFlightDate(outboundDateISO: string, outboundEtd: string, rf: ScheduledFlight): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(outboundDateISO);
+  if (!m) return outboundDateISO;
+  const base = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  if (rf.days.includes(base.getDay()) && rf.etd > outboundEtd) return outboundDateISO;
+  for (let i = 1; i <= 7; i++) {
+    const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + i);
+    if (rf.days.includes(d.getDay())) return toISODate(d);
+  }
+  return outboundDateISO;
+}
 
 type ParsedRow = {
   row: number;
@@ -378,6 +488,20 @@ type MealOrderConfirmation = {
   } | undefined;
 };
 
+// ISO "YYYY-MM-DD" ↔ local Date (parse/format as *local* to avoid the UTC
+// off-by-one), plus a compact "05 Jul 2026" label for the range-picker trigger.
+const isoToDate = (s: string): Date | undefined => {
+  if (!s) return undefined;
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d);
+};
+const dateToIso = (d?: Date): string =>
+  d ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` : "";
+const fmtRangeDate = (s: string): string => {
+  const d = isoToDate(s);
+  return d ? d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "";
+};
+
 export default function OrderManagementPage() {
   useArrivalFlash();
   const navigate = useNavigate();
@@ -385,19 +509,102 @@ export default function OrderManagementPage() {
   // Action buttons are permissioned elements — shown only with "create".
   const canCreate = useElementPermission("/order-management", "action-create").create;
   const canBulk = useElementPermission("/order-management", "action-bulk").create;
-  const [omParams] = useSearchParams();
+  const [omParams, setOmParams] = useSearchParams();
   const [view, setView] = useState<"list" | "create" | "bulk" | "crew-create">(() => {
     const v = omParams.get("view");
     return (v === "bulk" || v === "create" || v === "crew-create") ? v : "list";
   });
-  const [selectedOrder, setSelectedOrder] = useState<FlightOrder | null>(null);
+  // Detail dialog — a single flight leg (row View) or a whole order (order-level
+  // View, which shows every leg at once).
+  const [detailView, setDetailView] = useState<{ order: FlightOrder; legs: FlightOrder[] } | null>(null);
+  const viewLeg = (o: FlightOrder) => setDetailView({ order: o, legs: [o] });
+  const viewOrder = (legs: FlightOrder[]) => { if (legs.length) setDetailView({ order: legs[0], legs }); };
   const [activeTab, setActiveTab] = useState<"flights" | "crew">("flights");
   const [confirmedOrder, setConfirmedOrder] = useState<MealOrderConfirmation | null>(null);
   const [nextDayDraftSaved, setNextDayDraftSaved] = useState(false);
   const [showNextDaySummary, setShowNextDaySummary] = useState(false);
 
-  // Clicking View on a row surfaces THAT individual flight's details.
-  const selectedLegs = selectedOrder ? [selectedOrder] : [];
+  // ── Shared filter — drives the merged metric tiles and BOTH tabs. Draft
+  // binds to the inputs; changes take effect only on "Apply" (Reset clears). ──
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const EMPTY_FILTER = {
+    search: "",
+    scope: "All" as "All" | "Domestic" | "International",
+    airline: "All",
+    status: "All" as "All" | FlightOrderStatus,
+    from: "",
+    to: "",
+  };
+  const [draft, setDraft] = useState(EMPTY_FILTER);
+  const [applied, setApplied] = useState(EMPTY_FILTER);
+  const [lmcOnly, setLmcOnly] = useState<boolean>(
+    () => new URLSearchParams(window.location.search).get("lmc") === "1",
+  );
+  // Controlled so the in-calendar "Apply" can close the popover.
+  const [dateOpen, setDateOpen] = useState(false);
+  const patchDraft = (p: Partial<typeof EMPTY_FILTER>) => setDraft((d) => ({ ...d, ...p }));
+  const applyFilters = () => setApplied(draft);
+  const resetFilters = () => { setDraft(EMPTY_FILTER); setApplied(EMPTY_FILTER); setLmcOnly(false); };
+  const filterDirty = JSON.stringify(draft) !== JSON.stringify(applied);
+  const filtersActive =
+    applied.search !== "" || applied.scope !== "All" || applied.airline !== "All" ||
+    applied.status !== "All" || applied.from !== "" || applied.to !== "" || lmcOnly;
+  const airlineOptions = useMemo(() => Array.from(new Set(orders.map((o) => o.airline))).sort(), [orders]);
+
+  // Trigger label for the merged date-range control.
+  const rangeLabel =
+    draft.from && draft.to
+      ? draft.from === draft.to
+        ? draft.from === todayStr ? "Today" : fmtRangeDate(draft.from)
+        : `${fmtRangeDate(draft.from)} → ${fmtRangeDate(draft.to)}`
+      : draft.from ? `From ${fmtRangeDate(draft.from)}` : draft.to ? `Until ${fmtRangeDate(draft.to)}` : "All dates";
+
+  // Deep-link ?lmc=1 has been read into `lmcOnly`; strip it so a refresh / shared
+  // URL doesn't keep re-pinning it (Reset also clears it).
+  useEffect(() => {
+    if (!omParams.has("lmc")) return;
+    const next = new URLSearchParams(omParams);
+    next.delete("lmc");
+    setOmParams(next, { replace: true });
+  }, [omParams]);
+
+  // One pass: apply the committed filter, split flight vs crew legs.
+  const { flightOrders, crewOrders } = useMemo(() => {
+    const q = applied.search.trim().toLowerCase();
+    const match = (o: FlightOrder) => {
+      if (applied.from && o.date < applied.from) return false;
+      if (applied.to && o.date > applied.to) return false;
+      if (applied.airline !== "All" && o.airline !== applied.airline) return false;
+      if (applied.scope === "Domestic" && !isDomesticSector(o.sector)) return false;
+      if (applied.scope === "International" && isDomesticSector(o.sector)) return false;
+      if (applied.status !== "All" && o.status !== applied.status) return false;
+      if (q && !(
+        o.flight.toLowerCase().includes(q) ||
+        o.orderNo.toLowerCase().includes(q) ||
+        o.sector.toLowerCase().includes(q) ||
+        o.airline.toLowerCase().includes(q)
+      )) return false;
+      if (lmcOnly && !getOrderAmendments(o.id).some((r) => r.isLmc && r.at.slice(0, 10) === todayStr)) return false;
+      return true;
+    };
+    const fl: FlightOrder[] = [], cr: FlightOrder[] = [];
+    for (const o of orders) {
+      if (!match(o)) continue;
+      if (o.orderType === "crew") cr.push(o); else fl.push(o);
+    }
+    return { flightOrders: fl, crewOrders: cr };
+  }, [orders, applied, lmcOnly, todayStr]);
+
+  // Merged metrics across both tabs (reflect the applied filter). Tab badges
+  // count distinct Order #s (not individual flight legs).
+  const flightOrderCount = new Set(flightOrders.map((o) => o.orderNo)).size;
+  const crewOrderCount = new Set(crewOrders.map((o) => o.orderNo)).size;
+  const metricOrders = new Set([...flightOrders, ...crewOrders].map((o) => o.orderNo)).size;
+  const metricPaxMeals = flightOrders.reduce((s, o) => s + o.pax, 0);
+  const metricCrewMeals = crewOrders.reduce((s, o) => s + (o.crew ?? 0), 0);
+  const metricPending =
+    flightOrders.filter((o) => o.status === "Pending").length +
+    crewOrders.filter((o) => o.status === "Pending").length;
 
   // After creating an order, jump straight to it in the list. The list is
   // sorted by date (desc) and the seed data runs months into the future, so a
@@ -418,32 +625,6 @@ export default function OrderManagementPage() {
   const addOrdersBulk = (newOrders: FlightOrder[]) => {
     addFlightOrders(newOrders);
     revealOrder(newOrders[0]?.orderNo);
-  };
-
-  const advanceStatus = (rowId: string) => {
-    const target = orders.find((o) => o.id === rowId);
-    if (!target) return;
-    const next = nextFlightStatus(target.status);
-    if (!next) {
-      toast.info(`${target.flight} is already Completed.`);
-      return;
-    }
-    updateFlightOrderStatus(rowId, next);
-    toast.success(`${target.flight} moved to ${next}.`);
-  };
-
-  const advanceOrderStatus = (orderNo: string) => {
-    const legs = orders.filter((o) => o.orderNo === orderNo);
-    let moved = 0;
-    for (const leg of legs) {
-      const next = nextFlightStatus(leg.status);
-      if (next) {
-        updateFlightOrderStatus(leg.id, next);
-        moved += 1;
-      }
-    }
-    if (moved > 0) toast.success(`${orderNo} — advanced ${moved} ${moved === 1 ? "flight" : "flights"}.`);
-    else toast.info(`${orderNo} is already Completed.`);
   };
 
   // Resolve the Order # for a manually-created crew order: reuse the flight
@@ -486,11 +667,21 @@ export default function OrderManagementPage() {
     };
   }, [confirmedOrder]);
 
+  const headerMeta =
+    view === "create"
+      ? { title: "Create Flight Order", subtitle: "Pick a date and flight — the details auto-fill. Add one or both legs, then save." }
+      : view === "crew-create"
+        ? { title: "Create Crew Meal Order", subtitle: "Order crew meals by flight and meal slot." }
+        : view === "bulk"
+          ? { title: "Bulk Upload", subtitle: "Import multiple flight orders from a spreadsheet." }
+          : { title: "Order Management", subtitle: "Create, import and track flight orders" };
+
   return (
     <>
       <PageHeader
-        title="Order Management"
-        subtitle="Create, import and track flight orders"
+        title={headerMeta.title}
+        subtitle={headerMeta.subtitle}
+        hideIcon
         actions={
           view === "list" ? (
             <>
@@ -660,6 +851,154 @@ export default function OrderManagementPage() {
             </div>
           )}
 
+          {/* Merged metric tiles — flights + crew, reflecting the applied filter. */}
+          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            <MetricTile icon={<FileText className="h-4 w-4" />} label="Orders" value={metricOrders} accent="neutral" />
+            <MetricTile icon={<Plane className="h-4 w-4" />} label="Flights" value={flightOrders.length} accent="primary" />
+            <MetricTile icon={<Utensils className="h-4 w-4" />} label="Passenger Meals" value={metricPaxMeals} accent="brand" />
+            <MetricTile icon={<Users className="h-4 w-4" />} label="Crew Meals" value={metricCrewMeals} accent="neutral" />
+            <MetricTile icon={<AlertCircle className="h-4 w-4" />} label="Pending" value={metricPending} accent="amber" />
+          </div>
+
+          {/* Shared search & filter bar — drives both tabs, committed on Apply. */}
+          <div className="mt-4 rounded-lg border border-border bg-muted/20 p-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              {/* Free-text search */}
+              <div className="relative min-w-[220px] flex-1 lg:max-w-sm">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                <Input
+                  value={draft.search}
+                  onChange={(e) => patchDraft({ search: e.target.value })}
+                  onKeyDown={(e) => { if (e.key === "Enter") applyFilters(); }}
+                  placeholder="Search flight, order #, sector, airline…"
+                  className="h-9 pl-8 pr-8 bg-background"
+                  aria-label="Search orders"
+                />
+                {draft.search && (
+                  <button
+                    type="button"
+                    onClick={() => patchDraft({ search: "" })}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                    aria-label="Clear search"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+
+              <span className="hidden lg:block h-6 w-px bg-border" aria-hidden />
+
+              {/* Merged date-range control */}
+              <Popover open={dateOpen} onOpenChange={setDateOpen}>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" className="no-brand h-9 gap-1.5 bg-background px-3 text-sm font-normal">
+                    <CalendarRange className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span className="tabular-nums">{rangeLabel}</span>
+                    <ChevronDown className="h-3.5 w-3.5 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-auto p-0">
+                  <Calendar
+                    mode="range"
+                    numberOfMonths={2}
+                    captionLayout="dropdown"
+                    showOutsideDays={false}
+                    startMonth={new Date(2020, 0)}
+                    endMonth={new Date(2035, 11)}
+                    defaultMonth={isoToDate(draft.from) ?? new Date()}
+                    selected={draft.from || draft.to ? { from: isoToDate(draft.from), to: isoToDate(draft.to) } : undefined}
+                    onSelect={(range: DateRange | undefined) => patchDraft({ from: dateToIso(range?.from), to: dateToIso(range?.to) })}
+                  />
+                  <div className="flex items-center justify-between gap-2 border-t border-border px-3 py-2">
+                    <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => patchDraft({ from: todayStr, to: todayStr })}>Today</Button>
+                    <div className="flex items-center gap-1.5">
+                      <Button variant="ghost" size="sm" className="h-7 text-xs text-muted-foreground" onClick={() => patchDraft({ from: "", to: "" })}>Clear</Button>
+                      <Button
+                        size="sm"
+                        className="h-7 gap-1.5 px-3 text-xs"
+                        disabled={!draft.from || !draft.to}
+                        onClick={() => { applyFilters(); setDateOpen(false); }}
+                      >
+                        <Check className="h-3.5 w-3.5" /> Apply
+                      </Button>
+                    </div>
+                  </div>
+                </PopoverContent>
+              </Popover>
+
+              {/* Scope */}
+              <Select value={draft.scope} onValueChange={(v) => patchDraft({ scope: v as "All" | "Domestic" | "International" })}>
+                <SelectTrigger className="h-9 w-[140px] gap-1.5 bg-background" aria-label="Filter by sector">
+                  <Plane className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="All">All Sectors</SelectItem>
+                  <SelectItem value="Domestic">Domestic</SelectItem>
+                  <SelectItem value="International">International</SelectItem>
+                </SelectContent>
+              </Select>
+
+              {/* Airline */}
+              <Select value={draft.airline} onValueChange={(v) => patchDraft({ airline: v })}>
+                <SelectTrigger className="h-9 w-[150px] gap-1.5 bg-background" aria-label="Filter by airline">
+                  <Plane className="h-3.5 w-3.5 shrink-0 text-primary" />
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="All">All Airlines</SelectItem>
+                  {airlineOptions.map((a) => <SelectItem key={a} value={a}>{a}</SelectItem>)}
+                </SelectContent>
+              </Select>
+
+              {/* Status */}
+              <Select value={draft.status} onValueChange={(v) => patchDraft({ status: v as "All" | FlightOrderStatus })}>
+                <SelectTrigger className="h-9 w-[140px] gap-1.5 bg-background" aria-label="Filter by status">
+                  <CircleDot className="h-3.5 w-3.5 shrink-0 text-primary" />
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="All">All Statuses</SelectItem>
+                  {FLIGHT_ORDER_STATUS_FLOW.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+                </SelectContent>
+              </Select>
+
+              {lmcOnly && (
+                <Badge
+                  className="gap-1 border border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-50"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setLmcOnly(false)}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setLmcOnly(false); } }}
+                  title="Showing only orders with a last-minute change today — click to clear"
+                >
+                  <AlertCircle className="h-3 w-3" /> LMC only <X className="h-3 w-3" />
+                </Badge>
+              )}
+
+              {/* Apply / Reset */}
+              <div className="ml-auto flex items-center gap-2 pl-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="no-brand h-9 gap-1.5 px-3 text-xs"
+                  onClick={resetFilters}
+                  disabled={!filtersActive && !filterDirty}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" /> Reset
+                </Button>
+                <Button
+                  size="sm"
+                  className="h-9 gap-1.5 px-4 text-xs shadow-sm"
+                  onClick={applyFilters}
+                  disabled={!filterDirty}
+                >
+                  <Check className="h-3.5 w-3.5" /> Apply
+                </Button>
+              </div>
+            </div>
+          </div>
+
           <Tabs
             value={activeTab}
             onValueChange={(v) => setActiveTab(v as "flights" | "crew")}
@@ -671,21 +1010,23 @@ export default function OrderManagementPage() {
                 className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-4 pb-3"
               >
                 Flight Orders
+                <span className="ml-2 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-muted-foreground">{flightOrderCount}</span>
               </TabsTrigger>
               <TabsTrigger
                 value="crew"
                 className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-4 pb-3"
               >
                 Crew Meals
+                <span className="ml-2 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-muted-foreground">{crewOrderCount}</span>
               </TabsTrigger>
             </TabsList>
 
             <TabsContent value="flights" className="mt-0">
-              <OrdersList orders={orders} onView={setSelectedOrder} />
+              <OrdersList orders={flightOrders} onView={viewLeg} onViewOrder={viewOrder} hasFilters={filtersActive} />
             </TabsContent>
 
             <TabsContent value="crew" className="mt-0">
-              <CrewMealsView orders={orders} />
+              <CrewMealsView orders={crewOrders} hasFilters={filtersActive} />
             </TabsContent>
           </Tabs>
 
@@ -826,22 +1167,16 @@ export default function OrderManagementPage() {
       )}
 
       <FlightOrderDetailsDialog
-        order={selectedOrder}
-        legs={selectedLegs}
+        order={detailView?.order ?? null}
+        legs={detailView?.legs ?? []}
         allOrders={orders}
-        onAdvanceLeg={advanceStatus}
-        onAdvanceOrder={advanceOrderStatus}
-        onClose={() => setSelectedOrder(null)}
+        onClose={() => setDetailView(null)}
       />
     </>
   );
 }
 
-function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
-  const today = new Date().toISOString().slice(0, 10);
-  const [date, setDate] = useState<string>(today);
-  const [scope, setScope] = useState<"Domestic" | "International" | "All">("Domestic");
-  const [airline, setAirline] = useState<string>("All");
+function CrewMealsView({ orders, hasFilters }: { orders: FlightOrder[]; hasFilters: boolean }) {
   // Crew leg being edited — only Pending legs can open this.
   const [editLeg, setEditLeg] = useState<FlightOrder | null>(null);
   // Crew leg whose change history (LMC) is open — available regardless of status.
@@ -850,25 +1185,16 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
   const [mealDetailLeg, setMealDetailLeg] = useState<FlightOrder | null>(null);
   const slots = useMealSlots();
 
-  const airlineOptions = Array.from(new Set(orders.map((o) => o.airline))).sort();
-
-  const filtered = orders.filter((o) => {
-    if (date && o.date !== date) return false;
-    if (scope === "Domestic" && !isDomesticSector(o.sector)) return false;
-    if (scope === "International" && isDomesticSector(o.sector)) return false;
-    if (airline !== "All" && o.airline !== airline) return false;
-    return true;
-  });
-
-  const grandCrew = filtered.reduce((s, o) => s + o.crew, 0);
+  // Already filtered by the shared page-level filter; sort/paginate here only.
+  const filtered = orders;
+  const grandCrew = filtered.reduce((s, o) => s + (o.crew ?? 0), 0);
 
   // Pagination — paginate the flat flight-row list, then re-group the current
-  // page by meal slot for display. The summary cards above reflect the FULL
-  // filtered set, not just the visible page.
+  // page by meal slot for display.
   const pageSize = 12;
   const [page, setPage] = useState(1);
   const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
-  useEffect(() => { setPage(1); }, [date, scope, airline]);
+  useEffect(() => { setPage(1); }, [orders]);
   useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
   const pageStart = (page - 1) * pageSize;
   const pageEnd = Math.min(pageStart + pageSize, filtered.length);
@@ -890,88 +1216,26 @@ function CrewMealsView({ orders }: { orders: FlightOrder[] }) {
       <CardContent className="pt-5 space-y-5">
         <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-border">
           <div>
-            <h3 className="text-sm font-semibold tracking-wider uppercase text-foreground">
-              Meal for {scope === "All" ? "All" : scope} Flights
-              {airline !== "All" && <span className="text-muted-foreground normal-case font-normal"> · {airline}</span>}
-            </h3>
+            <h3 className="text-sm font-semibold tracking-wider uppercase text-foreground">Crew Meals</h3>
             <p className="text-xs text-muted-foreground mt-0.5">
               Cabin-crew meal orders grouped by meal slot — derived from each flight's ETD.
             </p>
           </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
-              <CalendarRange className="h-3.5 w-3.5 text-primary" />
-              <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">Date</Label>
-              <Input
-                type="date"
-                value={date}
-                onChange={(e) => setDate(e.target.value)}
-                className="h-7 w-[140px] border-0 shadow-none px-1 focus-visible:ring-0"
-              />
-              {date ? (
-                <button
-                  type="button"
-                  onClick={() => setDate("")}
-                  className="text-[11px] font-medium text-muted-foreground hover:text-foreground"
-                  title="Show all dates"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              ) : (
-                <span className="text-[11px] font-medium text-primary px-1">All dates</span>
-              )}
+          <div className="flex items-center gap-5 text-sm">
+            <div className="text-right">
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Flights</div>
+              <div className="font-semibold tabular-nums">{filtered.length}</div>
             </div>
-            <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
-              <Plane className="h-3.5 w-3.5 text-muted-foreground" />
-              <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">Airline</Label>
-              <select
-                value={airline}
-                onChange={(e) => setAirline(e.target.value)}
-                className="h-7 bg-transparent border-0 text-sm focus:outline-none focus:ring-0 pr-1"
-                aria-label="Filter Crew Meals by airline"
-              >
-                <option value="All">All</option>
-                {airlineOptions.map((a) => <option key={a} value={a}>{a}</option>)}
-              </select>
+            <div className="text-right">
+              <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Crew Meals</div>
+              <div className="font-semibold tabular-nums text-primary">{grandCrew}</div>
             </div>
-            <div className="inline-flex rounded-md border border-input bg-background p-0.5 shadow-sm">
-              {(["Domestic", "International", "All"] as const).map((s) => {
-                const active = scope === s;
-                return (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => setScope(s)}
-                    className={
-                      "px-3 py-1.5 text-xs font-medium rounded-sm transition-colors " +
-                      (active
-                        ? "bg-primary/10 text-primary"
-                        : "text-muted-foreground hover:text-foreground")
-                    }
-                  >
-                    {s}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        {/* Summary cards — moved to the top header; reflect the full filtered set. */}
-        <div className="grid grid-cols-2 gap-3">
-          <div className="rounded-lg border border-border bg-muted/30 px-4 py-3">
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Flights</div>
-            <div className="mt-1 text-lg font-semibold tabular-nums">{filtered.length}</div>
-          </div>
-          <div className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3">
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Crew Meals</div>
-            <div className="mt-1 text-lg font-semibold tabular-nums text-primary">{grandCrew}</div>
           </div>
         </div>
 
         {filtered.length === 0 ? (
           <div className="py-12 text-center text-sm text-muted-foreground">
-            No {scope.toLowerCase()} flights on {date || "the selected date"}.
+            {hasFilters ? "No crew meal orders match the selected filters." : "No crew meal orders."}
           </div>
         ) : (
           <>
@@ -1265,29 +1529,47 @@ function DirectionBadge({ direction }: { direction: FlightDirection }) {
   );
 }
 
+// Headline metric tile — icon chip + label + big number. Accent tints the chip
+// only, so the tiles read as one calm row rather than a rainbow.
+function MetricTile({
+  icon, label, value, accent = "neutral",
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: number | string;
+  accent?: "neutral" | "primary" | "brand" | "amber";
+}) {
+  const accentCls =
+    accent === "primary" ? "bg-primary/10 text-primary" :
+    accent === "brand"   ? "bg-[#E10101]/10 text-[#E10101]" :
+    accent === "amber"   ? "bg-amber-100 text-amber-700" :
+    "bg-muted text-muted-foreground";
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 shadow-sm transition-colors hover:border-border/80">
+      <span className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-lg", accentCls)}>
+        {icon}
+      </span>
+      <div className="min-w-0">
+        <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">{label}</div>
+        <div className="text-xl font-bold leading-tight tabular-nums text-foreground">{value}</div>
+      </div>
+    </div>
+  );
+}
+
 function OrdersList({
-  orders, onView,
+  orders, onView, onViewOrder, hasFilters,
 }: {
   orders: FlightOrder[];
   onView: (o: FlightOrder) => void;
+  onViewOrder: (legs: FlightOrder[]) => void;
+  hasFilters: boolean;
 }) {
   const { role } = useRole();
   const access = useAccess();
   // The Special Meals column is a permissioned element (view).
   const showSpecMeals = canElement(role, "/order-management", "col:spec-meals", "view", access);
   const colCount = showSpecMeals ? 8 : 7;
-  const today = new Date().toISOString().slice(0, 10);
-  const [from, setFrom] = useState<string>("");
-  const [to, setTo] = useState<string>("");
-  const [airline, setAirline] = useState<string>("All");
-  const [scope, setScope] = useState<"All" | "Domestic" | "International">("All");
-  const [status, setStatus] = useState<"All" | FlightOrderStatus>("All");
-  // LMC-only filter — surfaces just the orders affected by a last-minute change
-  // today. Deep-linked from the dashboard's "N last-minute changes today" banner
-  // via ?lmc=1; the param is stripped after mount (see effect below).
-  const [lmcOnly, setLmcOnly] = useState<boolean>(
-    () => new URLSearchParams(window.location.search).get("lmc") === "1",
-  );
   // Flight whose special-meal count was clicked — drives the focused roster dialog.
   const [mealDetailLeg, setMealDetailLeg] = useState<FlightOrder | null>(null);
   // Leg being edited — only Pending legs can open this (button disabled otherwise).
@@ -1295,47 +1577,28 @@ function OrdersList({
   // Leg whose change history (LMC) is open — available regardless of status.
   const [historyLeg, setHistoryLeg] = useState<FlightOrder | null>(null);
 
-  const airlineOptions = Array.from(new Set(orders.map((o) => o.airline))).sort();
-
-  const filteredOrders = useMemo(
+  // Orders arrive pre-filtered by the shared page-level filter; sort here —
+  // freshly created/imported orders first, then by flight date / ETD desc.
+  const sortedOrders = useMemo(
     () =>
-      orders
-        .filter((o) => {
-          // Crew-meal orders live in the Crew Meals tab, not the flight list.
-          if (o.orderType === "crew") return false;
-          if (from && o.date < from) return false;
-          if (to && o.date > to) return false;
-          if (airline !== "All" && o.airline !== airline) return false;
-          if (scope === "Domestic" && !isDomesticSector(o.sector)) return false;
-          if (scope === "International" && isDomesticSector(o.sector)) return false;
-          if (status !== "All" && o.status !== status) return false;
-          if (
-            lmcOnly &&
-            !getOrderAmendments(o.id).some((r) => r.isLmc && r.at.slice(0, 10) === today)
-          )
-            return false;
-          return true;
-        })
-        // Freshly created/imported orders (with createdAt) surface first, newest
-        // first; the rest fall back to flight date / ETD descending.
-        .sort((a, b) =>
-          (b.createdAt ?? 0) - (a.createdAt ?? 0)
-          || b.date.localeCompare(a.date)
-          || b.etd.localeCompare(a.etd)),
-    [orders, from, to, airline, scope, status, lmcOnly, today],
+      [...orders].sort((a, b) =>
+        (b.createdAt ?? 0) - (a.createdAt ?? 0)
+        || b.date.localeCompare(a.date)
+        || b.etd.localeCompare(a.etd)),
+    [orders],
   );
 
-  // Group filtered rows by Order # — memoised so we don't redo this work each
-  // render (with 3k+ rows the grouping cost was visible during page switches).
+  // Group rows by Order # — memoised so we don't redo this work each render
+  // (with 3k+ rows the grouping cost was visible during page switches).
   const groupedOrders = useMemo(() => {
     const map = new Map<string, FlightOrder[]>();
-    for (const o of filteredOrders) {
+    for (const o of sortedOrders) {
       const list = map.get(o.orderNo);
       if (list) list.push(o);
       else map.set(o.orderNo, [o]);
     }
     return Array.from(map.entries());
-  }, [filteredOrders]);
+  }, [sortedOrders]);
 
   // Pagination — paginate by order group, not by flight row, so an order's
   // legs stay together on one page. Capped at 3 orders per page on user
@@ -1356,8 +1619,8 @@ function OrdersList({
       return next;
     });
 
-  // Whenever the filter/sort inputs change the result set, jump back to page 1.
-  useEffect(() => { setPage(1); }, [from, to, airline, scope, status, lmcOnly]);
+  // Whenever the (filtered) order set changes, jump back to page 1.
+  useEffect(() => { setPage(1); }, [orders]);
   // Defensive: if `page` is now past the last page (e.g. after a filter
   // narrowed the list), clamp it.
   useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
@@ -1368,15 +1631,6 @@ function OrdersList({
   // view, then strip the param so a manual refresh doesn't keep re-triggering.
   const [searchParams, setSearchParams] = useSearchParams();
   const ordParam = searchParams.get("ord");
-  // The ?lmc=1 deep-link has already been read into `lmcOnly` state at mount;
-  // strip it so a manual refresh / shared URL keeps the filter only as long as
-  // the user leaves it on (and "Clear All" fully clears it).
-  useEffect(() => {
-    if (!searchParams.has("lmc")) return;
-    const next = new URLSearchParams(searchParams);
-    next.delete("lmc");
-    setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams]);
   // Row id to scroll to after a deep-link page jump. Set here, consumed by the
   // scroll effect below — kept separate so stripping ?ord doesn't tear down the
   // pending scroll before the target page has rendered.
@@ -1447,331 +1701,234 @@ function OrdersList({
   const pageEnd = Math.min(pageStart + pageSize, groupedOrders.length);
   const pageGroups = groupedOrders.slice(pageStart, pageEnd);
 
-  const pendingCount = filteredOrders.filter((o) => o.status === "Pending").length;
-  const totalPaxMeals = filteredOrders.reduce((s, o) => s + o.pax, 0);
-  const rangeActive = from !== "" || to !== "";
-  const filtersActive = rangeActive || airline !== "All" || scope !== "All" || status !== "All" || lmcOnly;
-  const rangeLabel =
-    from && to
-      ? from === to
-        ? from === today ? "Today" : from
-        : `${from} → ${to}`
-      : from
-      ? `From ${from}`
-      : to
-      ? `Until ${to}`
-      : "All Dates";
-
-  const clearRange = () => { setFrom(""); setTo(""); };
-  const setToday = () => { setFrom(today); setTo(today); };
-  const clearAll = () => { setFrom(""); setTo(""); setAirline("All"); setScope("All"); setStatus("All"); setLmcOnly(false); };
+  // Collapsible order sections. Each order group is a collapsible panel; the
+  // first order on the current page is open by default, the rest collapsed.
+  // Changing page or filters re-seeds so the top order is always visible.
+  const [openSections, setOpenSections] = useState<Set<string>>(new Set());
+  const pageGroupKey = pageGroups.map(([no]) => no).join("|");
+  // Seed before paint (no collapsed-then-open flash on load / page change).
+  useLayoutEffect(() => {
+    const first = pageGroups[0]?.[0];
+    setOpenSections(first ? new Set([first]) : new Set());
+    // Re-seed only when the set of visible orders changes (page / filter shift).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageGroupKey]);
+  const toggleSection = (orderNo: string) =>
+    setOpenSections((prev) => {
+      const next = new Set(prev);
+      next.has(orderNo) ? next.delete(orderNo) : next.add(orderNo);
+      return next;
+    });
+  const expandAllSections = () => setOpenSections(new Set(pageGroups.map(([no]) => no)));
+  const collapseAllSections = () => setOpenSections(new Set());
 
   return (
     <Card>
       <CardContent className="pt-6">
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-          <h3 className="text-xs font-bold uppercase tracking-[0.14em] text-muted-foreground">
-            Flight Orders — {rangeLabel}
-            {airline !== "All" && <span className="normal-case font-normal"> · {airline}</span>}
-          </h3>
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
-              <CalendarRange className="h-3.5 w-3.5 text-primary" />
-              <Plane className="h-3.5 w-3.5 text-muted-foreground" />
-              <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">Scope</Label>
-              <select
-                value={scope}
-                onChange={(e) => setScope(e.target.value as "All" | "Domestic" | "International")}
-                className="h-7 bg-transparent border-0 text-sm focus:outline-none focus:ring-0 pr-1"
-                aria-label="Filter by domestic or international"
-              >
-                <option value="All">All</option>
-                <option value="Domestic">Domestic</option>
-                <option value="International">International</option>
-              </select>
-            </div>
-            <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
-              <CalendarRange className="h-3.5 w-3.5 text-muted-foreground" />
-              <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">From</Label>
-              <Input
-                type="date"
-                value={from}
-                onChange={(e) => setFrom(e.target.value)}
-                max={to || undefined}
-                className="h-7 w-[140px] border-0 shadow-none px-1 focus-visible:ring-0"
-              />
-              <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">To</Label>
-              <Input
-                type="date"
-                value={to}
-                onChange={(e) => setTo(e.target.value)}
-                min={from || undefined}
-                className="h-7 w-[140px] border-0 shadow-none px-1 focus-visible:ring-0"
-              />
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-8 px-2.5 text-xs"
-              onClick={setToday}
-            >
-              Today
-            </Button>
-            {rangeActive && (
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-8 px-2 text-xs text-muted-foreground"
-                onClick={clearRange}
-                aria-label="Clear date range"
-              >
-                <X className="h-3.5 w-3.5 mr-1" /> Date
-              </Button>
-            )}
-            <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
-              <Plane className="h-3.5 w-3.5 text-primary" />
-              <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">Airline</Label>
-              <select
-                value={airline}
-                onChange={(e) => setAirline(e.target.value)}
-                className="h-7 bg-transparent border-0 text-sm focus:outline-none focus:ring-0 pr-1"
-              >
-                <option value="All">All</option>
-                {airlineOptions.map((a) => <option key={a} value={a}>{a}</option>)}
-              </select>
-            </div>
-            <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 shadow-sm">
-              <CircleDot className="h-3.5 w-3.5 text-primary" />
-              <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">Status</Label>
-              <select
-                value={status}
-                onChange={(e) => setStatus(e.target.value as "All" | FlightOrderStatus)}
-                className="h-7 bg-transparent border-0 text-sm focus:outline-none focus:ring-0 pr-1"
-                aria-label="Filter by order status"
-              >
-                <option value="All">All</option>
-                {FLIGHT_ORDER_STATUS_FLOW.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-            </div>
-            {lmcOnly && (
-              <Badge
-                className="gap-1 border border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-50"
-                role="button"
-                tabIndex={0}
-                onClick={() => setLmcOnly(false)}
-                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setLmcOnly(false); } }}
-                title="Showing only orders with a last-minute change today — click to clear"
-              >
-                <AlertCircle className="h-3 w-3" />
-                LMC only
-                <X className="h-3 w-3" />
-              </Badge>
-            )}
-            {filtersActive && (
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-8 px-2 text-xs text-muted-foreground"
-                onClick={clearAll}
-                aria-label="Clear all filters"
-              >
-                <X className="h-3.5 w-3.5 mr-1" /> Clear All
-              </Button>
-            )}
-            {pendingCount > 0 && (
-              <Badge className="bg-destructive/10 text-destructive border border-destructive/30 hover:bg-destructive/10">
-                <span className="h-1.5 w-1.5 rounded-full bg-destructive mr-1.5" />
-                {pendingCount} Pending
-              </Badge>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="text-xs text-muted-foreground">
+            <strong className="text-foreground tabular-nums">{groupedOrders.length}</strong> order{groupedOrders.length === 1 ? "" : "s"} ·{" "}
+            <strong className="text-foreground tabular-nums">{sortedOrders.length}</strong> flight{sortedOrders.length === 1 ? "" : "s"}
+            {groupedOrders.length > 0 && (
+              <> · Page <strong className="text-foreground tabular-nums">{page}</strong> of <strong className="text-foreground tabular-nums">{totalPages}</strong></>
             )}
           </div>
-        </div>
-
-        {/* Summary cards — top header; reflect the full filtered set. */}
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="rounded-lg border border-border bg-muted/30 px-4 py-3">
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Flights</div>
-            <div className="mt-1 text-lg font-semibold tabular-nums">{filteredOrders.length}</div>
-          </div>
-          <div className="rounded-lg border border-primary/30 bg-primary/5 px-4 py-3">
-            <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Passenger Meals</div>
-            <div className="mt-1 text-lg font-semibold tabular-nums text-primary">{totalPaxMeals}</div>
-          </div>
-        </div>
-
-        <div className="text-xs text-muted-foreground mb-2">
-          Showing <strong className="text-foreground tabular-nums">{filteredOrders.length}</strong> of {orders.length} order{orders.length === 1 ? "" : "s"} ·{" "}
-          <strong className="text-foreground tabular-nums">{groupedOrders.length}</strong> Order{groupedOrders.length === 1 ? "" : "s"}{" "}
-          {groupedOrders.length > 0 && (
-            <>· Page <strong className="text-foreground tabular-nums">{page}</strong> of <strong className="text-foreground tabular-nums">{totalPages}</strong></>
+          {pageGroups.length > 1 && (
+            <div className="flex items-center gap-2 text-xs">
+              <button
+                type="button"
+                onClick={expandAllSections}
+                className="font-medium text-muted-foreground hover:text-primary"
+              >
+                Expand all
+              </button>
+              <span className="text-border">·</span>
+              <button
+                type="button"
+                onClick={collapseAllSections}
+                className="font-medium text-muted-foreground hover:text-primary"
+              >
+                Collapse all
+              </button>
+            </div>
           )}
         </div>
 
-        <div data-arrival-id="active-orders" className="border border-border rounded-md overflow-hidden">
-          <Table>
-            <TableHeader style={{ backgroundColor: "#F6F2EF" }}>
-              <TableRow>
-                <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
-                <TableHead className="text-xs uppercase tracking-wider">Airline</TableHead>
-                <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
-                <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
-                <TableHead className="text-xs uppercase tracking-wider">ETD</TableHead>
-                <TableHead className="text-xs uppercase tracking-wider text-right">PAX</TableHead>
-                {showSpecMeals && <TableHead className="text-xs uppercase tracking-wider text-right">Spec. Meals</TableHead>}
-                <TableHead className="text-xs uppercase tracking-wider">Action</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {filteredOrders.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={colCount} className="text-center text-sm text-muted-foreground py-8">
-                    No flight orders match the selected filters.
-                  </TableCell>
-                </TableRow>
-              ) : (() => {
-                const rows: React.ReactNode[] = [];
-                pageGroups.forEach(([orderNo, legs]) => {
-                  // Decorative status accent stripe on the order group header.
-                  const barStatus = legs[0]?.status;
-                  const barColor =
-                    barStatus === "Completed"  ? "#0f7a40" :
-                    barStatus === "Dispatched" ? "#0f766e" :
-                    barStatus === "Production" ? "#d97316" :
-                    barStatus === "Approved"   ? "#3c3a40" :
-                    "#E10101"; // Pending / default — brand red
-                  rows.push(
-                    <TableRow key={`grp-${orderNo}`} className="border-0 hover:bg-transparent">
-                      <TableCell colSpan={colCount} className="p-0">
-                        <div
-                          className="relative flex items-center flex-wrap gap-[11px] border-t border-b py-3 pl-[18px] pr-4"
-                          style={{
-                            background: "#f6f2ef",
-                            borderTopColor: "#e9e4e1",
-                            borderBottomColor: "#f0ebe8",
-                          }}
-                        >
-                          <span
-                            className="absolute inset-y-0 left-0 w-[3px]"
-                            style={{ background: barColor }}
-                          />
-                          <span className="text-sm font-bold tracking-[0.01em] text-[#E10101]">
-                            {orderNo}
-                          </span>
-                          {legs.length > 1 && (
-                            <span className="rounded-md border border-[#e9e4e1] bg-white px-2 py-[3px] text-[10px] font-bold uppercase tracking-[0.05em] text-[#6b6b72]">
-                              {legs.length} flights
-                            </span>
-                          )}
-                          <OrderStatusBadges legs={legs} />
-                        </div>
-                      </TableCell>
-                    </TableRow>,
-                  );
-                  // Cap legs per order; "show all" expands in place. Always
-                  // render every leg when this order is the deep-link target so
-                  // its row exists in the DOM to scroll to.
-                  const isExpanded = expandedOrders.has(orderNo) || pendingScrollId != null && legs.some((l) => l.id === pendingScrollId);
-                  const shownLegs = isExpanded ? legs : legs.slice(0, LEG_CAP);
-                  shownLegs.forEach((o) => {
-                    const isReturn = o.direction === "Return";
-                    rows.push(
-                      <TableRow key={o.id} data-arrival-row-id={o.id} className="hover:bg-muted/30">
-                        <TableCell className="font-medium pl-6">
-                          <div className="flex items-center gap-2">
-                            <span className="inline-flex items-center rounded-[7px] bg-[#2a2528] px-[9px] py-1 text-xs font-bold tabular-nums text-white">
-                              {o.flight}
-                            </span>
-                            <DirectionBadge direction={o.direction} />
-                            <LmcBadge orderId={o.id} />
-                          </div>
-                        </TableCell>
-                        <TableCell>{o.airline}</TableCell>
-                        <TableCell>
-                          <span className={isReturn ? "text-muted-foreground" : undefined}>
-                            {o.sector}
-                          </span>
-                        </TableCell>
-                        <TableCell className="tabular-nums text-xs">{o.date}</TableCell>
-                        <TableCell>{o.etd}</TableCell>
-                        <TableCell className="text-right tabular-nums">{o.pax}</TableCell>
-                        {showSpecMeals && (
-                          <TableCell className="text-right tabular-nums">
-                            {o.specialMeals > 0 ? (
-                              <button
-                                type="button"
-                                onClick={() => setMealDetailLeg(o)}
-                                className="font-medium text-sky-700 underline decoration-dotted underline-offset-2 hover:text-sky-800 tabular-nums"
-                                title="View special meal count & roster"
-                              >
-                                {o.specialMeals}
-                              </button>
-                            ) : (
-                              <span className="text-muted-foreground/60">0</span>
-                            )}
-                          </TableCell>
+        {groupedOrders.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-border py-14 text-center text-sm text-muted-foreground">
+            {hasFilters ? "No flight orders match the selected filters." : "No flight orders yet."}
+          </div>
+        ) : (
+          <div data-arrival-id="active-orders" className="space-y-3">
+            {pageGroups.map(([orderNo, legs]) => {
+              // A collapsed card shows only its header band; a deep-linked order
+              // is force-opened so its row exists in the DOM to scroll to.
+              const isDeepLinkTarget = pendingScrollId != null && legs.some((l) => l.id === pendingScrollId);
+              const open = openSections.has(orderNo) || isDeepLinkTarget;
+
+              // Header summary — keeps the band informative while collapsed.
+              const groupPax = legs.reduce((s, l) => s + l.pax, 0);
+              const groupSpec = legs.reduce((s, l) => s + l.specialMeals, 0);
+              const dates = legs.map((l) => l.date);
+              const minDate = dates.reduce((a, b) => (a < b ? a : b), dates[0]);
+              const maxDate = dates.reduce((a, b) => (a > b ? a : b), dates[0]);
+              const groupDateLabel = minDate === maxDate ? minDate : `${minDate} → ${maxDate}`;
+
+              // Cap legs per order; "show all" expands in place.
+              const isExpanded = expandedOrders.has(orderNo) || isDeepLinkTarget;
+              const shownLegs = isExpanded ? legs : legs.slice(0, LEG_CAP);
+
+              return (
+                <div
+                  key={orderNo}
+                  className={cn(
+                    "overflow-hidden rounded-xl border bg-card transition-shadow",
+                    open ? "border-border shadow-sm" : "border-border/70 hover:border-border hover:shadow-sm",
+                  )}
+                >
+                  {/* Header band — collapse toggle + order-level actions. */}
+                  <div className="flex items-stretch gap-2 py-2.5 pl-4 pr-3" style={{ background: "#f6f2ef" }}>
+                    <button
+                      type="button"
+                      onClick={() => toggleSection(orderNo)}
+                      aria-expanded={open}
+                      className="flex min-w-0 flex-1 flex-wrap items-center gap-x-[11px] gap-y-1.5 text-left"
+                    >
+                      <ChevronDown
+                        className={cn(
+                          "h-4 w-4 shrink-0 text-[#6b6b72] transition-transform duration-200",
+                          !open && "-rotate-90",
                         )}
-                        <TableCell>
-                          <div className="flex items-center gap-1.5">
-                            <Button
-                              size="icon"
-                              variant="outline"
-                              className="h-7 w-7"
-                              onClick={() => onView(o)}
-                              aria-label={`View ${o.orderNo}`}
-                              title="View"
-                            >
-                              <Eye className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              size="icon"
-                              variant="outline"
-                              className="h-7 w-7"
-                              onClick={() => setEditLeg(o)}
-                              disabled={isAmendLocked(o)}
-                              aria-label={`${o.status === "Pending" ? "Edit" : "Amend"} ${o.flight}`}
-                              title={amendLockTitle(o)}
-                            >
-                              <Pencil className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              size="icon"
-                              variant="outline"
-                              className="h-7 w-7"
-                              onClick={() => setHistoryLeg(o)}
-                              aria-label={`Change history for ${o.flight}`}
-                              title="Change history"
-                            >
-                              <History className="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>,
-                    );
-                  });
-                  // Per-order expand / collapse control when legs exceed the cap.
-                  if (legs.length > LEG_CAP) {
-                    rows.push(
-                      <TableRow key={`more-${orderNo}`} className="border-0 hover:bg-transparent">
-                        <TableCell colSpan={colCount} className="py-2 pl-6">
-                          <button
-                            type="button"
-                            onClick={() => toggleExpand(orderNo)}
-                            className="text-xs font-semibold text-primary hover:underline"
-                          >
-                            {isExpanded
-                              ? "Show less"
-                              : `+ ${legs.length - LEG_CAP} more flight${legs.length - LEG_CAP === 1 ? "" : "s"} — show all ${legs.length}`}
-                          </button>
-                        </TableCell>
-                      </TableRow>,
-                    );
-                  }
-                });
-                return rows;
-              })()}
-            </TableBody>
-          </Table>
-        </div>
+                      />
+                      <span className="text-sm font-bold tracking-[0.01em] text-[#E10101]">{orderNo}</span>
+                      {legs.length > 1 && (
+                        <span className="rounded-md border border-[#e9e4e1] bg-white px-2 py-[3px] text-[10px] font-bold uppercase tracking-[0.05em] text-[#6b6b72]">
+                          {legs.length} flights
+                        </span>
+                      )}
+                      <OrderStatusBadges legs={legs} />
+                      <span className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 pr-1 text-[11px] text-[#6b6b72]">
+                        <span className="inline-flex items-center gap-1 tabular-nums">
+                          <CalendarRange className="h-3.5 w-3.5 opacity-70" />
+                          {groupDateLabel}
+                        </span>
+                        <span className="tabular-nums">
+                          <strong className="font-bold text-[#2a2528]">{groupPax}</strong> pax
+                        </span>
+                        {showSpecMeals && groupSpec > 0 && (
+                          <span className="tabular-nums">
+                            <strong className="font-bold text-[#2a2528]">{groupSpec}</strong> spec
+                          </span>
+                        )}
+                      </span>
+                    </button>
+                    <div className="flex shrink-0 items-center gap-1.5 self-center border-l border-[#e4ddd8] pl-2.5">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 gap-1 px-2 text-xs"
+                        onClick={() => onViewOrder(legs)}
+                        title="View full order"
+                        aria-label={`View order ${orderNo}`}
+                      >
+                        <Eye className="h-3.5 w-3.5" /> View
+                      </Button>
+                    </div>
+                  </div>
+
+                  {/* Collapsible body — this order's flights. */}
+                  {open && (
+                    <div className="border-t border-border">
+                      <Table>
+                        <TableHeader className="bg-muted/40">
+                          <TableRow>
+                            <TableHead className="h-9 text-[10px] uppercase tracking-wider">Flight</TableHead>
+                            <TableHead className="h-9 text-[10px] uppercase tracking-wider">Airline</TableHead>
+                            <TableHead className="h-9 text-[10px] uppercase tracking-wider">Sector</TableHead>
+                            <TableHead className="h-9 text-[10px] uppercase tracking-wider">Date</TableHead>
+                            <TableHead className="h-9 text-[10px] uppercase tracking-wider">ETD</TableHead>
+                            <TableHead className="h-9 text-[10px] uppercase tracking-wider text-right">PAX</TableHead>
+                            {showSpecMeals && <TableHead className="h-9 text-[10px] uppercase tracking-wider text-right">Spec. Meals</TableHead>}
+                            <TableHead className="h-9 text-[10px] uppercase tracking-wider text-right">Action</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {shownLegs.map((o) => {
+                            const isReturn = o.direction === "Return";
+                            return (
+                              <TableRow key={o.id} data-arrival-row-id={o.id} className="hover:bg-muted/30">
+                                <TableCell className="font-medium pl-4">
+                                  <div className="flex items-center gap-2">
+                                    <span className="inline-flex items-center rounded-[7px] bg-[#2a2528] px-[9px] py-1 text-xs font-bold tabular-nums text-white">
+                                      {o.flight}
+                                    </span>
+                                    <DirectionBadge direction={o.direction} />
+                                    <LmcBadge orderId={o.id} />
+                                  </div>
+                                </TableCell>
+                                <TableCell>{o.airline}</TableCell>
+                                <TableCell>
+                                  <span className={isReturn ? "text-muted-foreground" : undefined}>{o.sector}</span>
+                                </TableCell>
+                                <TableCell className="tabular-nums text-xs">{o.date}</TableCell>
+                                <TableCell>{o.etd}</TableCell>
+                                <TableCell className="text-right tabular-nums">{o.pax}</TableCell>
+                                {showSpecMeals && (
+                                  <TableCell className="text-right tabular-nums">
+                                    {o.specialMeals > 0 ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => setMealDetailLeg(o)}
+                                        className="font-medium text-sky-700 underline decoration-dotted underline-offset-2 hover:text-sky-800 tabular-nums"
+                                        title="View special meal count & roster"
+                                      >
+                                        {o.specialMeals}
+                                      </button>
+                                    ) : (
+                                      <span className="text-muted-foreground/60">0</span>
+                                    )}
+                                  </TableCell>
+                                )}
+                                <TableCell>
+                                  <div className="flex items-center justify-end gap-1.5">
+                                    <Button size="icon" variant="outline" className="h-7 w-7" onClick={() => onView(o)} aria-label={`View ${o.flight}`} title="View flight">
+                                      <Eye className="h-3.5 w-3.5" />
+                                    </Button>
+                                    <Button size="icon" variant="outline" className="h-7 w-7" onClick={() => setEditLeg(o)} disabled={isAmendLocked(o)} aria-label={`${o.status === "Pending" ? "Edit" : "Amend"} ${o.flight}`} title={amendLockTitle(o)}>
+                                      <Pencil className="h-3.5 w-3.5" />
+                                    </Button>
+                                    <Button size="icon" variant="outline" className="h-7 w-7" onClick={() => setHistoryLeg(o)} aria-label={`Change history for ${o.flight}`} title="Change history">
+                                      <History className="h-3.5 w-3.5" />
+                                    </Button>
+                                  </div>
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                          {legs.length > LEG_CAP && (
+                            <TableRow className="hover:bg-transparent">
+                              <TableCell colSpan={colCount} className="py-2 pl-4">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleExpand(orderNo)}
+                                  className="text-xs font-semibold text-primary hover:underline"
+                                >
+                                  {isExpanded
+                                    ? "Show less"
+                                    : `+ ${legs.length - LEG_CAP} more flight${legs.length - LEG_CAP === 1 ? "" : "s"} — show all ${legs.length}`}
+                                </button>
+                              </TableCell>
+                            </TableRow>
+                          )}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
 
         {groupedOrders.length > 0 && (
           <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
@@ -1989,7 +2146,7 @@ function EditOrderLegDialog({
             </div>
             <p className="text-xs text-rose-900">
               {lead != null && lead >= 0
-                ? `Departure in ${lead < 1 ? `${Math.round(lead * 60)} min` : `${lead.toFixed(1)} h`} — within the ${LMC_WINDOW_HOURS}h cut-off.`
+                ? `Departure in ${lead < 1 ? `${Math.round(lead * 60)} min` : `${lead.toFixed(1)} h`} — within the ${getLmcWindowHours()}h cut-off.`
                 : "Flight has already departed."}{" "}
               A reason is required and the change is flagged for the team.
             </p>
@@ -2213,9 +2370,133 @@ function LmcBadge({ orderId }: { orderId: string }) {
 const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
+type SearchOption = { value: string; label: string; keywords?: string };
+
+/**
+ * A searchable single-select dropdown (Popover + cmdk) styled to match the
+ * form's inputs. Drop-in replacement for a native <select>: pass `value`,
+ * `onChange`, and `options`. Filtering matches the option value, label, and any
+ * extra `keywords` (e.g. city name behind an airport code).
+ */
+function SearchSelect({
+  value, onChange, options, placeholder = "Select…", searchPlaceholder = "Search…",
+  emptyText = "No results.", disabled, className,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  options: SearchOption[];
+  placeholder?: string;
+  searchPlaceholder?: string;
+  emptyText?: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = options.find((o) => o.value === value);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          role="combobox"
+          aria-expanded={open}
+          disabled={disabled}
+          className={cn(
+            "mt-1 flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 text-sm shadow-sm transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
+            !selected && "text-muted-foreground",
+            className,
+          )}
+        >
+          <span className="truncate text-left">{selected ? selected.label : placeholder}</span>
+          <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="w-[var(--radix-popover-trigger-width)] min-w-[240px] p-0"
+      >
+        <Command>
+          <CommandInput placeholder={searchPlaceholder} className="h-9" />
+          <CommandList>
+            <CommandEmpty>{emptyText}</CommandEmpty>
+            <CommandGroup>
+              {options.map((o) => (
+                <CommandItem
+                  key={o.value}
+                  value={`${o.value} ${o.label} ${o.keywords ?? ""}`}
+                  onSelect={() => { onChange(o.value); setOpen(false); }}
+                >
+                  <Check className={cn("mr-2 h-4 w-4 shrink-0", value === o.value ? "opacity-100" : "opacity-0")} />
+                  <span className="truncate">{o.label}</span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/** Numbered step marker used in the create-form section headers. */
+function StepBadge({ n }: { n: number }) {
+  return (
+    <span className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-[11px] font-bold text-primary-foreground shadow-sm">
+      {n}
+    </span>
+  );
+}
+
+/**
+ * Field label with an inline help tooltip. `hint` explains what the field is
+ * for; `auto` renders a small "Auto" chip signalling the value was pre-filled
+ * from the selected flight (and can still be edited).
+ */
+function FieldLabel({
+  children, hint, required, auto,
+}: {
+  children: React.ReactNode;
+  hint: string;
+  required?: boolean;
+  auto?: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+        {children}
+        {required && <span className="text-destructive"> *</span>}
+      </Label>
+      {auto && (
+        <span className="inline-flex items-center gap-0.5 rounded-sm bg-primary/10 px-1 py-px text-[9px] font-semibold uppercase tracking-wider text-primary">
+          <Wand2 className="h-2.5 w-2.5" /> Auto
+        </span>
+      )}
+      <TooltipProvider delayDuration={150}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-label="Field help"
+              className="text-muted-foreground/50 transition-colors hover:text-foreground"
+            >
+              <HelpCircle className="h-3.5 w-3.5" />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-[240px] text-left leading-snug">
+            {hint}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </div>
+  );
+}
+
 type LegDraft = {
   flight: string;
+  airline: string;
   sector: string;
+  date: string;
   etd: string;
   pax: number;
   crew: number;
@@ -2229,66 +2510,87 @@ type RosterDraft = Omit<SpecialMealEntry, "id">;
 
 const EMPTY_ROSTER_ROW: RosterDraft = { pnr: "", passengerName: "", seat: "", mealCode: "AVML" };
 
-let rosterIdSeq = 9000;
-const nextRosterId = () => `SM-${++rosterIdSeq}`;
+// A per-row id that stays unique even across a dev HMR reload (which resets the
+// counter while React keeps the existing rows). Without the time component a
+// reset counter can re-mint an existing id, and then editing one row would
+// patch every row sharing that id.
+let rosterIdSeq = 0;
+const nextRosterId = () => `SM-${Date.now().toString(36)}-${(++rosterIdSeq).toString(36)}`;
 
-function OrderCreate({
-  onSave, nextOrderNo, nextRowSeq,
+// ── One flight's editable detail (the fields auto-filled from the schedule) ──
+// Shared by the primary flight and, when the round-trip option is on, the paired
+// return flight — each is an independent draft with its own PAX and roster.
+type LegDetail = {
+  date: string;  // this leg's own departure date (ISO) — a return may differ
+  scope: "Domestic" | "International";
+  airline: string;
+  from: string;
+  to: string;
+  etd: string;
+  pax: string;   // kept as string for the number input
+  crew: string;
+  direction: FlightDirection;
+  roster: SpecialMealEntry[];
+};
+
+const emptyLegDetail = (): LegDetail => ({
+  date: "", scope: "Domestic", airline: AIRLINES[0], from: "", to: "", etd: "",
+  pax: "", crew: "", direction: "Outbound", roster: [],
+});
+
+const legDetailFromSchedule = (sf: ScheduledFlight, dateISO: string): LegDetail => ({
+  date: dateISO, scope: sf.scope, airline: sf.airline, from: sf.from, to: sf.to,
+  etd: sf.etd, pax: "", crew: String(sf.crew), direction: sf.direction, roster: [],
+});
+
+const DOMESTIC_CODES = ["DAC", "CGP", "CXB", "ZYL", "JSR"];
+
+/**
+ * The editable detail block for a single flight leg: the auto-filled fields grid
+ * (Scope / Airline / ETD / sector / Direction / PAX / Crew / Special Meals) plus
+ * that leg's Special Meal Roster. Fully controlled via `value` / `onChange` so it
+ * can be reused for both the outbound and the return flight. `autoFocusPax`
+ * lands the cursor on PAX (the one field that isn't auto-filled).
+ */
+function FlightLegFields({
+  value, onChange, autoFocusPax, showAuto = true,
 }: {
-  onSave: (legs: FlightOrder[]) => void;
-  nextOrderNo: string;
-  nextRowSeq: number;
+  value: LegDetail;
+  onChange: (patch: Partial<LegDetail>) => void;
+  autoFocusPax?: boolean;
+  /** Show the "Auto" chips — true when values came from the schedule (auto mode),
+   *  false for manual entry where nothing is pre-filled. */
+  showAuto?: boolean;
 }) {
-  const [scope, setScope] = useState<"Domestic" | "International">("Domestic");
-  const [flight, setFlight] = useState("");
-  const [airline, setAirline] = useState(AIRLINES[0]);
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
-  const [etd, setEtd] = useState("");
-  const [pax, setPax] = useState("");
-  const [crew, setCrew] = useState("");
-  const [direction, setDirection] = useState<FlightDirection>("Outbound");
-  const [roster, setRoster] = useState<SpecialMealEntry[]>([]);
   const [bulkPaste, setBulkPaste] = useState("");
   const [showBulk, setShowBulk] = useState(false);
-  const [legs, setLegs] = useState<LegDraft[]>([]);
 
-  const domesticCodes = ["DAC", "CGP", "CXB", "ZYL", "JSR"];
-  const airportChoices = scope === "Domestic"
-    ? AIRPORTS.filter((a) => domesticCodes.includes(a.code))
+  const airportChoices = value.scope === "Domestic"
+    ? AIRPORTS.filter((a) => DOMESTIC_CODES.includes(a.code))
     : AIRPORTS;
 
   const onScopeChange = (next: "Domestic" | "International") => {
-    setScope(next);
-    // If the currently-picked airport doesn't belong to the new scope, clear it.
-    const isDomCode = (code: string) => domesticCodes.includes(code);
+    // Dropping to Domestic can invalidate an international airport pick — clear it.
     if (next === "Domestic") {
-      if (from && !isDomCode(from)) setFrom("");
-      if (to && !isDomCode(to)) setTo("");
+      const patch: Partial<LegDetail> = { scope: next };
+      if (value.from && !DOMESTIC_CODES.includes(value.from)) patch.from = "";
+      if (value.to && !DOMESTIC_CODES.includes(value.to)) patch.to = "";
+      onChange(patch);
+    } else {
+      onChange({ scope: next });
     }
-    // For International we keep whatever was selected — all codes are valid.
-  };
-
-  const resetForm = () => {
-    setFlight(""); setFrom(""); setTo("");
-    setEtd(""); setPax(""); setCrew("");
-    setDirection("Outbound");
-    setRoster([]);
-    setBulkPaste("");
-    setShowBulk(false);
   };
 
   const addRosterRow = () =>
-    setRoster((prev) => [...prev, { id: nextRosterId(), ...EMPTY_ROSTER_ROW }]);
+    onChange({ roster: [...value.roster, { id: nextRosterId(), ...EMPTY_ROSTER_ROW }] });
 
   const updateRosterRow = (id: string, patch: Partial<RosterDraft>) =>
-    setRoster((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+    onChange({ roster: value.roster.map((r) => (r.id === id ? { ...r, ...patch } : r)) });
 
   const removeRosterRow = (id: string) =>
-    setRoster((prev) => prev.filter((r) => r.id !== id));
+    onChange({ roster: value.roster.filter((r) => r.id !== id) });
 
-  // Bulk paste: TSV/CSV in column order PNR, Name, Seat, Code
+  // Bulk paste: TSV/CSV in column order PNR, Name, Seat, Code, [Audience]
   const applyBulkPaste = () => {
     const lines = bulkPaste.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     if (lines.length === 0) {
@@ -2311,37 +2613,459 @@ function OrderCreate({
       toast.error("No valid rows. Format: PNR, Name, Seat, Code (one per line).");
       return;
     }
-    setRoster((prev) => [...prev, ...parsed]);
+    onChange({ roster: [...value.roster, ...parsed] });
     setBulkPaste("");
     setShowBulk(false);
     toast.success(`Imported ${parsed.length} passenger${parsed.length === 1 ? "" : "s"}.${skipped ? ` ${skipped} skipped.` : ""}`);
   };
 
-  const addLeg = () => {
-    if (!flight.trim()) { toast.error("Flight number is required."); return; }
-    if (!from || !to) { toast.error("Sector (From → To) is required."); return; }
-    if (from === to) { toast.error("From and To must be different airports."); return; }
-    const paxNum = Number(pax);
-    if (!paxNum || paxNum <= 0) { toast.error("PAX must be greater than zero."); return; }
+  return (
+    <>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-4">
+        <div>
+          <FieldLabel auto={showAuto} hint="Domestic or international routing — sets the applicable meal specification and dispatch handling. Auto-set from the flight in auto mode; editable.">
+            Scope
+          </FieldLabel>
+          <div className="mt-1 flex w-fit rounded-md border border-input bg-background p-0.5 shadow-sm">
+            {(["Domestic", "International"] as const).map((s) => {
+              const active = value.scope === s;
+              return (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => onScopeChange(s)}
+                  className={
+                    "px-3 py-1.5 text-xs font-medium rounded-sm transition-colors " +
+                    (active ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground")
+                  }
+                >
+                  {s}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          <FieldLabel auto={showAuto} hint="Operating carrier for this flight. Auto-set from the schedule in auto mode; editable.">
+            Airline
+          </FieldLabel>
+          <SearchSelect
+            value={value.airline}
+            onChange={(airline) => onChange({ airline })}
+            options={AIRLINES.map((a) => ({ value: a, label: a }))}
+            placeholder="Select airline"
+            searchPlaceholder="Search airline…"
+            emptyText="No airline found."
+          />
+        </div>
+
+        <div>
+          <FieldLabel auto={showAuto} required hint="Estimated Time of Departure (local, 24-hour). Auto-set from the schedule in auto mode; adjust for a known delay or re-time.">
+            ETD
+          </FieldLabel>
+          <Input
+            type="time"
+            value={value.etd}
+            onChange={(e) => onChange({ etd: e.target.value })}
+            className="mt-1"
+          />
+        </div>
+
+        <div>
+          <FieldLabel auto={showAuto} required hint="Origin (departure) airport. Auto-set from the flight's sector in auto mode; editable.">
+            From
+          </FieldLabel>
+          <SearchSelect
+            value={value.from}
+            onChange={(from) => onChange({ from })}
+            options={airportChoices.map((a) => ({ value: a.code, label: `${a.code} — ${a.name}`, keywords: a.name }))}
+            placeholder="Select origin"
+            searchPlaceholder="Search airport or city…"
+            emptyText="No airport found."
+          />
+        </div>
+
+        <div>
+          <FieldLabel auto={showAuto} required hint="Destination (arrival) airport. Auto-set from the flight's sector in auto mode; editable.">
+            To
+          </FieldLabel>
+          <SearchSelect
+            value={value.to}
+            onChange={(to) => onChange({ to })}
+            options={airportChoices.map((a) => ({ value: a.code, label: `${a.code} — ${a.name}`, keywords: a.name }))}
+            placeholder="Select destination"
+            searchPlaceholder="Search airport or city…"
+            emptyText="No airport found."
+          />
+        </div>
+
+        <div>
+          <FieldLabel auto={showAuto} hint="Outbound (departing base) or the Return leg of the rotation. Auto-set from the flight in auto mode; editable.">
+            Direction
+          </FieldLabel>
+          <div className="mt-1 flex w-fit rounded-md border border-input bg-background p-0.5 shadow-sm">
+            {(["Outbound", "Return"] as FlightDirection[]).map((d) => {
+              const active = value.direction === d;
+              const isReturn = d === "Return";
+              return (
+                <button
+                  key={d}
+                  type="button"
+                  onClick={() => onChange({ direction: d })}
+                  className={
+                    "px-3 py-1.5 text-xs font-medium rounded-sm transition-colors " +
+                    (active
+                      ? isReturn
+                        ? "bg-navy/10 text-navy"
+                        : "bg-success/10 text-success"
+                      : "text-muted-foreground hover:text-foreground")
+                  }
+                >
+                  {isReturn ? "↺" : "↗"} {d}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div>
+          <FieldLabel required hint="Number of passengers booked on this flight — enter this manually. It drives passenger meal production.">
+            PAX
+          </FieldLabel>
+          <Input
+            type="number"
+            min={0}
+            value={value.pax}
+            onChange={(e) => onChange({ pax: e.target.value })}
+            placeholder="0"
+            autoFocus={autoFocusPax}
+            className="mt-1"
+          />
+        </div>
+
+        <div>
+          <FieldLabel auto={showAuto} hint="Rostered cockpit + cabin crew — drives crew-meal counts. Auto-set from the flight in auto mode; edit to match the actual crew roster.">
+            No of Crew
+          </FieldLabel>
+          <Input
+            type="number"
+            min={0}
+            value={value.crew}
+            onChange={(e) => onChange({ crew: e.target.value })}
+            placeholder="0"
+            className="mt-1"
+          />
+        </div>
+
+        <div>
+          <FieldLabel hint="Total special meals on this flight — counted automatically from the Special Meal Roster below. Add rows there to change it.">
+            Special Meals
+          </FieldLabel>
+          <div className="mt-1 h-9 rounded-md border border-input bg-muted/40 px-3 flex items-center justify-between text-sm">
+            <span className="tabular-nums font-semibold text-foreground">{value.roster.length}</span>
+            <span className="text-[11px] text-muted-foreground">auto from roster below</span>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Special Meal Roster (per leg) ──────────────────────────────── */}
+      <div className="mt-6 border-t border-border pt-4">
+        <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-foreground">
+              Special Meal Roster
+            </h4>
+            <p className="text-[11px] text-muted-foreground mt-0.5">
+              Optional — one row per passenger requiring a special meal on this flight.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 text-xs"
+              onClick={() => setShowBulk((v) => !v)}
+            >
+              <FileSpreadsheet className="h-3.5 w-3.5 mr-1.5" />
+              {showBulk ? "Hide Paste" : "Bulk Paste"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 text-xs"
+              onClick={addRosterRow}
+            >
+              <Plus className="h-3.5 w-3.5 mr-1.5" /> Add Passenger
+            </Button>
+          </div>
+        </div>
+
+        {showBulk && (
+          <div className="mb-3 rounded-md border border-dashed border-border bg-muted/30 p-3">
+            <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">
+              Paste from spreadsheet — one passenger per line
+            </Label>
+            <p className="text-[10px] text-muted-foreground mt-0.5 mb-1.5 font-mono">
+              PNR, Passenger Name, Seat, Meal Code, [Audience]   (comma/tab separated · Audience optional: "Crew" for crew specials)
+            </p>
+            <textarea
+              value={bulkPaste}
+              onChange={(e) => setBulkPaste(e.target.value)}
+              rows={4}
+              className="w-full text-xs font-mono rounded-md border border-input bg-background px-3 py-2 shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              placeholder={"09QIBQ, NILAVRO SARKAR DIP, 21A, AVML\n09QI6J1, MD SHOJIB, 22A, FPML"}
+            />
+            <div className="mt-2 flex items-center justify-end gap-2">
+              <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => { setBulkPaste(""); setShowBulk(false); }}>
+                Cancel
+              </Button>
+              <Button size="sm" className="h-7 text-xs" onClick={applyBulkPaste}>
+                Import {bulkPaste.split(/\r?\n/).filter((l) => l.trim()).length || 0} Rows
+              </Button>
+            </div>
+          </div>
+        )}
+
+        <div className="border border-border rounded-md overflow-hidden">
+          <Table>
+            <TableHeader className="bg-muted/40">
+              <TableRow>
+                <TableHead className="w-10 text-[10px] uppercase tracking-wider">SL</TableHead>
+                <TableHead className="text-[10px] uppercase tracking-wider w-36">For</TableHead>
+                <TableHead className="text-[10px] uppercase tracking-wider w-32">PNR</TableHead>
+                <TableHead className="text-[10px] uppercase tracking-wider">Passenger Name</TableHead>
+                <TableHead className="text-[10px] uppercase tracking-wider w-20">Seat</TableHead>
+                <TableHead className="text-[10px] uppercase tracking-wider w-40">Meal Type</TableHead>
+                <TableHead className="w-12" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {value.roster.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={7} className="text-center text-xs text-muted-foreground py-6">
+                    No special meals on this flight. Click <strong className="text-foreground">+ Add Passenger</strong> or <strong className="text-foreground">Bulk Paste</strong> to attach a manifest.
+                  </TableCell>
+                </TableRow>
+              ) : (
+                value.roster.map((r, i) => {
+                  return (
+                    <TableRow key={r.id}>
+                      <TableCell className="text-xs tabular-nums text-muted-foreground">{i + 1}</TableCell>
+                      <TableCell>
+                        <div className="flex w-full rounded-md border border-input bg-background p-0.5 shadow-sm">
+                          {(["Passenger", "Crew"] as const).map((a) => {
+                            const active = (r.audience ?? "Passenger") === a;
+                            return (
+                              <button
+                                key={a}
+                                type="button"
+                                onClick={() => updateRosterRow(r.id, { audience: a })}
+                                className={
+                                  "flex-1 rounded-sm px-1.5 py-1 text-[11px] font-medium transition-colors " +
+                                  (active ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground")
+                                }
+                              >
+                                {a}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          value={r.pnr}
+                          onChange={(e) => updateRosterRow(r.id, { pnr: e.target.value.toUpperCase() })}
+                          placeholder={r.audience === "Crew" ? "—" : "09QIBQ"}
+                          disabled={r.audience === "Crew"}
+                          className="h-8 font-mono text-xs"
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          value={r.passengerName}
+                          onChange={(e) => updateRosterRow(r.id, { passengerName: e.target.value })}
+                          placeholder={r.audience === "Crew" ? "Any crew member" : "PASSENGER NAME"}
+                          disabled={r.audience === "Crew"}
+                          className="h-8 text-xs"
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Input
+                          value={r.seat}
+                          onChange={(e) => updateRosterRow(r.id, { seat: e.target.value.toUpperCase() })}
+                          placeholder={r.audience === "Crew" ? "—" : "21A"}
+                          disabled={r.audience === "Crew"}
+                          className="h-8 font-mono text-xs"
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <SearchSelect
+                          value={r.mealCode}
+                          onChange={(mealCode) => updateRosterRow(r.id, { mealCode })}
+                          options={SPECIAL_MEAL_CODES.map((m) => ({
+                            value: m.code,
+                            label: `${m.code} — ${m.name}`,
+                            keywords: `${m.name} ${m.category}`,
+                          }))}
+                          searchPlaceholder="Search meal…"
+                          emptyText="No meal code."
+                          className="mt-0 h-8 text-xs"
+                        />
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          className="h-7 w-7"
+                          onClick={() => removeRosterRow(r.id)}
+                          aria-label="Remove passenger"
+                        >
+                          <X className="h-3.5 w-3.5 text-destructive" />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function OrderCreate({
+  onSave, nextOrderNo, nextRowSeq,
+}: {
+  onSave: (legs: FlightOrder[]) => void;
+  nextOrderNo: string;
+  nextRowSeq: number;
+}) {
+  // Auto: pick a scheduled flight and let its details fill in. Manual: type the
+  // flight number and enter every field by hand (no schedule lookup).
+  const [flightMode, setFlightMode] = useState<"auto" | "manual">("auto");
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [flight, setFlight] = useState("");                  // primary flight # (Step 1)
+  const [primary, setPrimary] = useState<LegDetail>(emptyLegDetail());
+  const [withReturn, setWithReturn] = useState(false);       // also order the paired leg
+  const [ret, setRet] = useState<LegDetail>(emptyLegDetail());
+  const [legs, setLegs] = useState<LegDraft[]>([]);
+
+  // Flights that operate on the chosen date — the Flight Number dropdown source.
+  // Flights already added to this order are hidden to avoid duplicates.
+  const availableFlights = useMemo(() => {
+    const used = new Set(legs.map((l) => l.flight));
+    return scheduledFlightsForDate(date).filter((f) => !used.has(f.flight));
+  }, [date, legs]);
+
+  // The scheduled return/outbound counterpart of the selected flight, if any —
+  // gates the round-trip checkbox and seeds the return detail block.
+  const pairFlight = useMemo(() => (flight ? pairScheduledFlight(flight) : undefined), [flight]);
+
+  // Whole-day gap between the outbound date and the return's own date (0 = same
+  // day). Drives the "next day" badge on the return panel.
+  const returnDayGap = withReturn && ret.date && ret.date !== date
+    ? Math.round((Date.parse(ret.date) - Date.parse(date)) / 86_400_000)
+    : 0;
+
+  const patchPrimary = (patch: Partial<LegDetail>) => setPrimary((p) => ({ ...p, ...patch }));
+  const patchReturn = (patch: Partial<LegDetail>) => setRet((p) => ({ ...p, ...patch }));
+
+  // Changing the date invalidates the flight pick (a flight may not operate that
+  // day), so clear the whole selection.
+  const onDateChange = (next: string) => {
+    setDate(next);
+    setFlight("");
+    setPrimary(emptyLegDetail());
+    setWithReturn(false);
+    setRet(emptyLegDetail());
+  };
+
+  // Pick a scheduled flight → auto-fill its detail block. The round-trip option
+  // resets so the user re-opts-in per flight.
+  const onFlightChange = (flightNo: string) => {
+    setFlight(flightNo);
+    setWithReturn(false);
+    setRet(emptyLegDetail());
+    const sf = availableFlights.find((f) => f.flight === flightNo);
+    setPrimary(sf ? legDetailFromSchedule(sf, date) : emptyLegDetail());
+  };
+
+  // Toggle "also order the return flight" → seed the return block from the pair,
+  // dated to the return's own schedule (same-day turnaround or a later day).
+  const onToggleReturn = (checked: boolean) => {
+    setWithReturn(checked);
+    if (checked && pairFlight) {
+      const rDate = returnFlightDate(date, primary.etd || pairFlight.etd, pairFlight);
+      setRet(legDetailFromSchedule(pairFlight, rDate));
+    } else {
+      setRet(emptyLegDetail());
+    }
+  };
+
+  // Switch entry mode → clear the in-progress flight/details (already-added legs
+  // stay). Manual mode has no schedule pairing, so the round-trip option is off.
+  const onModeChange = (next: "auto" | "manual") => {
+    setFlightMode(next);
+    setFlight("");
+    setPrimary(emptyLegDetail());
+    setWithReturn(false);
+    setRet(emptyLegDetail());
+  };
+
+  const resetForm = () => {
+    setFlight("");
+    setPrimary(emptyLegDetail());
+    setWithReturn(false);
+    setRet(emptyLegDetail());
+  };
+
+  // Build one leg (flight # + its detail), validating and cleaning the roster.
+  // Returns null after a toast when the detail is invalid.
+  const buildLeg = (flightNo: string, d: LegDetail, label: string): LegDraft | null => {
+    if (!d.date) { toast.error(`${label}: departure date is required.`); return null; }
+    if (!d.from || !d.to) { toast.error(`${label}: sector (From → To) is required.`); return null; }
+    if (d.from === d.to) { toast.error(`${label}: From and To must be different airports.`); return null; }
+    const paxNum = Number(d.pax);
+    if (!paxNum || paxNum <= 0) { toast.error(`${label}: PAX must be greater than zero.`); return null; }
     // Drop blank rows. Crew specials need only a meal code (no PNR/seat);
     // passenger rows still need the full identity.
-    const cleanRoster = roster.filter((r) =>
+    const cleanRoster = d.roster.filter((r) =>
       r.mealCode && (r.audience === "Crew" || (r.pnr.trim() && r.passengerName.trim() && r.seat.trim())),
     );
-    setLegs((prev) => [
-      ...prev,
-      {
-        flight: flight.trim().toUpperCase(),
-        sector: `${from} → ${to}`,
-        etd: etd || "—",
-        pax: paxNum,
-        crew: Math.max(0, Number(crew) || 0),
-        specialMeals: cleanRoster.length,
-        status: "Pending",
-        direction,
-        roster: cleanRoster,
-      },
-    ]);
+    return {
+      flight: flightNo.trim().toUpperCase(),
+      airline: d.airline,
+      sector: `${d.from} → ${d.to}`,
+      date: d.date,
+      etd: d.etd || "—",
+      pax: paxNum,
+      crew: Math.max(0, Number(d.crew) || 0),
+      specialMeals: cleanRoster.length,
+      status: "Pending",
+      direction: d.direction,
+      roster: cleanRoster,
+    };
+  };
+
+  const addLeg = () => {
+    if (!flight.trim()) {
+      toast.error(flightMode === "manual" ? "Flight number is required." : "Select a flight first.");
+      return;
+    }
+    // The primary leg always departs on the Step-1 date.
+    const primaryLeg = buildLeg(flight, { ...primary, date }, "Flight");
+    if (!primaryLeg) return;
+    const newLegs: LegDraft[] = [primaryLeg];
+    if (withReturn && pairFlight) {
+      // Validate the return before committing either — an all-or-nothing add.
+      const returnLeg = buildLeg(pairFlight.flight, ret, `Return flight ${pairFlight.flight}`);
+      if (!returnLeg) return;
+      newLegs.push(returnLeg);
+    }
+    setLegs((prev) => [...prev, ...newLegs]);
     resetForm();
   };
 
@@ -2357,9 +3081,9 @@ function OrderCreate({
       id: `FO-${String(nextRowSeq + i).padStart(3, "0")}`,
       orderNo: nextOrderNo,
       flight: l.flight,
-      airline,
+      airline: l.airline,
       sector: l.sector,
-      date,
+      date: l.date,
       etd: l.etd,
       pax: l.pax,
       crew: l.crew,
@@ -2374,401 +3098,275 @@ function OrderCreate({
     toast.success(`${nextOrderNo} created with ${legs.length} ${legs.length === 1 ? "flight" : "flights"}.`);
   };
 
-  return (
-    <Card>
-      <CardContent className="pt-6">
-        <div className="flex items-center justify-between mb-6 gap-2 flex-wrap">
-          <div>
-            <h3 className="text-sm font-semibold tracking-wider uppercase text-foreground">
-              Create Flight Order
-            </h3>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              All flights added below share this Order — each flight becomes its own row in the list.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={addLeg}>
-              <Plus className="h-4 w-4 mr-1.5" /> Add Flight
-            </Button>
-            <Button onClick={handleSave}>
-              <Save className="h-4 w-4 mr-1.5" /> Save
-            </Button>
-          </div>
-        </div>
+  const totalPax = legs.reduce((s, l) => s + l.pax, 0);
+  const totalMeals = legs.reduce((s, l) => s + l.specialMeals, 0);
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-4 mb-4">
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Scope</Label>
-            <div className="mt-1 flex w-fit rounded-md border border-input bg-background p-0.5 shadow-sm">
-              {(["Domestic", "International"] as const).map((s) => {
-                const active = scope === s;
+  return (
+    <div className="mx-auto w-full max-w-5xl space-y-5">
+      {/* ── Step 1 · Date → Flight ───────────────────────────────────────── */}
+      <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+        <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-border bg-muted/30 px-5 py-3">
+          <div className="flex items-center gap-2.5">
+            <StepBadge n={1} />
+            <CalendarRange className="h-4 w-4 text-muted-foreground" />
+            <h3 className="text-sm font-semibold text-foreground">Select Date &amp; Flight</h3>
+          </div>
+          {/* Entry mode — Auto (pick from schedule) vs Manual (type everything) */}
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Entry</span>
+            <div className="flex rounded-md border border-input bg-background p-0.5 shadow-sm">
+              {(["auto", "manual"] as const).map((m) => {
+                const active = flightMode === m;
                 return (
                   <button
-                    key={s}
+                    key={m}
                     type="button"
-                    onClick={() => onScopeChange(s)}
+                    onClick={() => onModeChange(m)}
                     className={
-                      "px-3 py-1.5 text-xs font-medium rounded-sm transition-colors " +
+                      "rounded-sm px-3 py-1 text-[11px] font-medium capitalize transition-colors " +
                       (active ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground")
                     }
                   >
-                    {s}
+                    {m}
                   </button>
                 );
               })}
             </div>
           </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              Airline
-            </Label>
-            <select
-              value={airline}
-              onChange={(e) => setAirline(e.target.value)}
-              className={selectCls}
-            >
-              {AIRLINES.map((a) => <option key={a} value={a}>{a}</option>)}
-            </select>
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              Date
-            </Label>
-            <Input
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              className="mt-1"
-            />
-          </div>
-        </div>
-
-        <div className="border-t border-border pt-4 mb-2">
-          <h4 className="text-xs font-semibold uppercase tracking-wider text-foreground">
-            New Flight
-          </h4>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              Flight Number <span className="text-destructive">*</span>
-            </Label>
-            <Input
-              value={flight}
-              onChange={(e) => setFlight(e.target.value)}
-              placeholder="e.g. BS-203"
-              className="mt-1"
-            />
-          </div>
-
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              From <span className="text-destructive">*</span>
-            </Label>
-            <select
-              value={from}
-              onChange={(e) => setFrom(e.target.value)}
-              className={selectCls}
-            >
-              <option value="">Select origin</option>
-              {airportChoices.map((a) => (
-                <option key={a.code} value={a.code}>{a.code} — {a.name}</option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              To <span className="text-destructive">*</span>
-            </Label>
-            <select
-              value={to}
-              onChange={(e) => setTo(e.target.value)}
-              className={selectCls}
-            >
-              <option value="">Select destination</option>
-              {airportChoices.map((a) => (
-                <option key={a.code} value={a.code}>{a.code} — {a.name}</option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              ETD
-            </Label>
-            <Input
-              type="time"
-              value={etd}
-              onChange={(e) => setEtd(e.target.value)}
-              className="mt-1"
-            />
-          </div>
-
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              PAX <span className="text-destructive">*</span>
-            </Label>
-            <Input
-              type="number"
-              min={0}
-              value={pax}
-              onChange={(e) => setPax(e.target.value)}
-              placeholder="0"
-              className="mt-1"
-            />
-          </div>
-
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              No of Crew
-            </Label>
-            <Input
-              type="number"
-              min={0}
-              value={crew}
-              onChange={(e) => setCrew(e.target.value)}
-              placeholder="0"
-              className="mt-1"
-            />
-          </div>
-
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              Special Meals
-            </Label>
-            <div className="mt-1 h-9 rounded-md border border-input bg-muted/40 px-3 flex items-center justify-between text-sm">
-              <span className="tabular-nums font-semibold text-foreground">{roster.length}</span>
-              <span className="text-[11px] text-muted-foreground">auto from roster below</span>
-            </div>
-          </div>
-
-          <div className="md:col-span-2">
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              Direction
-            </Label>
-            <div className="mt-1 flex w-fit rounded-md border border-input bg-background p-0.5 shadow-sm">
-              {(["Outbound", "Return"] as FlightDirection[]).map((d) => {
-                const active = direction === d;
-                const isReturn = d === "Return";
-                return (
-                  <button
-                    key={d}
-                    type="button"
-                    onClick={() => setDirection(d)}
-                    className={
-                      "px-3 py-1.5 text-xs font-medium rounded-sm transition-colors " +
-                      (active
-                        ? isReturn
-                          ? "bg-navy/10 text-navy"
-                          : "bg-success/10 text-success"
-                        : "text-muted-foreground hover:text-foreground")
-                    }
-                  >
-                    {isReturn ? "↺" : "↗"} {d}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        {/* ── Special Meal Roster (per leg) ──────────────────────────────── */}
-        <div className="mt-6 border-t border-border pt-4">
-          <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
+        </header>
+        <div className="p-5">
+          <div className="grid grid-cols-1 gap-x-6 gap-y-4 md:grid-cols-2">
             <div>
-              <h4 className="text-xs font-semibold uppercase tracking-wider text-foreground">
-                Special Meal Roster
-              </h4>
-              <p className="text-[11px] text-muted-foreground mt-0.5">
-                Optional — one row per passenger requiring a special meal on this flight.
-              </p>
+              <FieldLabel
+                required
+                hint="Scheduled departure date. Pick this first — the Flight Number list below shows only the flights that operate on this day."
+              >
+                Date
+              </FieldLabel>
+              <Input
+                type="date"
+                value={date}
+                onChange={(e) => onDateChange(e.target.value)}
+                className="mt-1"
+              />
             </div>
-            <div className="flex items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-8 text-xs"
-                onClick={() => setShowBulk((v) => !v)}
+            <div>
+              <FieldLabel
+                required
+                hint={
+                  flightMode === "auto"
+                    ? "Flights scheduled on the selected date. Choosing one auto-fills the scope, airline, sector, ETD and crew below — all still editable."
+                    : "Type the flight number, then enter every field below by hand. No schedule is used."
+                }
               >
-                <FileSpreadsheet className="h-3.5 w-3.5 mr-1.5" />
-                {showBulk ? "Hide Paste" : "Bulk Paste"}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-8 text-xs"
-                onClick={addRosterRow}
-              >
-                <Plus className="h-3.5 w-3.5 mr-1.5" /> Add Passenger
-              </Button>
+                Flight Number
+              </FieldLabel>
+              {flightMode === "auto" ? (
+                <>
+                  <SearchSelect
+                    value={flight}
+                    onChange={onFlightChange}
+                    disabled={availableFlights.length === 0}
+                    options={availableFlights.map((f) => ({
+                      value: f.flight,
+                      label: `${f.flight} · ${f.from}→${f.to} · ${f.etd} · ${f.airline}`,
+                      keywords: `${f.from} ${f.to} ${f.airline}`,
+                    }))}
+                    placeholder={availableFlights.length ? "Select a flight…" : "No flights scheduled for this date"}
+                    searchPlaceholder="Search flight, sector, airline…"
+                    emptyText="No matching flight."
+                  />
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    {availableFlights.length
+                      ? `${availableFlights.length} flight${availableFlights.length === 1 ? "" : "s"} operating on this date`
+                      : "No scheduled flights left for this date — try another date."}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <Input
+                    value={flight}
+                    onChange={(e) => setFlight(e.target.value.toUpperCase())}
+                    placeholder="e.g. BS-203"
+                    className="mt-1"
+                  />
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    Manual entry — fill in every field below yourself.
+                  </p>
+                </>
+              )}
             </div>
           </div>
 
-          {showBulk && (
-            <div className="mb-3 rounded-md border border-dashed border-border bg-muted/30 p-3">
-              <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">
-                Paste from spreadsheet — one passenger per line
-              </Label>
-              <p className="text-[10px] text-muted-foreground mt-0.5 mb-1.5 font-mono">
-                PNR, Passenger Name, Seat, Meal Code, [Audience]   (comma/tab separated · Audience optional: "Crew" for crew specials)
-              </p>
-              <textarea
-                value={bulkPaste}
-                onChange={(e) => setBulkPaste(e.target.value)}
-                rows={4}
-                className="w-full text-xs font-mono rounded-md border border-input bg-background px-3 py-2 shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder={"09QIBQ, NILAVRO SARKAR DIP, 21A, AVML\n09QI6J1, MD SHOJIB, 22A, FPML"}
+          {/* Round-trip toggle — auto mode only (it relies on the schedule).
+              Appears once a flight with a scheduled pair is picked; ticking it
+              loads the paired leg so both can be ordered together. */}
+          {flightMode === "auto" && flight && pairFlight && (
+            <label
+              className={cn(
+                "mt-4 flex cursor-pointer items-start gap-3 rounded-lg border p-3.5 transition-colors",
+                withReturn
+                  ? "border-primary/40 bg-primary/[0.04]"
+                  : "border-border bg-muted/20 hover:bg-muted/40",
+              )}
+            >
+              <input
+                type="checkbox"
+                checked={withReturn}
+                onChange={(e) => onToggleReturn(e.target.checked)}
+                className="mt-0.5 h-4 w-4 shrink-0 rounded border-input accent-primary"
               />
-              <div className="mt-2 flex items-center justify-end gap-2">
-                <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => { setBulkPaste(""); setShowBulk(false); }}>
-                  Cancel
-                </Button>
-                <Button size="sm" className="h-7 text-xs" onClick={applyBulkPaste}>
-                  Import {bulkPaste.split(/\r?\n/).filter((l) => l.trim()).length || 0} Rows
-                </Button>
-              </div>
+              <CornerUpLeft
+                className={cn(
+                  "mt-0.5 h-4 w-4 shrink-0",
+                  withReturn ? "text-primary" : "text-muted-foreground",
+                )}
+              />
+              <span className="text-xs leading-snug">
+                <span className="font-semibold text-foreground">
+                  Also order the {primary.direction === "Return" ? "outbound" : "return"} flight — {pairFlight.flight}
+                </span>
+                <span className="mt-0.5 block text-muted-foreground">
+                  {pairFlight.from}→{pairFlight.to} · {pairFlight.etd}. Adds a second leg with its own PAX and special-meal roster.
+                </span>
+              </span>
+            </label>
+          )}
+          {flightMode === "auto" && flight && !pairFlight && (
+            <p className="mt-3 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <CornerUpLeft className="h-3 w-3" />
+              No scheduled return for {flight} — this sector is one-way in the timetable.
+            </p>
+          )}
+        </div>
+      </section>
+
+      {/* ── Step 2 · Flight details (auto-filled, editable) ──────────────── */}
+      <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+        <header className="flex flex-wrap items-center gap-2.5 border-b border-border bg-muted/30 px-5 py-3">
+          <StepBadge n={2} />
+          <Plane className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-sm font-semibold text-foreground">Flight Details</h3>
+          <span className="text-[11px] text-muted-foreground">
+            {flightMode === "auto" ? "auto-filled — edit anything that differs" : "enter each field for this flight"}
+          </span>
+        </header>
+        <div className="p-5">
+          {flightMode === "auto" && !flight ? (
+            <div className="rounded-lg border border-dashed border-border bg-muted/20 px-4 py-12 text-center">
+              <Plane className="mx-auto mb-2 h-6 w-6 text-muted-foreground/50" />
+              <p className="text-sm text-muted-foreground">Select a flight above to load its details.</p>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {/* Primary flight — wrapped in a labelled card only in round-trip mode */}
+              {withReturn ? (
+                <div className="rounded-lg border border-border bg-muted/10 p-4">
+                  <div className="mb-3 flex flex-wrap items-center gap-2">
+                    <Plane className="h-3.5 w-3.5 text-primary" />
+                    <span className="text-xs font-semibold uppercase tracking-wider text-foreground">
+                      {primary.direction === "Return" ? "Return Flight" : "Outbound Flight"}
+                    </span>
+                    <span className="text-xs font-semibold text-foreground">{flight}</span>
+                    <DirectionBadge direction={primary.direction} />
+                    <span className="text-xs text-muted-foreground">
+                      {primary.from}→{primary.to} · {date} · {primary.etd}
+                    </span>
+                  </div>
+                  <FlightLegFields value={primary} onChange={patchPrimary} autoFocusPax showAuto={flightMode === "auto"} />
+                </div>
+              ) : (
+                <FlightLegFields value={primary} onChange={patchPrimary} autoFocusPax showAuto={flightMode === "auto"} />
+              )}
+
+              {/* Paired return flight — its own schedule date (below) and time */}
+              {withReturn && pairFlight && (
+                <div className="rounded-lg border border-primary/30 bg-primary/[0.03] p-4">
+                  <div className="mb-3 flex flex-wrap items-center gap-2">
+                    <CornerUpLeft className="h-3.5 w-3.5 text-primary" />
+                    <span className="text-xs font-semibold uppercase tracking-wider text-foreground">
+                      {ret.direction === "Return" ? "Return Flight" : "Outbound Flight"}
+                    </span>
+                    <span className="text-xs font-semibold text-foreground">{pairFlight.flight}</span>
+                    <DirectionBadge direction={ret.direction} />
+                    <span className="text-xs text-muted-foreground">
+                      {ret.from}→{ret.to} · {ret.date} · {ret.etd}
+                    </span>
+                    {returnDayGap > 0 && (
+                      <span className="rounded-sm bg-navy/10 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-navy">
+                        {returnDayGap === 1 ? "Next day" : `+${returnDayGap} days`}
+                      </span>
+                    )}
+                  </div>
+                  <div className="mb-4 max-w-[240px]">
+                    <FieldLabel auto required hint="The return flight's own departure date, from its schedule — the same day for a turnaround, or a later day for an overnight return. Editable if it differs.">
+                      Return Date
+                    </FieldLabel>
+                    <Input
+                      type="date"
+                      value={ret.date}
+                      min={date}
+                      onChange={(e) => patchReturn({ date: e.target.value })}
+                      className="mt-1"
+                    />
+                  </div>
+                  <FlightLegFields value={ret} onChange={patchReturn} />
+                </div>
+              )}
             </div>
           )}
-
-          <div className="border border-border rounded-md overflow-hidden">
-            <Table>
-              <TableHeader className="bg-muted/40">
-                <TableRow>
-                  <TableHead className="w-10 text-[10px] uppercase tracking-wider">SL</TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-wider w-28">For</TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-wider w-32">PNR</TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-wider">Passenger Name</TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-wider w-20">Seat</TableHead>
-                  <TableHead className="text-[10px] uppercase tracking-wider w-40">Meal Type</TableHead>
-                  <TableHead className="w-12" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {roster.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={7} className="text-center text-xs text-muted-foreground py-6">
-                      No special meals on this flight. Click <strong className="text-foreground">+ Add Passenger</strong> or <strong className="text-foreground">Bulk Paste</strong> to attach a manifest.
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  roster.map((r, i) => {
-                    const meta = SPECIAL_MEAL_BY_CODE[r.mealCode];
-                    return (
-                      <TableRow key={r.id}>
-                        <TableCell className="text-xs tabular-nums text-muted-foreground">{i + 1}</TableCell>
-                        <TableCell>
-                          <select
-                            value={r.audience ?? "Passenger"}
-                            onChange={(e) => updateRosterRow(r.id, { audience: e.target.value as "Passenger" | "Crew" })}
-                            className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                          >
-                            <option value="Passenger">Passenger</option>
-                            <option value="Crew">Crew</option>
-                          </select>
-                        </TableCell>
-                        <TableCell>
-                          <Input
-                            value={r.pnr}
-                            onChange={(e) => updateRosterRow(r.id, { pnr: e.target.value.toUpperCase() })}
-                            placeholder={r.audience === "Crew" ? "—" : "09QIBQ"}
-                            disabled={r.audience === "Crew"}
-                            className="h-8 font-mono text-xs"
-                          />
-                        </TableCell>
-                        <TableCell>
-                          <Input
-                            value={r.passengerName}
-                            onChange={(e) => updateRosterRow(r.id, { passengerName: e.target.value })}
-                            placeholder={r.audience === "Crew" ? "Any crew member" : "PASSENGER NAME"}
-                            disabled={r.audience === "Crew"}
-                            className="h-8 text-xs"
-                          />
-                        </TableCell>
-                        <TableCell>
-                          <Input
-                            value={r.seat}
-                            onChange={(e) => updateRosterRow(r.id, { seat: e.target.value.toUpperCase() })}
-                            placeholder={r.audience === "Crew" ? "—" : "21A"}
-                            disabled={r.audience === "Crew"}
-                            className="h-8 font-mono text-xs"
-                          />
-                        </TableCell>
-                        <TableCell>
-                          <select
-                            value={r.mealCode}
-                            onChange={(e) => updateRosterRow(r.id, { mealCode: e.target.value })}
-                            className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                            title={meta?.name}
-                          >
-                            {SPECIAL_MEAL_CODES.map((m) => (
-                              <option key={m.code} value={m.code}>{m.code} — {m.name}</option>
-                            ))}
-                          </select>
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-7 w-7"
-                            onClick={() => removeRosterRow(r.id)}
-                            aria-label="Remove passenger"
-                          >
-                            <X className="h-3.5 w-3.5 text-destructive" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })
-                )}
-              </TableBody>
-            </Table>
-          </div>
         </div>
+      </section>
 
-        <div className="mt-6">
-          <div className="flex items-center justify-between mb-2">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-foreground">
-              Flights
-            </h4>
-            <span className="text-xs text-muted-foreground">
-              {legs.length === 0 ? "No flights added yet" : `${legs.length} ${legs.length === 1 ? "flight" : "flights"} on this order`}
-            </span>
-          </div>
-          <div className="border border-border rounded-md overflow-hidden">
+      {/* ── Flights on this order ────────────────────────────────────────── */}
+      <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+        <header className="flex flex-wrap items-center gap-2.5 border-b border-border bg-muted/30 px-5 py-3">
+          <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-sm font-semibold text-foreground">Flights on this order</h3>
+          <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+            {legs.length}
+          </span>
+        </header>
+        <div className="p-5">
+          <div className="overflow-hidden rounded-lg border border-border">
             <Table>
               <TableHeader className="bg-muted/40">
                 <TableRow>
-                  <TableHead className="w-14 text-xs uppercase tracking-wider">#</TableHead>
-                  <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
-                  <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
-                  <TableHead className="text-xs uppercase tracking-wider">ETD</TableHead>
-                  <TableHead className="text-xs uppercase tracking-wider text-right">PAX</TableHead>
-                  <TableHead className="text-xs uppercase tracking-wider text-right">Spec. Meals</TableHead>
-                  <TableHead className="w-16" />
+                  <TableHead className="w-12 text-[10px] uppercase tracking-wider">#</TableHead>
+                  <TableHead className="text-[10px] uppercase tracking-wider">Flight</TableHead>
+                  <TableHead className="text-[10px] uppercase tracking-wider">Date</TableHead>
+                  <TableHead className="text-[10px] uppercase tracking-wider">Sector</TableHead>
+                  <TableHead className="text-[10px] uppercase tracking-wider">ETD</TableHead>
+                  <TableHead className="text-right text-[10px] uppercase tracking-wider">PAX</TableHead>
+                  <TableHead className="text-right text-[10px] uppercase tracking-wider">Spec. Meals</TableHead>
+                  <TableHead className="w-14" />
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {legs.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="text-center text-sm text-muted-foreground py-8">
-                      Fill the form above and click <strong className="text-foreground">Add Flight</strong> to attach a flight to this order.
+                    <TableCell colSpan={8} className="py-10 text-center">
+                      <Plane className="mx-auto mb-2 h-5 w-5 text-muted-foreground/40" />
+                      <p className="text-sm text-muted-foreground">
+                        No flights yet. Fill the details above and click{" "}
+                        <strong className="text-foreground">{withReturn ? "Add Both Flights" : "Add Flight"}</strong>.
+                      </p>
                     </TableCell>
                   </TableRow>
                 ) : (
                   <>
                     {legs.map((l, i) => (
-                      <TableRow key={i}>
-                        <TableCell className="tabular-nums text-xs">{i + 1}</TableCell>
+                      <TableRow key={i} className="hover:bg-muted/20">
+                        <TableCell className="text-xs tabular-nums text-muted-foreground">{i + 1}</TableCell>
                         <TableCell className="font-medium">
                           <div className="flex items-center gap-1.5">
                             {l.flight}
                             <DirectionBadge direction={l.direction} />
                           </div>
                         </TableCell>
+                        <TableCell className="text-xs tabular-nums">{l.date}</TableCell>
                         <TableCell>{l.sector}</TableCell>
-                        <TableCell>{l.etd}</TableCell>
+                        <TableCell className="tabular-nums">{l.etd}</TableCell>
                         <TableCell className="text-right tabular-nums">{l.pax}</TableCell>
                         <TableCell className="text-right tabular-nums">{l.specialMeals}</TableCell>
                         <TableCell className="text-right">
@@ -2777,7 +3375,7 @@ function OrderCreate({
                             variant="ghost"
                             className="h-7 w-7"
                             onClick={() => removeLeg(i)}
-                            aria-label={`Remove flight${i + 1}`}
+                            aria-label={`Remove flight ${i + 1}`}
                           >
                             <X className="h-3.5 w-3.5 text-destructive" />
                           </Button>
@@ -2785,15 +3383,11 @@ function OrderCreate({
                       </TableRow>
                     ))}
                     <TableRow className="bg-muted/30 font-semibold">
-                      <TableCell colSpan={4} className="text-right uppercase text-xs tracking-wider">
+                      <TableCell colSpan={5} className="text-right text-xs uppercase tracking-wider">
                         Total
                       </TableCell>
-                      <TableCell className="text-right tabular-nums">
-                        {legs.reduce((s, l) => s + l.pax, 0)}
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums">
-                        {legs.reduce((s, l) => s + l.specialMeals, 0)}
-                      </TableCell>
+                      <TableCell className="text-right tabular-nums">{totalPax}</TableCell>
+                      <TableCell className="text-right tabular-nums">{totalMeals}</TableCell>
                       <TableCell />
                     </TableRow>
                   </>
@@ -2802,8 +3396,36 @@ function OrderCreate({
             </Table>
           </div>
         </div>
-      </CardContent>
-    </Card>
+      </section>
+
+      {/* ── Sticky summary + actions ─────────────────────────────────────── */}
+      <div className="sticky bottom-4 z-10">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card/95 px-5 py-3 shadow-lg backdrop-blur supports-[backdrop-filter]:bg-card/80">
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs">
+            <span className="flex items-center gap-1.5 text-muted-foreground">
+              <Plane className="h-3.5 w-3.5" />
+              <span className="font-semibold tabular-nums text-foreground">{legs.length}</span> flight{legs.length === 1 ? "" : "s"}
+            </span>
+            <span className="flex items-center gap-1.5 text-muted-foreground">
+              <Users className="h-3.5 w-3.5" />
+              <span className="font-semibold tabular-nums text-foreground">{totalPax}</span> PAX
+            </span>
+            <span className="flex items-center gap-1.5 text-muted-foreground">
+              <Utensils className="h-3.5 w-3.5" />
+              <span className="font-semibold tabular-nums text-foreground">{totalMeals}</span> special meal{totalMeals === 1 ? "" : "s"}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={addLeg} disabled={!flight}>
+              <Plus className="mr-1.5 h-4 w-4" /> {withReturn ? "Add Both Flights" : "Add Flight"}
+            </Button>
+            <Button onClick={handleSave} disabled={legs.length === 0}>
+              <Save className="mr-1.5 h-4 w-4" /> Save Order
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -5838,14 +6460,12 @@ function SpecialMealRosterPanel({ legs, level = "passenger" }: { legs: FlightOrd
 }
 
 function FlightOrderDetailsDialog({
-  order, legs, allOrders = [], onClose, onAdvanceLeg, onAdvanceOrder,
+  order, legs, allOrders = [], onClose,
 }: {
   order: FlightOrder | null;
   legs: FlightOrder[];
   allOrders?: FlightOrder[];
   onClose: () => void;
-  onAdvanceLeg: (rowId: string) => void;
-  onAdvanceOrder: (orderNo: string) => void;
 }) {
   const isMulti = legs.length > 1;
   const hasRoster = legs.some((l) => (l.specialMealRoster ?? []).length > 0);
@@ -5858,7 +6478,7 @@ function FlightOrderDetailsDialog({
     const rosterCount = leg.specialMealRoster?.length ?? 0;
     return (
       <Dialog open={!!order} onOpenChange={(open) => !open && onClose()}>
-        <DialogContent className={rosterCount > 0 ? "max-w-2xl" : "max-w-lg"}>
+        <DialogContent className={cn(rosterCount > 0 ? "max-w-2xl" : "max-w-lg", "max-h-[85vh] overflow-y-auto")}>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 flex-wrap">
               Flight Details
@@ -5936,7 +6556,7 @@ function FlightOrderDetailsDialog({
 
   return (
     <Dialog open={!!order} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className={isMulti || hasRoster ? "max-w-3xl" : "max-w-2xl"}>
+      <DialogContent className={cn(isMulti || hasRoster ? "max-w-3xl" : "max-w-2xl", "max-h-[85vh] overflow-y-auto")}>
         <DialogHeader>
           <DialogTitle>
             Order Details
@@ -5979,20 +6599,13 @@ function FlightOrderDetailsDialog({
                     {legs.length} {legs.length === 1 ? "flight" : "flights"}
                   </Badge>
                 </div>
-                {legs.some((l) => nextFlightStatus(l.status) !== null) && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 text-xs"
-                    onClick={() => onAdvanceOrder(order.orderNo)}
-                  >
-                    Advance All Flights →
-                  </Button>
-                )}
+                <span className="text-[10px] text-muted-foreground">
+                  Status advances automatically as flights move through the workflow
+                </span>
               </div>
-              <div className="border border-border rounded-md overflow-hidden">
+              <div className="border border-border rounded-md overflow-hidden max-h-[42vh] overflow-y-auto">
                 <Table>
-                  <TableHeader className="bg-muted/40">
+                  <TableHeader className="bg-muted/40 sticky top-0 z-10">
                     <TableRow>
                       <TableHead className="w-12 text-[10px] uppercase tracking-wider">#</TableHead>
                       <TableHead className="text-[10px] uppercase tracking-wider">Flight</TableHead>
@@ -6023,15 +6636,12 @@ function FlightOrderDetailsDialog({
                           <TableCell><StatusBadge status={leg.status} /></TableCell>
                           <TableCell>
                             {next ? (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-7 px-2 text-[11px] text-primary hover:text-primary"
-                                onClick={() => onAdvanceLeg(leg.id)}
-                                title={`Move to ${next}`}
+                              <span
+                                className="text-[11px] text-muted-foreground"
+                                title={`Next stage: ${next}`}
                               >
                                 → {next}
-                              </Button>
+                              </span>
                             ) : (
                               <span className="text-[10px] text-success">Done</span>
                             )}

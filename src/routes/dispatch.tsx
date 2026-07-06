@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import {
   Truck, Package, Plus, AlertTriangle, Bell, MoreHorizontal,
   Eye, Croissant, Pill, ShieldCheck, Download,
-  CheckCircle2, ThermometerSun, PlaneLanding, User, Clock,
+  CheckCircle2, ThermometerSun, PlaneLanding, User, Clock, MoveRight,
 } from "lucide-react";
 import { flights, meals, activeWarehouses, activeOffices, activeWarehousesByOffice } from "@/lib/sample-data";
 import {
@@ -108,6 +108,10 @@ export type DispatchRecord = {
   dispatch_type?: "Production" | "Delay Refreshment";
   /** 1 = original production dispatch, 2 = delay refreshment dispatch. */
   dispatch_sequence?: number;
+  /** Returned load captured when a transfer-in-transit is returned (Transfer →
+   *  Return). Only these lines/quantities are re-dispatched — not the whole
+   *  original dispatch. Set alongside status "Returned". */
+  returnedLines?: { meal: string; qty: number; uom?: string; flight?: string }[];
 };
 
 type CfgPaxLine     = { id: string; itemName: string; percent: number; qty: number };
@@ -1412,6 +1416,80 @@ export default function Dispatch() {
     setFormOpen(false);
   };
 
+  // ── Re-dispatch a Returned dispatch ─────────────────────────────────────────
+  // A transfer-in-transit return flips the linked dispatch record to "Returned"
+  // and stamps the returned lines/quantities onto it. Re-dispatching runs the
+  // FULL pipeline again — but only for the RETURNED load, not the whole original
+  // dispatch: the linked packaging rows are rebuilt to exactly the returned
+  // lines (Ready for Packaging), QC is cleared, and the record re-enters
+  // "Preparing" so packaging → QC → Initiate Dispatch flow as a fresh dispatch.
+  const reDispatchReturned = (dspId: string) => {
+    const rec = records.find((r) => r.id === dspId);
+    if (!rec || rec.status !== "Returned") return;
+    const now = new Date();
+    const dateStr = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+    const timeStr = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: true });
+    const returned = rec.returnedLines ?? [];
+    const primaryFlight = rec.flightNos[0];
+
+    setPackagingRows((prev) => {
+      if (returned.length === 0) {
+        // No line detail (legacy/seed) — fall back to re-running the whole load.
+        return prev.map((r) => (r.dspRef === dspId ? { ...r, packagingStatus: "Ready for Packaging" as PackagingStatus } : r));
+      }
+      // Inherit slot/section metadata from the dispatch's original rows.
+      const template = prev.find((r) => r.dspRef === dspId);
+      const others = prev.filter((r) => r.dspRef !== dspId);
+      const rebuilt: PackagingRow[] = returned
+        .filter((l) => l.qty > 0)
+        .map((l, i) => ({
+          id: `${dspId}-RD-${i + 1}`,
+          date: template?.date ?? rec.date,
+          depTime: template?.depTime ?? rec.depTime,
+          flight: l.flight ?? template?.flight ?? primaryFlight,
+          mealType: template?.mealType ?? "Lunch",
+          mealName: l.meal,
+          qty: l.qty,
+          section: template?.section ?? "Hot Kitchen",
+          packagingStatus: "Ready for Packaging" as PackagingStatus,
+          dspRef: dspId,
+          orderNo: template?.orderNo,
+          productionOrderId: template?.productionOrderId,
+        }));
+      return [...rebuilt, ...others];
+    });
+
+    // Clear local QC so the returned load must pass QC again on the re-run.
+    const flightSet = new Set([...rec.flightNos, ...returned.map((l) => l.flight ?? primaryFlight)]);
+    setFlightQCStates((prev) => {
+      const next = new Map(prev);
+      flightSet.forEach((f) => f && next.delete(f));
+      return next;
+    });
+
+    // Re-enter the pipeline and log the re-dispatch on the record's trail.
+    setRecords((prev) =>
+      prev.map((r) =>
+        r.id === dspId
+          ? {
+              ...r,
+              status: "Preparing" as DispatchStatus,
+              trail: [
+                ...r.trail,
+                { status: "Preparing" as DispatchStatus, by: "M. Karim (Dispatch Executive) — re-dispatch of returned load", date: dateStr, time: timeStr },
+              ],
+            }
+          : r,
+      ),
+    );
+    const totalQty = returned.reduce((s, l) => s + l.qty, 0);
+    toast.success(
+      returned.length
+        ? `${dspId} re-dispatch initiated — returned load (${totalQty} unit${totalQty === 1 ? "" : "s"}) sent back through packaging & QC.`
+        : `${dspId} re-dispatch initiated — sent back through packaging & QC.`,
+    );
+  };
+
   // ── LMC downstream impact: a dispatch is built from a snapshot of the order's
   // PAX. If the order is later amended, the snapshot goes stale. Compare each
   // leg's snapshot pax (sum of its paxLines) against the source order's current
@@ -2055,7 +2133,11 @@ export default function Dispatch() {
                       // One row per flight now — the per-meal production breakdown
                       // lives in the View dialog (Eye / Meals cell), not the list.
                       const dspId = flightGroup.rows.find((r) => r.dspRef)?.dspRef;
-                      const dspHasRecord = !!dspId && records.some((rec) => rec.id === dspId);
+                      const dspRec = dspId ? records.find((rec) => rec.id === dspId) : undefined;
+                      const dspHasRecord = !!dspRec;
+                      // A dispatch returned from transfer-in-transit can be re-dispatched
+                      // (full pipeline re-run) from its record's row.
+                      const isReturnedDispatch = dspRec?.status === "Returned";
                       const run = dispatchRunInfo[fgIdx];
                       // One serial per dispatch run (= per Dispatch ID).
                       const runsBefore = dispatchRunInfo.slice(0, fgIdx).filter((r) => r.first).length;
@@ -2224,6 +2306,18 @@ export default function Dispatch() {
                                   <Truck className="h-3 w-3 mr-1" /> Initiate Dispatch{isRoundTrip ? " (Round Trip)" : ""}
                                 </Button>
                               )}
+                              {/* Returned from transfer-in-transit → allow re-dispatch,
+                                  which re-runs the full packaging → QC → dispatch flow. */}
+                              {run.first && isReturnedDispatch && (
+                                <Button
+                                  size="sm"
+                                  className="h-7 px-3 text-xs shrink-0 bg-gradient-to-r from-rose-500 to-orange-500 text-white hover:from-rose-600 hover:to-orange-600 border-0 shadow-sm"
+                                  onClick={() => reDispatchReturned(dspId!)}
+                                  title="Re-run packaging, QC & dispatch for the returned load"
+                                >
+                                  <MoveRight className="h-3 w-3 mr-1" /> Re-dispatch
+                                </Button>
+                              )}
                               <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
                                   <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0">
@@ -2363,8 +2457,13 @@ export default function Dispatch() {
               flightOrders.find((o) => o.flight === v.flight)?.sector ??
               flights.find((f) => f.flight === v.flight)?.sector;
             const totalQty = orderRows.reduce((s, r) => s + r.qty, 0);
-            const qc = flightQCStates.get(v.flight);
-            const qs = qc?.qcState ?? "not-started";
+            // Mirror the list row's QC resolution: a flight cleared via Dispatch
+            // Monitoring, HOC-approved, or already fully dispatched is QC-done,
+            // even if no *local* QC toggle was recorded — otherwise the modal
+            // would read "Pending" for a flight the row shows as done.
+            const allDispatched = orderRows.length > 0 && orderRows.every((r) => r.packagingStatus === "Dispatched");
+            const qs: QCState = getQcState(v.flight) === "done" || allDispatched ? "done" : (flightQCStates.get(v.flight)?.qcState ?? "not-started");
+            const qcCheckedAt = qcClearedFlights[v.flight] ?? flightQCStates.get(v.flight)?.qcCheckedAt;
             return (
               <div className="space-y-4 text-sm">
                 <div className="grid grid-cols-2 gap-x-4 gap-y-2">
@@ -2387,8 +2486,8 @@ export default function Dispatch() {
                       {qs === "done" ? "QC Done" : qs === "in-progress" ? "QC In Progress" : "Pending"}
                     </span>
                   </div>
-                  {qc?.qcCheckedAt && (
-                    <div><span className="text-muted-foreground">QC at:</span><span className="font-semibold ml-1">{qc.qcCheckedAt}</span></div>
+                  {qcCheckedAt && (
+                    <div><span className="text-muted-foreground">QC at:</span><span className="font-semibold ml-1">{qcCheckedAt}</span></div>
                   )}
                 </div>
 

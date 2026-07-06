@@ -24,6 +24,7 @@ import {
   loadDrafts, persistDrafts, type GalleyDraft,
 } from "@/lib/galley-drafts";
 import { getAuthUser } from "@/lib/auth";
+import { getFlightOrders } from "@/lib/flight-orders-store";
 // Galley planning was relocated out of Dispatch Monitoring into this module.
 // The plan editor (GalleyPlanningModal) and its data plumbing still live in
 // dispatch-monitoring.tsx (exported); this page is the new launch surface.
@@ -338,6 +339,18 @@ export default function GalleyPlanningPage() {
     return m;
   }, [galleyRecords]);
 
+  // Airline is captured on the catering order, not the dispatch/flight board —
+  // so resolve it from the Order table by flight number (latest order wins).
+  const airlineByFlight = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const o of getFlightOrders()) {
+      if (o.flight && o.airline) m.set(o.flight, o.airline);
+    }
+    return m;
+  }, []);
+  const airlineOf = (flightNo?: string) =>
+    (flightNo && airlineByFlight.get(flightNo)) || "—";
+
   const rowStatus = (entryId: string): RowStatus =>
     recByEntry.get(entryId)?.galleyStatus ?? (drafts[entryId] ? "draft" : "not_planned");
 
@@ -349,7 +362,7 @@ export default function GalleyPlanningPage() {
     if (statusFilter !== "all" && rowStatus(e.id) !== statusFilter) return false;
     if (!query.trim()) return true;
     const f = flights.find((x) => x.id === e.flightId);
-    const hay = `${f?.flight ?? e.flightId} ${f?.sector ?? ""} ${f?.aircraft ?? ""} ${e.packagingDate}`.toLowerCase();
+    const hay = `${f?.flight ?? e.flightId} ${f?.sector ?? ""} ${airlineOf(f?.flight)} ${f?.aircraft ?? ""} ${e.packagingDate}`.toLowerCase();
     return hay.includes(query.trim().toLowerCase());
   });
 
@@ -490,11 +503,12 @@ export default function GalleyPlanningPage() {
           </div>
 
           <div className="border border-border rounded-md overflow-hidden">
-            <Table className="min-w-[860px]">
+            <Table className="min-w-[960px]">
               <TableHeader className="bg-muted/40">
                 <TableRow>
                   <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
+                  <TableHead className="text-xs uppercase tracking-wider">Airline</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Aircraft</TableHead>
                   <TableHead className="text-right text-xs uppercase tracking-wider">PAX</TableHead>
@@ -506,7 +520,7 @@ export default function GalleyPlanningPage() {
               <TableBody>
                 {visibleEntries.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-10">
+                    <TableCell colSpan={9} className="text-center text-sm text-muted-foreground py-10">
                       {entries.length === 0 ? "No dispatches to plan." : "No dispatches match the current filters."}
                     </TableCell>
                   </TableRow>
@@ -518,8 +532,15 @@ export default function GalleyPlanningPage() {
                     <TableRow key={e.id} className="hover:bg-muted/30">
                       <TableCell className="font-semibold">{f?.flight ?? e.flightId}</TableCell>
                       <TableCell>{f?.sector ?? "—"}</TableCell>
+                      <TableCell>{airlineOf(f?.flight)}</TableCell>
                       <TableCell className="tabular-nums text-xs">{e.packagingDate}</TableCell>
-                      <TableCell>{f?.aircraft ?? "—"}</TableCell>
+                      {/* Aircraft is assigned during galley planning — it can't be
+                          pre-loaded, so it only appears once a plan is saved. */}
+                      <TableCell>
+                        {status === "not_planned"
+                          ? <span className="text-muted-foreground">—</span>
+                          : (f?.aircraft ?? "—")}
+                      </TableCell>
                       <TableCell className="text-right tabular-nums">{f?.pax ?? "—"}</TableCell>
                       <TableCell className="text-right tabular-nums">{f?.crew ?? "—"}</TableCell>
                       <TableCell>{rowStatusBadge(status)}</TableCell>

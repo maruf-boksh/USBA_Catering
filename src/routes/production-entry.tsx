@@ -189,6 +189,33 @@ function computeOrderRequirements(orders: FlightOrderRow[]): OrderRequirement[] 
   });
 }
 
+// ── Order → Menu Planning → Production link ──────────────────────────────────
+// A produced item's required quantity is a function of the menu plan (which
+// audience gets it, at what choice %) and the flight orders (pax / crew /
+// special-meal counts). Resolving an item back to its menu-plan spec lets us
+// RECOMPUTE the required qty whenever an order changes (e.g. an LMC), instead of
+// asking the planner to guess a new number.
+type MenuSpec = { flightTypes: string[]; forType: string; kind: "Choice" | "Special"; percentage?: number };
+function menuSpecFor(name: string, dayOfWeek: string, cards: MealCard[]): MenuSpec | null {
+  const scan = (cs: MealCard[]): MenuSpec | null => {
+    for (const card of cs) {
+      for (const ch of card.choices) {
+        if (ch.items.some((it) => it.name === name))
+          return { flightTypes: card.flightType, forType: card.forType, kind: "Choice", percentage: ch.percentage };
+      }
+      for (const sp of card.specialMeals) {
+        if (sp.enabled && sp.items.some((it) => it.name === name))
+          return { flightTypes: card.flightType, forType: card.forType, kind: "Special" };
+      }
+      if (card.dessert.name === name)
+        return { flightTypes: card.flightType, forType: card.forType, kind: "Choice", percentage: 100 };
+    }
+    return null;
+  };
+  // Prefer the card for this weekday; fall back to any card carrying the item.
+  return scan(cards.filter((c) => c.day === dayOfWeek)) ?? scan(cards);
+}
+
 
 
 const selectCls =
@@ -576,10 +603,16 @@ export default function ProductionEntryPage() {
     }
   }, []);
   const {
-    productionEntries, addProductionEntry, mrpRuns,
+    productionEntries, addProductionEntry, updateProductionEntryStatus, mrpRuns,
     demands, addDemands, addMrpRun,
   } = useWorkflow();
+  // In-progress batch target correction (LMC "Adjust batch"). adjustReq holds the
+  // menu-plan-derived required qty + breakdown so the dialog shows the derivation.
+  const [adjustEntry, setAdjustEntry] = useState<NumberedEntry | null>(null);
+  const [adjustQty, setAdjustQty] = useState("");
+  const [adjustReq, setAdjustReq] = useState<{ qty: number; breakdown: string } | null>(null);
   const flightOrders = useFlightOrders();
+  const navigate = useNavigate();
   const forwardedOrders = useMemo(() => buildForwardedOrders(flightOrders), [flightOrders]);
   const totalMealsFromOrders = useMemo(
     () => flightOrders.reduce(
@@ -861,6 +894,99 @@ export default function ProductionEntryPage() {
   type NumberedEntry = ProductionEntry & { __sl: number };
   const numberedEntries: NumberedEntry[] = entries.map((e, i) => ({ ...e, __sl: i + 1 }));
 
+  // ── Row-level LMC awareness ─────────────────────────────────────────────────
+  // Production is planned at the aggregate meal-item level (no per-flight qty
+  // link), so we can't recompute a specific order from a pax change. Instead we
+  // flag production rows whose DATE had a quantity-affecting last-minute change
+  // today and, per row status, surface the right VARIANCE action — never editing
+  // a completed order's produced figure.
+  const lmcByDate = useMemo(() => {
+    const orderById = new Map(flightOrders.map((o) => [o.id, o]));
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const map = new Map<string, { count: number; critical: number; netPax: number; samples: string[] }>();
+    for (const a of getAllAmendments()) {
+      if (!a.isLmc || a.at.slice(0, 10) !== todayIso) continue;
+      const paxCh = a.changes.find((c) => c.field === "pax");
+      const spCh = a.changes.find((c) => c.field === "specialMeals");
+      if (!paxCh && !spCh) continue; // only quantity-affecting changes hit production
+      const order = orderById.get(a.orderId);
+      if (!order?.date) continue;
+      const delta = paxCh ? Number(paxCh.to) - Number(paxCh.from) : 0;
+      const e = map.get(order.date) ?? { count: 0, critical: 0, netPax: 0, samples: [] };
+      e.count++;
+      if (a.severity === "critical") e.critical++;
+      e.netPax += delta;
+      if (e.samples.length < 4) e.samples.push(`${order.flight} ${paxCh ? `PAX ${paxCh.from}→${paxCh.to}` : `SPML ${spCh?.from}→${spCh?.to}`}`);
+      map.set(order.date, e);
+    }
+    return map;
+  }, [flightOrders]);
+
+  // Recompute an item's REQUIRED production qty from the current (LMC-updated)
+  // flight orders × its menu-plan spec. This is the Order → Menu Planning →
+  // Production connection: change PAX/special-meals on an order and this returns
+  // the new quantity that should be produced, with a human-readable breakdown.
+  const computeRequiredQty = (entry: NumberedEntry): { qty: number; breakdown: string } | null => {
+    const name = entry.outputItemName;
+    if (!name) return null;
+    const cards = loadMealPlanningConfig();
+    const spec = menuSpecFor(name, getDayFromDate(entry.date), cards);
+    if (!spec) return null;
+    // Date-specific aggregation: only THIS date's orders on matching flight
+    // types feed this production date's requirement (not a weekday roll-up).
+    const dayOrders = flightOrders.filter(
+      (o) => o.date === entry.date && spec.flightTypes.includes(getFlightTypeFromSector(o.sector)),
+    );
+    if (dayOrders.length === 0) return null;
+    const isCrew = spec.forType.toLowerCase().includes("crew");
+    if (spec.kind === "Special") {
+      const spc = dayOrders.reduce((s, o) => s + o.specialMeals, 0);
+      return { qty: spc, breakdown: `${spc} special meal${spc === 1 ? "" : "s"} on ${entry.date}` };
+    }
+    const audience = dayOrders.reduce((s, o) => s + (isCrew ? o.crew : o.pax), 0);
+    const pct = spec.percentage ?? 100;
+    const qty = Math.round((audience * pct) / 100);
+    return { qty, breakdown: `${audience} ${isCrew ? "crew" : "pax"} × ${pct}% = ${qty} (${entry.date})` };
+  };
+
+  // Open the adjust dialog pre-filled with the menu-plan-derived required qty.
+  const openAdjust = (r: NumberedEntry, req: { qty: number; breakdown: string } | null) => {
+    setAdjustEntry(r);
+    setAdjustReq(req);
+    setAdjustQty(String(req?.qty ?? r.orderQty ?? r.producedQty));
+  };
+
+  // Shortfall after completion → a fresh supplementary (top-up) order for the
+  // delta; the original completed order is left untouched (as-produced record).
+  const raiseTopUp = (r: NumberedEntry, delta: number) => {
+    const qty = Math.max(1, Math.round(delta));
+    addProductionEntry({
+      id: `PRO-LMC-${Date.now().toString(36).slice(-5).toUpperCase()}`,
+      date: r.date,
+      bom: r.bom,
+      outputItemName: r.outputItemName,
+      outputItemCode: r.outputItemCode,
+      orderQty: qty,
+      producedQty: 0,
+      status: "Pending",
+      officeId: r.officeId,
+      warehouseId: r.warehouseId,
+    });
+    toast.success(`Top-up order raised — ${qty} × ${r.outputItemName ?? "item"} (LMC shortfall). Original order untouched.`);
+  };
+  // In-progress order → correct the target quantity. Legitimate because it's not
+  // finished: already-produced units are kept, Remaining recalculates from the
+  // new target. Status is preserved.
+  const saveAdjust = () => {
+    if (!adjustEntry) return;
+    const n = Math.round(Number(adjustQty));
+    if (!Number.isFinite(n) || n <= 0) { toast.error("Enter a valid target quantity."); return; }
+    updateProductionEntryStatus(adjustEntry.id, adjustEntry.status, { orderQty: n });
+    toast.success(`${adjustEntry.id} target set to ${n.toLocaleString()} — remaining recalculated (${adjustEntry.producedQty.toLocaleString()} already produced).`);
+    setAdjustEntry(null);
+    setAdjustReq(null);
+  };
+
   const cols: Column<NumberedEntry>[] = [
     {
       key: "__sl",
@@ -929,6 +1055,53 @@ export default function ProductionEntryPage() {
         <StatusBadge status={r.status} />
       </ReviewStatusCell>
     ) },
+    {
+      key: "date" as keyof NumberedEntry,
+      header: "LMC / Variance",
+      sortable: false,
+      render: (r) => {
+        const flag = lmcByDate.get(r.date);
+        if (!flag) return <span className="text-muted-foreground">—</span>;
+        // Precise, per-item required qty from menu plan × current orders.
+        const req = computeRequiredQty(r);
+        const currentTarget = r.orderQty ?? r.producedQty;
+        const fullyMade = r.status === "Completed" || r.status === "Ready for QC";
+        const tip = req
+          ? `Menu plan now requires ${req.qty} (${req.breakdown}). Current target ${currentTarget}, produced ${r.producedQty}.`
+          : `${flag.count} last-minute change${flag.count > 1 ? "s" : ""} on ${r.date} — item not in the menu plan, review manually.`;
+        return (
+          <div className="flex items-center gap-1.5" title={tip}>
+            <span className="inline-flex items-center gap-1 rounded border border-rose-200 bg-rose-50 px-1.5 h-5 text-[10px] font-bold uppercase tracking-wider text-rose-700">
+              <AlertCircle className="h-3 w-3" /> LMC
+            </span>
+            {req == null ? (
+              <button type="button" className="text-[11px] text-primary hover:underline" onClick={() => navigate("/order-management?lmc=1")}>Review →</button>
+            ) : fullyMade ? (
+              req.qty < r.producedQty ? (
+                <span
+                  className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700"
+                  title={`Produced ${r.producedQty}, now required ${req.qty} — ${r.producedQty - req.qty} surplus. Reallocate or hold; not auto-wasted.`}
+                >
+                  <AlertCircle className="h-3 w-3" /> {r.producedQty - req.qty} surplus
+                </span>
+              ) : req.qty > r.producedQty ? (
+                <Button size="sm" variant="outline" className="h-7 px-2 text-[11px] border-sky-300 text-sky-700 hover:bg-sky-50" onClick={() => raiseTopUp(r, req.qty - r.producedQty)}>
+                  <Plus className="h-3 w-3 mr-1" /> Raise top-up ({req.qty - r.producedQty})
+                </Button>
+              ) : (
+                <span className="inline-flex items-center gap-1 text-[11px] text-emerald-600"><CheckCircle2 className="h-3 w-3" /> In sync</span>
+              )
+            ) : req.qty !== currentTarget ? (
+              <Button size="sm" variant="outline" className="h-7 px-2 text-[11px] border-violet-300 text-violet-700 hover:bg-violet-50" onClick={() => openAdjust(r, req)}>
+                <Flame className="h-3 w-3 mr-1" /> Recompute → {req.qty}
+              </Button>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-[11px] text-emerald-600"><CheckCircle2 className="h-3 w-3" /> In sync</span>
+            )}
+          </div>
+        );
+      },
+    },
   ];
 
   return (
@@ -1292,6 +1465,74 @@ export default function ProductionEntryPage() {
         date={selectedForwardedDate}
         readOnly={isViewOnly}
       />
+
+      {/* Adjust batch — correct an in-progress order's target for an LMC. */}
+      <Dialog open={!!adjustEntry} onOpenChange={(o) => { if (!o) { setAdjustEntry(null); setAdjustReq(null); } }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Flame className="h-5 w-5 text-amber-600" /> Adjust Batch Target
+            </DialogTitle>
+          </DialogHeader>
+          {adjustEntry && (() => {
+            const produced = adjustEntry.producedQty;
+            const target = Math.max(0, Math.round(Number(adjustQty) || 0));
+            const newRemaining = Math.max(0, target - produced);
+            const surplus = target < produced ? produced - target : 0;
+            return (
+              <div className="space-y-4 text-sm">
+                <div className="rounded-md border border-border bg-muted/30 px-3 py-2">
+                  <div className="font-medium">{adjustEntry.outputItemName ?? adjustEntry.bom}</div>
+                  <div className="text-xs text-muted-foreground mt-0.5 font-mono">{adjustEntry.id} · {adjustEntry.date} · {adjustEntry.status}</div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-md border border-border px-3 py-2">
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Current Target</div>
+                    <div className="font-semibold tabular-nums mt-0.5">{(adjustEntry.orderQty ?? produced).toLocaleString()}</div>
+                  </div>
+                  <div className="rounded-md border border-border px-3 py-2">
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Already Produced</div>
+                    <div className="font-semibold tabular-nums mt-0.5">{produced.toLocaleString()}</div>
+                  </div>
+                </div>
+                {adjustReq && (
+                  <div className="rounded-md border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-900">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="uppercase tracking-wider text-[10px] font-semibold text-violet-700">Required by menu plan</span>
+                      <span className="font-bold tabular-nums">{adjustReq.qty.toLocaleString()}</span>
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-violet-700">{adjustReq.breakdown}</div>
+                  </div>
+                )}
+                <div>
+                  <Label className="text-xs">New Target Quantity {adjustReq && <span className="text-muted-foreground font-normal">(pre-filled from menu plan)</span>}</Label>
+                  <Input
+                    type="number"
+                    min={0}
+                    value={adjustQty}
+                    onChange={(e) => setAdjustQty(e.target.value)}
+                    className="mt-1 h-9"
+                    autoFocus
+                  />
+                </div>
+                <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+                  New <strong>Remaining</strong> to produce: <strong className="tabular-nums">{newRemaining.toLocaleString()}</strong>
+                  {surplus > 0 && (
+                    <span className="block mt-1 text-amber-700">
+                      Target is below produced — <strong>{surplus.toLocaleString()}</strong> already-made unit{surplus === 1 ? "" : "s"} become surplus (log as wastage separately).
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-muted-foreground">Already-produced units are kept; only the target changes. Status stays <strong>{adjustEntry.status}</strong>.</p>
+              </div>
+            );
+          })()}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAdjustEntry(null)}>Cancel</Button>
+            <Button onClick={saveAdjust}><Save className="h-4 w-4 mr-1" /> Update Target</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

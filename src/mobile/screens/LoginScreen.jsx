@@ -220,7 +220,7 @@ export function LoginScreen({ onLogin }) {
         </button>
 
         <div style={{ textAlign: 'center', fontSize: 11, color: T.textDisabled, fontFamily: T.fontBody, marginTop: 6 }}>
-          Harvest Catering · Operations Platform v2.4
+          AeroGalley Catering · Operations Platform v2.4
         </div>
       </div>
 

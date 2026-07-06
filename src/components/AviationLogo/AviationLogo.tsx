@@ -22,7 +22,7 @@ export default function AviationLogo({
       className={className}
       style={{ display: 'block', ...style }}
       role="img"
-      aria-label="Harvest Catering – Aviation Catering Management"
+      aria-label="AeroGalley Catering – Aviation Catering Management"
     >
       {/* ── Background ─────────────────────────────────────────── */}
       {showBackground && <rect width="300" height="360" fill={bgColor} />}

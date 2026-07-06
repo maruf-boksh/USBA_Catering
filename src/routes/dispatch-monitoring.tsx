@@ -71,7 +71,6 @@ export const flights: FlightOption[] = (() => {
 })();
 
 // ── Constants ───────────────────────────────────────────────────────────────
-const MEAL_TYPES = ["Regular", "Vegetarian (VGML)", "Child Meal (CHML)", "Diabetic (DBML)", "Kosher (KSML)", "Crew Meal", "Special"];
 export const APT_EXECUTIVES = ["M. Hossain", "T. Ahmed", "K. Sultana", "A. Chowdhury", "R. Islam"];
 const APT_DESIGNATIONS = ["APT Executive", "Sr. APT Executive", "Airport Supervisor", "Ground Operations Officer"];
 const FS_HYGIENE_EXECUTIVES = ["F. Begum", "A. Khan", "S. Islam", "R. Akter", "N. Hossain"];
@@ -1281,32 +1280,15 @@ export default function DispatchMonitoring() {
                   {/* Meal lines */}
                   <div>
                     <div className="flex items-center justify-between mb-2">
-                      <Label className="text-xs">Meal Types & Quantities</Label>
+                      <Label className="text-xs">Quantity</Label>
                       <span className="text-xs text-muted-foreground">Total: <strong className="text-blue-700">{totalQty(form.mealLines)}</strong> pax</span>
                     </div>
-                    <div className="space-y-1.5">
-                      {form.mealLines.map((line, i) => (
-                        <div key={i} className="flex gap-2 items-center">
-                          <Select value={line.type} onValueChange={(v) => sf("mealLines", form.mealLines.map((l, j) => j === i ? { ...l, type: v } : l))}>
-                            <SelectTrigger className="flex-1 h-8 text-xs"><SelectValue /></SelectTrigger>
-                            <SelectContent>{MEAL_TYPES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
-                          </Select>
-                          <Input type="number" min={0} placeholder="Qty" value={line.qty}
-                            onChange={(e) => sf("mealLines", form.mealLines.map((l, j) => j === i ? { ...l, qty: e.target.value } : l))}
-                            className="w-20 h-8 text-xs" />
-                          {form.mealLines.length > 1 && (
-                            <Button type="button" size="sm" variant="ghost" className="h-8 w-8 p-0 text-red-400"
-                              onClick={() => sf("mealLines", form.mealLines.filter((_, j) => j !== i))}>
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                    <Button type="button" size="sm" variant="outline" className="mt-2 h-7 text-xs border-blue-300 text-blue-700 hover:bg-blue-50"
-                      onClick={() => sf("mealLines", [...form.mealLines, { type: "Regular", qty: "" }])}>
-                      <Plus className="h-3 w-3 mr-1" /> Add Meal Type
-                    </Button>
+                    <Input
+                      type="number" min={0} placeholder="Qty"
+                      value={form.mealLines[0]?.qty ?? ""}
+                      onChange={(e) => sf("mealLines", [{ type: "Regular", qty: e.target.value }])}
+                      className="w-full h-9 text-sm"
+                    />
                   </div>
 
                   {/* ─ Vehicle ─ */}

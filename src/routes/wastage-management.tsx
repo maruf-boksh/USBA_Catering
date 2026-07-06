@@ -173,7 +173,7 @@ function StatusBadge({ status }: { status: WastageStatus }) {
 // ── Empty form factory ────────────────────────────────────────────────────────
 
 type FormState = {
-  wastageType: WastageType;
+  wastageType: WastageType | "";
   itemName: string;
   packageBatchSize: string;
   batchCode: string;
@@ -203,7 +203,7 @@ type FormState = {
 };
 
 const emptyForm = (): FormState => ({
-  wastageType: "Production",
+  wastageType: "",
   itemName: "",
   packageBatchSize: "",
   batchCode: "",
@@ -302,6 +302,7 @@ export default function WastageManagementPage() {
   // ── Submit ─────────────────────────────────────────────────────────────────
 
   const handleSubmit = () => {
+    if (!form.wastageType) { toast.error("Wastage type is required."); return; }
     if (!form.itemName.trim()) { toast.error("Item name is required."); return; }
     if (!form.disposalQty || isNaN(Number(form.disposalQty)) || Number(form.disposalQty) <= 0) {
       toast.error("Valid disposal quantity is required."); return;
@@ -319,7 +320,7 @@ export default function WastageManagementPage() {
     const newEntry: WastageEntry = {
       id: genId(entries),
       reportingDate: todayDate(),
-      wastageType: form.wastageType,
+      wastageType: form.wastageType as WastageType, // guaranteed non-empty (validated above)
       itemName: form.itemName.trim(),
       packageBatchSize: form.packageBatchSize.trim() || "N/A",
       batchCode: form.batchCode.trim() || "N/A",
@@ -425,7 +426,7 @@ export default function WastageManagementPage() {
             className="h-8 gap-1.5 text-xs"
             onClick={() => { setForm(emptyForm()); setCreateOpen(true); }}
           >
-            <Plus className="h-3.5 w-3.5" /> New Wastage Report
+            <Plus className="h-3.5 w-3.5" /> New Wastage/Disposal
           </Button>
         </div>
       </div>
@@ -525,7 +526,7 @@ export default function WastageManagementPage() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-base">
               <Trash2 className="h-5 w-5 text-red-500" />
-              New Wastage / Damaged Product Disposal Report
+              New Wastage / Damaged Product Disposal
             </DialogTitle>
           </DialogHeader>
 
@@ -555,7 +556,7 @@ export default function WastageManagementPage() {
                     recookBatchQtys: {},
                   })}
                 >
-                  <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue /></SelectTrigger>
+                  <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select type" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="Production">Production Point</SelectItem>
                     <SelectItem value="Airport Store">Airport Store</SelectItem>
