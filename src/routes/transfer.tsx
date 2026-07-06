@@ -402,23 +402,33 @@ export default function TransferPage() {
       dispatchRef: dspId,
       dispatchStatus: dspId ? "Returned" : undefined,
     };
-    // If every in-hand unit is being returned → original is Rejected; otherwise Completed.
     const totalInHand = target.lines.reduce((s, l) => s + l.transferredQty, 0);
     const fullyReturned = total >= totalInHand;
     setRows((prev) => {
-      const updated = prev.map((r) => (
-        r.id === id
-          ? {
-              ...r,
-              status: (fullyReturned ? "Rejected" : "Completed") as TransferStatus,
-              lines: fullyReturned
-                ? r.lines
-                : r.lines.map((l) => ({ ...l, transferredQty: l.transferredQty - (qty[l.id] ?? 0) })),
-              receivedBy: r.receivedBy === "—" ? "(received)" : r.receivedBy,
-              dispatchStatus: dspId ? ("Returned" as TransferDispatchStatus) : r.dispatchStatus,
-            }
-          : r
-      ));
+      const updated = prev.map((r) => {
+        if (r.id !== id) return r;
+        // Dispatch-linked transfer: it STAYS "In Transit" — only the returned
+        // quantity peels off (that portion comes back for re-dispatch through the
+        // usual packaging → QC → dispatch flow). The remaining load keeps moving.
+        if (dspId) {
+          return {
+            ...r,
+            status: "In Transit" as TransferStatus,
+            lines: r.lines.map((l) => ({ ...l, transferredQty: Math.max(0, l.transferredQty - (qty[l.id] ?? 0)) })),
+            receivedBy: r.receivedBy === "—" ? "(received)" : r.receivedBy,
+            dispatchStatus: "Returned" as TransferDispatchStatus,
+          };
+        }
+        // Regular transfer: full return → Rejected, partial → Completed.
+        return {
+          ...r,
+          status: (fullyReturned ? "Rejected" : "Completed") as TransferStatus,
+          lines: fullyReturned
+            ? r.lines
+            : r.lines.map((l) => ({ ...l, transferredQty: l.transferredQty - (qty[l.id] ?? 0) })),
+          receivedBy: r.receivedBy === "—" ? "(received)" : r.receivedBy,
+        };
+      });
       return [ret, ...updated];
     });
     // Reflect the return on the linked dispatch record (Dispatch page shows
@@ -430,7 +440,7 @@ export default function TransferPage() {
     }
     toast.success(
       dspId
-        ? `${id} returned — dispatch ${dspId} marked Returned. Return ${newId} created; re-dispatch available.`
+        ? `${total} unit${total === 1 ? "" : "s"} returned — ${id} stays In Transit; dispatch ${dspId} flagged Returned. Re-dispatch restarts packaging → QC → dispatch.`
         : fullyReturned
         ? `${id} rejected — return ${newId} created.`
         : `Partial return ${newId} created. ${id} kept ${totalInHand - total} unit${(totalInHand - total) === 1 ? "" : "s"}.`,

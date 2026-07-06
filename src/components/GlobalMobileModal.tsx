@@ -222,7 +222,7 @@ export function GlobalMobileModal({ open, onClose }: Props) {
                   }}>
                     <PlaneTakeoff className="h-7 w-7 text-white" />
                   </div>
-                  <p className="text-white font-bold text-lg tracking-tight">Harvest Catering</p>
+                  <p className="text-white font-bold text-lg tracking-tight">AeroGalley Catering</p>
                   <p className="text-slate-400 text-[11px] mt-0.5">Mobile Operations</p>
                 </div>
 
@@ -278,7 +278,7 @@ export function GlobalMobileModal({ open, onClose }: Props) {
                   </button>
 
                   <p className="text-[10px] text-slate-400 text-center">
-                    By signing in you agree to Harvest Catering's Terms of Service.
+                    By signing in you agree to AeroGalley Catering's Terms of Service.
                   </p>
                 </div>
               </div>
@@ -292,7 +292,7 @@ export function GlobalMobileModal({ open, onClose }: Props) {
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-white font-bold text-sm">Good morning, R. Hossain 👋</p>
-                      <p className="text-slate-400 text-[10px] mt-0.5">GM/Admin · Harvest Catering</p>
+                      <p className="text-slate-400 text-[10px] mt-0.5">GM/Admin · AeroGalley Catering</p>
                     </div>
                     <button onClick={() => setScreen("login")} className="text-slate-400 hover:text-white transition-colors">
                       <LogOut className="h-4 w-4" />

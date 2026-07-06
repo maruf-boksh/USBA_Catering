@@ -49,7 +49,7 @@ import {
 } from "@/lib/sample-data";
 import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-settings";
 import {
-  useFlightOrders, addFlightOrders, updateFlightOrder, updateFlightOrderStatus,
+  useFlightOrders, addFlightOrders, updateFlightOrder,
   amendOrder, getOrderAmendments, revertAmendment, canRevertAmendment,
   leadHoursToDeparture, isLmcLead, hasDeparted, getLmcWindowHours,
   type OrderAmendment,
@@ -627,32 +627,6 @@ export default function OrderManagementPage() {
     revealOrder(newOrders[0]?.orderNo);
   };
 
-  const advanceStatus = (rowId: string) => {
-    const target = orders.find((o) => o.id === rowId);
-    if (!target) return;
-    const next = nextFlightStatus(target.status);
-    if (!next) {
-      toast.info(`${target.flight} is already Completed.`);
-      return;
-    }
-    updateFlightOrderStatus(rowId, next);
-    toast.success(`${target.flight} moved to ${next}.`);
-  };
-
-  const advanceOrderStatus = (orderNo: string) => {
-    const legs = orders.filter((o) => o.orderNo === orderNo);
-    let moved = 0;
-    for (const leg of legs) {
-      const next = nextFlightStatus(leg.status);
-      if (next) {
-        updateFlightOrderStatus(leg.id, next);
-        moved += 1;
-      }
-    }
-    if (moved > 0) toast.success(`${orderNo} — advanced ${moved} ${moved === 1 ? "flight" : "flights"}.`);
-    else toast.info(`${orderNo} is already Completed.`);
-  };
-
   // Resolve the Order # for a manually-created crew order: reuse the flight
   // order's number for the same date + flights so a flight and its crew order
   // share one Order #. Falls back to a fresh sequential number when there's no
@@ -1196,8 +1170,6 @@ export default function OrderManagementPage() {
         order={detailView?.order ?? null}
         legs={detailView?.legs ?? []}
         allOrders={orders}
-        onAdvanceLeg={advanceStatus}
-        onAdvanceOrder={advanceOrderStatus}
         onClose={() => setDetailView(null)}
       />
     </>
@@ -6488,14 +6460,12 @@ function SpecialMealRosterPanel({ legs, level = "passenger" }: { legs: FlightOrd
 }
 
 function FlightOrderDetailsDialog({
-  order, legs, allOrders = [], onClose, onAdvanceLeg, onAdvanceOrder,
+  order, legs, allOrders = [], onClose,
 }: {
   order: FlightOrder | null;
   legs: FlightOrder[];
   allOrders?: FlightOrder[];
   onClose: () => void;
-  onAdvanceLeg: (rowId: string) => void;
-  onAdvanceOrder: (orderNo: string) => void;
 }) {
   const isMulti = legs.length > 1;
   const hasRoster = legs.some((l) => (l.specialMealRoster ?? []).length > 0);
@@ -6629,16 +6599,9 @@ function FlightOrderDetailsDialog({
                     {legs.length} {legs.length === 1 ? "flight" : "flights"}
                   </Badge>
                 </div>
-                {legs.some((l) => nextFlightStatus(l.status) !== null) && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 text-xs"
-                    onClick={() => onAdvanceOrder(order.orderNo)}
-                  >
-                    Advance All Flights →
-                  </Button>
-                )}
+                <span className="text-[10px] text-muted-foreground">
+                  Status advances automatically as flights move through the workflow
+                </span>
               </div>
               <div className="border border-border rounded-md overflow-hidden max-h-[42vh] overflow-y-auto">
                 <Table>
@@ -6673,15 +6636,12 @@ function FlightOrderDetailsDialog({
                           <TableCell><StatusBadge status={leg.status} /></TableCell>
                           <TableCell>
                             {next ? (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-7 px-2 text-[11px] text-primary hover:text-primary"
-                                onClick={() => onAdvanceLeg(leg.id)}
-                                title={`Move to ${next}`}
+                              <span
+                                className="text-[11px] text-muted-foreground"
+                                title={`Next stage: ${next}`}
                               >
                                 → {next}
-                              </Button>
+                              </span>
                             ) : (
                               <span className="text-[10px] text-success">Done</span>
                             )}

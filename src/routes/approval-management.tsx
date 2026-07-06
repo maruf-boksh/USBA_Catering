@@ -44,6 +44,7 @@ import { useRole } from "@/lib/roles";
 import { type PersonalHygieneRecord, PHSignOffPanel, PHFormGrid, phNotOkCount } from "@/routes/personal-hygiene-monitoring";
 import { type WastageEntry, type WastageApprovalStep } from "@/routes/wastage-management";
 import { SEED_RETURNS, type PurchaseReturn } from "@/routes/purchase-return";
+import { getCriticalLmcsForApproval, LMC_APPROVALS_KEY, LMC_CHARGE, type LmcDecision } from "@/routes/lmc";
 
 type Category =
   | "Flight Orders"
@@ -65,7 +66,8 @@ type Category =
   | "Purchase Return"
   | "Galley Loading"
   | "Personal Hygiene"
-  | "Wastage Entry";
+  | "Wastage Entry"
+  | "Last-Minute Change";
 
 // Shared type with dispatch-monitoring.tsx via "galley_loading" sessionStorage key
 type SignOffLog = { name: string; designation: string; signedAt: string };
@@ -137,12 +139,13 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Galley Loading",       label: "Galley Loading",     icon: LayoutGrid      },
   { key: "Personal Hygiene",    label: "Personal Hygiene",   icon: Users           },
   { key: "Wastage Entry",       label: "Damaged Product Disposal",    icon: Trash2          },
+  { key: "Last-Minute Change",  label: "Last-Minute Change", icon: AlertTriangle   },
 ];
 
 // Overview grid — categories grouped into business sections (mirrors the
 // reference layout). Each card drills into that category's pending queue.
 const APPROVAL_SECTIONS: { label: string; keys: Category[] }[] = [
-  { label: "Operations Approval",     keys: ["Flight Orders", "Crew Orders"] },
+  { label: "Operations Approval",     keys: ["Flight Orders", "Crew Orders", "Last-Minute Change"] },
   { label: "Dispatch Approval",       keys: ["Dispatch"] },
   { label: "Procurement Approval",    keys: ["Request for Quotation", "Quotation", "Purchase Requisition", "Purchase Order", "Goods Receipt", "Purchase Return"] },
   { label: "Inventory Approval",      keys: ["Demand Request", "Transfer Request", "Stock Adjustment"] },
@@ -325,6 +328,8 @@ export default function ApprovalManagementPage() {
     "purchase-return-rows",
     SEED_RETURNS,
   );
+  // LMC approval decisions — shared with the LMC page via the same persisted key.
+  const [lmcDecisions, setLmcDecisions] = usePersistedState<Record<string, LmcDecision>>(LMC_APPROVALS_KEY, {});
   const [consumableInventory, setConsumableInventory] = usePersistedState<ConsumableItem[]>(
     "airline-consumables-items",
     consumableItems,
@@ -779,6 +784,33 @@ export default function ApprovalManagementPage() {
       });
   }, [purchaseReturns]);
 
+  // Project critical LMCs into the approval queue. Only critical severity is
+  // gated (major/minor/info are flag-don't-gate). The decision drives the status.
+  const lmcApprovalItems: ApprovalItem[] = useMemo(() => {
+    return getCriticalLmcsForApproval().map((l) => {
+      const decision = lmcDecisions[l.id];
+      const status: ApprovalStatus =
+        decision?.status === "Approved" ? "Approved"
+        : decision?.status === "Rejected" ? "Rejected"
+        : "Pending";
+      return {
+        id: `LMC-AP-${l.id}`,
+        category: "Last-Minute Change" as Category,
+        refId: l.id,
+        title: `LMC — ${l.flight} · ${l.typeLabel}`,
+        requestedBy: l.by,
+        requestedAt: l.at.slice(0, 16).replace("T", " "),
+        summary: `${l.changeText} · ${l.sector} · ${l.orderNo} · ${l.leadHours != null ? `${l.leadHours.toFixed(1)}h to STD` : "—"} · ${l.reason}`,
+        amount: LMC_CHARGE,
+        status,
+        processedBy: decision?.by,
+        processedAt: decision?.at,
+        rejectionReason: decision?.status === "Rejected" ? decision.reason : undefined,
+      };
+    });
+    // lmcDecisions drives re-projection; the underlying LMCs are static per session.
+  }, [lmcDecisions]);
+
   const personalHygieneItems: ApprovalItem[] = useMemo(() => {
     return phRecords
       .filter(r => r.status !== "approved" || r.approvedAt)
@@ -829,7 +861,7 @@ export default function ApprovalManagementPage() {
   }, [wastageEntries]);
 
   const allItems = useMemo(() => {
-    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...personalHygieneItems, ...wastageItems, ...items];
+    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...wastageItems, ...items];
     // Overlay "Reviewed" (returned for correction) onto still-pending requests.
     return base.map((it) => {
       const rv = reviews[reviewKey(it.category, it.refId)];
@@ -838,7 +870,7 @@ export default function ApprovalManagementPage() {
       }
       return it;
     });
-  }, [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, personalHygieneItems, wastageItems, items, reviews]);
+  }, [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, wastageItems, items, reviews]);
 
   const counts = useMemo(() => {
     const pendingByCat = new Map<Category, number>();
@@ -1125,6 +1157,11 @@ export default function ApprovalManagementPage() {
       if (!silent) toast.success(`${it.refId} — Purchase return approved for dispatch to supplier.`);
       return;
     }
+    if (it.category === "Last-Minute Change") {
+      setLmcDecisions((p) => ({ ...p, [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() } }));
+      if (!silent) toast.success(`LMC ${it.refId} approved — cleared to action & chargeable.`);
+      return;
+    }
     if (it.category === "Wastage Entry") {
       const entry = wastageEntries.find((e) => e.id === it.refId);
       if (!entry) { if (!silent) toast.error(`Wastage ${it.refId} not found.`); return; }
@@ -1305,6 +1342,8 @@ export default function ApprovalManagementPage() {
             : pr,
         ),
       );
+    } else if (it.category === "Last-Minute Change") {
+      setLmcDecisions((p) => ({ ...p, [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason } }));
     } else if (it.category === "Wastage Entry") {
       const entry = wastageEntries.find((e) => e.id === it.refId);
       const stepName =

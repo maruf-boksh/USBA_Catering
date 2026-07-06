@@ -504,6 +504,14 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     },
   ]);
   const initialProductionEntries: WfProductionEntry[] = [
+    // Dated 2026-05-21 (a Thursday) with menu-plan items (meal-8 · Choice 1, 60%
+    // · Passengers) so the row-level LMC / Variance flag recomputes from the
+    // Order→Menu link. That date's international pax = BS-203 (168) + BS-307 (282)
+    // = 450 → 450×60% = 270 produced. The demo LMC drops BS-203 to 130 → required
+    // 412×60% = 247, so the Completed row shows "Log surplus wastage (23)" and the
+    // in-progress row shows "Recompute → 247".
+    { id: "PRO-2026-000045", date: "2026-05-21", bom: "Grilled Chicken",       outputItemName: "Grilled Chicken",      orderQty: 270, producedQty: 270, status: "Completed",      qcCheckedBy: "Hygiene Lead", qcPassedAt: "2026-05-21 15:00", completedAt: "2026-05-21 15:02", inventoryAdded: true, officeId: "OFF-001", warehouseId: "WH-003" },
+    { id: "PRO-2026-000046", date: "2026-05-21", bom: "Steamed Rice",          outputItemName: "Steamed Rice",         orderQty: 270, producedQty: 100, status: "In Preparation", officeId: "OFF-001", warehouseId: "WH-004" },
     { id: "PRO-2026-000031", date: "2026-05-19", bom: "Chicken Biryani",       outputItemName: "Chicken Biryani",      orderQty: 280, producedQty: 140, status: "In Preparation", officeId: "OFF-001", warehouseId: "WH-003" },
     { id: "PRO-2026-000030", date: "2026-05-18", bom: "Continental Breakfast", outputItemName: "Continental Breakfast", orderQty: 150, producedQty: 150, status: "Ready for QC",   officeId: "OFF-001", warehouseId: "WH-003" },
     { id: "PRO-2026-000029", date: "2026-05-17", bom: "Veg Pulao",             outputItemName: "Veg Pulao",            orderQty: 320, producedQty:   0, status: "Approved",        officeId: "OFF-001", warehouseId: "WH-003" },

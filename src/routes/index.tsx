@@ -725,7 +725,7 @@ export default function Dashboard() {
       ["Stock Value", k.dailyCost.value, k.dailyCost.sub],
     ];
     const lines: (string | number)[][] = [
-      ["Harvest Catering — Dashboard Report"],
+      ["AeroGalley Catering — Dashboard Report"],
       ["Period", periodLabel],
       ["Generated", new Date().toLocaleString("en-GB")],
       [],

@@ -346,7 +346,16 @@ const DEMO_AMENDMENTS: OrderAmendment[] = [
 ];
 for (const rev of DEMO_AMENDMENTS) {
   const ov = ensureOverlay(rev.orderId);
+  // Record the revision once (history).
   if (!ov.revisions.some((r) => r.id === rev.id)) ov.revisions = [rev, ...ov.revisions];
+  // Apply the change to the order itself so downstream consumers (production
+  // requirement recompute, dispatch re-sync) see the amended figures — how a real
+  // amendOrder behaves. Applied every load (idempotent — sets to the same "to"
+  // value) so the demo holds even when the revision was persisted head-less.
+  const patch: Record<string, unknown> = {};
+  for (const c of rev.changes) patch[c.field] = c.to;
+  ov.head = { ...ov.head, ...patch };
+  current = current.map((o) => (o.id === rev.orderId ? { ...o, ...patch } : o));
 }
 
 function notify() {

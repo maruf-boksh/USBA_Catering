@@ -292,7 +292,7 @@ export const AppSidebar = memo(function AppSidebar({
           {!collapsed && (
             <span className="sb-brand-copy">
               <span className="sb-brand-name">
-                <span className="sb-brand-word">Harvest</span>
+                <span className="sb-brand-word">AeroGalley</span>
                 <em>Catering</em>
                 <i className="sb-brand-underline" aria-hidden />
               </span>
@@ -379,7 +379,7 @@ export const AppSidebar = memo(function AppSidebar({
         <div className={`sb-foot${collapsed ? ' is-collapsed' : ''}`}>
           {!collapsed && (
             <span className="sb-foot-copy">
-              Harvest Catering · 2026
+              AeroGalley Catering · 2026
               <span className="sb-foot-sub">powered by US-Bangla Airlines</span>
             </span>
           )}

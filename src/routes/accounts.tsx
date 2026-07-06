@@ -12,7 +12,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import { KpiCard } from "@/components/common/KpiCard";
-import { ShoppingCart, Layers, CreditCard } from "lucide-react";
+import { ShoppingCart, Layers, CreditCard, Receipt } from "lucide-react";
+import { usePersistedState } from "@/lib/use-persisted-state";
+import { getCriticalLmcsForApproval, LMC_APPROVALS_KEY, LMC_CHARGE, type LmcDecision } from "@/routes/lmc";
 
 // Types
 interface PurchaseOrder {
@@ -1573,21 +1575,83 @@ function PaymentsApprovalsTab() {
 }
 
 // Main Accounts Component
+// Approved critical LMCs are billable last-minute changes — a flat LMC_CHARGE
+// per change. This surfaces them to Accounts (read-only) once GM-approved.
+function LmcChargesTab() {
+  const [decisions] = usePersistedState<Record<string, LmcDecision>>(LMC_APPROVALS_KEY, {});
+  const charges = useMemo(
+    () =>
+      getCriticalLmcsForApproval()
+        .map((l) => ({ l, d: decisions[l.id] }))
+        .filter((x) => x.d?.status === "Approved"),
+    [decisions],
+  );
+  const total = charges.length * LMC_CHARGE;
+  return (
+    <Card>
+      <CardContent className="p-0">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[820px]">
+            <thead className="bg-muted/40 border-b border-border">
+              <tr>
+                <th className="text-left p-3 text-xs uppercase tracking-wider font-semibold">Approved</th>
+                <th className="text-left p-3 text-xs uppercase tracking-wider font-semibold">Flight / Order</th>
+                <th className="text-left p-3 text-xs uppercase tracking-wider font-semibold">Change</th>
+                <th className="text-left p-3 text-xs uppercase tracking-wider font-semibold">Type</th>
+                <th className="text-left p-3 text-xs uppercase tracking-wider font-semibold">Approved By</th>
+                <th className="text-right p-3 text-xs uppercase tracking-wider font-semibold">Charge</th>
+              </tr>
+            </thead>
+            <tbody>
+              {charges.length === 0 ? (
+                <tr><td colSpan={6} className="text-center text-sm text-muted-foreground py-10">No billable last-minute changes yet — a critical LMC becomes chargeable once approved in Approval Management.</td></tr>
+              ) : charges.map(({ l, d }) => (
+                <tr key={l.id} className="border-b border-border/50 hover:bg-muted/20">
+                  <td className="p-3 tabular-nums text-xs text-muted-foreground whitespace-nowrap">{d?.at}</td>
+                  <td className="p-3"><span className="font-semibold">{l.flight}</span> <span className="text-muted-foreground text-xs">· {l.sector} · {l.orderNo}</span></td>
+                  <td className="p-3 text-xs tabular-nums">{l.changeText}</td>
+                  <td className="p-3 text-xs">{l.typeLabel}</td>
+                  <td className="p-3 text-xs">{d?.by}</td>
+                  <td className="p-3 text-right tabular-nums font-medium">{LMC_CHARGE.toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+            {charges.length > 0 && (
+              <tfoot>
+                <tr className="border-t-2 border-border bg-muted/30">
+                  <td colSpan={5} className="p-3 text-right text-xs font-semibold uppercase tracking-wider">Total LMC Charges</td>
+                  <td className="p-3 text-right tabular-nums font-bold">{total.toLocaleString()}</td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function Accounts() {
   const [activeTab, setActiveTab] = useState("po");
+  const [lmcDecisions] = usePersistedState<Record<string, LmcDecision>>(LMC_APPROVALS_KEY, {});
+  const lmcChargeCount = useMemo(
+    () => getCriticalLmcsForApproval().filter((l) => lmcDecisions[l.id]?.status === "Approved").length,
+    [lmcDecisions],
+  );
 
   return (
     <>
       <PageHeader
         title="Accounts"
-        subtitle="Purchase Orders, Bill of Materials & Payment approvals"
+        subtitle="Purchase Orders, Bill of Materials, Payments & LMC charges"
         actions={<></>}
       />
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
         <KpiCard label="Total POs" value={initialPOs.length} icon={ShoppingCart} tone="navy" />
         <KpiCard label="Total BOMs" value={initialBOMs.length} icon={Layers} tone="success" />
         <KpiCard label="Pending Invoices" value={initialInvoices.filter((i) => i.status === "Pending").length} icon={CreditCard} tone="warning" />
+        <KpiCard label="LMC Charges" value={(lmcChargeCount * LMC_CHARGE).toLocaleString()} sub={`${lmcChargeCount} change${lmcChargeCount === 1 ? "" : "s"}`} icon={Receipt} tone="red" />
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
@@ -1601,6 +1665,9 @@ export default function Accounts() {
           <TabsTrigger value="payments">
             <CreditCard className="h-4 w-4 mr-1" /> Payments & Approvals
           </TabsTrigger>
+          <TabsTrigger value="lmc">
+            <Receipt className="h-4 w-4 mr-1" /> LMC Charges
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="po" className="mt-4">
@@ -1613,6 +1680,10 @@ export default function Accounts() {
 
         <TabsContent value="payments" className="mt-4">
           <PaymentsApprovalsTab />
+        </TabsContent>
+
+        <TabsContent value="lmc" className="mt-4">
+          <LmcChargesTab />
         </TabsContent>
       </Tabs>
     </>

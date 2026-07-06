@@ -24,7 +24,7 @@ import {
   getLmcWindowHours, setLmcWindowHours,
   type OrderAmendment, type LmcSeverity,
 } from "@/lib/flight-orders-store";
-import { productionOrders } from "@/lib/sample-data";
+import { productionOrders, aircraftFleet, type Aircraft } from "@/lib/sample-data";
 import { getAuthUser } from "@/lib/auth";
 import { INITIAL_RECORDS, type DispatchRecord } from "@/routes/dispatch";
 import { flights, loadGalleyRecords } from "@/routes/dispatch-monitoring";
@@ -61,9 +61,16 @@ const WORK_META: Record<"open" | WorkStatus, { label: string; cls: string }> = {
   closed:    { label: "Closed",    cls: "bg-emerald-50 text-emerald-700 border-emerald-300" },
 };
 
+const APPROVAL_BADGE: Record<"awaiting" | "rejected", { label: string; cls: string }> = {
+  awaiting: { label: "Awaiting Approval", cls: "bg-amber-50 text-amber-700 border-amber-300" },
+  rejected: { label: "Rejected",          cls: "bg-rose-100 text-rose-700 border-rose-300" },
+};
+
 // ── Manual LMC events (non-edit) ──────────────────────────────────────────────
 const MANUAL_TYPES = [
   "Aircraft Swap",
+  "PAX Change",
+  "Special Meal Change",
   "Flight Cancellation",
   "Nil Catering / Offload",
   "Schedule / Delay",
@@ -74,23 +81,30 @@ type ManualType = typeof MANUAL_TYPES[number];
 
 const MANUAL_DEFAULT_SEV: Record<ManualType, LmcSeverity> = {
   "Aircraft Swap": "critical",
+  "PAX Change": "critical",
+  "Special Meal Change": "critical",
   "Flight Cancellation": "critical",
   "Nil Catering / Offload": "critical",
   "Schedule / Delay": "major",
   "Extra / Reduced Crew": "major",
   "Other": "minor",
 };
-// Contextual labels/placeholders for the optional from → to fields.
-const MANUAL_FIELD_HINT: Record<ManualType, { from: string; to: string }> = {
-  "Aircraft Swap": { from: "From aircraft (e.g. DASH 8)", to: "To aircraft (e.g. ATR 72-600)" },
-  "Flight Cancellation": { from: "Was (Active)", to: "Now (Cancelled)" },
-  "Nil Catering / Offload": { from: "Ordered meals", to: "Uplift now (0 / reduced)" },
-  "Schedule / Delay": { from: "Scheduled STD", to: "Revised STD" },
-  "Extra / Reduced Crew": { from: "Crew was", to: "Crew now" },
-  "Other": { from: "From (was)", to: "To (now)" },
+// Type-aware from → to capture. `kind` picks the control (dropdown / time /
+// number / text); `show:false` hides the pair entirely for types whose Type +
+// Reason already say everything (cancellation, nil-catering).
+type FtKind = "aircraft" | "time" | "number" | "text";
+const MANUAL_FT: Record<ManualType, { show: boolean; kind: FtKind; fromLabel: string; toLabel: string }> = {
+  "Aircraft Swap":          { show: true,  kind: "aircraft", fromLabel: "From aircraft", toLabel: "To aircraft" },
+  "PAX Change":             { show: true,  kind: "number",   fromLabel: "PAX was", toLabel: "PAX now" },
+  "Special Meal Change":    { show: true,  kind: "number",   fromLabel: "Special meals was", toLabel: "Special meals now" },
+  "Flight Cancellation":    { show: false, kind: "text",     fromLabel: "", toLabel: "" },
+  "Nil Catering / Offload": { show: false, kind: "text",     fromLabel: "", toLabel: "" },
+  "Schedule / Delay":       { show: true,  kind: "time",     fromLabel: "Scheduled STD", toLabel: "Revised STD" },
+  "Extra / Reduced Crew":   { show: true,  kind: "number",   fromLabel: "Crew was", toLabel: "Crew now" },
+  "Other":                  { show: true,  kind: "text",     fromLabel: "From (was)", toLabel: "To (now)" },
 };
 
-type ManualLmc = {
+export type ManualLmc = {
   id: string;
   at: string;
   by: string;
@@ -105,6 +119,43 @@ type ManualLmc = {
   severity: LmcSeverity;
   leadHours: number | null;
 };
+
+// ── Cross-module contract (Approval Management + Accounts) ────────────────────
+// Critical LMCs are routed through Approval Management (Phase 3) and, once
+// approved, are billable last-minute changes surfaced in Accounts. The approval
+// decision is a light persisted overlay keyed by LMC id — it never mutates the
+// amendment history.
+export const LMC_MANUAL_KEY = "lmc-manual";
+export const LMC_APPROVALS_KEY = "lmc-approvals";
+/** Flat charge applied to a billable (critical) last-minute change. */
+export const LMC_CHARGE = 5000;
+
+export type LmcDecision = { status: "Approved" | "Rejected"; by: string; at: string; reason?: string };
+
+/** Flattened critical-LMC record shared with Approval Management / Accounts. */
+export type LmcApprovalRow = {
+  id: string;
+  flight: string;
+  sector: string;
+  orderNo: string;
+  typeLabel: string;
+  changeText: string;
+  severity: LmcSeverity;
+  at: string;
+  by: string;
+  role: string;
+  reason: string;
+  leadHours: number | null;
+};
+
+function readManualLmc(): ManualLmc[] {
+  try {
+    const raw = window.localStorage.getItem(`harvest-data-v1:${LMC_MANUAL_KEY}`);
+    return raw ? (JSON.parse(raw) as ManualLmc[]) : [];
+  } catch {
+    return [];
+  }
+}
 
 // ── Downstream commitment ─────────────────────────────────────────────────────
 // "How committed is this leg already?" — the core LMC question. The further a
@@ -184,6 +235,40 @@ function amendmentTypeLabel(a: OrderAmendment): string {
 const fmtLead = (h: number | null) => (h == null ? "—" : `${h.toFixed(1)}h to STD`);
 const fmtVal = (v: unknown) => (v === "" || v == null ? "—" : String(v));
 
+const changeText = (changes: { label: string; from: unknown; to: unknown }[]): string => {
+  const c = changes[0];
+  if (!c) return "—";
+  const extra = changes.length - 1;
+  return `${c.label}: ${fmtVal(c.from)} → ${fmtVal(c.to)}${extra > 0 ? ` +${extra}` : ""}`;
+};
+
+/** Critical last-minute changes (auto + manual) that require sign-off. Consumed
+ *  by Approval Management (the approval gate) and Accounts (chargeable). Shared
+ *  here so the classification lives in one place. */
+export function getCriticalLmcsForApproval(): LmcApprovalRow[] {
+  const orderById = new Map(getFlightOrders().map((o) => [o.id, o]));
+  const fromAmendments: LmcApprovalRow[] = getAllAmendments()
+    .filter((a) => a.isLmc && a.severity === "critical")
+    .map((a) => {
+      const order = orderById.get(a.orderId);
+      return {
+        id: a.id, flight: order?.flight ?? a.orderId, sector: order?.sector ?? "—",
+        orderNo: order?.orderNo ?? "—", typeLabel: amendmentTypeLabel(a),
+        changeText: changeText(a.changes), severity: a.severity,
+        at: a.at, by: a.by, role: a.role, reason: a.reason, leadHours: a.leadHours,
+      };
+    });
+  const fromManual: LmcApprovalRow[] = readManualLmc()
+    .filter((m) => m.severity === "critical")
+    .map((m) => ({
+      id: m.id, flight: m.flight, sector: m.sector ?? "—", orderNo: m.orderNo ?? "—",
+      typeLabel: m.type,
+      changeText: (m.from || m.to) ? `${m.type}: ${m.from ?? "—"} → ${m.to ?? "—"}` : m.type,
+      severity: m.severity, at: m.at, by: m.by, role: m.role, reason: m.reason, leadHours: m.leadHours,
+    }));
+  return [...fromAmendments, ...fromManual].sort((x, y) => (x.at < y.at ? 1 : -1));
+}
+
 export default function LmcPage() {
   const navigate = useNavigate();
   // Deep-link a change back to its source order in Order Management.
@@ -191,7 +276,10 @@ export default function LmcPage() {
     if (orderNo && orderNo !== "—") navigate(`/order-management?ord=${encodeURIComponent(orderNo)}`);
   };
   const [workStatus, setWorkStatus] = usePersistedState<Record<string, WorkStatus>>("lmc-work-status", {});
-  const [manual, setManual] = usePersistedState<ManualLmc[]>("lmc-manual", []);
+  const [manual, setManual] = usePersistedState<ManualLmc[]>(LMC_MANUAL_KEY, []);
+  // Approval decisions (read-only here) — critical LMCs are gated on GM sign-off
+  // in Approval Management before they can be closed.
+  const [lmcDecisions] = usePersistedState<Record<string, LmcDecision>>(LMC_APPROVALS_KEY, {});
   const [dispatchRecords] = usePersistedState<DispatchRecord[]>("dispatch-records", INITIAL_RECORDS);
   const galleyRecords = useMemo(() => loadGalleyRecords(), []);
 
@@ -241,15 +329,27 @@ export default function LmcPage() {
     }));
 
     return [...amendmentItems, ...manualItems]
-      .map((it) => ({
-        it,
-        status: (workStatus[it.id] ?? "open") as "open" | WorkStatus,
-        production: prodCommit(it.flight),
-        dispatch: dispCommit(it.flight, dispatchRecords),
-        galley: galleyCommit(it.flight, galleyRecords),
-      }))
+      .map((it) => {
+        // Critical LMCs require GM sign-off (Approval Management) before closure.
+        const needsApproval = it.severity === "critical";
+        const decision = lmcDecisions[it.id];
+        const approval: "n/a" | "awaiting" | "approved" | "rejected" =
+          !needsApproval ? "n/a"
+          : decision?.status === "Approved" ? "approved"
+          : decision?.status === "Rejected" ? "rejected"
+          : "awaiting";
+        return {
+          it,
+          status: (workStatus[it.id] ?? "open") as "open" | WorkStatus,
+          approval,
+          decision,
+          production: prodCommit(it.flight),
+          dispatch: dispCommit(it.flight, dispatchRecords),
+          galley: galleyCommit(it.flight, galleyRecords),
+        };
+      })
       .sort((x, y) => (x.it.at < y.it.at ? 1 : -1));
-  }, [orderById, manual, workStatus, dispatchRecords, galleyRecords]);
+  }, [orderById, manual, workStatus, lmcDecisions, dispatchRecords, galleyRecords]);
 
   const scoped = rows.filter((r) => {
     if (scope === "lmc" && !r.it.isLmc) return false;
@@ -446,9 +546,20 @@ export default function LmcPage() {
                         </div>
                       </TableCell>
                       <TableCell>
-                        <Badge variant="outline" className={`h-5 px-1.5 text-[10px] font-bold uppercase ${WORK_META[r.status].cls}`}>
-                          {WORK_META[r.status].label}
-                        </Badge>
+                        {r.approval === "awaiting" || r.approval === "rejected" ? (
+                          <Badge variant="outline" className={`h-5 px-1.5 text-[10px] font-bold uppercase ${APPROVAL_BADGE[r.approval].cls}`}>
+                            {APPROVAL_BADGE[r.approval].label}
+                          </Badge>
+                        ) : (
+                          <span className="inline-flex items-center gap-1">
+                            <Badge variant="outline" className={`h-5 px-1.5 text-[10px] font-bold uppercase ${WORK_META[r.status].cls}`}>
+                              {WORK_META[r.status].label}
+                            </Badge>
+                            {r.approval === "approved" && (
+                              <span title={`Approved by ${r.decision?.by ?? ""}`} className="text-emerald-600"><CheckCircle2 className="h-3.5 w-3.5" /></span>
+                            )}
+                          </span>
+                        )}
                       </TableCell>
                       <TableCell className="text-right">
                         <Button variant="outline" size="sm" className="h-7 px-2.5 text-xs" onClick={() => setViewId(r.it.id)}>
@@ -531,24 +642,56 @@ export default function LmcPage() {
                   <ImpactRow icon={LayoutGrid} label="Galley"     commit={viewRow.galley} />
                 </div>
               </div>
+
+              {/* Approval gate — critical LMCs need GM sign-off before closure. */}
+              {viewRow.approval !== "n/a" && (
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-sky-700 mb-2">Approval</p>
+                  {viewRow.approval === "awaiting" ? (
+                    <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 flex items-start gap-2">
+                      <ShieldAlert className="h-4 w-4 mt-0.5 shrink-0" />
+                      <span>Critical last-minute change — <strong>pending GM sign-off</strong> in Approval Management. It can't be closed until approved.</span>
+                    </div>
+                  ) : viewRow.approval === "rejected" ? (
+                    <div className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+                      <div className="font-semibold">Rejected by {viewRow.decision?.by}</div>
+                      {viewRow.decision?.reason && <div className="mt-0.5">Reason: <span className="italic">{viewRow.decision.reason}</span></div>}
+                      <div className="text-[10px] mt-0.5 opacity-80">{viewRow.decision?.at}</div>
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 flex items-start gap-2">
+                      <CheckCircle2 className="h-4 w-4 mt-0.5 shrink-0" />
+                      <span>Approved by <strong>{viewRow.decision?.by}</strong> · {viewRow.decision?.at} · <Receipt className="h-3 w-3 inline" /> chargeable ({LMC_CHARGE.toLocaleString()})</span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="border-t bg-white px-6 py-3 shrink-0 flex flex-wrap items-center justify-end gap-2">
               <span className="text-[11px] text-muted-foreground mr-auto">
-                Status: <span className="font-semibold">{WORK_META[viewRow.status].label}</span>
+                Status: <span className="font-semibold">
+                  {viewRow.approval === "awaiting" ? "Awaiting Approval" : viewRow.approval === "rejected" ? "Rejected" : WORK_META[viewRow.status].label}
+                </span>
               </span>
-              {viewRow.status === "open" && (
+              {viewRow.status === "open" && viewRow.approval !== "awaiting" && (
                 <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => { setStatus(viewRow.it.id, "assessing"); toast.info("Marked under assessment."); }}>
                   <Clock className="h-3.5 w-3.5 mr-1" /> Start Assessment
                 </Button>
               )}
-              {viewRow.status !== "closed" && (
+              {viewRow.status !== "closed" && viewRow.approval !== "awaiting" && viewRow.approval !== "rejected" && (
                 <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => { setStatus(viewRow.it.id, "actioned"); toast.success("Marked actioned — downstream coordinated."); }}>
                   <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> Mark Actioned
                 </Button>
               )}
               {viewRow.status !== "closed" ? (
-                <Button size="sm" className="h-8 text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => { setStatus(viewRow.it.id, "closed"); toast.success("LMC closed."); setViewId(null); }}>
+                <Button
+                  size="sm"
+                  className="h-8 text-xs bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50"
+                  disabled={viewRow.approval === "awaiting"}
+                  title={viewRow.approval === "awaiting" ? "Requires GM approval in Approval Management" : undefined}
+                  onClick={() => { setStatus(viewRow.it.id, "closed"); toast.success("LMC closed."); setViewId(null); }}
+                >
                   Close LMC
                 </Button>
               ) : (
@@ -586,13 +729,50 @@ function LogLmcDialog({
   const [reason, setReason] = useState("");
   const [severity, setSeverity] = useState<LmcSeverity>(MANUAL_DEFAULT_SEV["Aircraft Swap"]);
   const [sevTouched, setSevTouched] = useState(false);
+  const [aircraftRows] = usePersistedState<Aircraft[]>("config-aircraft-rows", aircraftFleet);
+  const aircraftOptions = useMemo(
+    () => aircraftRows.filter((a) => a.status === "Active").map((a) => `${a.type} (${a.registration})`),
+    [aircraftRows],
+  );
 
   const match = flightOptions.find((f) => f.flight === flight);
-  const hint = MANUAL_FIELD_HINT[type];
+  const ft = MANUAL_FT[type];
 
   const onType = (t: ManualType) => {
     setType(t);
     if (!sevTouched) setSeverity(MANUAL_DEFAULT_SEV[t]); // auto-follow type until user overrides
+    // The control changes with the type, so reset the values. Pre-fill the
+    // schedule "from" with the flight's current STD when we know it.
+    setFrom(t === "Schedule / Delay" && match ? match.etd : "");
+    setTo("");
+  };
+
+  // Render the from/to value control appropriate to the selected type.
+  const renderValueField = (which: "from" | "to") => {
+    const val = which === "from" ? from : to;
+    const setVal = which === "from" ? setFrom : setTo;
+    const label = which === "from" ? ft.fromLabel : ft.toLabel;
+    return (
+      <div>
+        <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</label>
+        {ft.kind === "aircraft" ? (
+          <Select value={val} onValueChange={setVal}>
+            <SelectTrigger className="h-9 mt-1 text-sm"><SelectValue placeholder="Select aircraft" /></SelectTrigger>
+            <SelectContent>
+              {aircraftOptions.length === 0
+                ? <SelectItem value="none" disabled>No aircraft configured</SelectItem>
+                : aircraftOptions.map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        ) : ft.kind === "time" ? (
+          <Input type="time" value={val} onChange={(e) => setVal(e.target.value)} className="h-9 mt-1 text-sm" />
+        ) : ft.kind === "number" ? (
+          <Input type="number" min={0} value={val} onChange={(e) => setVal(e.target.value)} placeholder="0" className="h-9 mt-1 text-sm" />
+        ) : (
+          <Input value={val} onChange={(e) => setVal(e.target.value)} className="h-9 mt-1 text-sm" />
+        )}
+      </div>
+    );
   };
 
   const save = () => {
@@ -666,16 +846,12 @@ function LogLmcDialog({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">From (was)</label>
-              <Input value={from} onChange={(e) => setFrom(e.target.value)} placeholder={hint.from} className="h-9 mt-1 text-sm" />
+          {ft.show && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {renderValueField("from")}
+              {renderValueField("to")}
             </div>
-            <div>
-              <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">To (now)</label>
-              <Input value={to} onChange={(e) => setTo(e.target.value)} placeholder={hint.to} className="h-9 mt-1 text-sm" />
-            </div>
-          </div>
+          )}
 
           <div>
             <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Reason <span className="text-rose-500">(required)</span></label>

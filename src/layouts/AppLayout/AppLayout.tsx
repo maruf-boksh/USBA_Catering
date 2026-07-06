@@ -319,7 +319,7 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
               <button
                 onClick={() => setMobileAppOpen(true)}
                 className="app-topbar-mobileview"
-                title="Harvest Catering App"
+                title="AeroGalley Catering App"
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
@@ -341,7 +341,7 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
                 }}
               >
                 <MobileOutlined style={{ fontSize: 14 }} />
-                <span className="app-topbar-mobileview-label">Harvest Catering App</span>
+                <span className="app-topbar-mobileview-label">AeroGalley Catering App</span>
               </button>
             </div>
 
