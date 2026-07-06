@@ -54,9 +54,34 @@ function saveAddedOrders() {
 
 const AMEND_KEY = "harvest-data-v1:flight-order-amendments";
 
-/** Lead time (hours before ETD) at or under which an edit counts as a
- *  Last-Minute Change. Single knob — tune to the operation's cut-off. */
+/** Default lead time (hours before ETD) at or under which an edit counts as a
+ *  Last-Minute Change. The live value is configurable — see getLmcWindowHours;
+ *  this constant is only the fallback when nothing is stored. */
 export const LMC_WINDOW_HOURS = 4;
+
+const LMC_WINDOW_KEY = "harvest-data-v1:lmc-window-hours";
+
+/** The active LMC cut-off in hours, read live so the setting takes effect
+ *  without a reload. Falls back to the default; clamped to a sane range. */
+export function getLmcWindowHours(): number {
+  try {
+    const raw = window.localStorage.getItem(LMC_WINDOW_KEY);
+    if (raw != null) {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) return Math.min(48, Math.max(0.25, n));
+    }
+  } catch {
+    /* unavailable / corrupt — fall through to default */
+  }
+  return LMC_WINDOW_HOURS;
+}
+
+/** Persist the LMC cut-off (hours). Clamped to 0.25–48h. */
+export function setLmcWindowHours(hours: number): void {
+  const n = Math.min(48, Math.max(0.25, Number(hours) || LMC_WINDOW_HOURS));
+  try { window.localStorage.setItem(LMC_WINDOW_KEY, String(n)); } catch { /* quota — non-fatal */ }
+  notify();
+}
 
 export type LmcSeverity = "info" | "minor" | "major" | "critical";
 
@@ -99,7 +124,7 @@ export function leadHoursToDeparture(o: Pick<FlightOrder, "date" | "etd">): numb
  *  must not be flagged LMC (otherwise editing any historical flight today would
  *  pollute the dashboard's "changes today" count and the LMC filter). */
 export function isLmcLead(leadHours: number | null): boolean {
-  return leadHours != null && leadHours >= 0 && leadHours <= LMC_WINDOW_HOURS;
+  return leadHours != null && leadHours >= 0 && leadHours <= getLmcWindowHours();
 }
 
 /** True once the flight's scheduled departure has passed — the order is "Flown".
@@ -281,6 +306,47 @@ const listeners = new Set<() => void>();
 // If the migration re-aligned any crew Order #, persist the aligned set so the
 // fix sticks across reloads (no-op when nothing changed).
 if (persistedAdded !== rawAdded) saveAddedOrders();
+
+// ── Demo LMC amendments ───────────────────────────────────────────────────────
+// The seed order book is historical (past-dated → departed), so out of the box
+// nothing is "in-window" and the LMC control tower reads empty. These synthetic,
+// stable-id revisions represent last-minute changes made against today's flights
+// while they were still in-window — enough to populate the LMC page, dashboard
+// banner and production banner. History-only: we intentionally do NOT apply them
+// as head edits, so order figures on other pages are left untouched.
+const DEMO_AMENDMENTS: OrderAmendment[] = [
+  {
+    id: "AMD-DEMO-1", orderId: "FO-007", at: "2026-07-06T04:35:00.000Z",
+    by: "R. Hossain", role: "GM/Admin", reason: "Airline sent revised final figures",
+    changes: [
+      { field: "pax", label: "PAX", from: 168, to: 130 },
+      { field: "specialMeals", label: "Special Meals", from: 10, to: 16 },
+    ],
+    leadHours: 2.3, isLmc: true, severity: "critical",
+  },
+  {
+    id: "AMD-DEMO-2", orderId: "FO-008", at: "2026-07-06T05:10:00.000Z",
+    by: "S. Karim", role: "Operations Manager", reason: "Extra SPML/VGML requested by airline",
+    changes: [{ field: "specialMeals", label: "Special Meals", from: 22, to: 30 }],
+    leadHours: 1.2, isLmc: true, severity: "critical",
+  },
+  {
+    id: "AMD-DEMO-3", orderId: "FO-225", at: "2026-07-06T03:50:00.000Z",
+    by: "M. Jahangir", role: "Catering Supervisor", reason: "ATC slot delay — STD pushed",
+    changes: [{ field: "etd", label: "ETD", from: "15:40", to: "17:10" }],
+    leadHours: 3.6, isLmc: true, severity: "critical",
+  },
+  {
+    id: "AMD-DEMO-4", orderId: "FO-004", at: "2026-07-06T06:05:00.000Z",
+    by: "R. Hossain", role: "GM/Admin", reason: "Re-routed via alternate hub",
+    changes: [{ field: "sector", label: "Sector", from: "DAC → KUL", to: "DAC → SIN" }],
+    leadHours: 2.9, isLmc: true, severity: "major",
+  },
+];
+for (const rev of DEMO_AMENDMENTS) {
+  const ov = ensureOverlay(rev.orderId);
+  if (!ov.revisions.some((r) => r.id === rev.id)) ov.revisions = [rev, ...ov.revisions];
+}
 
 function notify() {
   for (const l of listeners) l();

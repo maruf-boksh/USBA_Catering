@@ -36,7 +36,7 @@ import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-
 import {
   useFlightOrders, addFlightOrders, updateFlightOrder, updateFlightOrderStatus,
   amendOrder, getOrderAmendments, revertAmendment, canRevertAmendment,
-  leadHoursToDeparture, isLmcLead, hasDeparted, LMC_WINDOW_HOURS,
+  leadHoursToDeparture, isLmcLead, hasDeparted, getLmcWindowHours,
   type OrderAmendment,
 } from "@/lib/flight-orders-store";
 import { getAuthUser } from "@/lib/auth";
@@ -1989,7 +1989,7 @@ function EditOrderLegDialog({
             </div>
             <p className="text-xs text-rose-900">
               {lead != null && lead >= 0
-                ? `Departure in ${lead < 1 ? `${Math.round(lead * 60)} min` : `${lead.toFixed(1)} h`} — within the ${LMC_WINDOW_HOURS}h cut-off.`
+                ? `Departure in ${lead < 1 ? `${Math.round(lead * 60)} min` : `${lead.toFixed(1)} h`} — within the ${getLmcWindowHours()}h cut-off.`
                 : "Flight has already departed."}{" "}
               A reason is required and the change is flagged for the team.
             </p>
