@@ -106,7 +106,7 @@ export function SplashScreen({ onDone }) {
           color: '#ffffff',
           textTransform: 'uppercase',
         }}>
-          HARVEST
+          AEROGALLEY
         </div>
         <div style={{
           fontFamily: T.fontBrand,
