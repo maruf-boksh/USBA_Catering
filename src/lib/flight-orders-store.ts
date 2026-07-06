@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import {
   seedFlightOrders,
+  seedCrewOrders,
   isDomesticSector,
   type FlightOrderRow,
   type FlightOrderStatus,
@@ -298,7 +299,7 @@ const addedIds = new Set<string>(persistedAdded.map((o) => o.id));
 // Persisted creates take precedence over (and sit above) the seed snapshot.
 // Then re-apply each order's persisted head edits (LMC amendments) so edits to
 // SEED orders survive a reload — the added-delta only covers created orders.
-let current: FlightOrder[] = [...persistedAdded, ...seedFlightOrders].map((o) => {
+let current: FlightOrder[] = [...persistedAdded, ...seedFlightOrders, ...seedCrewOrders].map((o) => {
   const ov = overlay.get(o.id);
   return ov && Object.keys(ov.head).length ? { ...o, ...ov.head } : o;
 });

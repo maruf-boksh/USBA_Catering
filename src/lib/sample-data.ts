@@ -1672,6 +1672,37 @@ export const seedFlightOrders: FlightOrderRow[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Crew-meal orders (Crew Meals tab). Same shape as a flight order but flagged
+// `orderType: "crew"` and carrying a crew-meal count instead of passenger meals.
+// They reuse the matching flight order's number so a flight and its crew meals
+// share one Order #, and span a range of ETDs so the meal-slot grouping (from
+// each flight's departure time) shows several slots.
+// ─────────────────────────────────────────────────────────────────────────────
+export const seedCrewOrders: FlightOrderRow[] = [
+  // ORD-3411 — Air Astra Dubai rotation
+  { id: "CR-001", orderNo: "ORD-3411", flight: "BG-401", airline: "Air Astra", sector: "DAC → DXB", date: "2026-05-20", etd: "10:30", pax: 0, crew: 14, specialMeals: 0, status: "Completed",  direction: "Outbound", orderType: "crew" },
+  { id: "CR-002", orderNo: "ORD-3411", flight: "BG-402", airline: "Air Astra", sector: "DXB → DAC", date: "2026-05-20", etd: "23:45", pax: 0, crew: 14, specialMeals: 0, status: "Dispatched", direction: "Return",   orderType: "crew" },
+  // ORD-3412 — Air Astra London
+  { id: "CR-003", orderNo: "ORD-3412", flight: "BG-522", airline: "Air Astra", sector: "DAC → LHR", date: "2026-05-20", etd: "14:45", pax: 0, crew: 18, specialMeals: 0, status: "Production", direction: "Outbound", orderType: "crew" },
+  // ORD-3413 — US-Bangla KUL/SIN triangle
+  { id: "CR-004", orderNo: "ORD-3413", flight: "VQ-901", airline: "US-Bangla", sector: "DAC → KUL", date: "2026-05-20", etd: "16:20", pax: 0, crew: 12, specialMeals: 0, status: "Production", direction: "Outbound", orderType: "crew" },
+  { id: "CR-005", orderNo: "ORD-3413", flight: "VQ-902", airline: "US-Bangla", sector: "KUL → SIN", date: "2026-05-20", etd: "20:40", pax: 0, crew: 12, specialMeals: 0, status: "Production", direction: "Outbound", orderType: "crew" },
+  { id: "CR-006", orderNo: "ORD-3413", flight: "VQ-903", airline: "US-Bangla", sector: "SIN → DAC", date: "2026-05-20", etd: "23:55", pax: 0, crew: 12, specialMeals: 0, status: "Approved",   direction: "Return",   orderType: "crew" },
+  // ORD-3414 / ORD-3415 — long-haul departures
+  { id: "CR-007", orderNo: "ORD-3414", flight: "BS-203", airline: "US-Bangla", sector: "DAC → DOH", date: "2026-05-21", etd: "18:10", pax: 0, crew: 14, specialMeals: 0, status: "Approved",   direction: "Outbound", orderType: "crew" },
+  { id: "CR-008", orderNo: "ORD-3415", flight: "BS-307", airline: "US-Bangla", sector: "DAC → BKK", date: "2026-05-21", etd: "20:00", pax: 0, crew: 16, specialMeals: 0, status: "Pending",    direction: "Outbound", orderType: "crew" },
+  // ORD-3416 — CGP domestic pair (early morning slot)
+  { id: "CR-009", orderNo: "ORD-3416", flight: "BS-141", airline: "US-Bangla", sector: "DAC → CGP", date: "2026-05-20", etd: "06:30", pax: 0, crew: 4,  specialMeals: 0, status: "Production", direction: "Outbound", orderType: "crew" },
+  { id: "CR-010", orderNo: "ORD-3416", flight: "BS-142", airline: "US-Bangla", sector: "CGP → DAC", date: "2026-05-20", etd: "08:30", pax: 0, crew: 4,  specialMeals: 0, status: "Production", direction: "Return",   orderType: "crew" },
+  // Assorted domestic legs to spread across meal slots
+  { id: "CR-011", orderNo: "ORD-3417", flight: "BS-105", airline: "US-Bangla", sector: "DAC → CXB", date: "2026-05-20", etd: "07:15", pax: 0, crew: 4,  specialMeals: 0, status: "Approved",   direction: "Outbound", orderType: "crew" },
+  { id: "CR-012", orderNo: "ORD-3419", flight: "BS-195", airline: "US-Bangla", sector: "DAC → JSR", date: "2026-05-20", etd: "11:30", pax: 0, crew: 4,  specialMeals: 0, status: "Production", direction: "Outbound", orderType: "crew" },
+  { id: "CR-013", orderNo: "ORD-3420", flight: "BS-165", airline: "US-Bangla", sector: "DAC → CXB", date: "2026-05-20", etd: "13:20", pax: 0, crew: 4,  specialMeals: 0, status: "Approved",   direction: "Outbound", orderType: "crew" },
+  { id: "CR-014", orderNo: "ORD-3421", flight: "BS-147", airline: "US-Bangla", sector: "DAC → CGP", date: "2026-05-20", etd: "15:40", pax: 0, crew: 4,  specialMeals: 0, status: "Production", direction: "Outbound", orderType: "crew" },
+  { id: "CR-015", orderNo: "ORD-3423", flight: "BS-115", airline: "US-Bangla", sector: "DAC → CXB", date: "2026-05-20", etd: "19:30", pax: 0, crew: 4,  specialMeals: 0, status: "Pending",    direction: "Outbound", orderType: "crew" },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Flight-order generator
 // ─────────────────────────────────────────────────────────────────────────────
 // Builds one "ORD-NNNN" per day for 90 days starting 2026-06-01 (the system
