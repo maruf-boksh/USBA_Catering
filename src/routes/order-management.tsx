@@ -669,7 +669,7 @@ export default function OrderManagementPage() {
 
   const headerMeta =
     view === "create"
-      ? { title: "Create Flight Order", subtitle: "Pick a date and flight — the details auto-fill. Add one or both legs, then save." }
+      ? { title: "Create Flight Order", subtitle: "Pick a date and one or more flights — each flight's details auto-fill and are edited individually. Add them, then save." }
       : view === "crew-create"
         ? { title: "Create Crew Meal Order", subtitle: "Order crew meals by flight and meal slot." }
         : view === "bulk"
@@ -2438,6 +2438,80 @@ function SearchSelect({
   );
 }
 
+/**
+ * Multi-select variant of {@link SearchSelect}: pick any number of options from a
+ * searchable list. The popover stays open across picks so several can be toggled
+ * in one go; the trigger summarises the current selection. Used for the Flight
+ * Number picker so a whole batch of flights can be chosen for one order.
+ */
+function MultiSearchSelect({
+  values, onToggle, options, placeholder = "Select…", searchPlaceholder = "Search…",
+  emptyText = "No results.", disabled, className,
+}: {
+  values: string[];
+  onToggle: (value: string) => void;
+  options: SearchOption[];
+  placeholder?: string;
+  searchPlaceholder?: string;
+  emptyText?: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const selectedSet = new Set(values);
+  const summary = values.length === 0
+    ? placeholder
+    : values.length === 1
+      ? (options.find((o) => o.value === values[0])?.label ?? values[0])
+      : `${values.length} flights selected`;
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          role="combobox"
+          aria-expanded={open}
+          disabled={disabled}
+          className={cn(
+            "mt-1 flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 text-sm shadow-sm transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
+            values.length === 0 && "text-muted-foreground",
+            className,
+          )}
+        >
+          <span className="truncate text-left">{summary}</span>
+          <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        className="w-[var(--radix-popover-trigger-width)] min-w-[240px] p-0"
+      >
+        <Command>
+          <CommandInput placeholder={searchPlaceholder} className="h-9" />
+          <CommandList>
+            <CommandEmpty>{emptyText}</CommandEmpty>
+            <CommandGroup>
+              {options.map((o) => {
+                const checked = selectedSet.has(o.value);
+                return (
+                  <CommandItem
+                    key={o.value}
+                    value={`${o.value} ${o.label} ${o.keywords ?? ""}`}
+                    onSelect={() => onToggle(o.value)}
+                  >
+                    <Check className={cn("mr-2 h-4 w-4 shrink-0", checked ? "opacity-100" : "opacity-0")} />
+                    <span className="truncate">{o.label}</span>
+                  </CommandItem>
+                );
+              })}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 /** Numbered step marker used in the create-form section headers. */
 function StepBadge({ n }: { n: number }) {
   return (
@@ -2936,6 +3010,16 @@ function FlightLegFields({
   );
 }
 
+// One selected flight in the create form: its own editable detail block plus an
+// optional paired return leg. Auto mode holds an array of these — one per flight
+// number picked from the multi-select — so several flights are filled at once.
+type FlightEntry = {
+  flight: string;
+  detail: LegDetail;
+  withReturn: boolean;
+  ret: LegDetail;
+};
+
 function OrderCreate({
   onSave, nextOrderNo, nextRowSeq,
 }: {
@@ -2943,14 +3027,20 @@ function OrderCreate({
   nextOrderNo: string;
   nextRowSeq: number;
 }) {
-  // Auto: pick a scheduled flight and let its details fill in. Manual: type the
-  // flight number and enter every field by hand (no schedule lookup).
+  // Auto: pick one or more scheduled flights and fill each flight's details
+  // individually. Manual: type a single flight number and enter every field by
+  // hand (no schedule lookup).
   const [flightMode, setFlightMode] = useState<"auto" | "manual">("auto");
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
-  const [flight, setFlight] = useState("");                  // primary flight # (Step 1)
-  const [primary, setPrimary] = useState<LegDetail>(emptyLegDetail());
-  const [withReturn, setWithReturn] = useState(false);       // also order the paired leg
-  const [ret, setRet] = useState<LegDetail>(emptyLegDetail());
+
+  // Auto mode — one entry per selected flight, each with its own editable detail
+  // (and an optional paired return leg).
+  const [entries, setEntries] = useState<FlightEntry[]>([]);
+
+  // Manual mode — a single hand-typed flight.
+  const [manualFlight, setManualFlight] = useState("");
+  const [manualDetail, setManualDetail] = useState<LegDetail>(emptyLegDetail());
+
   const [legs, setLegs] = useState<LegDraft[]>([]);
 
   // Flights that operate on the chosen date — the Flight Number dropdown source.
@@ -2960,66 +3050,76 @@ function OrderCreate({
     return scheduledFlightsForDate(date).filter((f) => !used.has(f.flight));
   }, [date, legs]);
 
-  // The scheduled return/outbound counterpart of the selected flight, if any —
-  // gates the round-trip checkbox and seeds the return detail block.
-  const pairFlight = useMemo(() => (flight ? pairScheduledFlight(flight) : undefined), [flight]);
+  const selectedFlights = entries.map((e) => e.flight);
 
-  // Whole-day gap between the outbound date and the return's own date (0 = same
-  // day). Drives the "next day" badge on the return panel.
-  const returnDayGap = withReturn && ret.date && ret.date !== date
-    ? Math.round((Date.parse(ret.date) - Date.parse(date)) / 86_400_000)
-    : 0;
+  const patchManual = (patch: Partial<LegDetail>) => setManualDetail((p) => ({ ...p, ...patch }));
 
-  const patchPrimary = (patch: Partial<LegDetail>) => setPrimary((p) => ({ ...p, ...patch }));
-  const patchReturn = (patch: Partial<LegDetail>) => setRet((p) => ({ ...p, ...patch }));
-
-  // Changing the date invalidates the flight pick (a flight may not operate that
-  // day), so clear the whole selection.
+  // Changing the date invalidates every flight pick (a flight may not operate
+  // that day), so clear the whole in-progress selection.
   const onDateChange = (next: string) => {
     setDate(next);
-    setFlight("");
-    setPrimary(emptyLegDetail());
-    setWithReturn(false);
-    setRet(emptyLegDetail());
+    setEntries([]);
+    setManualFlight("");
+    setManualDetail(emptyLegDetail());
   };
 
-  // Pick a scheduled flight → auto-fill its detail block. The round-trip option
-  // resets so the user re-opts-in per flight.
-  const onFlightChange = (flightNo: string) => {
-    setFlight(flightNo);
-    setWithReturn(false);
-    setRet(emptyLegDetail());
-    const sf = availableFlights.find((f) => f.flight === flightNo);
-    setPrimary(sf ? legDetailFromSchedule(sf, date) : emptyLegDetail());
+  // Toggle a scheduled flight in/out of the selection. Adding one seeds its
+  // detail block from the schedule; removing drops that entry.
+  const toggleFlight = (flightNo: string) => {
+    setEntries((prev) => {
+      if (prev.some((e) => e.flight === flightNo)) {
+        return prev.filter((e) => e.flight !== flightNo);
+      }
+      const sf = scheduledFlightsForDate(date).find((f) => f.flight === flightNo);
+      return [
+        ...prev,
+        {
+          flight: flightNo,
+          detail: sf ? legDetailFromSchedule(sf, date) : emptyLegDetail(),
+          withReturn: false,
+          ret: emptyLegDetail(),
+        },
+      ];
+    });
   };
 
-  // Toggle "also order the return flight" → seed the return block from the pair,
-  // dated to the return's own schedule (same-day turnaround or a later day).
-  const onToggleReturn = (checked: boolean) => {
-    setWithReturn(checked);
-    if (checked && pairFlight) {
-      const rDate = returnFlightDate(date, primary.etd || pairFlight.etd, pairFlight);
-      setRet(legDetailFromSchedule(pairFlight, rDate));
-    } else {
-      setRet(emptyLegDetail());
-    }
-  };
+  const removeEntry = (flightNo: string) =>
+    setEntries((prev) => prev.filter((e) => e.flight !== flightNo));
 
-  // Switch entry mode → clear the in-progress flight/details (already-added legs
-  // stay). Manual mode has no schedule pairing, so the round-trip option is off.
+  const patchEntryDetail = (flightNo: string, patch: Partial<LegDetail>) =>
+    setEntries((prev) => prev.map((e) =>
+      e.flight === flightNo ? { ...e, detail: { ...e.detail, ...patch } } : e));
+
+  const patchEntryReturn = (flightNo: string, patch: Partial<LegDetail>) =>
+    setEntries((prev) => prev.map((e) =>
+      e.flight === flightNo ? { ...e, ret: { ...e.ret, ...patch } } : e));
+
+  // Toggle "also order the return flight" for one entry → seed its return block
+  // from the scheduled pair, dated to the return's own schedule (same-day
+  // turnaround or a later day).
+  const toggleEntryReturn = (flightNo: string, checked: boolean) =>
+    setEntries((prev) => prev.map((e) => {
+      if (e.flight !== flightNo) return e;
+      const pair = pairScheduledFlight(flightNo);
+      if (checked && pair) {
+        const rDate = returnFlightDate(date, e.detail.etd || pair.etd, pair);
+        return { ...e, withReturn: true, ret: legDetailFromSchedule(pair, rDate) };
+      }
+      return { ...e, withReturn: false, ret: emptyLegDetail() };
+    }));
+
+  // Switch entry mode → clear the in-progress selection (already-added legs stay).
   const onModeChange = (next: "auto" | "manual") => {
     setFlightMode(next);
-    setFlight("");
-    setPrimary(emptyLegDetail());
-    setWithReturn(false);
-    setRet(emptyLegDetail());
+    setEntries([]);
+    setManualFlight("");
+    setManualDetail(emptyLegDetail());
   };
 
   const resetForm = () => {
-    setFlight("");
-    setPrimary(emptyLegDetail());
-    setWithReturn(false);
-    setRet(emptyLegDetail());
+    setEntries([]);
+    setManualFlight("");
+    setManualDetail(emptyLegDetail());
   };
 
   // Build one leg (flight # + its detail), validating and cleaning the roster.
@@ -3050,20 +3150,31 @@ function OrderCreate({
     };
   };
 
-  const addLeg = () => {
-    if (!flight.trim()) {
-      toast.error(flightMode === "manual" ? "Flight number is required." : "Select a flight first.");
-      return;
-    }
-    // The primary leg always departs on the Step-1 date.
-    const primaryLeg = buildLeg(flight, { ...primary, date }, "Flight");
-    if (!primaryLeg) return;
-    const newLegs: LegDraft[] = [primaryLeg];
-    if (withReturn && pairFlight) {
-      // Validate the return before committing either — an all-or-nothing add.
-      const returnLeg = buildLeg(pairFlight.flight, ret, `Return flight ${pairFlight.flight}`);
-      if (!returnLeg) return;
-      newLegs.push(returnLeg);
+  const addLegs = () => {
+    const newLegs: LegDraft[] = [];
+    if (flightMode === "manual") {
+      if (!manualFlight.trim()) { toast.error("Flight number is required."); return; }
+      // The leg always departs on the Step-1 date.
+      const leg = buildLeg(manualFlight, { ...manualDetail, date }, "Flight");
+      if (!leg) return;
+      newLegs.push(leg);
+    } else {
+      if (entries.length === 0) { toast.error("Select at least one flight."); return; }
+      // Validate every selected flight (and its return) before committing any —
+      // an all-or-nothing add across the whole batch.
+      for (const e of entries) {
+        const primaryLeg = buildLeg(e.flight, { ...e.detail, date }, `Flight ${e.flight}`);
+        if (!primaryLeg) return;
+        newLegs.push(primaryLeg);
+        if (e.withReturn) {
+          const pair = pairScheduledFlight(e.flight);
+          if (pair) {
+            const returnLeg = buildLeg(pair.flight, e.ret, `Return flight ${pair.flight}`);
+            if (!returnLeg) return;
+            newLegs.push(returnLeg);
+          }
+        }
+      }
     }
     setLegs((prev) => [...prev, ...newLegs]);
     resetForm();
@@ -3100,6 +3211,12 @@ function OrderCreate({
 
   const totalPax = legs.reduce((s, l) => s + l.pax, 0);
   const totalMeals = legs.reduce((s, l) => s + l.specialMeals, 0);
+
+  // How many legs the current Add will produce (each selected flight, plus any
+  // opted-in returns) — drives the Add button's label and disabled state.
+  const pendingCount = flightMode === "manual"
+    ? (manualFlight.trim() ? 1 : 0)
+    : entries.reduce((n, e) => n + 1 + (e.withReturn && pairScheduledFlight(e.flight) ? 1 : 0), 0);
 
   return (
     <div className="mx-auto w-full max-w-5xl space-y-5">
@@ -3155,7 +3272,7 @@ function OrderCreate({
                 required
                 hint={
                   flightMode === "auto"
-                    ? "Flights scheduled on the selected date. Choosing one auto-fills the scope, airline, sector, ETD and crew below — all still editable."
+                    ? "Flights scheduled on the selected date. Pick as many as you need — each one gets its own details block below to fill in individually."
                     : "Type the flight number, then enter every field below by hand. No schedule is used."
                 }
               >
@@ -3163,30 +3280,32 @@ function OrderCreate({
               </FieldLabel>
               {flightMode === "auto" ? (
                 <>
-                  <SearchSelect
-                    value={flight}
-                    onChange={onFlightChange}
+                  <MultiSearchSelect
+                    values={selectedFlights}
+                    onToggle={toggleFlight}
                     disabled={availableFlights.length === 0}
                     options={availableFlights.map((f) => ({
                       value: f.flight,
                       label: `${f.flight} · ${f.from}→${f.to} · ${f.etd} · ${f.airline}`,
                       keywords: `${f.from} ${f.to} ${f.airline}`,
                     }))}
-                    placeholder={availableFlights.length ? "Select a flight…" : "No flights scheduled for this date"}
+                    placeholder={availableFlights.length ? "Select one or more flights…" : "No flights scheduled for this date"}
                     searchPlaceholder="Search flight, sector, airline…"
                     emptyText="No matching flight."
                   />
                   <p className="mt-1 text-[11px] text-muted-foreground">
                     {availableFlights.length
-                      ? `${availableFlights.length} flight${availableFlights.length === 1 ? "" : "s"} operating on this date`
+                      ? selectedFlights.length
+                        ? `${selectedFlights.length} selected · ${availableFlights.length} operating on this date`
+                        : `${availableFlights.length} flight${availableFlights.length === 1 ? "" : "s"} operating on this date`
                       : "No scheduled flights left for this date — try another date."}
                   </p>
                 </>
               ) : (
                 <>
                   <Input
-                    value={flight}
-                    onChange={(e) => setFlight(e.target.value.toUpperCase())}
+                    value={manualFlight}
+                    onChange={(e) => setManualFlight(e.target.value.toUpperCase())}
                     placeholder="e.g. BS-203"
                     className="mt-1"
                   />
@@ -3197,47 +3316,6 @@ function OrderCreate({
               )}
             </div>
           </div>
-
-          {/* Round-trip toggle — auto mode only (it relies on the schedule).
-              Appears once a flight with a scheduled pair is picked; ticking it
-              loads the paired leg so both can be ordered together. */}
-          {flightMode === "auto" && flight && pairFlight && (
-            <label
-              className={cn(
-                "mt-4 flex cursor-pointer items-start gap-3 rounded-lg border p-3.5 transition-colors",
-                withReturn
-                  ? "border-primary/40 bg-primary/[0.04]"
-                  : "border-border bg-muted/20 hover:bg-muted/40",
-              )}
-            >
-              <input
-                type="checkbox"
-                checked={withReturn}
-                onChange={(e) => onToggleReturn(e.target.checked)}
-                className="mt-0.5 h-4 w-4 shrink-0 rounded border-input accent-primary"
-              />
-              <CornerUpLeft
-                className={cn(
-                  "mt-0.5 h-4 w-4 shrink-0",
-                  withReturn ? "text-primary" : "text-muted-foreground",
-                )}
-              />
-              <span className="text-xs leading-snug">
-                <span className="font-semibold text-foreground">
-                  Also order the {primary.direction === "Return" ? "outbound" : "return"} flight — {pairFlight.flight}
-                </span>
-                <span className="mt-0.5 block text-muted-foreground">
-                  {pairFlight.from}→{pairFlight.to} · {pairFlight.etd}. Adds a second leg with its own PAX and special-meal roster.
-                </span>
-              </span>
-            </label>
-          )}
-          {flightMode === "auto" && flight && !pairFlight && (
-            <p className="mt-3 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-              <CornerUpLeft className="h-3 w-3" />
-              No scheduled return for {flight} — this sector is one-way in the timetable.
-            </p>
-          )}
         </div>
       </section>
 
@@ -3248,71 +3326,128 @@ function OrderCreate({
           <Plane className="h-4 w-4 text-muted-foreground" />
           <h3 className="text-sm font-semibold text-foreground">Flight Details</h3>
           <span className="text-[11px] text-muted-foreground">
-            {flightMode === "auto" ? "auto-filled — edit anything that differs" : "enter each field for this flight"}
+            {flightMode === "auto" ? "auto-filled per flight — edit anything that differs" : "enter each field for this flight"}
           </span>
         </header>
         <div className="p-5">
-          {flightMode === "auto" && !flight ? (
+          {flightMode === "manual" ? (
+            <FlightLegFields value={manualDetail} onChange={patchManual} autoFocusPax showAuto={false} />
+          ) : entries.length === 0 ? (
             <div className="rounded-lg border border-dashed border-border bg-muted/20 px-4 py-12 text-center">
               <Plane className="mx-auto mb-2 h-6 w-6 text-muted-foreground/50" />
-              <p className="text-sm text-muted-foreground">Select a flight above to load its details.</p>
+              <p className="text-sm text-muted-foreground">Select one or more flights above to fill their details individually.</p>
             </div>
           ) : (
             <div className="space-y-5">
-              {/* Primary flight — wrapped in a labelled card only in round-trip mode */}
-              {withReturn ? (
-                <div className="rounded-lg border border-border bg-muted/10 p-4">
-                  <div className="mb-3 flex flex-wrap items-center gap-2">
-                    <Plane className="h-3.5 w-3.5 text-primary" />
-                    <span className="text-xs font-semibold uppercase tracking-wider text-foreground">
-                      {primary.direction === "Return" ? "Return Flight" : "Outbound Flight"}
-                    </span>
-                    <span className="text-xs font-semibold text-foreground">{flight}</span>
-                    <DirectionBadge direction={primary.direction} />
-                    <span className="text-xs text-muted-foreground">
-                      {primary.from}→{primary.to} · {date} · {primary.etd}
-                    </span>
-                  </div>
-                  <FlightLegFields value={primary} onChange={patchPrimary} autoFocusPax showAuto={flightMode === "auto"} />
-                </div>
-              ) : (
-                <FlightLegFields value={primary} onChange={patchPrimary} autoFocusPax showAuto={flightMode === "auto"} />
-              )}
-
-              {/* Paired return flight — its own schedule date (below) and time */}
-              {withReturn && pairFlight && (
-                <div className="rounded-lg border border-primary/30 bg-primary/[0.03] p-4">
-                  <div className="mb-3 flex flex-wrap items-center gap-2">
-                    <CornerUpLeft className="h-3.5 w-3.5 text-primary" />
-                    <span className="text-xs font-semibold uppercase tracking-wider text-foreground">
-                      {ret.direction === "Return" ? "Return Flight" : "Outbound Flight"}
-                    </span>
-                    <span className="text-xs font-semibold text-foreground">{pairFlight.flight}</span>
-                    <DirectionBadge direction={ret.direction} />
-                    <span className="text-xs text-muted-foreground">
-                      {ret.from}→{ret.to} · {ret.date} · {ret.etd}
-                    </span>
-                    {returnDayGap > 0 && (
-                      <span className="rounded-sm bg-navy/10 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-navy">
-                        {returnDayGap === 1 ? "Next day" : `+${returnDayGap} days`}
+              {entries.map((e, idx) => {
+                const pair = pairScheduledFlight(e.flight);
+                // Whole-day gap between the outbound date and the return's own
+                // date (0 = same day). Drives the "next day" badge.
+                const returnDayGap = e.withReturn && e.ret.date && e.ret.date !== date
+                  ? Math.round((Date.parse(e.ret.date) - Date.parse(date)) / 86_400_000)
+                  : 0;
+                return (
+                  <div key={e.flight} className="rounded-lg border border-border bg-muted/10 p-4">
+                    {/* Flight header + remove-from-selection */}
+                    <div className="mb-3 flex flex-wrap items-center gap-2">
+                      <Plane className="h-3.5 w-3.5 text-primary" />
+                      <span className="text-xs font-semibold text-foreground">{e.flight}</span>
+                      <DirectionBadge direction={e.detail.direction} />
+                      <span className="text-xs text-muted-foreground">
+                        {e.detail.from}→{e.detail.to} · {date} · {e.detail.etd}
                       </span>
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        className="ml-auto h-7 w-7"
+                        onClick={() => removeEntry(e.flight)}
+                        aria-label={`Remove flight ${e.flight}`}
+                      >
+                        <X className="h-3.5 w-3.5 text-destructive" />
+                      </Button>
+                    </div>
+                    <FlightLegFields
+                      value={e.detail}
+                      onChange={(patch) => patchEntryDetail(e.flight, patch)}
+                      autoFocusPax={idx === 0}
+                      showAuto
+                    />
+
+                    {/* Round-trip toggle for this flight (relies on the schedule). */}
+                    {pair ? (
+                      <label
+                        className={cn(
+                          "mt-4 flex cursor-pointer items-start gap-3 rounded-lg border p-3.5 transition-colors",
+                          e.withReturn
+                            ? "border-primary/40 bg-primary/[0.04]"
+                            : "border-border bg-muted/20 hover:bg-muted/40",
+                        )}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={e.withReturn}
+                          onChange={(ev) => toggleEntryReturn(e.flight, ev.target.checked)}
+                          className="mt-0.5 h-4 w-4 shrink-0 rounded border-input accent-primary"
+                        />
+                        <CornerUpLeft
+                          className={cn(
+                            "mt-0.5 h-4 w-4 shrink-0",
+                            e.withReturn ? "text-primary" : "text-muted-foreground",
+                          )}
+                        />
+                        <span className="text-xs leading-snug">
+                          <span className="font-semibold text-foreground">
+                            Also order the {e.detail.direction === "Return" ? "outbound" : "return"} flight — {pair.flight}
+                          </span>
+                          <span className="mt-0.5 block text-muted-foreground">
+                            {pair.from}→{pair.to} · {pair.etd}. Adds a second leg with its own PAX and special-meal roster.
+                          </span>
+                        </span>
+                      </label>
+                    ) : (
+                      <p className="mt-3 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                        <CornerUpLeft className="h-3 w-3" />
+                        No scheduled return for {e.flight} — this sector is one-way in the timetable.
+                      </p>
+                    )}
+
+                    {/* Paired return flight — its own schedule date (below) and time */}
+                    {e.withReturn && pair && (
+                      <div className="mt-4 rounded-lg border border-primary/30 bg-primary/[0.03] p-4">
+                        <div className="mb-3 flex flex-wrap items-center gap-2">
+                          <CornerUpLeft className="h-3.5 w-3.5 text-primary" />
+                          <span className="text-xs font-semibold uppercase tracking-wider text-foreground">
+                            {e.ret.direction === "Return" ? "Return Flight" : "Outbound Flight"}
+                          </span>
+                          <span className="text-xs font-semibold text-foreground">{pair.flight}</span>
+                          <DirectionBadge direction={e.ret.direction} />
+                          <span className="text-xs text-muted-foreground">
+                            {e.ret.from}→{e.ret.to} · {e.ret.date} · {e.ret.etd}
+                          </span>
+                          {returnDayGap > 0 && (
+                            <span className="rounded-sm bg-navy/10 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-navy">
+                              {returnDayGap === 1 ? "Next day" : `+${returnDayGap} days`}
+                            </span>
+                          )}
+                        </div>
+                        <div className="mb-4 max-w-[240px]">
+                          <FieldLabel auto required hint="The return flight's own departure date, from its schedule — the same day for a turnaround, or a later day for an overnight return. Editable if it differs.">
+                            Return Date
+                          </FieldLabel>
+                          <Input
+                            type="date"
+                            value={e.ret.date}
+                            min={date}
+                            onChange={(ev) => patchEntryReturn(e.flight, { date: ev.target.value })}
+                            className="mt-1"
+                          />
+                        </div>
+                        <FlightLegFields value={e.ret} onChange={(patch) => patchEntryReturn(e.flight, patch)} />
+                      </div>
                     )}
                   </div>
-                  <div className="mb-4 max-w-[240px]">
-                    <FieldLabel auto required hint="The return flight's own departure date, from its schedule — the same day for a turnaround, or a later day for an overnight return. Editable if it differs.">
-                      Return Date
-                    </FieldLabel>
-                    <Input
-                      type="date"
-                      value={ret.date}
-                      min={date}
-                      onChange={(e) => patchReturn({ date: e.target.value })}
-                      className="mt-1"
-                    />
-                  </div>
-                  <FlightLegFields value={ret} onChange={patchReturn} />
-                </div>
-              )}
+                );
+              })}
             </div>
           )}
         </div>
@@ -3349,7 +3484,7 @@ function OrderCreate({
                       <Plane className="mx-auto mb-2 h-5 w-5 text-muted-foreground/40" />
                       <p className="text-sm text-muted-foreground">
                         No flights yet. Fill the details above and click{" "}
-                        <strong className="text-foreground">{withReturn ? "Add Both Flights" : "Add Flight"}</strong>.
+                        <strong className="text-foreground">{pendingCount > 1 ? `Add ${pendingCount} Flights` : "Add Flight"}</strong>.
                       </p>
                     </TableCell>
                   </TableRow>
@@ -3416,8 +3551,8 @@ function OrderCreate({
             </span>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" onClick={addLeg} disabled={!flight}>
-              <Plus className="mr-1.5 h-4 w-4" /> {withReturn ? "Add Both Flights" : "Add Flight"}
+            <Button variant="outline" onClick={addLegs} disabled={pendingCount === 0}>
+              <Plus className="mr-1.5 h-4 w-4" /> {pendingCount > 1 ? `Add ${pendingCount} Flights` : "Add Flight"}
             </Button>
             <Button onClick={handleSave} disabled={legs.length === 0}>
               <Save className="mr-1.5 h-4 w-4" /> Save Order
