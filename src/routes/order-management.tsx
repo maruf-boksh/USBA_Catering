@@ -3640,12 +3640,14 @@ function CrewMealCreate({
       ...prev,
       {
         flight: flight.trim().toUpperCase(),
+        airline,
         sector: `${from} → ${to}`,
+        date,
         etd,
         pax: Number(pax) || 0,
         crew: crewNum,
         specialMeals: Number(specialMeals) || 0,
-        status: "Pending",
+        status: "Pending" as FlightOrderStatus,
         direction,
         roster: [],
       },
@@ -3780,11 +3782,11 @@ function CrewMealCreate({
                       ? "bg-primary/10 text-primary"
                       : "text-muted-foreground hover:text-foreground")
                   }
-                  title={`${s.name} (${s.range})`}
+                  title={`${s.name} (${formatSlotRange(s)})`}
                 >
                   {s.name}
                   <span className="ml-1.5 text-[10px] opacity-70 tabular-nums">
-                    {s.range}
+                    {formatSlotRange(s)}
                   </span>
                 </button>
               );
