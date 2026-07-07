@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
@@ -14,15 +14,15 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  Replace, Search, AlertTriangle, ShieldAlert, Clock, Factory, Truck,
+  Replace, Search, AlertTriangle, ShieldAlert, Factory, Truck,
   LayoutGrid, CheckCircle2, CornerUpLeft, Eye, X as CloseIcon, Receipt, Plus,
 } from "lucide-react";
 import { toast } from "sonner";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import {
-  getAllAmendments, getFlightOrders, leadHoursToDeparture,
-  getLmcWindowHours, setLmcWindowHours,
-  type OrderAmendment, type LmcSeverity,
+  getAllAmendments, getFlightOrders, useFlightOrders, amendOrder,
+  leadHoursToDeparture, isLmcLead, getLmcWindowHours, setLmcWindowHours,
+  type OrderAmendment, type LmcSeverity, type FlightOrder,
 } from "@/lib/flight-orders-store";
 import { productionOrders, aircraftFleet, type Aircraft } from "@/lib/sample-data";
 import { getAuthUser } from "@/lib/auth";
@@ -45,7 +45,7 @@ import { flights, loadGalleyRecords } from "@/routes/dispatch-monitoring";
 // keyed by change id — it never mutates the amendment history.
 // ─────────────────────────────────────────────────────────────────────────────
 
-type WorkStatus = "assessing" | "actioned" | "closed"; // absent ⇒ "open"
+type WorkStatus = "actioned" | "closed"; // absent ⇒ "open"
 
 const SEVERITY_META: Record<LmcSeverity, { label: string; cls: string }> = {
   critical: { label: "Critical", cls: "bg-rose-100 text-rose-700 border-rose-200" },
@@ -56,7 +56,6 @@ const SEVERITY_META: Record<LmcSeverity, { label: string; cls: string }> = {
 
 const WORK_META: Record<"open" | WorkStatus, { label: string; cls: string }> = {
   open:      { label: "Open",      cls: "bg-rose-50 text-rose-700 border-rose-300" },
-  assessing: { label: "Assessing", cls: "bg-violet-50 text-violet-700 border-violet-300" },
   actioned:  { label: "Actioned",  cls: "bg-sky-50 text-sky-700 border-sky-300" },
   closed:    { label: "Closed",    cls: "bg-emerald-50 text-emerald-700 border-emerald-300" },
 };
@@ -102,6 +101,26 @@ const MANUAL_FT: Record<ManualType, { show: boolean; kind: FtKind; fromLabel: st
   "Schedule / Delay":       { show: true,  kind: "time",     fromLabel: "Scheduled STD", toLabel: "Revised STD" },
   "Extra / Reduced Crew":   { show: true,  kind: "number",   fromLabel: "Crew was", toLabel: "Crew now" },
   "Other":                  { show: true,  kind: "text",     fromLabel: "From (was)", toLabel: "To (now)" },
+};
+
+// Manual types that ARE order-field edits. These are routed through the amendment
+// engine (amendOrder) — updating the order's real figures and flowing into the
+// unified LMC worklist + Approval Management + Accounts exactly like an in-window
+// Order Management edit — instead of being stored as a standalone note. The rest
+// (Aircraft Swap, Cancellation, Nil Catering, Other) have no order field and stay
+// as manual log entries.
+const MANUAL_ORDER_FIELD: Partial<Record<ManualType, "pax" | "crew" | "specialMeals" | "etd">> = {
+  "PAX Change": "pax",
+  "Special Meal Change": "specialMeals",
+  "Extra / Reduced Crew": "crew",
+  "Schedule / Delay": "etd",
+};
+
+// One flight in the Log LMC picker — the order id + current figures ride along so
+// the form can read real values and amend the exact order behind the flight.
+type FlightOption = {
+  id: string; flight: string; sector: string; orderNo: string; date: string; etd: string;
+  pax: number; crew: number; specialMeals: number;
 };
 
 export type ManualLmc = {
@@ -300,12 +319,19 @@ export default function LmcPage() {
     toast.success(`LMC cut-off set to ${n}h — applies to changes from now on.`);
   };
 
-  const orders = useMemo(() => getFlightOrders(), []);
+  // Subscribe to the live order store so a manual LMC that amends an order (see
+  // LogLmcDialog) re-renders this worklist immediately with the new amendment.
+  const orders = useFlightOrders();
   const orderById = useMemo(() => new Map(orders.map((o) => [o.id, o])), [orders]);
-  // Distinct flights (latest order per flight) — powers the Log LMC picker.
+  // Distinct flights (latest order per flight) — powers the Log LMC picker. Each
+  // option carries the order's id + current figures so the picker can prefill the
+  // "was" value from real data and route order-field changes through amendOrder.
   const flightOptions = useMemo(() => {
-    const m = new Map<string, { flight: string; sector: string; orderNo: string; date: string; etd: string }>();
-    for (const o of orders) if (!m.has(o.flight)) m.set(o.flight, { flight: o.flight, sector: o.sector, orderNo: o.orderNo, date: o.date, etd: o.etd });
+    const m = new Map<string, FlightOption>();
+    for (const o of orders) if (!m.has(o.flight)) m.set(o.flight, {
+      id: o.id, flight: o.flight, sector: o.sector, orderNo: o.orderNo, date: o.date, etd: o.etd,
+      pax: o.pax, crew: o.crew ?? 0, specialMeals: o.specialMeals ?? 0,
+    });
     return [...m.values()].sort((a, b) => a.flight.localeCompare(b.flight));
   }, [orders]);
 
@@ -340,7 +366,9 @@ export default function LmcPage() {
           : "awaiting";
         return {
           it,
-          status: (workStatus[it.id] ?? "open") as "open" | WorkStatus,
+          // Coerce anything that isn't a live work-state to "open" — this also
+          // maps the now-removed legacy "assessing" value from persisted storage.
+          status: ((s) => (s === "actioned" || s === "closed" ? s : "open"))(workStatus[it.id]) as "open" | WorkStatus,
           approval,
           decision,
           production: prodCommit(it.flight),
@@ -364,7 +392,7 @@ export default function LmcPage() {
 
   // KPIs are computed over the LMC set (the real worklist), not the filter.
   const lmc = rows.filter((r) => r.it.isLmc);
-  const openCount = lmc.filter((r) => r.status === "open" || r.status === "assessing").length;
+  const openCount = lmc.filter((r) => r.status === "open").length;
   const criticalCount = lmc.filter((r) => r.it.severity === "critical" && r.status !== "closed").length;
   const majorCount = lmc.filter((r) => r.it.severity === "major" && r.status !== "closed").length;
   const closedCount = lmc.filter((r) => r.status === "closed").length;
@@ -563,7 +591,7 @@ export default function LmcPage() {
                       </TableCell>
                       <TableCell className="text-right">
                         <Button variant="outline" size="sm" className="h-7 px-2.5 text-xs" onClick={() => setViewId(r.it.id)}>
-                          <Eye className="h-3 w-3 mr-1" /> Assess
+                          <Eye className="h-3 w-3 mr-1" /> View
                         </Button>
                       </TableCell>
                     </TableRow>
@@ -578,24 +606,24 @@ export default function LmcPage() {
       {viewRow && (
         <Dialog open onOpenChange={(v) => { if (!v) setViewId(null); }}>
           <DialogContent className="w-full max-w-[95vw] lg:max-w-2xl max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
-            <div className="bg-gradient-to-r from-slate-800 to-slate-700 text-white px-6 py-4 shrink-0">
+            <div className="bg-white text-slate-900 border-b px-6 py-4 shrink-0">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="text-[10px] text-slate-300 uppercase tracking-widest font-semibold">
+                  <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold">
                     Last Minute Change · {viewRow.it.kind === "manual" ? "Manual Log" : "Impact Assessment"}
                   </p>
-                  <h2 className="text-lg font-bold mt-0.5">{viewRow.it.flight} <span className="text-slate-300 font-normal text-sm">· {viewRow.it.sector}</span></h2>
+                  <h2 className="text-lg font-bold mt-0.5">{viewRow.it.flight} <span className="text-slate-500 font-normal text-sm">· {viewRow.it.sector}</span></h2>
                   <div className="flex flex-wrap items-center gap-2 mt-1 text-xs">
                     <Badge variant="outline" className={`h-5 px-1.5 text-[10px] font-bold uppercase ${SEVERITY_META[viewRow.it.severity].cls}`}>{SEVERITY_META[viewRow.it.severity].label}</Badge>
-                    <span className="text-slate-300">{viewRow.it.typeLabel}</span>
+                    <span className="text-slate-500">{viewRow.it.typeLabel}</span>
                     {viewRow.it.orderNo !== "—" ? (
-                      <button type="button" className="text-slate-100 underline decoration-slate-400 underline-offset-2 hover:text-white" onClick={() => openOrder(viewRow.it.orderNo)}>
+                      <button type="button" className="text-sky-700 underline decoration-sky-300 underline-offset-2 hover:text-sky-900" onClick={() => openOrder(viewRow.it.orderNo)}>
                         {viewRow.it.orderNo}
                       </button>
                     ) : (
-                      <span className="text-slate-300">{viewRow.it.orderNo}</span>
+                      <span className="text-slate-500">{viewRow.it.orderNo}</span>
                     )}
-                    <span className="text-slate-300 tabular-nums">{fmtLead(viewRow.it.leadHours)}</span>
+                    <span className="text-slate-500 tabular-nums">{fmtLead(viewRow.it.leadHours)}</span>
                     {viewRow.it.severity === "critical" && (
                       <span className="inline-flex items-center gap-1 bg-rose-500/80 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white">
                         <Receipt className="h-3 w-3" /> Chargeable
@@ -603,7 +631,7 @@ export default function LmcPage() {
                     )}
                   </div>
                 </div>
-                <button onClick={() => setViewId(null)} className="text-slate-300 hover:text-white p-1 rounded shrink-0"><CloseIcon className="h-5 w-5" /></button>
+                <button onClick={() => setViewId(null)} className="text-slate-400 hover:text-slate-700 p-1 rounded shrink-0"><CloseIcon className="h-5 w-5" /></button>
               </div>
             </div>
 
@@ -674,12 +702,7 @@ export default function LmcPage() {
                   {viewRow.approval === "awaiting" ? "Awaiting Approval" : viewRow.approval === "rejected" ? "Rejected" : WORK_META[viewRow.status].label}
                 </span>
               </span>
-              {viewRow.status === "open" && viewRow.approval !== "awaiting" && (
-                <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => { setStatus(viewRow.it.id, "assessing"); toast.info("Marked under assessment."); }}>
-                  <Clock className="h-3.5 w-3.5 mr-1" /> Start Assessment
-                </Button>
-              )}
-              {viewRow.status !== "closed" && viewRow.approval !== "awaiting" && viewRow.approval !== "rejected" && (
+              {viewRow.status === "open" && viewRow.approval !== "awaiting" && viewRow.approval !== "rejected" && (
                 <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => { setStatus(viewRow.it.id, "actioned"); toast.success("Marked actioned — downstream coordinated."); }}>
                   <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> Mark Actioned
                 </Button>
@@ -718,7 +741,7 @@ export default function LmcPage() {
 function LogLmcDialog({
   flightOptions, onClose, onSave,
 }: {
-  flightOptions: { flight: string; sector: string; orderNo: string; date: string; etd: string }[];
+  flightOptions: FlightOption[];
   onClose: () => void;
   onSave: (m: ManualLmc) => void;
 }) {
@@ -737,13 +760,32 @@ function LogLmcDialog({
 
   const match = flightOptions.find((f) => f.flight === flight);
   const ft = MANUAL_FT[type];
+  const orderField = MANUAL_ORDER_FIELD[type];
+
+  // For an order-field change the "was" side is the order's real value — read-only
+  // ground truth. Mirror the selected flight's current figure into `from` whenever
+  // the flight or type changes. Free-entry types (aircraft / other) are left alone
+  // so the user's typed value survives a flight switch (onType clears on retype).
+  useEffect(() => {
+    if (!orderField) return;
+    setFrom(match ? String(match[orderField] ?? "") : "");
+    // match is derived from `flight`; `flightOptions` refreshes when an order changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flight, type, flightOptions]);
+
+  // Order-field changes are classified by the amendment engine (lead time × impact),
+  // so the manual Severity control doesn't apply — surface the value it will get.
+  const derivedSeverity: LmcSeverity | null =
+    orderField && match
+      ? (isLmcLead(leadHoursToDeparture({ date: match.date, etd: match.etd })) ? "critical" : "minor")
+      : null;
 
   const onType = (t: ManualType) => {
     setType(t);
     if (!sevTouched) setSeverity(MANUAL_DEFAULT_SEV[t]); // auto-follow type until user overrides
-    // The control changes with the type, so reset the values. Pre-fill the
-    // schedule "from" with the flight's current STD when we know it.
-    setFrom(t === "Schedule / Delay" && match ? match.etd : "");
+    // Control changes with the type — clear both sides. The effect re-fills the
+    // "was" side for order-field types; free-entry types start blank.
+    setFrom("");
     setTo("");
   };
 
@@ -752,6 +794,15 @@ function LogLmcDialog({
     const val = which === "from" ? from : to;
     const setVal = which === "from" ? setFrom : setTo;
     const label = which === "from" ? ft.fromLabel : ft.toLabel;
+    // The "was" side of an order-field change is locked to the order's real value.
+    if (which === "from" && orderField) {
+      return (
+        <div>
+          <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</label>
+          <Input value={val} readOnly disabled placeholder={match ? "" : "Select a flight first"} className="h-9 mt-1 text-sm bg-muted/50" />
+        </div>
+      );
+    }
     return (
       <div>
         <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</label>
@@ -779,6 +830,34 @@ function LogLmcDialog({
     if (!flight.trim()) { toast.error("Pick or enter a flight."); return; }
     if (!reason.trim()) { toast.error("A reason is required for a last-minute change."); return; }
     const user = getAuthUser();
+
+    // Order-field change → run it through the amendment engine so the order's real
+    // figures update and it flows into the same worklist / Approval / Accounts path
+    // as any in-window Order Management edit (rather than a disconnected note).
+    if (orderField) {
+      if (!match) { toast.error("That flight has no order to amend."); return; }
+      if (!to.trim()) { toast.error("Enter the new value."); return; }
+      let patch: Partial<FlightOrder>;
+      if (orderField === "etd") {
+        patch = { etd: to.trim() };
+      } else {
+        const n = Number(to);
+        if (!Number.isFinite(n) || n < 0) { toast.error("Enter a valid number."); return; }
+        patch = { [orderField]: n } as Partial<FlightOrder>;
+      }
+      const rev = amendOrder(match.id, patch, {
+        by: user?.name ?? "—",
+        role: user?.role ?? "Operations",
+        reason: reason.trim(),
+      });
+      if (!rev) { toast.info("No change — that already matches the current order."); return; }
+      toast.success(`${type} on ${flight} — order amended${rev.isLmc ? " (last-minute change)" : ""}.`);
+      onClose();
+      return;
+    }
+
+    // Non-order operational event (aircraft swap, cancellation, nil-catering, other)
+    // — no order field to touch, so keep it as a standalone manual LMC log entry.
     const leadHours = match ? leadHoursToDeparture({ date: match.date, etd: match.etd }) : null;
     onSave({
       id: `MLMC-${Date.now().toString(36)}`,
@@ -800,10 +879,10 @@ function LogLmcDialog({
   return (
     <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
       <DialogContent className="w-full max-w-[95vw] sm:max-w-lg p-0 overflow-hidden">
-        <div className="bg-gradient-to-r from-slate-800 to-slate-700 text-white px-6 py-4">
-          <p className="text-[10px] text-slate-300 uppercase tracking-widest font-semibold">Operations</p>
+        <div className="bg-white text-slate-900 border-b px-6 py-4">
+          <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold">Operations</p>
           <h2 className="text-lg font-bold mt-0.5">Log Last-Minute Change</h2>
-          <p className="text-xs text-slate-300 mt-0.5">Record an operational LMC that isn't an order edit — aircraft swap, cancellation, nil-catering, delay.</p>
+          <p className="text-xs text-slate-500 mt-0.5">Record an operational LMC that isn't an order edit — aircraft swap, cancellation, nil-catering, delay.</p>
         </div>
         <div className="px-6 py-5 space-y-4">
           <div>
@@ -838,14 +917,23 @@ function LogLmcDialog({
             </div>
             <div>
               <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Severity</label>
-              <Select value={severity} onValueChange={(v) => { setSeverity(v as LmcSeverity); setSevTouched(true); }}>
-                <SelectTrigger className="h-9 mt-1 text-sm"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {(["critical", "major", "minor", "info"] as LmcSeverity[]).map((s) => (
-                    <SelectItem key={s} value={s}>{SEVERITY_META[s].label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              {orderField ? (
+                <div className="h-9 mt-1 flex items-center gap-2 rounded-md border border-input bg-muted/50 px-3">
+                  <Badge variant="outline" className={`h-5 px-1.5 text-[10px] font-bold uppercase ${SEVERITY_META[derivedSeverity ?? "minor"].cls}`}>
+                    {SEVERITY_META[derivedSeverity ?? "minor"].label}
+                  </Badge>
+                  <span className="text-[11px] text-muted-foreground">auto · from lead time</span>
+                </div>
+              ) : (
+                <Select value={severity} onValueChange={(v) => { setSeverity(v as LmcSeverity); setSevTouched(true); }}>
+                  <SelectTrigger className="h-9 mt-1 text-sm"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {(["critical", "major", "minor", "info"] as LmcSeverity[]).map((s) => (
+                      <SelectItem key={s} value={s}>{SEVERITY_META[s].label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
             </div>
           </div>
 

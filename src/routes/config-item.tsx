@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { useMemo, useState, useSyncExternalStore } from "react";
+import { useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -524,6 +524,96 @@ function BatchToggle({ master }: { master: ItemRow }) {
   );
 }
 
+/** Read-only Item profile shown by the row "View" action — a sectioned profile
+ *  (header + grouped attributes) instead of the generic flat field dump. Mirrors
+ *  the Edit form's grouping and reads derived allocation / batch-tracking from the
+ *  same source the table uses, so the view stays truthful. */
+function ItemProfileView({ row }: { row: ItemRow }) {
+  const active = row.status === "Active";
+  const allocation = getAllocationMethodForMaster(row.id);
+  const batchTracked = isBatchTrackedForMaster(row.id);
+
+  const wh = row.warehouseId
+    ? ALL_WAREHOUSES.find((w) => w.id === row.warehouseId) ?? customWarehousesRegistry.find((w) => w.id === row.warehouseId)
+    : undefined;
+  const officeId = row.officeId ?? wh?.officeId;
+  const off = officeId
+    ? ALL_OFFICES.find((o) => o.id === officeId) ?? customOfficesRegistry.find((o) => o.id === officeId)
+    : undefined;
+  const hasLocation = !!(off || wh || row.binLocation);
+
+  const Field = ({ label, children }: { label: string; children?: ReactNode }) => (
+    <div className="min-w-0">
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">{label}</div>
+      <div className="text-sm font-medium mt-0.5 break-words">{children == null || children === "" ? "—" : children}</div>
+    </div>
+  );
+  const Section = ({ title, children }: { title: string; children: ReactNode }) => (
+    <div>
+      <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">{title}</div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3 rounded-lg border border-border bg-muted/30 p-4">
+        {children}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="space-y-5">
+      {/* Header — item identity at a glance */}
+      <div className="flex items-start justify-between gap-4 border-b border-border pb-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h3 className="text-lg font-bold truncate">{row.name}</h3>
+            <span className={cn(
+              "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold",
+              active ? "bg-success/10 text-success" : "bg-muted text-muted-foreground",
+            )}>
+              {active ? <CheckCircle className="h-3 w-3" /> : <XCircle className="h-3 w-3" />} {row.status}
+            </span>
+          </div>
+          <div className="text-xs text-muted-foreground mt-1 flex items-center gap-2 flex-wrap">
+            <span className="font-mono">{row.code}</span>
+            <span>·</span>
+            <span>{row.itemType}</span>
+          </div>
+        </div>
+        <div className="shrink-0 text-right">
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Item ID</div>
+          <div className="font-mono text-sm font-semibold">{row.id}</div>
+        </div>
+      </div>
+
+      <Section title="Classification">
+        <Field label="Category">{row.category}</Field>
+        <Field label="Sub Category">{row.subCategory}</Field>
+        <Field label="Primary UOM">{row.uom}</Field>
+      </Section>
+
+      <Section title="Costing & Nutrition">
+        <Field label="Cost Price">{row.costPrice != null ? `৳ ${row.costPrice}` : ""}</Field>
+        <Field label="Weight">{row.weightG ? `${row.weightG} g` : ""}</Field>
+        <Field label="Energy">{row.kcal ? `${row.kcal} kcal` : ""}</Field>
+      </Section>
+
+      <Section title="Inventory & Tracking">
+        <Field label="Allocation Method">{allocation}</Field>
+        <Field label="Batch Tracked">{batchTracked ? "Yes" : "No"}</Field>
+        <Field label="Storage">{row.storage}</Field>
+        {row.currentStock != null && <Field label="Current Stock">{`${row.currentStock} ${row.uom}`}</Field>}
+        {row.reorderLevel != null && <Field label="Reorder Level">{`${row.reorderLevel} ${row.uom}`}</Field>}
+      </Section>
+
+      {hasLocation && (
+        <Section title="Default Location">
+          <Field label="Office">{off ? `${off.code} — ${off.name}` : ""}</Field>
+          <Field label="Warehouse">{wh ? `${wh.code} — ${wh.name}` : ""}</Field>
+          <Field label="Bin">{row.binLocation}</Field>
+        </Section>
+      )}
+    </div>
+  );
+}
+
 function ItemList({
   data, onToggle, editors,
 }: {
@@ -662,6 +752,7 @@ function ItemList({
           row={r}
           actions={["view", "edit", "print"]}
           onSave={editors.onSave}
+          detail={<ItemProfileView row={r} />}
           editDetail={({ save, close }) => <ItemEditForm row={r} onSubmit={save} onClose={close} />}
         />
       )}

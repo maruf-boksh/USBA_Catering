@@ -385,13 +385,13 @@ function EntryViewModal({ entry, onClose }: { entry: WfMaintenanceApproval; onCl
           )}
           {entry.vendor && (
             <div>
-              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Vendor</p>
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Service Provider</p>
               <p className="text-sm">{entry.vendor}</p>
             </div>
           )}
           {entry.expenseCost !== undefined && (
             <div>
-              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Expense Cost</p>
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Maintenance Cost</p>
               <p className="text-sm font-semibold tabular-nums">৳ {entry.expenseCost.toLocaleString()}</p>
             </div>
           )}
@@ -433,11 +433,14 @@ function SendToAccountsModal({
   onSubmit: (data: { accountsHeadId: string; vendor: string; expenseCost: number }) => void;
 }) {
   const accountsHeadId = `ACH-${entry.id.replace("MNT-", "")}`;
-  const [vendorList, setVendorList] = useState<string[]>(DEFAULT_VENDORS);
-  const [vendor, setVendor] = useState("");
+  // Pre-fill with the provider / cost captured when the maintenance was logged.
+  const [vendorList, setVendorList] = useState<string[]>(
+    entry.vendor && !DEFAULT_VENDORS.includes(entry.vendor) ? [...DEFAULT_VENDORS, entry.vendor] : DEFAULT_VENDORS,
+  );
+  const [vendor, setVendor] = useState(entry.vendor ?? "");
   const [addingNew, setAddingNew] = useState(false);
   const [newVendor, setNewVendor] = useState("");
-  const [expenseCost, setExpenseCost] = useState("");
+  const [expenseCost, setExpenseCost] = useState(entry.expenseCost != null ? String(entry.expenseCost) : "");
 
   const handleVendorChange = (v: string) => {
     if (v === "__add_new__") {
@@ -597,12 +600,30 @@ function MaintenanceCreate({
   const [serviceDate, setServiceDate] = useState(today);
   const [nextDue, setNextDue] = useState(sixMonthsOut);
   const [workType, setWorkType] = useState<WfMaintenanceApproval["workType"]>("Routine");
+  const [provider, setProvider] = useState("");
+  const [providerList, setProviderList] = useState<string[]>(DEFAULT_VENDORS);
+  const [addingProvider, setAddingProvider] = useState(false);
+  const [newProvider, setNewProvider] = useState("");
+  const [cost, setCost] = useState("");
   const [notes, setNotes] = useState("");
 
   const selectedAsset = assets.find((a) => a.id === assetId);
 
+  const onProviderChange = (v: string) => {
+    if (v === "__add_new__") { setAddingProvider(true); setProvider(""); }
+    else { setAddingProvider(false); setProvider(v); }
+  };
+  const addNewProvider = () => {
+    const t = newProvider.trim();
+    if (!t) return;
+    setProviderList((p) => (p.includes(t) ? p : [...p, t]));
+    setProvider(t); setAddingProvider(false); setNewProvider("");
+  };
+
   const save = () => {
     if (!selectedAsset) { toast.error("Select an asset."); return; }
+    const effectiveProvider = (addingProvider ? newProvider.trim() : provider).trim();
+    const costNum = parseFloat(cost);
     onSave({
       id: nextLogId,
       assetId: selectedAsset.id,
@@ -610,6 +631,8 @@ function MaintenanceCreate({
       serviceDate,
       nextDue,
       workType,
+      vendor: effectiveProvider || undefined,
+      expenseCost: cost !== "" && !isNaN(costNum) && costNum >= 0 ? costNum : undefined,
       notes: notes.trim() || undefined,
       submittedAt: today,
       status: "Logged",
@@ -651,6 +674,43 @@ function MaintenanceCreate({
             <select value={workType} onChange={(e) => setWorkType(e.target.value as WfMaintenanceApproval["workType"])} className={selectCls}>
               {WORK_TYPES.map((w) => <option key={w}>{w}</option>)}
             </select>
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Service Provider</Label>
+            <select
+              value={addingProvider ? "__add_new__" : provider}
+              onChange={(e) => onProviderChange(e.target.value)}
+              className={selectCls}
+            >
+              <option value="">Select provider…</option>
+              {providerList.map((v) => <option key={v} value={v}>{v}</option>)}
+              <option value="__add_new__">+ Add New Provider</option>
+            </select>
+            {addingProvider && (
+              <div className="flex gap-2 mt-2">
+                <Input
+                  value={newProvider}
+                  onChange={(e) => setNewProvider(e.target.value)}
+                  placeholder="Enter provider name"
+                  className="flex-1"
+                  onKeyDown={(e) => e.key === "Enter" && addNewProvider()}
+                />
+                <Button size="sm" variant="outline" onClick={addNewProvider}>Add</Button>
+                <Button size="sm" variant="ghost" onClick={() => { setAddingProvider(false); setNewProvider(""); }}>Cancel</Button>
+              </div>
+            )}
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Maintenance Cost (৳)</Label>
+            <Input
+              type="number"
+              min="0"
+              step="0.01"
+              value={cost}
+              onChange={(e) => setCost(e.target.value)}
+              placeholder="0.00"
+              className="mt-1 tabular-nums"
+            />
           </div>
           <div className="md:col-span-3">
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Notes</Label>

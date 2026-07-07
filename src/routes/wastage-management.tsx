@@ -28,10 +28,23 @@ import { toast } from "sonner";
 import { useRole } from "@/lib/roles";
 import { useWorkflow, type WfProductionEntry } from "@/lib/workflow-store";
 import { resolveProductionItem } from "@/lib/meal-recipe";
+import { inventory } from "@/lib/sample-data";
 
 // ── Shared types (exported so approval-management can consume them) ────────────
 
 export type WastageType = "Production" | "Airport Store" | "Return Item";
+
+// Display labels for wastage types. The stored VALUES stay stable ("Production",
+// "Airport Store", "Return Item") so all branching / persisted data is untouched;
+// only what the user sees is renamed here.
+const WASTAGE_TYPE_LABELS: Record<WastageType, string> = {
+  "Production": "Production",
+  "Airport Store": "Galley Returns",
+  "Return Item": "Return Item",
+};
+function wastageTypeLabel(t: WastageType | ""): string {
+  return t ? WASTAGE_TYPE_LABELS[t] : "Unspecified";
+}
 
 export type WastageStatus =
   | "Pending In-Charge"
@@ -272,12 +285,22 @@ export default function WastageManagementPage() {
     return consumableReturns.filter((r) => r.date === today);
   }, [consumableReturns]);
 
+  // Item catalogue for the "Name of RM / PM / FG" picker. Prefer the live
+  // inventory-items store; fall back to the seed inventory so the field always
+  // loads items — even before the Inventory page has been opened and regardless
+  // of whether a Wastage Type has been picked.
+  const itemSource = useMemo(
+    () => (inventoryItems.length > 0
+      ? inventoryItems
+      : inventory.map((i) => ({ id: i.id, name: i.name, stock: i.stock, uom: i.uom }))),
+    [inventoryItems],
+  );
+
   const stockSuggestions = useMemo(() => {
-    if (form.wastageType !== "Production" && form.wastageType !== "Airport Store") return [];
     if (!form.itemName.trim()) return [];
     const q = form.itemName.toLowerCase();
-    return inventoryItems.filter((i) => i.name.toLowerCase().includes(q)).slice(0, 8);
-  }, [inventoryItems, form.itemName, form.wastageType]);
+    return itemSource.filter((i) => i.name.toLowerCase().includes(q)).slice(0, 8);
+  }, [itemSource, form.itemName]);
 
   // ── Derived ────────────────────────────────────────────────────────────────
 
@@ -302,7 +325,6 @@ export default function WastageManagementPage() {
   // ── Submit ─────────────────────────────────────────────────────────────────
 
   const handleSubmit = () => {
-    if (!form.wastageType) { toast.error("Wastage type is required."); return; }
     if (!form.itemName.trim()) { toast.error("Item name is required."); return; }
     if (!form.disposalQty || isNaN(Number(form.disposalQty)) || Number(form.disposalQty) <= 0) {
       toast.error("Valid disposal quantity is required."); return;
@@ -320,7 +342,7 @@ export default function WastageManagementPage() {
     const newEntry: WastageEntry = {
       id: genId(entries),
       reportingDate: todayDate(),
-      wastageType: form.wastageType as WastageType, // guaranteed non-empty (validated above)
+      wastageType: form.wastageType as WastageType, // optional — may be "" (Unspecified); type-specific features just don't trigger
       itemName: form.itemName.trim(),
       packageBatchSize: form.packageBatchSize.trim() || "N/A",
       batchCode: form.batchCode.trim() || "N/A",
@@ -389,7 +411,7 @@ export default function WastageManagementPage() {
     <>
       <PageHeader
         title="Wastage Management"
-        subtitle="Production & Airport Store Wastage — Disposal Reports & Approval Tracking"
+        subtitle="Production & Galley Returns Wastage — Disposal Reports & Approval Tracking"
       />
 
       <div className="usb-livery-stripe h-1 rounded-full mb-5" aria-hidden />
@@ -408,7 +430,7 @@ export default function WastageManagementPage() {
           <TabsList className="h-8">
             <TabsTrigger value="all"           className="text-xs px-3 h-7">All</TabsTrigger>
             <TabsTrigger value="Production"    className="text-xs px-3 h-7">Production</TabsTrigger>
-            <TabsTrigger value="Airport Store" className="text-xs px-3 h-7">Airport Store</TabsTrigger>
+            <TabsTrigger value="Airport Store" className="text-xs px-3 h-7">Galley Returns</TabsTrigger>
           </TabsList>
         </Tabs>
         <div className="flex items-center gap-2">
@@ -479,9 +501,10 @@ export default function WastageManagementPage() {
                           "text-[10px] font-semibold px-2 py-0.5 rounded-full",
                           entry.wastageType === "Production"    ? "bg-orange-100 text-orange-700" :
                           entry.wastageType === "Airport Store" ? "bg-sky-100 text-sky-700" :
-                                                                  "bg-violet-100 text-violet-700",
+                          entry.wastageType === "Return Item"   ? "bg-violet-100 text-violet-700" :
+                                                                  "bg-slate-100 text-slate-600",
                         )}>
-                          {entry.wastageType}
+                          {wastageTypeLabel(entry.wastageType)}
                         </span>
                       </TableCell>
                       <TableCell className="text-sm font-medium max-w-[150px] truncate">{entry.itemName}</TableCell>
@@ -541,7 +564,7 @@ export default function WastageManagementPage() {
             {/* Type selector */}
             <div className="grid grid-cols-3 gap-4">
               <div>
-                <Label className="text-xs">Wastage Type <span className="text-red-500">*</span></Label>
+                <Label className="text-xs">Wastage Type</Label>
                 <Select
                   value={form.wastageType}
                   onValueChange={(v) => setForm({
@@ -558,8 +581,8 @@ export default function WastageManagementPage() {
                 >
                   <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select type" /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="Production">Production Point</SelectItem>
-                    <SelectItem value="Airport Store">Airport Store</SelectItem>
+                    <SelectItem value="Production">Production</SelectItem>
+                    <SelectItem value="Airport Store">Galley Returns</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -813,49 +836,37 @@ export default function WastageManagementPage() {
                 {!(form.wastageType === "Production" && form.selectedRecookBatchIds.length > 1) && (
                 <div>
                   <Label className="text-xs">01. Name of RM / PM / FG <span className="text-red-500">*</span></Label>
-                  {(form.wastageType === "Production" || form.wastageType === "Airport Store") ? (
-                    <div className="relative">
-                      <Input
-                        className="mt-1 h-9 text-sm"
-                        value={form.itemName}
-                        onChange={(e) => {
-                          setForm({ ...form, itemName: e.target.value, stockItemName: e.target.value, previousStock: "" });
-                          setStockDropOpen(true);
-                        }}
-                        onFocus={() => setStockDropOpen(true)}
-                        onBlur={() => setTimeout(() => setStockDropOpen(false), 150)}
-                        placeholder="Type to search inventory items..."
-                      />
-                      {stockDropOpen && stockSuggestions.length > 0 && (
-                        <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-background border border-border rounded-md shadow-lg max-h-44 overflow-y-auto">
-                          {stockSuggestions.map((item, idx) => (
-                            <div
-                              key={idx}
-                              className="px-3 py-2 text-xs cursor-pointer hover:bg-muted/60 flex justify-between items-center"
-                              onMouseDown={(e) => e.preventDefault()}
-                              onClick={() => {
-                                setForm({ ...form, itemName: item.name, stockItemName: item.name, previousStock: String(item.stock ?? 0), disposalQtyUnit: item.uom ?? form.disposalQtyUnit });
-                                setStockDropOpen(false);
-                              }}
-                            >
-                              <span className="font-medium">{item.name}</span>
-                              <span className="text-muted-foreground tabular-nums">{item.stock ?? 0} {item.uom ?? ""}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {form.itemName.trim() && !stockDropOpen && !form.previousStock && (
-                        <p className="text-[11px] text-amber-600 mt-0.5">Not found in inventory — manual entry applied.</p>
-                      )}
-                    </div>
-                  ) : (
+                  <div className="relative">
                     <Input
                       className="mt-1 h-9 text-sm"
                       value={form.itemName}
-                      onChange={(e) => setForm({ ...form, itemName: e.target.value })}
-                      placeholder="e.g. Chinigura Rice"
+                      onChange={(e) => {
+                        setForm({ ...form, itemName: e.target.value, stockItemName: e.target.value, previousStock: "" });
+                        setStockDropOpen(true);
+                      }}
+                      onFocus={() => setStockDropOpen(true)}
+                      onBlur={() => setTimeout(() => setStockDropOpen(false), 150)}
+                      placeholder="Type to search items..."
                     />
-                  )}
+                    {stockDropOpen && stockSuggestions.length > 0 && (
+                      <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-background border border-border rounded-md shadow-lg max-h-44 overflow-y-auto">
+                        {stockSuggestions.map((item, idx) => (
+                          <div
+                            key={idx}
+                            className="px-3 py-2 text-xs cursor-pointer hover:bg-muted/60 flex justify-between items-center"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => {
+                              setForm({ ...form, itemName: item.name, stockItemName: item.name, previousStock: String(item.stock ?? 0), disposalQtyUnit: item.uom ?? form.disposalQtyUnit });
+                              setStockDropOpen(false);
+                            }}
+                          >
+                            <span className="font-medium">{item.name}</span>
+                            <span className="text-muted-foreground tabular-nums">{item.stock ?? 0} {item.uom ?? ""}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
                 )}
                 {!(form.wastageType === "Production" && form.selectedRecookBatchIds.length > 1) && (
@@ -1233,7 +1244,7 @@ export default function WastageManagementPage() {
               {/* Report meta */}
               <div className="grid grid-cols-3 gap-2 text-xs p-3 bg-muted/30 rounded-md border border-border">
                 <div><span className="text-muted-foreground">Reporting Date: </span><strong>{viewEntry.reportingDate}</strong></div>
-                <div><span className="text-muted-foreground">Type: </span><strong>{viewEntry.wastageType}</strong></div>
+                <div><span className="text-muted-foreground">Type: </span><strong>{wastageTypeLabel(viewEntry.wastageType)}</strong></div>
                 <div className="flex items-center gap-1"><span className="text-muted-foreground">Status: </span><StatusBadge status={viewEntry.status} /></div>
                 {viewEntry.returnRef && (
                   <div className="col-span-3"><span className="text-muted-foreground">Return Ref: </span><strong className="font-mono">{viewEntry.returnRef}</strong></div>
@@ -1496,7 +1507,7 @@ export default function WastageManagementPage() {
                       `─────────────────────────────────────────`,
                       `Report ID    : ${viewEntry.id}`,
                       `Reporting Date: ${viewEntry.reportingDate}`,
-                      `Wastage Type : ${viewEntry.wastageType}`,
+                      `Wastage Type : ${wastageTypeLabel(viewEntry.wastageType)}`,
                       `Status       : ${viewEntry.status}`,
                       ``,
                       `DISPOSAL DETAILS`,
@@ -1561,7 +1572,7 @@ export default function WastageManagementPage() {
             <div className="space-y-4 py-1">
               <div className="grid grid-cols-2 gap-3 text-xs p-3 bg-muted/30 rounded-md">
                 <div><span className="text-muted-foreground">Item: </span><strong>{stockLogEntry.itemName}</strong></div>
-                <div><span className="text-muted-foreground">Type: </span><strong>{stockLogEntry.wastageType}</strong></div>
+                <div><span className="text-muted-foreground">Type: </span><strong>{wastageTypeLabel(stockLogEntry.wastageType)}</strong></div>
                 <div><span className="text-muted-foreground">Qty Disposed: </span><strong className="text-red-600">{stockLogEntry.disposalQty} {stockLogEntry.disposalQtyUnit}</strong></div>
                 <div className="flex items-center gap-1"><span className="text-muted-foreground">Status: </span><StatusBadge status={stockLogEntry.status} /></div>
               </div>

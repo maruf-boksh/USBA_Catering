@@ -16,6 +16,8 @@ import {
   equipmentAssets as SEED_ASSETS,
   type EquipmentAsset,
 } from "@/lib/sample-data";
+import { getAuthUser } from "@/lib/auth";
+import { getActiveStaff } from "@/lib/staff";
 
 // Assignment shares the canonical asset register (same persisted key as the
 // Assets page), so an assignment here updates the single source of truth every
@@ -29,7 +31,6 @@ type AssignmentRecord = {
   assetId: string;
   assetName: string;
   assignTo: string;
-  custodian: string;
   date: string;
   assignedBy: string;
   note?: string;
@@ -46,10 +47,15 @@ export default function AssetAssignmentPage() {
 
   const [assetId, setAssetId] = useState("");
   const [assignTo, setAssignTo] = useState("");
-  const [custodian, setCustodian] = useState("");
   const [date, setDate] = useState(today());
-  const [assignedBy, setAssignedBy] = useState("Current User");
   const [note, setNote] = useState("");
+
+  // Assigned By is detected from the logged-in user — not hand-typed.
+  const assignedBy = getAuthUser()?.name ?? "Current User";
+
+  // Assets are assigned to an employee (the person who takes custody) — drawn
+  // from the active staff roster (same source the User Access screen manages).
+  const employees = useMemo(() => getActiveStaff(), []);
 
   // Destroyed / retired assets are out of the fleet — only live assets are assignable.
   const assignable = useMemo(
@@ -63,7 +69,7 @@ export default function AssetAssignmentPage() {
 
   const save = () => {
     if (!assetId) { toast.error("Select an asset to assign."); return; }
-    if (!assignTo.trim()) { toast.error("Enter where the asset is assigned to."); return; }
+    if (!assignTo.trim()) { toast.error("Select an employee to assign the asset to."); return; }
     const asset = assets.find((a) => a.id === assetId);
     if (!asset) { toast.error("Asset not found."); return; }
 
@@ -72,9 +78,8 @@ export default function AssetAssignmentPage() {
       assetId,
       assetName: asset.name,
       assignTo: assignTo.trim(),
-      custodian: custodian.trim(),
       date,
-      assignedBy: assignedBy.trim() || "Current User",
+      assignedBy,
       note: note.trim() || undefined,
     };
 
@@ -86,7 +91,6 @@ export default function AssetAssignmentPage() {
 
     setAssetId("");
     setAssignTo("");
-    setCustodian("");
     setNote("");
   };
 
@@ -119,21 +123,12 @@ export default function AssetAssignmentPage() {
             </div>
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Assign To *</Label>
-              <Input
-                value={assignTo}
-                onChange={(e) => setAssignTo(e.target.value)}
-                placeholder="e.g. Flight BS-203, Hot Kitchen, Galley Store"
-                className="mt-1"
-              />
-            </div>
-            <div>
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Custodian</Label>
-              <Input
-                value={custodian}
-                onChange={(e) => setCustodian(e.target.value)}
-                placeholder="Person responsible"
-                className="mt-1"
-              />
+              <select value={assignTo} onChange={(e) => setAssignTo(e.target.value)} className={selectCls}>
+                <option value="">Select employee…</option>
+                {employees.map((e) => (
+                  <option key={e.id} value={e.fullName}>{e.fullName} — {e.role}</option>
+                ))}
+              </select>
             </div>
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Assignment Date</Label>
@@ -141,7 +136,8 @@ export default function AssetAssignmentPage() {
             </div>
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Assigned By</Label>
-              <Input value={assignedBy} onChange={(e) => setAssignedBy(e.target.value)} className="mt-1" />
+              <Input value={assignedBy} disabled readOnly className="mt-1 bg-muted/50" />
+              <p className="text-[11px] text-muted-foreground mt-1">Detected from your login.</p>
             </div>
             <div className="md:col-span-2">
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Note</Label>
@@ -171,7 +167,6 @@ export default function AssetAssignmentPage() {
               <TableHead className="text-xs uppercase tracking-wider">Ref</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Asset</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Assigned To</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">Custodian</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">By</TableHead>
             </TableRow>
@@ -179,7 +174,7 @@ export default function AssetAssignmentPage() {
           <TableBody>
             {assignments.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="text-center text-sm text-muted-foreground py-8">
+                <TableCell colSpan={6} className="text-center text-sm text-muted-foreground py-8">
                   No assignments recorded yet.
                 </TableCell>
               </TableRow>
@@ -193,7 +188,6 @@ export default function AssetAssignmentPage() {
                     <div className="font-mono text-[11px] text-muted-foreground">{r.assetId}</div>
                   </TableCell>
                   <TableCell className="text-sm">{r.assignTo}</TableCell>
-                  <TableCell className="text-sm">{r.custodian || <span className="text-muted-foreground">—</span>}</TableCell>
                   <TableCell className="tabular-nums text-xs">{r.date}</TableCell>
                   <TableCell className="text-xs">{r.assignedBy}</TableCell>
                 </TableRow>

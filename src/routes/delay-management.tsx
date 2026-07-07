@@ -463,6 +463,23 @@ const SEED_EVENTS: DelayEvent[] = [
   },
 ];
 
+/** A delay event still in play — not resolved (Closed) or Rejected. The one
+ *  definition of "active", shared by the Delay Management KPI and the dashboard. */
+export const isActiveDelayEvent = (e: DelayEvent) => !["Closed", "Rejected"].includes(e.status);
+
+/** Non-hook reader of the shared delay-events store (falls back to the seed) so
+ *  other surfaces — e.g. the dashboard "Delayed Flights" KPI — reflect the same
+ *  live data the Delay Management page persists. */
+export function loadDelayEvents(): DelayEvent[] {
+  try {
+    const raw = window.localStorage.getItem("harvest-data-v1:delay-events");
+    if (raw) return JSON.parse(raw) as DelayEvent[];
+  } catch {
+    /* unavailable / corrupt — fall back to seed */
+  }
+  return SEED_EVENTS;
+}
+
 const SEED_APPROVALS: DelayApprovalRecord[] = [
   {
     id: "DA-0001",
@@ -898,7 +915,7 @@ function DelayList({
     });
   }, [events, search, filterStatus, filterFrom, filterTo]);
 
-  const active     = events.filter((e) => !["Closed", "Rejected"].includes(e.status)).length;
+  const active     = events.filter(isActiveDelayEvent).length;
   const pending    = events.filter((e) => e.status === "Approval Pending").length;
   const dispatched = events.filter((e) => e.status === "Dispatched" || e.status === "Sent To Dispatch").length;
 

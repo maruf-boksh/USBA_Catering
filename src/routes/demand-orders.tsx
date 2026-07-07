@@ -268,11 +268,6 @@ export default function DemandOrders() {
                         {activeDemand.rejectionReason && <span> — {activeDemand.rejectionReason}</span>}
                       </div>
                     )}
-                    {activeDemand.note && (
-                      <div className="text-muted-foreground italic pt-1 border-t border-border/60 mt-1.5">
-                        {activeDemand.note}
-                      </div>
-                    )}
                   </div>
 
                   {/* Item analysis — read-only split view */}

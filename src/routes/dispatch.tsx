@@ -32,6 +32,19 @@ export type DispatchStatus = "Preparing" | "Prepared" | "Ready For QC" | "Ready 
 
 type StatusLog = { status: DispatchStatus; by: string; date: string; time: string };
 
+/** Advance a dispatch record's status AND append it to the status trail, stamped
+ *  with the current date/time. Returns the record untouched when the status
+ *  hasn't actually changed (so no duplicate trail rows). Every status mutation
+ *  goes through this so the trail captures the full lifecycle, not just create +
+ *  dispatch. */
+function withStatusLog(r: DispatchRecord, status: DispatchStatus, by: string): DispatchRecord {
+  if (r.status === status) return r;
+  const now = new Date();
+  const date = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+  const time = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: true });
+  return { ...r, status, trail: [...r.trail, { status, by, date, time }] };
+}
+
 type DispatchDetail = {
   flightKitchen: { name: string; totalMeals: number; lunch: number; breakfast: number };
   bakery: { name: string; qty: number }[];
@@ -940,7 +953,7 @@ export default function Dispatch() {
       r.packagingStatus === "Packaging Done" || r.packagingStatus === "Ready for Dispatch"
     );
     const newStatus: DispatchStatus = allReady ? "Ready For Dispatch" : allDone ? "Prepared" : "Preparing";
-    setRecords((prev) => prev.map((r) => (r.id === dspId ? { ...r, status: newStatus } : r)));
+    setRecords((prev) => prev.map((r) => (r.id === dspId ? withStatusLog(r, newStatus, "System") : r)));
   };
 
   // ── Packaging handlers ──────────────────────────────────────────────────────
@@ -981,13 +994,15 @@ export default function Dispatch() {
     const current = flightQCStates.get(flight) ?? { qcState: "not-started" as QCState };
     if (current.qcState === "not-started") {
       setFlightQCStates((prev) => new Map(prev).set(flight, { qcState: "in-progress" }));
+      const dspRef = packagingRows.find((r) => r.flight === flight)?.dspRef;
+      if (dspRef) setRecords((prev) => prev.map((r) => r.id === dspRef ? withStatusLog(r, "Ready For QC", "Food Safety & QC") : r));
       toast.info(`QC started for flight ${flight}.`);
     } else if (current.qcState === "in-progress") {
       const now = new Date();
       const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
       setFlightQCStates((prev) => new Map(prev).set(flight, { qcState: "done", qcCheckedAt: timeStr }));
       const dspRef = packagingRows.find((r) => r.flight === flight)?.dspRef;
-      if (dspRef) setRecords((prev) => prev.map((r) => r.id === dspRef ? { ...r, status: "Ready For Dispatch" as DispatchStatus } : r));
+      if (dspRef) setRecords((prev) => prev.map((r) => r.id === dspRef ? withStatusLog(r, "Ready For Dispatch", "Food Safety & QC") : r));
       toast.success(`QC Done for flight ${flight}. Status → Ready for Dispatch.`);
     }
   };

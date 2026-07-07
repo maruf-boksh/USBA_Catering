@@ -26,6 +26,7 @@ import {
 import { useWorkflow } from "@/lib/workflow-store";
 import { useFlightOrders, getFlightOrders, getAllAmendments } from "@/lib/flight-orders-store";
 import { flagArrival } from "@/lib/arrival-flash";
+import { loadDelayEvents, isActiveDelayEvent } from "@/routes/delay-management";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import {
   INITIAL_PACKAGING_ROWS, buildDispatchList, FLIGHT_STATUS_BADGE,
@@ -132,15 +133,11 @@ function useDashboardKpis(period: Period, range?: DateRange) {
   const targetPct = targetTotal > 0 ? Math.round((producedTotal / targetTotal) * 100) : 0;
   const mealsRowIds = productionEntries.map((p) => p.id);
 
-  const delayedFlights = flights.filter((f) => f.status === "Delayed");
-  const delayed = delayedFlights.length;
-  const delayedPax = delayedFlights.reduce((s, f) => s + f.pax, 0);
-  const delayedFlightCodes = new Set(delayedFlights.map((f) => f.flight));
-  const delayedOrders = seedFlightOrders.filter((o) => delayedFlightCodes.has(o.flight));
-  const delayedRowIds = delayedOrders.map((o) => o.id);
-  // Deep-link target: the first delayed flight's catering order. Order Management
-  // jumps to that order's page (?ord=) so the arrival-flash can tint the row.
-  const delayedOrderNo = delayedOrders[0]?.orderNo;
+  // Delayed-flights KPI reads the live Delay Management store (same source the
+  // module and its "Active" KPI use) so the dashboard number stays in sync.
+  const activeDelays = loadDelayEvents().filter(isActiveDelayEvent);
+  const delayed = activeDelays.length;
+  const delayedPax = activeDelays.reduce((s, e) => s + e.paxCount, 0);
 
   const qcFailed = qcChecks.filter((q) => q.result === "Fail");
   const qcOpen = qcFailed.length;
@@ -221,7 +218,7 @@ function useDashboardKpis(period: Period, range?: DateRange) {
     kpis: {
       flights: { value: flightsValue, sub: flightsSub, ids: flightsIds },
       meals:   { value: producedTotal.toLocaleString(), sub: targetTotal > 0 ? `${targetPct}% of target` : "no targets yet", ids: mealsRowIds },
-      delayed: { value: delayed, sub: delayed > 0 ? `${delayedPax.toLocaleString()} pax affected` : "none on time", ids: delayedRowIds, ord: delayedOrderNo },
+      delayed: { value: delayed, sub: delayed > 0 ? `${delayedPax.toLocaleString()} pax affected` : "none on time" },
       qcIssues:{ value: qcOpen, sub: `${qcOpen} open, ${qcResolved} resolved`, ids: qcRowIds },
       pendingPOs:{ value: pendingPOCount, sub: pendingPOAmount > 0 ? `${formatLakh(pendingPOAmount)} pending` : "no value pending", ids: pendingPORowIds },
       invAlerts:{ value: invAlerts, sub: `${criticalItems.length} critical`, ids: invAlertRowIds },
@@ -828,7 +825,7 @@ export default function Dashboard() {
         </KpiLink>
         )}
         {showKpi("kpi-delayed") && (
-        <KpiLink to="/order-management" ord={data.kpis.delayed.ord} highlight="active-orders" ids={data.kpis.delayed.ids}>
+        <KpiLink to="/delay-management">
           <KpiCard label="Delayed Flights" value={data.kpis.delayed.value}   sub={data.kpis.delayed.sub}   icon={WarningOutlined}           tone="amber" variant="aurora" />
         </KpiLink>
         )}
@@ -1033,7 +1030,13 @@ function aoStatusPill(status: string): { color: string; bg: string; border: stri
 
 function ActiveOrdersTabs({ rows }: { rows: ReturnType<typeof pickActiveFlights> }) {
   const [tab, setTab] = useState<"flight" | "crew">("flight");
-  const groups = groupActiveByOrder(rows, 5);
+  // Split flight vs crew orders the same way the Order Management table does
+  // (orderType "crew" → Crew tab, everything else → Flight tab), so each tab
+  // shows the real orders from that table rather than the same list twice.
+  const tabRows = rows.filter((r) =>
+    tab === "crew" ? r.orderType === "crew" : (r.orderType ?? "flight") !== "crew",
+  );
+  const groups = groupActiveByOrder(tabRows, 5);
 
   // Span the panel body edge-to-edge so the tab rule + scroll list align to the
   // card like the mockup, then re-apply the design's own paddings inside.
@@ -1350,7 +1353,7 @@ function KpiLink({
   to, ord, highlight, ids, children,
 }: {
   to: "/order-management" | "/production-entry" | "/cooking-temp"
-    | "/procurement" | "/inventory" | "/dispatch";
+    | "/procurement" | "/inventory" | "/dispatch" | "/delay-management";
   ord?: string;
   highlight?: string;
   ids?: string[];
