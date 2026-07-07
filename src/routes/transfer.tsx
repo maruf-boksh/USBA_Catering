@@ -1,4 +1,5 @@
 import { useState, useEffect, type ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -16,6 +17,7 @@ import {
 } from "@/components/ui/table";
 import {
   Plus, ArrowLeft, Save, MoveRight, Trash2, CheckCircle, Clock, Truck, Undo2,
+  LayoutGrid, Info, ArrowRight,
 } from "lucide-react";
 import { KpiCard } from "@/components/common/KpiCard";
 import { toast } from "sonner";
@@ -244,6 +246,9 @@ export default function TransferPage() {
   const [actionMode, setActionMode] = useState<ActionMode>("receive");
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
+  // Guides the user after a receipt: the "Transfer In / Received" tab badge
+  // blinks until that tab is opened. Purely a navigation cue — no logic change.
+  const [blinkReceived, setBlinkReceived] = useState(false);
 
   // Dispatch-originated notes are materialized into the local mutable rows once
   // (so they can be sent/received), rather than shown as read-only bridged rows.
@@ -371,6 +376,8 @@ export default function TransferPage() {
         ? `${id} — ${totalReceived} received; ${totalRemaining} still in transit.`
         : `${id} received — ${totalReceived} unit${totalReceived === 1 ? "" : "s"} accepted.`,
     );
+    // Nudge the user toward the received items (now eligible for galley planning).
+    setBlinkReceived(true);
     closeAction();
   };
 
@@ -503,6 +510,8 @@ export default function TransferPage() {
             onReceive={(id) => openAction(id, "receive")}
             onReturn={(id) => openAction(id, "return")}
             editors={rowEditors(setRows)}
+            blinkReceived={blinkReceived}
+            onClearBlink={() => setBlinkReceived(false)}
           />
         </>
       ) : (
@@ -704,7 +713,7 @@ function TransferActionDialog({
 const TAB_PILL_CLS =
   "text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-4 pb-3 gap-2";
 
-function TabCount({ n, tone }: { n: number; tone: "warning" | "navy" | "success" | "muted" }) {
+function TabCount({ n, tone, blink }: { n: number; tone: "warning" | "navy" | "success" | "muted"; blink?: boolean }) {
   if (n === 0) return null;
   const cls =
     tone === "warning" ? "border-warning/40 bg-warning/10 text-warning" :
@@ -712,20 +721,32 @@ function TabCount({ n, tone }: { n: number; tone: "warning" | "navy" | "success"
     tone === "success" ? "border-success/40 bg-success/10 text-success" :
     "border-border bg-muted/40 text-muted-foreground";
   return (
-    <Badge variant="outline" className={`h-5 px-1.5 text-[10px] tabular-nums ${cls}`}>
+    <Badge
+      variant="outline"
+      className={`h-5 px-1.5 text-[10px] tabular-nums ${cls} ${blink ? "ring-2 ring-success/50 border-success/70 font-bold" : ""}`}
+      style={blink ? { animation: "transfer-received-blink 0.9s ease-in-out infinite" } : undefined}
+    >
       {n}
     </Badge>
   );
 }
 
 function TransferTabs({
-  data, onReceive, onReturn, editors,
+  data, onReceive, onReturn, editors, blinkReceived, onClearBlink,
 }: {
   data: Transfer[];
   onReceive: (id: string) => void;
   onReturn: (id: string) => void;
   editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
+  /** When true, blink the "Transfer In / Received" tab badge until it's opened. */
+  blinkReceived: boolean;
+  onClearBlink: () => void;
 }) {
+  const navigate = useNavigate();
+  const [tab, setTab] = useState("out");
+  // Opening the received tab is what the blink is nudging toward — clear it then.
+  const changeTab = (v: string) => { setTab(v); if (v === "received") onClearBlink(); };
+
   // Transfer Out lists every active outbound transfer (pending or shipped) as a
   // data log with the quantity breakdown — receipt happens on the In Transit tab.
   const transferOut    = data.filter((r) => r.kind === "Outbound" && (r.status === "Pending" || r.status === "In Transit"));
@@ -734,7 +755,23 @@ function TransferTabs({
   const received       = data.filter((r) => r.kind === "Outbound" && r.status === "Completed");
 
   return (
-    <Tabs defaultValue="out" className="space-y-4" data-arrival-id="transfer-list">
+    <Tabs value={tab} onValueChange={changeTab} className="space-y-4" data-arrival-id="transfer-list">
+      {/* Blink keyframes for the received-tab badge cue. */}
+      <style>{`@keyframes transfer-received-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.15; } }`}</style>
+
+      {/* Instructional flow guide — how a transfer reaches galley loading. */}
+      <div className="flex items-center gap-x-2 gap-y-1 flex-wrap rounded-lg border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+        <Info className="h-3.5 w-3.5 text-primary shrink-0" />
+        <span className="font-semibold text-foreground">How receiving works:</span>
+        <span className="inline-flex items-center gap-1">Open <span className="font-medium text-navy">Transfer In Transit</span></span>
+        <ArrowRight className="h-3 w-3 shrink-0" />
+        <span className="inline-flex items-center gap-1">click <span className="font-medium text-success">Receive</span></span>
+        <ArrowRight className="h-3 w-3 shrink-0" />
+        <span className="inline-flex items-center gap-1">it moves to <span className="font-medium text-success">Transfer In / Received</span></span>
+        <ArrowRight className="h-3 w-3 shrink-0" />
+        <span className="inline-flex items-center gap-1">then <span className="font-medium text-primary">Galley Plan</span> for loading</span>
+      </div>
+
       <TabsList className="h-auto bg-transparent p-0 border-b border-border w-full justify-start rounded-none">
         <TabsTrigger value="out"        className={TAB_PILL_CLS}>
           Transfer Out
@@ -750,7 +787,7 @@ function TransferTabs({
         </TabsTrigger>
         <TabsTrigger value="received"   className={TAB_PILL_CLS}>
           Transfer In / Received
-          <TabCount n={received.length} tone="success" />
+          <TabCount n={received.length} tone="success" blink={blinkReceived} />
         </TabsTrigger>
       </TabsList>
 
@@ -765,7 +802,31 @@ function TransferTabs({
         />
       </TabsContent>
       <TabsContent value="return"   className="mt-0"><TransferList data={returns}     emptyHint="No return transfers recorded." editors={editors} /></TabsContent>
-      <TabsContent value="received" className="mt-0"><TransferList data={received}    emptyHint="No received transfers yet." editors={editors} /></TabsContent>
+      <TabsContent value="received" className="mt-0 space-y-3">
+        {/* Note in the marked place — received items are galley-planning eligible. */}
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/30 bg-primary/[0.04] px-4 py-2.5">
+          <div className="flex items-start gap-2 min-w-0">
+            <LayoutGrid className="h-4 w-4 text-primary mt-0.5 shrink-0" />
+            <div className="text-xs">
+              <span className="font-semibold text-foreground">Go to Galley Plan for galley loading.</span>{" "}
+              <span className="text-muted-foreground">Only <span className="font-medium text-foreground">Transfer In / Received</span> items are eligible for galley planning.</span>
+            </div>
+          </div>
+          <Button
+            size="sm"
+            className="h-8 text-xs shrink-0"
+            onClick={() => navigate("/galley-planning")}
+          >
+            <LayoutGrid className="h-3.5 w-3.5 mr-1.5" /> Go to Galley Plan
+          </Button>
+        </div>
+        <TransferList
+          data={received}
+          emptyHint="No received transfers yet."
+          editors={editors}
+          onGoToTransit={() => changeTab("transit")}
+        />
+      </TabsContent>
     </Tabs>
   );
 }
@@ -828,7 +889,7 @@ function TransferDetail({ t }: { t: Transfer }) {
 }
 
 function TransferList({
-  data, emptyHint, qtyBreakdown, noActions, onReceive, onReturn, editors,
+  data, emptyHint, qtyBreakdown, noActions, onReceive, onReturn, editors, onGoToTransit,
 }: {
   data: Transfer[];
   emptyHint?: string;
@@ -840,6 +901,9 @@ function TransferList({
   onReceive?: (id: string) => void;
   onReturn?: (id: string) => void;
   editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
+  /** When set, each row shows a shortcut button to the Transfer In Transit tab
+   *  (where transfers are received). Navigation only — no data change. */
+  onGoToTransit?: () => void;
 }) {
   const sumReq = (r: Transfer) => r.lines.reduce((s, l) => s + l.requestedQty, 0);
   const sumDone = (r: Transfer) => r.lines.reduce((s, l) => s + l.transferredQty, 0);
@@ -959,13 +1023,26 @@ function TransferList({
         // returned dispatch record), where it re-runs the full packaging → QC →
         // dispatch process — so it's intentionally not offered here.
         return (
-          <RowActions
-            row={r}
-            actions={["view", "edit", "print"]}
-            detail={<TransferDetail t={r} />}
-            onSave={editors.onSave}
-            editDetail={({ save, close }) => <TransferFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
-          />
+          <div className="flex items-center gap-1.5">
+            {onGoToTransit && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-2.5 text-xs border-navy/40 text-navy hover:bg-navy/10 hover:text-navy"
+                onClick={onGoToTransit}
+                title="Receive transfers on the Transfer In Transit tab"
+              >
+                <Truck className="h-3 w-3 mr-1" /> In Transit
+              </Button>
+            )}
+            <RowActions
+              row={r}
+              actions={["view", "edit", "print"]}
+              detail={<TransferDetail t={r} />}
+              onSave={editors.onSave}
+              editDetail={({ save, close }) => <TransferFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
+            />
+          </div>
         );
       }}
     />

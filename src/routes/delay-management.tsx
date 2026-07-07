@@ -21,14 +21,14 @@ import { KpiCard } from "@/components/common/KpiCard";
 import {
   Clock, Plus, ArrowLeft, CheckCircle2, AlertTriangle, Truck, ShoppingCart,
   PackageOpen, Send, Timer, Eye, ChevronRight,
-  ExternalLink, Trash2, PlusCircle, ListChecks, Zap, History, X,
+  ExternalLink, Trash2, PlusCircle, ListChecks, Zap, History, X, ChefHat,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { useFlightOrders } from "@/lib/flight-orders-store";
 import { vendors } from "@/lib/sample-data";
 import { LocationPicker } from "@/components/common/LocationPicker";
-import { useWorkflow, type WfGRN, type WfGRNLine, type StockDelta } from "@/lib/workflow-store";
+import { useWorkflow, type WfGRN, type WfGRNLine, type StockDelta, type WfProductionEntry } from "@/lib/workflow-store";
 import { reduceInventoryStock } from "@/lib/stock-adjustments";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -40,6 +40,7 @@ export type DelayStatus =
   | "Approval Pending"
   | "Approved"
   | "Rejected"
+  | "Sent To Production"
   | "Sent To Dispatch"
   | "Dispatched"
   | "Closed";
@@ -99,6 +100,9 @@ export type DelayEvent = {
   fulfillment?: DelayFulfillment;
   dispatchId?: string;
   approvalId?: string;
+  /** Production Orders (WfProductionEntry ids) raised for this delay's food
+   *  items when they are cooked fresh rather than bought/received. */
+  productionOrderIds?: string[];
 };
 
 export type DelayApprovalRecord = {
@@ -237,6 +241,7 @@ const STATUS_BADGE: Record<DelayStatus, string> = {
   "Approval Pending":   "bg-violet-100 text-violet-700",
   "Approved":           "bg-emerald-100 text-emerald-700",
   "Rejected":           "bg-red-100 text-red-700",
+  "Sent To Production": "bg-indigo-100 text-indigo-700",
   "Sent To Dispatch":   "bg-teal-100 text-teal-700",
   "Dispatched":         "bg-emerald-200 text-emerald-800",
   "Closed":             "bg-gray-100 text-gray-500",
@@ -373,94 +378,6 @@ const SEED_EVENTS: DelayEvent[] = [
       notes: "",
     },
   },
-  {
-    id: "DEL-0002",
-    flightOrderId: "FO-DSP-1",
-    orderNo: "ORD-3425",
-    flightNumber: "BS-411",
-    flightDate: "2026-05-21",
-    sector: "CGP → DXB",
-    paxCount: 162,
-    crewCount: 8,
-    delayDurationHours: 2,
-    reason: "ATC Hold — Congestion at DXB, slot delay issued",
-    reportedBy: "S. Mahmud",
-    status: "Approved",
-    createdAt: "2026-05-21 16:00",
-    updatedAt: "2026-05-21 17:10",
-    mealType: "Heavy Snacks",
-    menuItems: [
-      { name: "Snack Pack", requiredQty: 170, uom: "pcs" },
-      { name: "Mineral Water 500ml", requiredQty: 170, uom: "pcs" },
-    ],
-    fulfillment: {
-      id: "DFR-0002",
-      itemType: "Heavy Snacks",
-      suggestedQty: 170,
-      finalQty: 170,
-      fulfillmentType: "Direct Receive",
-      requestedBy: "R. Islam",
-      notes: "Priority delivery — gate B7",
-      directReceive: {
-        id: "DR-0001",
-        vendorName: "Fresh Bites Catering Co.",
-        items: [
-          { name: "Mineral Water 500ml", qty: 170, unitCost: 20 },
-          { name: "Snack Pack",          qty: 136, unitCost: 95 },
-        ],
-        totalCost: 16320,
-        receivedBy: "R. Islam",
-        receivedAt: "2026-05-21 17:45",
-      },
-    },
-    approvalId: "DA-0001",
-  },
-  // Demo: approved event ready to send to dispatch — resets to this state on fresh localStorage clear
-  {
-    id: "DEL-DEMO",
-    flightOrderId: "FO-DSP-2",
-    orderNo: "ORD-3426",
-    flightNumber: "BG-521",
-    flightDate: "2026-05-22",
-    sector: "DAC → DOH",
-    paxCount: 196,
-    crewCount: 12,
-    delayDurationHours: 3,
-    reason: "Ground delay — Late incoming aircraft",
-    reportedBy: "Station Control (DAC)",
-    status: "Approved",
-    createdAt: "2026-05-22 07:30",
-    updatedAt: "2026-05-22 09:00",
-    mealType: "Breakfast",
-    originalEtd: "08:00",
-    menuItems: [
-      { name: "Breakfast Box", requiredQty: 208, uom: "pcs" },
-      { name: "Juice Box",     requiredQty: 208, uom: "pcs" },
-      { name: "Mineral Water 500ml", requiredQty: 208, uom: "pcs" },
-    ],
-    fulfillment: {
-      id: "DFR-DEMO",
-      itemType: "Breakfast",
-      suggestedQty: 250,
-      finalQty: 250,
-      fulfillmentType: "Direct Receive",
-      requestedBy: "T. Ahmed",
-      notes: "Expedited delivery — pier 6",
-      directReceive: {
-        id: "DR-DEMO",
-        vendorName: "Sky Meals Ltd.",
-        items: [
-          { name: "Breakfast Box",     qty: 208, unitCost: 220 },
-          { name: "Juice Box",         qty: 208, unitCost: 55 },
-          { name: "Mineral Water 500ml", qty: 208, unitCost: 20 },
-        ],
-        totalCost: 60944,
-        receivedBy: "T. Ahmed",
-        receivedAt: "2026-05-22 09:30",
-      },
-    },
-    approvalId: "DA-DEMO",
-  },
 ];
 
 const SEED_APPROVALS: DelayApprovalRecord[] = [
@@ -544,7 +461,7 @@ const SEED_DEMO_DISPATCH: DispatchRecordLike = {
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
-type View = "list" | "create" | "production" | "fulfillment" | "detail";
+type View = "list" | "production" | "fulfillment" | "detail";
 
 export default function DelayManagementPage() {
   const navigate = useNavigate();
@@ -553,17 +470,26 @@ export default function DelayManagementPage() {
   const [activeEventId, setActiveEventId] = useState<string | null>(null);
   /** Event ID shown in the view modal (eye icon). null = modal closed. */
   const [viewModalEventId, setViewModalEventId] = useState<string | null>(null);
+  /** Log Delay Event capture modal. */
+  const [createOpen, setCreateOpen]       = useState(false);
 
   const [delayEvents, setDelayEvents]       = usePersistedState<DelayEvent[]>("delay-events", SEED_EVENTS);
   const [delayApprovals, setDelayApprovals] = usePersistedState<DelayApprovalRecord[]>("delay-approval-records", SEED_APPROVALS);
   const [dispatchRecords, setDispatchRecords] = usePersistedState<DispatchRecordLike[]>("dispatch-records", []);
   const [packagingRows, setPackagingRows]   = usePersistedState<PackagingRowLike[]>("dispatch-packaging-rows", []);
-  const { applyStockDeltas } = useWorkflow();
+  const { applyStockDeltas, addProductionEntry } = useWorkflow();
 
   // Ensure the demo dispatch record is present in dispatch-records on first load
   const demoPresent = dispatchRecords.some((d) => d.id === "DSP-DEL-DEMO");
   if (!demoPresent) {
     setDispatchRecords((prev) => [...prev, SEED_DEMO_DISPATCH]);
+  }
+
+  // Keep only the first delay event — drop the retired demo seed rows (DEL-0002,
+  // DEL-DEMO) if an earlier session persisted them. Idempotent; leaves any
+  // user-created events untouched.
+  if (delayEvents.some((e) => e.id === "DEL-0002" || e.id === "DEL-DEMO")) {
+    setDelayEvents((prev) => prev.filter((e) => e.id !== "DEL-0002" && e.id !== "DEL-DEMO"));
   }
 
   // Handle ?del= deep-link from other modules
@@ -647,8 +573,64 @@ export default function DelayManagementPage() {
     toast.success(`${approvalRecord.id} submitted for approval.`);
   };
 
+  /**
+   * Route the delay's food items to the kitchen: raise one Production Order
+   * (WfProductionEntry, status "Pending") per item via the shared workflow
+   * store. Pending orders are projected straight into Approval Management's
+   * "Production" queue — approving there releases them to the Production Entry
+   * floor log. The created order ids are linked back onto the delay event.
+   */
+  const sentToProduction = (
+    eventId: string,
+    config: {
+      date: string;
+      officeId: string;
+      warehouseId: string;
+      lines: Array<{ name: string; qty: number; code?: string }>;
+    },
+  ) => {
+    const event = delayEvents.find((e) => e.id === eventId);
+    if (!event) return;
+    const batch = Date.now().toString(36).slice(-5).toUpperCase();
+    const orderIds: string[] = [];
+    config.lines.forEach((l, idx) => {
+      const id = `PRO-DEL-${batch}-${idx + 1}`;
+      const order: WfProductionEntry = {
+        id,
+        date: config.date,
+        bom: l.name,
+        outputItemName: l.name,
+        outputItemCode: l.code,
+        orderQty: l.qty,
+        producedQty: 0,
+        status: "Pending",
+        officeId: config.officeId,
+        warehouseId: config.warehouseId,
+      };
+      addProductionEntry(order);
+      orderIds.push(id);
+    });
+    setDelayEvents((prev) =>
+      prev.map((e) =>
+        e.id === eventId
+          ? {
+              ...e,
+              productionOrderIds: [...(e.productionOrderIds ?? []), ...orderIds],
+              status: "Sent To Production",
+              updatedAt: stamp(),
+            }
+          : e,
+      ),
+    );
+    setActiveEventId(eventId);
+    setView("detail");
+    toast.success(
+      `${orderIds.length} production order${orderIds.length === 1 ? "" : "s"} raised for ${eventId} — pending approval in Approval Management.`,
+    );
+  };
+
   const sendToDispatch = (event: DelayEvent) => {
-    if (event.status !== "Approved") return;
+    if (event.status !== "Approved" && event.status !== "Sent To Production") return;
     const now = stamp();
     const today = now.slice(0, 10);
     // Compute delayed dep time in airline 12h standard (original ETD + delay hours)
@@ -766,7 +748,7 @@ export default function DelayManagementPage() {
         subtitle="Track flight delays, fulfil refreshment requests, and manage delay dispatches"
         actions={
           view === "list" ? (
-            <Button onClick={() => setView("create")}>
+            <Button onClick={() => setCreateOpen(true)}>
               <Plus className="h-4 w-4 mr-1.5" /> Log Delay Event
             </Button>
           ) : (
@@ -787,19 +769,12 @@ export default function DelayManagementPage() {
         />
       )}
 
-      {view === "create" && (
-        <DelayCreate
-          nextId={nextDelId}
-          nextDfrId={nextDfrId}
-          onCreate={createEvent}
-        />
-      )}
-
       {view === "production" && activeEvent && (
         <DelayProductionScreen
           event={activeEvent}
           onProceed={(id) => setEventFulfillmentAndGo(id, "Instant Purchase")}
           onNeedsPurchase={(id, fulfillment, approval) => submitFulfillment(id, fulfillment, approval)}
+          onSentToProduction={sentToProduction}
           onCancel={() => setView("list")}
           nextDrId={nextDrId}
           nextDaId={nextDaId}
@@ -827,6 +802,25 @@ export default function DelayManagementPage() {
           onNavigate={navigate}
         />
       )}
+
+      {/* ─── Log Delay Event Modal ─────────────────────────────────────────── */}
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent className="w-full max-w-[95vw] sm:max-w-3xl max-h-[90vh] overflow-y-auto p-0">
+          <DialogHeader className="px-6 pt-5 pb-3 border-b border-border sticky top-0 bg-background z-10">
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <Plus className="h-4 w-4 text-primary" /> Log Delay Event
+              <span className="font-mono font-normal text-sm text-muted-foreground ml-1">{nextDelId}</span>
+            </DialogTitle>
+          </DialogHeader>
+          <div className="px-6 py-4">
+            <DelayCreate
+              nextId={nextDelId}
+              nextDfrId={nextDfrId}
+              onCreate={(ev) => { setCreateOpen(false); createEvent(ev); }}
+            />
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* ─── View Modal (eye icon / row click) ─────────────────────────────── */}
       <Dialog
@@ -925,7 +919,7 @@ function DelayList({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All Statuses</SelectItem>
-            {(["Received","Validated","Fulfillment Pending","Approval Pending","Approved","Rejected","Sent To Dispatch","Dispatched","Closed"] as DelayStatus[]).map((s) => (
+            {(["Received","Validated","Fulfillment Pending","Approval Pending","Approved","Rejected","Sent To Production","Sent To Dispatch","Dispatched","Closed"] as DelayStatus[]).map((s) => (
               <SelectItem key={s} value={s}>{s}</SelectItem>
             ))}
           </SelectContent>
@@ -1153,13 +1147,6 @@ function DelayCreate({
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold uppercase tracking-wider">New Delay Event</h3>
-        <Button onClick={save}>
-          <Send className="h-4 w-4 mr-1.5" /> Create &amp; Go to Fulfillment
-        </Button>
-      </div>
-
       <div className="space-y-5">
         {/* Flight Order */}
         <div>
@@ -1394,6 +1381,12 @@ function DelayCreate({
           </div>
         )}
       </div>
+
+      <div className="flex justify-end pt-2 border-t border-border">
+        <Button onClick={save} className="mt-3">
+          <Send className="h-4 w-4 mr-1.5" /> Create &amp; Go to Fulfillment
+        </Button>
+      </div>
     </div>
   );
 }
@@ -1401,11 +1394,20 @@ function DelayCreate({
 // ─── Delay Production Screen ──────────────────────────────────────────────────
 
 function DelayProductionScreen({
-  event, onProceed, onNeedsPurchase, onCancel, nextDrId, nextDaId,
+  event, onProceed, onNeedsPurchase, onSentToProduction, onCancel, nextDrId, nextDaId,
 }: {
   event: DelayEvent;
   onProceed: (id: string) => void;
   onNeedsPurchase: (id: string, fulfillment: DelayFulfillment, approval: DelayApprovalRecord) => void;
+  onSentToProduction: (
+    eventId: string,
+    config: {
+      date: string;
+      officeId: string;
+      warehouseId: string;
+      lines: Array<{ name: string; qty: number; code?: string }>;
+    },
+  ) => void;
   onCancel: () => void;
   nextDrId: string;
   nextDaId: string;
@@ -1424,7 +1426,39 @@ function DelayProductionScreen({
   const [stockLogLine, setStockLogLine]   = useState<DrFormLine | null>(null);
   const [stockLogOpen, setStockLogOpen]   = useState(false);
 
+  // ── Send to Production modal ──────────────────────────────────────────────
+  const [prodOpen, setProdOpen]                 = useState(false);
+  const [prodDate, setProdDate]                 = useState(event.flightDate);
+  const [prodOfficeId, setProdOfficeId]         = useState("OFF-001");
+  const [prodWarehouseId, setProdWarehouseId]   = useState("WH-003");
+  const [prodLines, setProdLines]               = useState<Array<{ id: string; name: string; qty: number }>>([]);
+
   const items = event.menuItems ?? [];
+
+  const openProdModal = () => {
+    setProdLines(items.map((mi, i) => ({ id: `pl-${i}`, name: mi.name, qty: mi.requiredQty })));
+    setProdDate(event.flightDate);
+    setProdOfficeId("OFF-001");
+    setProdWarehouseId("WH-003");
+    setProdOpen(true);
+  };
+  const updateProdLine = (id: string, field: "name" | "qty", val: string) =>
+    setProdLines((prev) => prev.map((l) => l.id === id ? { ...l, [field]: field === "name" ? val : Number(val) || 0 } : l));
+  const addProdLine    = () => setProdLines((prev) => [...prev, { id: `pl-${Date.now()}`, name: "", qty: 1 }]);
+  const removeProdLine = (id: string) => setProdLines((prev) => prev.filter((l) => l.id !== id));
+
+  const submitProduction = () => {
+    if (prodLines.length === 0) { toast.error("Add at least one production item."); return; }
+    if (prodLines.some((l) => !l.name.trim())) { toast.error("All items must have a name."); return; }
+    if (prodLines.some((l) => l.qty <= 0)) { toast.error("All items must have a quantity greater than 0."); return; }
+    setProdOpen(false);
+    onSentToProduction(event.id, {
+      date: prodDate,
+      officeId: prodOfficeId,
+      warehouseId: prodWarehouseId,
+      lines: prodLines.map((l) => ({ name: l.name.trim(), qty: l.qty })),
+    });
+  };
 
   const stockCheck = useMemo(() => {
     return items.map((mi) => {
@@ -1690,9 +1724,14 @@ function DelayProductionScreen({
                       : `${stockCheck.filter(i => !i.sufficient).length} insufficient item(s) will be forwarded for instant purchase.`}
                   </p>
                 </div>
-                <div className="flex gap-2 shrink-0">
+                <div className="flex flex-wrap gap-2 shrink-0">
                   <Button variant="outline" size="sm" onClick={onCancel}>
                     <ArrowLeft className="h-3.5 w-3.5 mr-1" /> Cancel
+                  </Button>
+                  <Button variant="outline" size="sm"
+                    className="border-indigo-300 text-indigo-700 hover:bg-indigo-50"
+                    onClick={openProdModal}>
+                    <ChefHat className="h-3.5 w-3.5 mr-1.5" /> Send to Production
                   </Button>
                   {allSufficient ? (
                     <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700 text-white"
@@ -1848,6 +1887,88 @@ function DelayProductionScreen({
           <DialogFooter>
             <Button variant="outline" onClick={() => setDrOpen(false)}>Cancel</Button>
             <Button onClick={submitDr}><Zap className="h-4 w-4 mr-1.5" /> Submit For Approval</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ─── Send to Production Modal ──────────────────────────────────────── */}
+      <Dialog open={prodOpen} onOpenChange={(v) => { if (!v) setProdOpen(false); }}>
+        <DialogContent className="w-full max-w-[95vw] sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ChefHat className="h-4 w-4 text-indigo-500" /> Send to Production — {event.id}
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <Label>Production Date <span className="text-destructive">*</span></Label>
+              <Input type="date" value={prodDate}
+                onChange={(e) => setProdDate(e.target.value)} className="mt-1 tabular-nums" />
+            </div>
+            <LocationPicker
+              officeId={prodOfficeId}
+              warehouseId={prodWarehouseId}
+              onChange={(n) => { setProdOfficeId(n.officeId); setProdWarehouseId(n.warehouseId); }}
+            />
+          </div>
+
+          <div className="mt-2">
+            <div className="flex items-center justify-between mb-2">
+              <Label>Production Items</Label>
+              <Button size="sm" variant="outline" onClick={addProdLine}>
+                <Plus className="h-3.5 w-3.5 mr-1" /> Add Row
+              </Button>
+            </div>
+            <div className="rounded-md border border-border overflow-x-auto -mx-1 px-1">
+              <table className="min-w-[420px] w-full text-sm">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="p-2 text-left font-semibold">Item to Produce</th>
+                    <th className="p-2 text-left font-semibold w-28">Order Qty</th>
+                    <th className="w-8" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {prodLines.length === 0 ? (
+                    <tr><td colSpan={3} className="p-3 text-center text-muted-foreground text-xs">
+                      No items — add a row to raise a production order.
+                    </td></tr>
+                  ) : prodLines.map((line) => (
+                    <tr key={line.id} className="border-t border-border/50">
+                      <td className="p-2">
+                        <Input value={line.name}
+                          onChange={(e) => updateProdLine(line.id, "name", e.target.value)}
+                          className="h-7 text-xs" placeholder="Item name" />
+                      </td>
+                      <td className="p-2">
+                        <Input type="number" min={1} value={line.qty || ""}
+                          onChange={(e) => updateProdLine(line.id, "qty", e.target.value)}
+                          className="h-7 text-xs tabular-nums" />
+                      </td>
+                      <td className="p-2">
+                        <button type="button" onClick={() => removeProdLine(line.id)}
+                          className="text-muted-foreground hover:text-destructive">
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-1.5 text-[11px] text-muted-foreground">
+              Each item raises a <span className="font-medium">Production Order</span> (Pending) that appears in{" "}
+              <span className="font-medium">Approval Management → Production</span>. Once approved, log output on the{" "}
+              <span className="font-medium">Production Entry</span> floor screen; finished meals return here to dispatch.
+            </p>
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setProdOpen(false)}>Cancel</Button>
+            <Button className="bg-indigo-600 hover:bg-indigo-700 text-white" onClick={submitProduction}>
+              <ChefHat className="h-4 w-4 mr-1.5" /> Raise Production Order{prodLines.length === 1 ? "" : "s"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -2181,20 +2302,53 @@ function DelayDetailScreen({
 }) {
   const [drLog] = usePersistedState<DrLogEntry[]>("delay-dr-log", []);
   const [detailStockLog, setDetailStockLog] = useState<{ item: DrItem; log: DrLogEntry[] } | null>(null);
+  const { productionEntries } = useWorkflow();
+  const [allDispatchRecords] = usePersistedState<DispatchRecordLike[]>("dispatch-records", []);
 
   const f  = event.fulfillment;
   const dr = f?.directReceive;
 
-  const timelineSteps: Array<{ label: string; done: boolean; active: boolean }> = [
-    { label: "Delay Received",    done: true, active: event.status === "Received" },
-    { label: "Validated",         done: event.status !== "Received", active: event.status === "Validated" },
-    { label: "Fulfillment",       done: !["Received","Validated"].includes(event.status), active: event.status === "Fulfillment Pending" },
-    { label: "Approval Pending",  done: !["Received","Validated","Fulfillment Pending"].includes(event.status), active: event.status === "Approval Pending" },
-    { label: "Approved",          done: ["Approved","Sent To Dispatch","Dispatched","Closed"].includes(event.status), active: event.status === "Approved" },
-    { label: "Sent To Dispatch",  done: ["Sent To Dispatch","Dispatched","Closed"].includes(event.status), active: event.status === "Sent To Dispatch" },
-    { label: "Dispatched",        done: ["Dispatched","Closed"].includes(event.status), active: event.status === "Dispatched" },
-    { label: "Closed",            done: event.status === "Closed", active: event.status === "Closed" },
-  ];
+  // The flight's earlier dispatches (everything for this flight other than this
+  // delay dispatch) — shown as "Previous Dispatch History" before the delay one.
+  const previousDispatches = allDispatchRecords
+    .filter((d) => d.flightNos.includes(event.flightNumber) && d.id !== event.dispatchId)
+    .sort((a, b) => (a.dispatch_sequence ?? 0) - (b.dispatch_sequence ?? 0));
+
+  // Food items + qty for the Delay Dispatch Details card: use the dispatch
+  // record's amenities when it resolves, otherwise fall back to the event's own
+  // menu items so the card always shows the dispatched food, never a bare stub.
+  const delayDispatchItems: { label: string; qty: number }[] =
+    (dispatchRecord?.detail.amenities.length ?? 0) > 0
+      ? dispatchRecord!.detail.amenities.map((a) => ({ label: a.label, qty: a.qty }))
+      : (event.menuItems ?? []).map((mi) => ({ label: mi.name, qty: mi.requiredQty }));
+
+  // ── Production route (delay food items cooked fresh) ──────────────────────
+  const isProductionRoute = (event.productionOrderIds?.length ?? 0) > 0;
+  const prodOrders = isProductionRoute
+    ? productionEntries.filter((o) => event.productionOrderIds!.includes(o.id))
+    : [];
+  const allProdApproved = prodOrders.length > 0 &&
+    prodOrders.every((o) => ["Approved", "In Preparation", "Ready for QC", "Completed"].includes(o.status));
+  const allProdCompleted = prodOrders.length > 0 && prodOrders.every((o) => o.status === "Completed");
+
+  const timelineSteps: Array<{ label: string; done: boolean; active: boolean }> = isProductionRoute
+    ? [
+        { label: "Delay Received",   done: true, active: false },
+        { label: "Sent To Production", done: true, active: event.status === "Sent To Production" && !allProdApproved },
+        { label: "Prod. Approved",   done: allProdApproved, active: allProdApproved && !allProdCompleted },
+        { label: "Produced",         done: allProdCompleted, active: allProdCompleted && event.status === "Sent To Production" },
+        { label: "Sent To Dispatch", done: ["Sent To Dispatch","Dispatched","Closed"].includes(event.status), active: event.status === "Sent To Dispatch" },
+        { label: "Dispatched",       done: ["Dispatched","Closed"].includes(event.status), active: ["Dispatched","Closed"].includes(event.status) },
+      ]
+    : [
+        { label: "Delay Received",    done: true, active: event.status === "Received" },
+        { label: "Validated",         done: event.status !== "Received", active: event.status === "Validated" },
+        { label: "Fulfillment",       done: !["Received","Validated"].includes(event.status), active: event.status === "Fulfillment Pending" },
+        { label: "Approval Pending",  done: !["Received","Validated","Fulfillment Pending"].includes(event.status), active: event.status === "Approval Pending" },
+        { label: "Approved",          done: ["Approved","Sent To Dispatch","Dispatched","Closed"].includes(event.status), active: event.status === "Approved" },
+        { label: "Sent To Dispatch",  done: ["Sent To Dispatch","Dispatched","Closed"].includes(event.status), active: event.status === "Sent To Dispatch" },
+        { label: "Dispatched",        done: ["Dispatched","Closed"].includes(event.status), active: ["Dispatched","Closed"].includes(event.status) },
+      ];
 
   return (
     <div className="space-y-4">
@@ -2206,6 +2360,11 @@ function DelayDetailScreen({
           </Button>
         )}
         {event.status === "Approved" && (
+          <Button size="sm" className="bg-teal-600 text-white hover:bg-teal-700" onClick={onSendToDispatch}>
+            <Truck className="h-3.5 w-3.5 mr-1.5" /> Send to Dispatch
+          </Button>
+        )}
+        {event.status === "Sent To Production" && allProdCompleted && (
           <Button size="sm" className="bg-teal-600 text-white hover:bg-teal-700" onClick={onSendToDispatch}>
             <Truck className="h-3.5 w-3.5 mr-1.5" /> Send to Dispatch
           </Button>
@@ -2350,30 +2509,16 @@ function DelayDetailScreen({
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {dr.items.map((item, i) => {
-                        const itemLog = drLog.filter(
-                          (e) => e.eventId === event.id && e.itemName.trim().toLowerCase() === item.name.trim().toLowerCase(),
-                        );
-                        return (
-                          <TableRow key={i}>
-                            <TableCell className="font-medium text-sm">{item.name}</TableCell>
-                            <TableCell className="text-right">
-                              <button
-                                type="button"
-                                title="Click to view stock log"
-                                className="tabular-nums text-sm font-semibold text-primary underline decoration-dotted underline-offset-2 hover:opacity-80"
-                                onClick={() => setDetailStockLog({ item, log: itemLog })}
-                              >
-                                {item.qty}
-                              </button>
-                            </TableCell>
-                            <TableCell className="text-right tabular-nums text-sm">৳ {item.unitCost.toLocaleString()}</TableCell>
-                            <TableCell className="text-right tabular-nums text-sm font-semibold">
-                              ৳ {(item.qty * item.unitCost).toLocaleString()}
-                            </TableCell>
-                          </TableRow>
-                        );
-                      })}
+                      {dr.items.map((item, i) => (
+                        <TableRow key={i}>
+                          <TableCell className="font-medium text-sm">{item.name}</TableCell>
+                          <TableCell className="text-right tabular-nums text-sm font-semibold">{item.qty}</TableCell>
+                          <TableCell className="text-right tabular-nums text-sm">৳ {item.unitCost.toLocaleString()}</TableCell>
+                          <TableCell className="text-right tabular-nums text-sm font-semibold">
+                            ৳ {(item.qty * item.unitCost).toLocaleString()}
+                          </TableCell>
+                        </TableRow>
+                      ))}
                     </TableBody>
                   </Table>
                 </div>
@@ -2383,6 +2528,75 @@ function DelayDetailScreen({
                   </div>
                 </div>
               </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Production Orders (delay food items cooked fresh) */}
+      {isProductionRoute && (
+        <Card>
+          <CardContent className="pt-4 space-y-4">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Production Orders
+              </div>
+              <Button size="sm" variant="outline" onClick={() => onNavigate("/production-entry")}>
+                <ExternalLink className="h-3.5 w-3.5 mr-1.5" /> View in Production
+              </Button>
+            </div>
+
+            <div className="border border-border rounded-md overflow-x-auto -mx-1 px-1">
+              <Table className="min-w-[520px]">
+                <TableHeader className="bg-muted/40">
+                  <TableRow>
+                    <TableHead className="text-xs uppercase tracking-wider">Order No</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right">Order Qty</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right">Produced</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {prodOrders.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5} className="text-center text-sm text-muted-foreground py-4">
+                        {event.productionOrderIds?.length ?? 0} order(s) raised — open the Production module to track them.
+                      </TableCell>
+                    </TableRow>
+                  ) : prodOrders.map((o) => (
+                    <TableRow key={o.id}>
+                      <TableCell className="font-mono text-xs font-semibold text-primary">{o.id}</TableCell>
+                      <TableCell className="text-sm font-medium">{o.outputItemName ?? o.bom}</TableCell>
+                      <TableCell className="text-right tabular-nums text-sm">{(o.orderQty ?? 0).toLocaleString()}</TableCell>
+                      <TableCell className="text-right tabular-nums text-sm">{o.producedQty.toLocaleString()}</TableCell>
+                      <TableCell>
+                        <span className={cn(
+                          "inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold",
+                          o.status === "Completed" ? "bg-emerald-100 text-emerald-700" :
+                          o.status === "Ready for QC" ? "bg-teal-100 text-teal-700" :
+                          o.status === "In Preparation" ? "bg-amber-100 text-amber-700" :
+                          o.status === "Approved" ? "bg-blue-100 text-blue-700" :
+                          o.status === "Re-Cook" ? "bg-red-100 text-red-700" :
+                          "bg-slate-100 text-slate-600",
+                        )}>
+                          {o.status}
+                        </span>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+
+            {allProdCompleted ? (
+              <p className="text-xs font-medium text-emerald-700">
+                All production orders completed — ready to send to dispatch.
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Orders flow through Approval Management → Production Entry → QC. This event can be dispatched once every order is Completed.
+              </p>
             )}
           </CardContent>
         </Card>
@@ -2424,87 +2638,100 @@ function DelayDetailScreen({
         </Card>
       )}
 
-      {/* Dispatch details with full activity log */}
+      {/* Previous dispatch history — the flight's earlier dispatches */}
       {event.dispatchId && (
         <Card>
           <CardContent className="pt-4 space-y-4">
             <div className="flex items-center justify-between">
               <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Dispatch — {event.dispatchId}
+                Previous Dispatch History
               </div>
               <Button size="sm" variant="outline" onClick={() => onNavigate("/dispatch")}>
                 <ExternalLink className="h-3.5 w-3.5 mr-1.5" /> View in Dispatch
               </Button>
             </div>
 
-            {dispatchRecord ? (
-              <>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-                  {[
-                    ["Status",      dispatchRecord.status],
-                    ["Date",        dispatchRecord.date],
-                    ["Dep. Time",   dispatchRecord.depTime],
-                    ["Type",        dispatchRecord.dispatch_type ?? "Delay Refreshment"],
-                    ["Total Meals", String(dispatchRecord.detail.flightKitchen.totalMeals)],
-                    ["Sequence",    String(dispatchRecord.dispatch_sequence ?? "—")],
-                  ].map(([l, v]) => (
-                    <div key={l}>
-                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{l}</div>
-                      <div className="mt-0.5 font-medium text-sm">{v}</div>
-                    </div>
-                  ))}
-                </div>
-
-                {dispatchRecord.detail.amenities.length > 0 && (
-                  <div>
-                    <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Items</div>
-                    <div className="border border-border rounded-md overflow-hidden">
-                      <Table>
-                        <TableHeader className="bg-muted/40">
-                          <TableRow>
-                            <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
-                            <TableHead className="text-xs uppercase tracking-wider text-right">Qty</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {dispatchRecord.detail.amenities.map((a, i) => (
-                            <TableRow key={i}>
-                              <TableCell className="text-sm font-medium">{a.label}</TableCell>
-                              <TableCell className="text-right tabular-nums text-sm">{a.qty}</TableCell>
-                            </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
-                    </div>
-                  </div>
-                )}
-
-                {/* Full activity log / dispatch trail */}
-                <div>
-                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
-                    Activity Log
-                  </div>
-                  <div className="space-y-2">
-                    {dispatchRecord.trail.map((entry, i) => (
-                      <div key={i} className="flex items-start gap-3">
-                        <div className="mt-1.5 h-2 w-2 rounded-full bg-primary shrink-0" />
-                        <div className="text-sm flex flex-wrap gap-x-2">
-                          <span className="font-semibold">{entry.status}</span>
-                          <span className="text-muted-foreground">— {entry.by}</span>
-                          <span className="tabular-nums text-xs text-muted-foreground">
-                            {entry.date} {entry.time}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            ) : (
+            {previousDispatches.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                Navigate to the Dispatch module to view the full QC &amp; dispatch trail for{" "}
-                <span className="font-mono font-medium">{event.dispatchId}</span>.
+                No previous dispatches recorded for {event.flightNumber}.
               </p>
+            ) : (
+              <div className="space-y-3">
+                {previousDispatches.map((d) => (
+                  <div key={d.id} className="rounded-md border border-border p-3">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        title="View in Dispatch"
+                        className="font-mono text-xs font-semibold text-primary underline decoration-dotted underline-offset-2 hover:opacity-80"
+                        onClick={() => onNavigate("/dispatch")}
+                      >
+                        {d.id}
+                      </button>
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${d.status === "Dispatched" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                        {d.status}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {d.detail.amenities.map((a) => a.label).join(", ") || "—"}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Delay dispatch details — ID, food items & qty, status Dispatched */}
+      {event.dispatchId && (
+        <Card>
+          <CardContent className="pt-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Delay Dispatch Details
+              </div>
+              <Button size="sm" variant="outline" onClick={() => onNavigate("/dispatch")}>
+                <ExternalLink className="h-3.5 w-3.5 mr-1.5" /> View in Dispatch
+              </Button>
+            </div>
+
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                title="View in Dispatch"
+                className="font-mono text-xs font-semibold text-primary underline decoration-dotted underline-offset-2 hover:opacity-80"
+                onClick={() => onNavigate("/dispatch")}
+              >
+                {event.dispatchId}
+              </button>
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700">
+                Dispatched
+              </span>
+            </div>
+
+            {delayDispatchItems.length > 0 && (
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Food Items</div>
+                <div className="border border-border rounded-md overflow-hidden">
+                  <Table>
+                    <TableHeader className="bg-muted/40">
+                      <TableRow>
+                        <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider text-right">Qty</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {delayDispatchItems.map((it, i) => (
+                        <TableRow key={i}>
+                          <TableCell className="text-sm font-medium">{it.label}</TableCell>
+                          <TableCell className="text-right tabular-nums text-sm">{it.qty}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
             )}
           </CardContent>
         </Card>

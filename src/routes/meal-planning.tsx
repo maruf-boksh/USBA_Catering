@@ -99,6 +99,14 @@ const rangeLabel = (from?: string, to?: string) => {
   if (from) return `From ${shortDate(from)}`;
   return `Until ${shortDate(to!)}`;
 };
+// "HH:MM" 24h → "HH:MM AM/PM" for serving-time display.
+const to12h = (hhmm: string): string => {
+  const [h, m] = hhmm.split(":").map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return hhmm;
+  const period = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${String(h12).padStart(2, "0")}:${String(m).padStart(2, "0")} ${period}`;
+};
 
 const FOOD_ITEMS: Record<string, Array<{ name: string; weight: number; calories: number }>> = {
   Breakfast: [
@@ -308,6 +316,53 @@ function getSampleMeals(): MealCard[] {
   return seedMealCards.map((m) => ({ ...m, createdDate: created }));
 }
 
+// ── Menu-type name change (approval-gated) ──────────────────────────────────
+// A request to rename a displayed menu-type label (e.g. "Breakfast" → "Morning
+// Meal"). It only changes the LABEL after approval — every configured menu under
+// the type keeps its full configuration (choices, special meals, dessert, etc.).
+interface MenuTypeChange {
+  id: string;
+  origType: string;   // the base MEAL_TYPES key this row maps from
+  oldName: string;    // label shown when the request was raised
+  newName: string;
+  requestedBy: string;
+  requestedAt: string;
+  status: "Pending" | "Approved" | "Rejected";
+  processedBy?: string;
+  processedAt?: string;
+}
+
+// Demo per-route Breakfast menus so the "same menu vs different menu per route"
+// scenario is visible inside the Breakfast card — passenger/crew, domestic/
+// international, a specific route, and an "All Routes" (shared) menu.
+function buildRouteDemoBreakfast(day: string, created: string): MealCard[] {
+  const mk = (
+    id: string, forType: string, flightType: string[], route: string | undefined,
+    items: MealItem[], dessert: MealItem,
+  ): MealCard => ({
+    id, day, mealType: "Breakfast", flightType, forType, route,
+    choices: [{ label: "CHOICE 1", percentage: 100, items }],
+    specialMeals: [], dessert,
+    servingTime: { start: "07:00", end: "10:00" },
+    totalKcal: items.reduce((s, i) => s + i.calories, 0) + dessert.calories,
+    createdDate: created,
+  });
+  return [
+    mk("route-demo-1", "Passengers", ["International"], "DAC-DXB-DAC",
+      [{ name: "Aloo Paratha", weight: 120, calories: 300 }, { name: "Masala Omelette", weight: 80, calories: 150 }],
+      { name: "Fresh Fruit Cup", weight: 80, calories: 70 }),
+    mk("route-demo-2", "Passengers", ["International"], "DAC-KUL-DAC",
+      [{ name: "Nasi Lemak", weight: 200, calories: 420 }, { name: "Boiled Egg", weight: 50, calories: 80 }],
+      { name: "Kaya Toast", weight: 60, calories: 180 }),
+    mk("route-demo-3", "Passengers", ["Domestic"], "DAC-CGP-DAC",
+      [{ name: "Bhuna Khichuri", weight: 220, calories: 280 }, { name: "Begun Bhaji", weight: 60, calories: 90 }],
+      { name: "Sweet Yoghurt", weight: 60, calories: 90 }),
+    mk("route-demo-4", "Crew", ["Domestic", "International"], undefined,
+      [{ name: "Paratha", weight: 100, calories: 250 }, { name: "Channa Masala", weight: 100, calories: 150 }],
+      { name: "Banana", weight: 100, calories: 90 }),
+  ];
+}
+
 export default function MealPlanning() {
   const navigate = useNavigate();
   // Meal types are driven by the configurable Meal Config (Configuration → Meal
@@ -337,6 +392,68 @@ export default function MealPlanning() {
   }, []);
   const [selectedDay, setSelectedDay] = useState(DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1]);
   const today = DAYS[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1];
+
+  // ── Per-route menu demo + menu-type rename approval ──────────────────────────
+  // Approved label overrides for menu types (base MEAL_TYPES key → new label).
+  // Only the label changes; each card's `mealType` and full config stay intact.
+  const [mealTypeRenames, setMealTypeRenames] = usePersistedState<Record<string, string>>("menu-type-renames", {});
+  const [menuTypeApprovals, setMenuTypeApprovals] = usePersistedState<MenuTypeChange[]>("menu-type-change-approvals", []);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<{ origType: string; currentName: string } | null>(null);
+  const [renameInput, setRenameInput] = useState("");
+  const [renameBy, setRenameBy] = useState("");
+
+  // Seed the demo per-route Breakfast menus once (idempotent by id) so the
+  // "different / shared menu per route" scenario is visible in the Breakfast card.
+  useEffect(() => {
+    if (meals.some((m) => m.id.startsWith("route-demo-"))) return;
+    const created = new Date().toISOString().split("T")[0];
+    setMeals((prev) => [...prev, ...buildRouteDemoBreakfast(today, created)]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const stampNow = () => new Date().toISOString().slice(0, 16).replace("T", " ");
+
+  const openRename = (origType: string, currentName: string) => {
+    setRenameTarget({ origType, currentName });
+    setRenameInput(currentName);
+    setRenameBy("");
+    setRenameOpen(true);
+  };
+  const submitRename = () => {
+    if (!renameTarget) return;
+    const newName = renameInput.trim();
+    if (!newName) { toast.error("Enter a new menu type name."); return; }
+    if (newName === renameTarget.currentName) { toast.error("Enter a name different from the current one."); return; }
+    if (!renameBy.trim()) { toast.error("Requested By is required."); return; }
+    if (menuTypeApprovals.some((r) => r.origType === renameTarget.origType && r.status === "Pending")) {
+      toast.error("A rename for this menu type is already pending approval."); return;
+    }
+    const rec: MenuTypeChange = {
+      id: `MTC-${Date.now().toString(36).slice(-6).toUpperCase()}`,
+      origType: renameTarget.origType,
+      oldName: renameTarget.currentName,
+      newName,
+      requestedBy: renameBy.trim(),
+      requestedAt: stampNow(),
+      status: "Pending",
+    };
+    setMenuTypeApprovals((prev) => [rec, ...prev]);
+    setRenameOpen(false);
+    toast.success(`Rename "${rec.oldName}" → "${rec.newName}" submitted for approval.`);
+  };
+  const approveRename = (rec: MenuTypeChange) => {
+    // Apply the label override — the underlying menus keep their configuration.
+    setMealTypeRenames((prev) => ({ ...prev, [rec.origType]: rec.newName }));
+    setMenuTypeApprovals((prev) => prev.map((r) =>
+      r.id === rec.id ? { ...r, status: "Approved" as const, processedBy: "GM Catering", processedAt: stampNow() } : r));
+    toast.success(`Approved — "${rec.oldName}" renamed to "${rec.newName}". All menus kept intact.`);
+  };
+  const rejectRename = (rec: MenuTypeChange) => {
+    setMenuTypeApprovals((prev) => prev.map((r) =>
+      r.id === rec.id ? { ...r, status: "Rejected" as const, processedBy: "GM Catering", processedAt: stampNow() } : r));
+    toast.success(`Rejected rename of "${rec.oldName}".`);
+  };
   // Date the planner is viewed "as of": only configs whose effective range covers
   // this date (plus range-less configs) are shown. Empty string = show all dates.
   // Defaults to today so the planner opens on the currently-effective menus.
@@ -2674,6 +2791,67 @@ export default function MealPlanning() {
         </span>
       </div>
 
+      {/* Menu-type rename — pending approvals */}
+      {menuTypeApprovals.some((r) => r.status === "Pending") && (
+        <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3">
+          <div className="text-xs font-semibold uppercase tracking-wider text-amber-800 mb-2">
+            Menu Type Name Changes — Pending Approval
+          </div>
+          <div className="space-y-2">
+            {menuTypeApprovals.filter((r) => r.status === "Pending").map((r) => (
+              <div key={r.id} className="flex flex-wrap items-center gap-2 text-sm bg-white rounded-md border border-amber-200 px-3 py-2">
+                <span className="font-mono text-[11px] text-muted-foreground">{r.id}</span>
+                <span className="font-medium">{r.oldName}</span>
+                <span className="text-muted-foreground">→</span>
+                <span className="font-semibold text-amber-800">{r.newName}</span>
+                <span className="text-xs text-muted-foreground">· by {r.requestedBy} · {r.requestedAt}</span>
+                <div className="ml-auto flex gap-2">
+                  <Button size="sm" className="h-7 text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => approveRename(r)}>
+                    Approve
+                  </Button>
+                  <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => rejectRename(r)}>
+                    Reject
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-[11px] text-amber-700 mt-2">
+            The label changes only after approval — every configured menu for the type keeps its full configuration.
+          </p>
+        </div>
+      )}
+
+      {/* Rename Menu Type dialog */}
+      <Dialog open={renameOpen} onOpenChange={setRenameOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Rename Menu Type</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label className="text-xs text-muted-foreground">Current Name</Label>
+              <div className="mt-1 text-sm font-medium">{renameTarget?.currentName}</div>
+            </div>
+            <div>
+              <Label className="text-xs text-muted-foreground">New Name <span className="text-destructive">*</span></Label>
+              <Input value={renameInput} onChange={(e) => setRenameInput(e.target.value)} className="mt-1" placeholder="e.g. Morning Meal" />
+            </div>
+            <div>
+              <Label className="text-xs text-muted-foreground">Requested By <span className="text-destructive">*</span></Label>
+              <Input value={renameBy} onChange={(e) => setRenameBy(e.target.value)} className="mt-1" placeholder="Name / designation" />
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              This goes to approval. All menus configured under this type keep their configuration — only the label changes once approved.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRenameOpen(false)}>Cancel</Button>
+            <Button onClick={submitRename}>Submit for Approval</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Day Tabs */}
       <Tabs value={selectedDay} onValueChange={setSelectedDay} className="mb-6">
         <TabsList>
@@ -2744,11 +2922,25 @@ export default function MealPlanning() {
               {MEAL_TYPES.map((mealType, typeIdx) => {
                 const palette = rowPalette[typeIdx % rowPalette.length];
                 const mealsForType = mealsByType[mealType];
+                const displayName = mealTypeRenames[mealType] ?? mealType;
+                const pendingRename = menuTypeApprovals.find((r) => r.origType === mealType && r.status === "Pending");
                 return (
                   <div key={mealType} className={`rounded-lg border ${palette.border} overflow-hidden`}>
-                    <div className={`${palette.header} px-4 py-2.5 flex items-center gap-4`}>
-                      <span className={`font-semibold text-sm w-28 shrink-0 ${palette.headerText}`}>{mealType}</span>
-                      <span className="text-xs text-muted-foreground">{mealTypeTime[mealType]}</span>
+                    <div className={`${palette.header} px-4 py-2.5 flex items-center gap-3 flex-wrap`}>
+                      <span className={`font-semibold text-sm uppercase tracking-wide ${palette.headerText}`}>{displayName}</span>
+                      <button
+                        type="button"
+                        title="Rename this menu type (requires approval)"
+                        className={`text-xs ${palette.headerText} opacity-70 hover:opacity-100 underline decoration-dotted underline-offset-2`}
+                        onClick={() => openRename(mealType, displayName)}
+                      >
+                        ✎ Rename
+                      </button>
+                      {pendingRename && (
+                        <span className="px-2 py-0.5 text-[10px] rounded-full bg-amber-100 text-amber-800 border border-amber-300 font-medium">
+                          Pending → {pendingRename.newName}
+                        </span>
+                      )}
                       <div className="ml-auto flex gap-2">
                         <Button
                           size="sm"
@@ -2802,14 +2994,17 @@ export default function MealPlanning() {
                                   {meal.flightType.map((ft) => (
                                     <span key={ft} className="px-2 py-0.5 text-xs rounded-full bg-primary/10 text-primary">{ft}</span>
                                   ))}
-                                  {meal.route && (
-                                    <span className="px-2 py-0.5 text-xs rounded-full bg-slate-100 text-slate-700 font-medium">{meal.route}</span>
-                                  )}
+                                  <span
+                                    className={`px-2 py-0.5 text-xs rounded-full font-medium ${meal.route ? "bg-slate-200 text-slate-800" : "bg-slate-100 text-slate-500"}`}
+                                    title={meal.route ? "Menu specific to this route" : "Shared menu — applies to every route"}
+                                  >
+                                    {meal.route ? `Route: ${meal.route}` : "All Routes"}
+                                  </span>
                                   <span className={`px-2 py-0.5 text-xs rounded-full ${(meal.effectiveFrom || meal.effectiveTo) ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-600"}`}>
                                     {rangeLabel(meal.effectiveFrom, meal.effectiveTo) || "All Dates"}
                                   </span>
-                                  <span className="text-xs text-muted-foreground">Serving: {meal.servingTime.start} – {meal.servingTime.end}</span>
-                                  <span className="text-xs italic text-muted-foreground">Effective: {formatDateDDMMMYYYY(meal.createdDate)}</span>
+                                  <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-900">Serving: {to12h(meal.servingTime.start)} – {to12h(meal.servingTime.end)}</span>
+                                  <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-sky-100 text-sky-900">Effective: {formatDateDDMMMYYYY(meal.createdDate)}</span>
                                   <Button variant="ghost" size="sm" className="h-6 px-2 text-xs ml-auto" onClick={() => openViewMenu(meal)}>📋 View Menu</Button>
                                 </div>
 
@@ -3001,10 +3196,10 @@ export default function MealPlanning() {
           {selectedMeal && (
             <div className="space-y-4 p-4 border rounded-lg bg-muted/30">
               <div>
-                <h4 className="font-semibold">{selectedMeal.mealType}</h4>
+                <h4 className="font-semibold">{mealTypeRenames[selectedMeal.mealType] ?? selectedMeal.mealType}</h4>
                 <p className="text-sm text-muted-foreground">
                   {selectedMeal.forType} • {selectedMeal.flightType.join(", ")}
-                  {selectedMeal.route && ` • ${selectedMeal.route}`}
+                  {" • "}{selectedMeal.route ? `Route: ${selectedMeal.route}` : "All Routes"}
                 </p>
               </div>
 

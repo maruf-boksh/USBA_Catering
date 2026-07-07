@@ -17,6 +17,7 @@ import {
   Plus, Minus, Truck, Pencil, Trash2, ThermometerSun, ShieldCheck,
   AlertOctagon, AlertTriangle, PlaneTakeoff, PlaneLanding, Warehouse,
   Clock, User, CheckCircle2, Eye, Smartphone, ChevronRight, QrCode, X as CloseIcon, Timer, Play,
+  Search,
 } from "lucide-react";
 import {
   flights as FLIGHT_BOARD, seedFlightOrders, activeOffices, activeWarehousesByOffice,
@@ -539,8 +540,17 @@ export default function DispatchMonitoring() {
   const [tickCount, setTickCount] = useState(0);
   const [formLoadStartIso, setFormLoadStartIso] = useState("");
   const [formTimerTick, setFormTimerTick] = useState(0);
+  // Airport Receive — "Time of Unloading" Start/End timer (self-contained; the
+  // start time is written into form.unloadingTime, the end time is UI-only).
+  const [unloadStartIso, setUnloadStartIso] = useState("");
+  const [unloadEndTime, setUnloadEndTime] = useState("");
+  const [unloadTimerTick, setUnloadTimerTick] = useState(0);
   const [fsRemarksInput, setFsRemarksInput] = useState("");
   const [hocRemarksInput, setHocRemarksInput] = useState("");
+  // Daily Product Dispatch Monitoring — table search + date-range filter.
+  const [dmSearch, setDmSearch] = useState("");
+  const [dmFrom, setDmFrom] = useState("");
+  const [dmTo, setDmTo] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
   const deepLinkHandled = useRef(false);
   const { markFlightQcCleared, addDispatchApproval, dispatchApprovals } = useWorkflow();
@@ -630,6 +640,7 @@ export default function DispatchMonitoring() {
     setShowForm(false); setEditId(null); setForm({ ...EMPTY_FORM }); setDepTime(""); setErrors({});
     setShowAirportPanel(false); setIsAirportReceiveMode(false);
     setFormLoadStartIso(""); setFormTimerTick(0);
+    setUnloadStartIso(""); setUnloadEndTime(""); setUnloadTimerTick(0);
   };
 
   const openNew = () => {
@@ -677,6 +688,14 @@ export default function DispatchMonitoring() {
     const id = setInterval(() => setFormTimerTick((t) => t + 1), 1000);
     return () => clearInterval(id);
   }, [formLoadStartIso]);
+
+  // Unloading timer tick — re-renders every second while the Airport Receive
+  // unloading timer is running.
+  useEffect(() => {
+    if (!unloadStartIso) return;
+    const id = setInterval(() => setUnloadTimerTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [unloadStartIso]);
 
 
   function startLoading(entryId: string) {
@@ -732,6 +751,7 @@ export default function DispatchMonitoring() {
     openEdit(entry);
     setShowAirportPanel(true);
     setIsAirportReceiveMode(true);
+    setUnloadStartIso(""); setUnloadEndTime(""); setUnloadTimerTick(0);
   };
 
   const validate = () => {
@@ -1042,6 +1062,19 @@ export default function DispatchMonitoring() {
   const unsatisfiedCount = entries.filter((e) => e.resultSatisfy === "No").length;
   const vehicleIssues = entries.filter((e) => e.vehicleClean === "No").length;
 
+  // Rows shown in the table after applying the search box + date-range filter.
+  // KPI totals above stay based on the full `entries` set.
+  const dmQuery = dmSearch.trim().toLowerCase();
+  const visibleEntries = entries.filter((e) => {
+    if (dmFrom && e.packagingDate < dmFrom) return false;
+    if (dmTo && e.packagingDate > dmTo) return false;
+    if (dmQuery) {
+      const hay = `${flightNo(e.flightId)} ${doc.originLabel} ${flightDest(e.flightId)} ${dispatchStatusBadge(e).label}`.toLowerCase();
+      if (!hay.includes(dmQuery)) return false;
+    }
+    return true;
+  });
+
   return (
     <>
       <div className="flex items-start justify-between gap-4">
@@ -1060,6 +1093,43 @@ export default function DispatchMonitoring() {
         <KpiCard label="Result Satisfied" value={satisfiedCount} icon={ShieldCheck} tone="success" />
         <KpiCard label="Not Satisfied" value={unsatisfiedCount} icon={AlertOctagon} tone="red" />
         <KpiCard label="Vehicle Issues" value={vehicleIssues} icon={AlertTriangle} tone="warning" />
+      </div>
+
+      {/* Toolbar — search, date-range filter, and shortcut to Transfer In Transit */}
+      <div className="flex flex-wrap items-center gap-3 mb-4">
+        <div className="relative flex-1 min-w-[200px] max-w-sm">
+          <Search className="h-4 w-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <Input
+            value={dmSearch}
+            onChange={(e) => setDmSearch(e.target.value)}
+            placeholder="Search flight, sector, status…"
+            className="h-9 pl-9"
+          />
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-muted-foreground whitespace-nowrap">From</span>
+          <Input type="date" value={dmFrom} onChange={(e) => setDmFrom(e.target.value)}
+            className="h-9 w-36 tabular-nums" />
+          <span className="text-xs text-muted-foreground whitespace-nowrap">To</span>
+          <Input type="date" value={dmTo} onChange={(e) => setDmTo(e.target.value)}
+            className="h-9 w-36 tabular-nums" />
+          {(dmFrom || dmTo || dmSearch) && (
+            <Button size="sm" variant="ghost" className="h-9 text-xs text-muted-foreground"
+              onClick={() => { setDmFrom(""); setDmTo(""); setDmSearch(""); }}>
+              Clear
+            </Button>
+          )}
+        </div>
+
+        <Button
+          className="h-9 ml-auto bg-navy text-navy-foreground hover:opacity-90"
+          onClick={() => navigate("/transfer")}
+          title="Open the Transfer module to receive items on the Transfer In Transit tab"
+        >
+          <Truck className="h-4 w-4 mr-1.5" /> Go to Transfer In Transit for Item Receive
+          <ChevronRight className="h-4 w-4 ml-1" />
+        </Button>
       </div>
 
       {/* Entries Table */}
@@ -1085,7 +1155,13 @@ export default function DispatchMonitoring() {
               </tr>
             </thead>
             <tbody>
-              {entries.map((entry, idx) => (
+              {visibleEntries.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="px-3 py-8 text-center text-muted-foreground">
+                    No dispatches match the current search / date filter.
+                  </td>
+                </tr>
+              ) : visibleEntries.map((entry, idx) => (
                 <Fragment key={entry.id}>
                   <tr className={`border-b border-border/40 hover:bg-blue-50/40 transition-colors ${idx % 2 === 1 ? "bg-slate-50/60" : "bg-white"}`}>
                     <td className="px-3 py-2 sticky left-0 z-10 bg-inherit font-semibold whitespace-nowrap text-blue-700">{flightNo(entry.flightId)}</td>
@@ -1564,7 +1640,63 @@ export default function DispatchMonitoring() {
                     </div>
                     <div>
                       <Label className="text-xs">Time of Unloading</Label>
-                      <Input type="time" value={form.unloadingTime} onChange={(e) => sf("unloadingTime", e.target.value)} className="mt-1 h-9" />
+                      <div className="mt-1 flex flex-wrap items-center gap-2">
+                        {!form.unloadingTime ? (
+                          <Button
+                            type="button"
+                            className="h-9 bg-indigo-600 hover:bg-indigo-700 text-white"
+                            onClick={() => {
+                              const now = new Date();
+                              const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+                              sf("unloadingTime", hhmm);
+                              setUnloadEndTime("");
+                              setUnloadStartIso(now.toISOString());
+                              toast.info("Unloading started — timer running.");
+                            }}
+                          >
+                            <Play className="h-4 w-4 mr-2" /> Start Timer
+                          </Button>
+                        ) : (
+                          <>
+                            <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2">
+                              <Play className="h-3.5 w-3.5 text-indigo-600 shrink-0" />
+                              <div>
+                                <div className="text-[9px] uppercase tracking-wider text-muted-foreground">Started</div>
+                                <div className="text-xs font-semibold tabular-nums text-indigo-700">{form.unloadingTime}</div>
+                              </div>
+                            </div>
+                            {unloadStartIso && !unloadEndTime && (
+                              <span className="font-mono text-xs text-violet-700 bg-violet-50 border border-violet-200 rounded px-2 py-1.5 tabular-nums">
+                                <Timer className="h-3 w-3 inline mr-0.5" />
+                                {unloadTimerTick >= 0 && formatElapsed(unloadStartIso)}
+                              </span>
+                            )}
+                            {unloadEndTime ? (
+                              <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
+                                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                                <div>
+                                  <div className="text-[9px] uppercase tracking-wider text-muted-foreground">Ended</div>
+                                  <div className="text-xs font-semibold tabular-nums text-emerald-700">{unloadEndTime}</div>
+                                </div>
+                              </div>
+                            ) : (
+                              <Button
+                                type="button"
+                                className="h-9 bg-emerald-600 hover:bg-emerald-700 text-white"
+                                onClick={() => {
+                                  const now = new Date();
+                                  const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+                                  setUnloadEndTime(hhmm);
+                                  setUnloadStartIso("");
+                                  toast.success("Unloading ended.");
+                                }}
+                              >
+                                <CheckCircle2 className="h-4 w-4 mr-2" /> End Timer
+                              </Button>
+                            )}
+                          </>
+                        )}
+                      </div>
                       <TempHint note="Time when unloading begins at gate" />
                     </div>
                   </div>
