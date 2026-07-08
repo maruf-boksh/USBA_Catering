@@ -13,6 +13,7 @@ import {
   ShieldCheck, ArrowLeft, Search, Save, UploadCloud, Undo2, Trash2, History,
   ChevronRight, ChevronDown, AlertTriangle, ShieldAlert, GitBranch, Copy, RotateCcw,
   Eye, Pencil, FileSpreadsheet, FileText, Download, GitCompare, Crosshair, Lock,
+  CheckSquare, Square, Columns3, FormInput, BarChart3, LayoutGrid, EyeOff,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useRolesStore } from "@/stores/rolesStore";
@@ -90,6 +91,8 @@ export default function RolePermissionEditorPage() {
   const [inspectorQuery, setInspectorQuery] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerSearch, setPickerSearch] = useState("");
+  const [centerTab, setCenterTab] = useState<"edit" | "preview">("edit");
+  const [leaveConfirm, setLeaveConfirm] = useState<null | { onConfirm: () => void }>(null);
 
   const editRole = editRoleId ? rolesById[editRoleId] : null;
 
@@ -172,6 +175,39 @@ export default function RolePermissionEditorPage() {
       for (const p of perms) if (p.scopeable && next[p.key]?.granted) next[p.key] = { granted: true, scope };
       return next;
     });
+  }
+
+  /** Grant / revoke every permission across a whole module (all its pages). */
+  function moduleGrant(modKey: string, granted: boolean) {
+    if (readOnly || !editRoleId) return;
+    const mod = PERMISSION_CATALOG.find(m => m.key === modKey);
+    if (!mod) return;
+    const perms = mod.submodules.flatMap(s => s.permissions as Permission[]);
+    let sensitiveCount = 0;
+    setWorking(prev => {
+      const next = { ...prev };
+      for (const p of perms) {
+        if (granted) { next[p.key] = p.scopeable ? { granted: true, scope: p.defaultScope ?? "department" } : { granted: true }; if (p.sensitive) sensitiveCount++; }
+        else delete next[p.key];
+      }
+      return next;
+    });
+    audit(editRoleId, granted ? "permission.granted" : "permission.revoked", { note: `${granted ? "Granted" : "Revoked"} all of ${mod.label}.` });
+    if (granted && sensitiveCount) toast.warning(`Granted ${sensitiveCount} sensitive permission${sensitiveCount === 1 ? "" : "s"} in ${mod.label}.`);
+    else toast.success(`${granted ? "Granted" : "Revoked"} ${mod.label}.`);
+  }
+
+  function moduleCoverage(modKey: string): { granted: number; total: number } {
+    const mod = PERMISSION_CATALOG.find(m => m.key === modKey);
+    if (!mod) return { granted: 0, total: 0 };
+    const perms = mod.submodules.flatMap(s => s.permissions);
+    return { granted: perms.filter(p => working[p.key]?.granted).length, total: perms.length };
+  }
+
+  /** Run `action`, but if there are unsaved edits, confirm first. */
+  function guarded(action: () => void) {
+    if (isDirty && !readOnly) setLeaveConfirm({ onConfirm: action });
+    else action();
   }
 
   function applyPreset(sub: { permissions: readonly Permission[] }, preset: PermissionPreset) {
@@ -483,7 +519,7 @@ export default function RolePermissionEditorPage() {
         icon={<span className="h-9 w-9 rounded-md bg-primary/10 text-primary text-sm font-semibold inline-flex items-center justify-center">{initials(editRole.name)}</span>}
         actions={
           <div className="flex gap-2 items-center flex-wrap">
-            <Button size="sm" variant="ghost" onClick={() => { setView("list"); setEditRoleId(null); }}><ArrowLeft className="h-4 w-4 mr-1.5" /> Back</Button>
+            <Button size="sm" variant="ghost" onClick={() => guarded(() => { setView("list"); setEditRoleId(null); })}><ArrowLeft className="h-4 w-4 mr-1.5" /> Back</Button>
             <Button size="sm" variant="outline" onClick={() => setAuditOpen(true)}><History className="h-4 w-4 mr-1.5" /> Audit</Button>
             <Button size="sm" variant="outline" onClick={() => { setCmpA(editRole.id); setCompareOpen(true); }}><GitCompare className="h-4 w-4 mr-1.5" /> Compare</Button>
             {!readOnly && <>
@@ -506,11 +542,19 @@ export default function RolePermissionEditorPage() {
         {/* LEFT — module / page tree */}
         <Card className="h-fit lg:sticky lg:top-3">
           <CardContent className="py-3 px-2">
-            <div className="relative mb-2 px-1">
+            <div className="relative mb-1.5 px-1">
               <Search className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
               <Input value={treeSearch} onChange={e => setTreeSearch(e.target.value)} placeholder="Find page…" className="h-8 pl-8" />
             </div>
-            <div className="max-h-[70vh] overflow-y-auto pr-1">
+            <div className="flex items-center justify-between px-1 mb-1">
+              <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Modules</span>
+              <div className="flex gap-1">
+                <button className="text-[10px] text-muted-foreground hover:text-foreground" onClick={() => setOpenModules(new Set(PERMISSION_CATALOG.map(m => m.key)))}>Expand all</button>
+                <span className="text-muted-foreground">·</span>
+                <button className="text-[10px] text-muted-foreground hover:text-foreground" onClick={() => setOpenModules(new Set())}>Collapse</button>
+              </div>
+            </div>
+            <div className="max-h-[68vh] overflow-y-auto pr-1">
               {PERMISSION_CATALOG.map(mod => {
                 const subs = mod.submodules.filter(s => {
                   const q = treeSearch.trim().toLowerCase();
@@ -518,15 +562,25 @@ export default function RolePermissionEditorPage() {
                 });
                 if (subs.length === 0) return null;
                 const isOpen = openModules.has(mod.key) || treeSearch.trim().length > 0;
+                const mc = moduleCoverage(mod.key);
                 return (
-                  <div key={mod.key} className="mb-0.5">
-                    <button
-                      className="w-full flex items-center gap-1 px-1.5 py-1 text-xs font-semibold text-foreground hover:bg-muted/60 rounded"
-                      onClick={() => setOpenModules(prev => { const n = new Set(prev); n.has(mod.key) ? n.delete(mod.key) : n.add(mod.key); return n; })}
-                    >
-                      {isOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                      {mod.label}
-                    </button>
+                  <div key={mod.key} className="mb-0.5 group">
+                    <div className="flex items-center gap-0.5 pr-1 rounded hover:bg-muted/60">
+                      <button
+                        className="flex-1 flex items-center gap-1 px-1.5 py-1 text-xs font-semibold text-foreground text-left"
+                        onClick={() => setOpenModules(prev => { const n = new Set(prev); n.has(mod.key) ? n.delete(mod.key) : n.add(mod.key); return n; })}
+                      >
+                        {isOpen ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
+                        <span className="truncate">{mod.label}</span>
+                        <span className={`ml-auto tabular-nums text-[9px] rounded-full px-1.5 ${mc.granted ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground"}`}>{mc.granted}/{mc.total}</span>
+                      </button>
+                      {!readOnly && (
+                        <span className="hidden group-hover:flex items-center gap-0.5">
+                          <button title={`Grant all of ${mod.label}`} className="text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 rounded p-0.5" onClick={() => moduleGrant(mod.key, true)}><CheckSquare className="h-3 w-3" /></button>
+                          <button title={`Revoke all of ${mod.label}`} className="text-red-600 hover:bg-red-50 dark:hover:bg-red-950/40 rounded p-0.5" onClick={() => moduleGrant(mod.key, false)}><Square className="h-3 w-3" /></button>
+                        </span>
+                      )}
+                    </div>
                     {isOpen && subs.map(s => {
                       const active = sel?.mod === mod.key && sel?.sub === s.key;
                       const gc = subGrantedCount(s.key, mod.key);
@@ -560,7 +614,15 @@ export default function RolePermissionEditorPage() {
                     <div className="font-semibold text-foreground">{currentSub.label}</div>
                     <div className="text-[11px] text-muted-foreground">{currentSub.description}</div>
                   </div>
+                  <div className="inline-flex items-center gap-0.5 rounded-md border border-border p-0.5 text-xs">
+                    <button className={`px-2 py-1 rounded inline-flex items-center gap-1 ${centerTab === "edit" ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`} onClick={() => setCenterTab("edit")}><Pencil className="h-3 w-3" /> Edit</button>
+                    <button className={`px-2 py-1 rounded inline-flex items-center gap-1 ${centerTab === "preview" ? "bg-primary text-primary-foreground" : "text-muted-foreground"}`} onClick={() => setCenterTab("preview")}><Eye className="h-3 w-3" /> Preview</button>
+                  </div>
                 </div>
+
+                {centerTab === "preview" ? (
+                  <PagePreview sub={currentSub} working={working} />
+                ) : (<>
 
                 {/* presets */}
                 {currentSub.presets && currentSub.presets.length > 0 && (
@@ -647,6 +709,7 @@ export default function RolePermissionEditorPage() {
                     </div>
                   ))}
                 </div>
+                </>)}
               </>
             )}
           </CardContent>
@@ -745,7 +808,111 @@ export default function RolePermissionEditorPage() {
 
       <CompareDialog open={compareOpen} onClose={() => setCompareOpen(false)} roles={roles} rolesById={rolesById}
         a={cmpA} b={cmpB} setA={setCmpA} setB={setCmpB} liveGrantsByRole={liveGrantsByRole} />
+
+      {/* Unsaved-changes guard */}
+      <Dialog open={leaveConfirm !== null} onOpenChange={o => !o && setLeaveConfirm(null)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader><DialogTitle>Discard unsaved changes?</DialogTitle></DialogHeader>
+          <p className="text-sm text-muted-foreground">You have edits that aren't saved as a draft. Leaving now will lose them.</p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setLeaveConfirm(null)}>Keep editing</Button>
+            <Button variant="outline" onClick={() => { handleSave(); const fn = leaveConfirm?.onConfirm; setLeaveConfirm(null); fn?.(); }}><Save className="h-4 w-4 mr-1.5" /> Save & leave</Button>
+            <Button className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={() => { const fn = leaveConfirm?.onConfirm; setLeaveConfirm(null); fn?.(); }}>Discard</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
+  );
+}
+
+// ── Live page preview ────────────────────────────────────────────────────────────
+// Renders a faithful mock of the selected page, gated by the working grants, so an
+// admin sees exactly what the role would see before publishing.
+function PagePreview({ sub, working }: { sub: NonNullable<ReturnType<typeof findSubmodule>>; working: RolePermissionMap }) {
+  const on = (key: string) => !!working[key]?.granted;
+  const bySection = (section: PermissionSection) => sub.permissions.filter(p => p.section === section);
+  const pageOn = on(sub.permissions.find(p => p.section === "page")?.key ?? "");
+
+  if (!pageOn) {
+    return (
+      <div className="rounded-md border border-dashed border-border py-12 text-center text-sm text-muted-foreground">
+        <EyeOff className="h-6 w-6 mx-auto mb-2 opacity-60" />
+        This role <strong className="text-foreground">cannot open {sub.label}</strong>. Grant “Access this page” to preview its contents.
+      </div>
+    );
+  }
+
+  const kpis = bySection("tiles"), columns = bySection("columns"), fields = bySection("forms");
+  const actions = bySection("page_actions"), sections = bySection("sections");
+  const scopeOf = (key: string) => working[key]?.scope;
+
+  return (
+    <div className="rounded-md border border-border overflow-hidden">
+      {/* mock page header */}
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border bg-muted/40">
+        <div className="text-sm font-semibold">{sub.label}</div>
+        <div className="flex flex-wrap gap-1 justify-end">
+          {actions.map(a => (
+            <span key={a.key} className={`text-[11px] rounded px-2 py-1 border ${on(a.key) ? "bg-primary text-primary-foreground border-primary" : "opacity-30 line-through border-border"}`}>{a.displayName}</span>
+          ))}
+          {actions.length === 0 && <span className="text-[11px] text-muted-foreground">No actions</span>}
+        </div>
+      </div>
+
+      <div className="p-3 space-y-3">
+        {kpis.length > 0 && (
+          <PreviewGroup icon={BarChart3} label="KPI cards">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {kpis.map(k => (
+                <div key={k.key} className={`rounded-md border px-2.5 py-1.5 ${on(k.key) ? "border-border" : "opacity-30 border-dashed"}`}>
+                  <div className="text-[10px] text-muted-foreground truncate">{k.displayName}</div>
+                  <div className="text-sm font-semibold">{on(k.key) ? "—" : <EyeOff className="h-3 w-3" />}</div>
+                  {on(k.key) && scopeOf(k.key) && <div className="text-[9px]" style={{ color: SCOPE_STYLE[scopeOf(k.key)!].color }}>{SCOPE_LABELS[scopeOf(k.key)!]}</div>}
+                </div>
+              ))}
+            </div>
+          </PreviewGroup>
+        )}
+
+        {columns.length > 0 && (
+          <PreviewGroup icon={Columns3} label="Table">
+            <div className="flex flex-wrap gap-1">
+              {columns.map(c => (
+                <span key={c.key} className={`text-[11px] rounded px-2 py-0.5 border ${on(c.key) ? "bg-muted border-border" : "opacity-30 line-through border-dashed"}`}>{c.displayName}</span>
+              ))}
+            </div>
+          </PreviewGroup>
+        )}
+
+        {fields.length > 0 && (
+          <PreviewGroup icon={FormInput} label="Form fields">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+              {fields.map(f => (
+                <div key={f.key} className={`rounded border px-2 py-1 text-[11px] ${on(f.key) ? "border-border text-foreground" : "opacity-30 line-through border-dashed"}`}>{f.displayName}</div>
+              ))}
+            </div>
+          </PreviewGroup>
+        )}
+
+        {sections.length > 0 && (
+          <PreviewGroup icon={LayoutGrid} label="Sections">
+            <div className="space-y-1">
+              {sections.map(s => (
+                <div key={s.key} className={`rounded border px-2 py-1.5 text-[11px] ${on(s.key) ? "border-border" : "opacity-30 line-through border-dashed"}`}>{s.displayName}</div>
+              ))}
+            </div>
+          </PreviewGroup>
+        )}
+      </div>
+    </div>
+  );
+}
+function PreviewGroup({ icon: Icon, label, children }: { icon: typeof BarChart3; label: string; children: ReactNode }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1 flex items-center gap-1"><Icon className="h-3 w-3" /> {label}</div>
+      {children}
+    </div>
   );
 }
 
