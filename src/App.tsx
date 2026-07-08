@@ -68,6 +68,7 @@ import ConfigAccessControlPage from "@/routes/config-access-control";
 import ConfigAccessControlPermissionsPage from "@/routes/config-access-control-permissions";
 import ConfigRoleSetupPage from "@/routes/config-role-setup";
 import ConfigRolePermissionEditorPage from "@/routes/config-role-permission-editor";
+import ConfigFormAccessControlPage from "@/routes/config-form-access-control";
 import ReportBuilderPage from "@/routes/report-builder";
 import OperationsOverviewPage from "@/routes/operations-overview";
 import ProductionOverviewPage from "@/routes/production-overview";
@@ -160,6 +161,7 @@ export function App() {
             <Route path="/config-access-control/permissions" element={<ConfigAccessControlPermissionsPage />} />
             <Route path="/config-role-setup" element={<ConfigRoleSetupPage />} />
             <Route path="/config-role-permission-editor" element={<ConfigRolePermissionEditorPage />} />
+            <Route path="/config-form-access-control" element={<ConfigFormAccessControlPage />} />
             <Route path="/report-builder" element={<ReportBuilderPage />} />
             <Route path="/operations-overview" element={<OperationsOverviewPage />} />
             <Route path="/production-overview" element={<ProductionOverviewPage />} />

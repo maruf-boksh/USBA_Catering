@@ -32,6 +32,7 @@ import {
   Undo2,
   UserCog,
   KeyRound,
+  LockKeyhole,
   LineChart,
   Wallet,
   Receipt,
@@ -261,6 +262,7 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/config-production-basis', label: 'Production Basis', icon: I(Scale) },
       { key: '/config-role-setup', label: 'Role Setup', icon: I(UserCog) },
       { key: '/config-role-permission-editor', label: 'Role Permission Editor', icon: I(KeyRound) },
+      { key: '/config-form-access-control', label: 'Form Access Control', icon: I(LockKeyhole) },
     ],
   },
 
