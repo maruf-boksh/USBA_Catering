@@ -7,6 +7,7 @@ import {
   Truck, Package, Plus, AlertTriangle, Bell, MoreHorizontal,
   Eye, Croissant, Pill, ShieldCheck, Download,
   CheckCircle2, ThermometerSun, PlaneLanding, User, Clock, MoveRight,
+  Printer, ScanLine,
 } from "lucide-react";
 import { flights, meals, activeWarehouses, activeOffices, activeWarehousesByOffice } from "@/lib/sample-data";
 import {
@@ -17,7 +18,7 @@ import { KpiCard } from "@/components/common/KpiCard";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem,
-  DropdownMenuTrigger, DropdownMenuSeparator,
+  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -31,6 +32,19 @@ import { useWorkflow } from "@/lib/workflow-store";
 export type DispatchStatus = "Preparing" | "Prepared" | "Ready For QC" | "Ready For Dispatch" | "Dispatched" | "Returned";
 
 type StatusLog = { status: DispatchStatus; by: string; date: string; time: string };
+
+/** Advance a dispatch record's status AND append it to the status trail, stamped
+ *  with the current date/time. Returns the record untouched when the status
+ *  hasn't actually changed (so no duplicate trail rows). Every status mutation
+ *  goes through this so the trail captures the full lifecycle, not just create +
+ *  dispatch. */
+function withStatusLog(r: DispatchRecord, status: DispatchStatus, by: string): DispatchRecord {
+  if (r.status === status) return r;
+  const now = new Date();
+  const date = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+  const time = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: true });
+  return { ...r, status, trail: [...r.trail, { status, by, date, time }] };
+}
 
 type DispatchDetail = {
   flightKitchen: { name: string; totalMeals: number; lunch: number; breakfast: number };
@@ -508,9 +522,14 @@ export default function Dispatch() {
   const [filterDateTo, setFilterDateTo]     = useState("");
   const [filterDepTime, setFilterDepTime]   = useState("");
   const [filterStatus, setFilterStatus]     = useState("All Statuses");
+  const [page, setPage]                     = useState(1);
   const [materialsRow, setMaterialsRow]             = useState<PackagingRow | null>(null);
   const [markReadyRow, setMarkReadyRow]             = useState<PackagingRow | null>(null);
   const [viewPackagingRow, setViewPackagingRow]     = useState<PackagingRow | null>(null);
+  // ── Print & Scan Labels dialog state ───────────────────────────────────────
+  const [labelRow, setLabelRow]             = useState<PackagingRow | null>(null);
+  const [scanInput, setScanInput]           = useState("");
+  const [scannedIds, setScannedIds]         = useState<Set<string>>(new Set());
   const [dispatchedFlightEntries, setDispatchedFlightEntries] = useState<DispatchedFlightEntry[]>([]);
   const [viewDispatchedEntry, setViewDispatchedEntry] = useState<DispatchedFlightEntry | null>(null);
   // ── QC Report dialog state ─────────────────────────────────────────────────
@@ -901,6 +920,22 @@ export default function Dispatch() {
     return timeGroups;
   }, [filteredPRDs]);
 
+  // ── Pagination (same format as Order Management) ────────────────────────────
+  // The table's rowspan structure is built per dep-time group, so groups are the
+  // pagination unit. Newest dispatches are prepended into packagingRows, so they
+  // lead the list (last dispatched on top). The SL counter below reports the
+  // dispatch-run range on the current page.
+  const DISPATCH_GROUPS_PER_PAGE = 6;
+  const totalDispatchPages = Math.max(1, Math.ceil(groupedPRDs.length / DISPATCH_GROUPS_PER_PAGE));
+  useEffect(() => { setPage(1); }, [filterDateFrom, filterDateTo, filterDepTime, filterStatus]);
+  useEffect(() => { if (page > totalDispatchPages) setPage(totalDispatchPages); }, [page, totalDispatchPages]);
+  const groupPageStart = (page - 1) * DISPATCH_GROUPS_PER_PAGE;
+  const pagedPRDs = groupedPRDs.slice(groupPageStart, groupPageStart + DISPATCH_GROUPS_PER_PAGE);
+  const runsPerGroup = groupedPRDs.map((g) => dispatchRunCount(g.flightGroups));
+  const totalDispatches = runsPerGroup.reduce((s, n) => s + n, 0);
+  const dispatchStart = totalDispatches === 0 ? 0 : runsPerGroup.slice(0, groupPageStart).reduce((s, n) => s + n, 0) + 1;
+  const dispatchEnd = runsPerGroup.slice(0, groupPageStart + DISPATCH_GROUPS_PER_PAGE).reduce((s, n) => s + n, 0);
+
   // ── KPI data ──────────────────────────────────────────────────────────────
   // The flight-level dispatch list (same source the table renders from) is the
   // "dispatched" universe; the Dispatch Monitoring receipts (dm_entries) tell us
@@ -940,7 +975,7 @@ export default function Dispatch() {
       r.packagingStatus === "Packaging Done" || r.packagingStatus === "Ready for Dispatch"
     );
     const newStatus: DispatchStatus = allReady ? "Ready For Dispatch" : allDone ? "Prepared" : "Preparing";
-    setRecords((prev) => prev.map((r) => (r.id === dspId ? { ...r, status: newStatus } : r)));
+    setRecords((prev) => prev.map((r) => (r.id === dspId ? withStatusLog(r, newStatus, "System") : r)));
   };
 
   // ── Packaging handlers ──────────────────────────────────────────────────────
@@ -967,6 +1002,58 @@ export default function Dispatch() {
     toast.success(`${row.id} marked as Packaging Done.`);
   };
 
+  // ── Print & Scan Labels ─────────────────────────────────────────────────────
+  // Each meal item carries its own scannable label. Scanning every in-progress
+  // item's label completes packaging (→ "Packaging Done"), mirroring the manual
+  // "Mark Packaging Done" action but driven by a per-item barcode scan.
+  const labelCode = (r: PackagingRow) => `LBL-${r.id}`;
+
+  const openLabelModal = (row: PackagingRow) => {
+    setScannedIds(new Set());
+    setScanInput("");
+    setLabelRow(row);
+  };
+
+  const handleScanLabel = (raw: string) => {
+    if (!labelRow) return;
+    const code = raw.trim().toUpperCase();
+    if (!code) return;
+    const flightRows = packagingRows.filter(
+      (r) => r.flight === labelRow.flight && r.depTime === labelRow.depTime
+    );
+    const target = flightRows.find(
+      (r) =>
+        r.packagingStatus === "Packaging In Progress" &&
+        (labelCode(r).toUpperCase() === code || r.id.toUpperCase() === code)
+    );
+    if (!target) {
+      toast.error(`No matching in-progress label for "${raw.trim()}".`);
+      return;
+    }
+    if (scannedIds.has(target.id)) {
+      toast.info(`${target.mealName} label already scanned.`);
+      setScanInput("");
+      return;
+    }
+    const nextScanned = new Set(scannedIds).add(target.id);
+    setScannedIds(nextScanned);
+    setScanInput("");
+    toast.success(`Scanned ${target.mealName} — ${labelCode(target)}.`);
+
+    // Once every in-progress item on this flight is scanned → Packaging Done.
+    const inProgress = flightRows.filter((r) => r.packagingStatus === "Packaging In Progress");
+    if (inProgress.length > 0 && inProgress.every((r) => nextScanned.has(r.id))) {
+      const ids = new Set(inProgress.map((r) => r.id));
+      const updated = packagingRows.map((r) =>
+        ids.has(r.id) ? { ...r, packagingStatus: "Packaging Done" as PackagingStatus } : r
+      );
+      setPackagingRows(updated);
+      const dspRefs = new Set(inProgress.map((r) => r.dspRef).filter(Boolean) as string[]);
+      dspRefs.forEach((d) => recalcDSP(updated, d));
+      toast.success(`All ${ids.size} label(s) scanned — flight ${labelRow.flight} marked Packaging Done.`);
+    }
+  };
+
   const handleMarkReadyForDispatch = (row: PackagingRow) => {
     const updated = packagingRows.map((r) =>
       r.id === row.id ? { ...r, packagingStatus: "Ready for Dispatch" as PackagingStatus } : r
@@ -981,13 +1068,15 @@ export default function Dispatch() {
     const current = flightQCStates.get(flight) ?? { qcState: "not-started" as QCState };
     if (current.qcState === "not-started") {
       setFlightQCStates((prev) => new Map(prev).set(flight, { qcState: "in-progress" }));
+      const dspRef = packagingRows.find((r) => r.flight === flight)?.dspRef;
+      if (dspRef) setRecords((prev) => prev.map((r) => r.id === dspRef ? withStatusLog(r, "Ready For QC", "Food Safety & QC") : r));
       toast.info(`QC started for flight ${flight}.`);
     } else if (current.qcState === "in-progress") {
       const now = new Date();
       const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true });
       setFlightQCStates((prev) => new Map(prev).set(flight, { qcState: "done", qcCheckedAt: timeStr }));
       const dspRef = packagingRows.find((r) => r.flight === flight)?.dspRef;
-      if (dspRef) setRecords((prev) => prev.map((r) => r.id === dspRef ? { ...r, status: "Ready For Dispatch" as DispatchStatus } : r));
+      if (dspRef) setRecords((prev) => prev.map((r) => r.id === dspRef ? withStatusLog(r, "Ready For Dispatch", "Food Safety & QC") : r));
       toast.success(`QC Done for flight ${flight}. Status → Ready for Dispatch.`);
     }
   };
@@ -2004,7 +2093,7 @@ export default function Dispatch() {
     <>
       {/* ── Header ──────────────────────────────────────────────────────────── */}
       <PageHeader
-        title="Packaging & Dispatch"
+        title="Dispatch"
         subtitle="Tray prep, cart assignment, label printing & vehicle dispatch"
         actions={<Button onClick={() => { setConfigDate(today); setConfigOpen(true); }}><Plus className="h-4 w-4 mr-1" /> New Dispatch</Button>}
       />
@@ -2089,7 +2178,8 @@ export default function Dispatch() {
                 </tr>
               </tbody>
             ) : (
-              groupedPRDs.map((timeGroup, tgIdx) => {
+              pagedPRDs.map((timeGroup, localIdx) => {
+                const tgIdx = groupPageStart + localIdx;
                 const flightCount = timeGroup.flightGroups.length;
                 // Running serial across all time-groups — one serial per dispatch
                 // run (round-trip legs share a Dispatch ID and one SL).
@@ -2326,20 +2416,10 @@ export default function Dispatch() {
                                 </DropdownMenuTrigger>
                                 <DropdownMenuContent align="end" className="w-52">
                                   {flightGroup.rows.some((r) => r.packagingStatus === "Packaging In Progress") && (
-                                    <>
-                                      <DropdownMenuItem onClick={() => {
-                                        const ids = new Set(flightGroup.rows.filter((r) => r.packagingStatus === "Packaging In Progress").map((r) => r.id));
-                                        setPackagingRows((prev) => prev.map((r) => ids.has(r.id) ? { ...r, packagingStatus: "Packaging Done" as PackagingStatus } : r));
-                                        toast.success(`Packaging done for flight ${flightGroup.flight}.`);
-                                      }}>
-                                        <CheckCircle2 className="h-4 w-4 mr-2" /> Mark Packaging Done
-                                      </DropdownMenuItem>
-                                      <DropdownMenuSeparator />
-                                    </>
+                                    <DropdownMenuItem onClick={() => openLabelModal(flightGroup.rows[0])}>
+                                      <Printer className="h-4 w-4 mr-2" /> Print Label
+                                    </DropdownMenuItem>
                                   )}
-                                  <DropdownMenuItem onClick={() => toast.info(`Print Label for ${flightGroup.flight}`)}>
-                                    Print Label
-                                  </DropdownMenuItem>
                                   <DropdownMenuItem onClick={() => setQcReport({ flight: flightGroup.flight, qcState: flightQCState, checkedAt: flightQCData?.qcCheckedAt })}>
                                     View QC Report
                                   </DropdownMenuItem>
@@ -2356,6 +2436,65 @@ export default function Dispatch() {
             )}
           </table>
         </div>
+        {groupedPRDs.length > 0 && totalDispatchPages > 1 && (
+          <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3">
+            <div className="text-xs text-muted-foreground">
+              Showing dispatches{" "}
+              <strong className="text-foreground tabular-nums">{dispatchStart}</strong>–
+              <strong className="text-foreground tabular-nums">{dispatchEnd}</strong>{" "}
+              of <strong className="text-foreground tabular-nums">{totalDispatches}</strong>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 px-2"
+                onClick={() => setPage(1)}
+                disabled={page === 1}
+                aria-label="First page"
+                title="First page"
+              >
+                «
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 px-2"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page === 1}
+                aria-label="Previous page"
+                title="Previous page"
+              >
+                ‹
+              </Button>
+              <span className="text-xs text-muted-foreground tabular-nums min-w-[80px] text-center">
+                Page {page} / {totalDispatchPages}
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 px-2"
+                onClick={() => setPage((p) => Math.min(totalDispatchPages, p + 1))}
+                disabled={page === totalDispatchPages}
+                aria-label="Next page"
+                title="Next page"
+              >
+                ›
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 px-2"
+                onClick={() => setPage(totalDispatchPages)}
+                disabled={page === totalDispatchPages}
+                aria-label="Last page"
+                title="Last page"
+              >
+                »
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
 
@@ -2641,6 +2780,151 @@ export default function Dispatch() {
                   >
                     Confirm — Start Packaging
                   </Button>
+                </div>
+              </>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Print & Scan Labels Modal ────────────────────────────────────────── */}
+      <Dialog open={!!labelRow} onOpenChange={(v) => !v && setLabelRow(null)}>
+        <DialogContent className="w-full max-w-full sm:max-w-3xl max-h-[100vh] sm:max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden">
+          <div className="px-6 pt-5 pb-4 border-b shrink-0">
+            <DialogTitle className="text-base font-semibold flex items-center gap-2">
+              <Printer className="h-4 w-4" /> Print &amp; Scan Labels — {labelRow?.flight}
+            </DialogTitle>
+          </div>
+          {labelRow && (() => {
+            const flightRows = packagingRows
+              .filter((r) => r.flight === labelRow.flight && r.depTime === labelRow.depTime)
+              .slice()
+              .sort((a, b) =>
+                (a.packagingStatus === "Packaging In Progress" ? 0 : 1) -
+                (b.packagingStatus === "Packaging In Progress" ? 0 : 1));
+            const inProgress = flightRows.filter((r) => r.packagingStatus === "Packaging In Progress");
+            const scannedCount = inProgress.filter((r) => scannedIds.has(r.id)).length;
+            return (
+              <>
+                {/* Scanner bar */}
+                <div className="px-6 py-3 border-b bg-muted/30 shrink-0 flex flex-col sm:flex-row sm:items-center gap-3 sm:justify-between">
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    <ScanLine className="h-4 w-4 text-primary shrink-0" />
+                    <input
+                      autoFocus
+                      value={scanInput}
+                      onChange={(e) => setScanInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleScanLabel(scanInput); } }}
+                      placeholder="Scan or type a label code, then press Enter…"
+                      className="flex-1 min-w-0 h-9 rounded-md border border-border bg-background px-3 text-sm font-mono"
+                    />
+                    <Button size="sm" className="shrink-0" onClick={() => handleScanLabel(scanInput)}>
+                      <ScanLine className="h-3.5 w-3.5 mr-1" /> Scan
+                    </Button>
+                  </div>
+                  {inProgress.length > 0 ? (
+                    <div className="text-xs font-semibold whitespace-nowrap">
+                      Scanned <span className="text-primary">{scannedCount}</span> / {inProgress.length} item{inProgress.length === 1 ? "" : "s"}
+                    </div>
+                  ) : (
+                    <div className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 whitespace-nowrap">
+                      <CheckCircle2 className="h-3.5 w-3.5" /> All items packaged
+                    </div>
+                  )}
+                </div>
+
+                {/* Individual item labels */}
+                <div className="flex-1 overflow-y-auto px-6 py-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {flightRows.map((r) => {
+                      const code = labelCode(r);
+                      const isInProgress = r.packagingStatus === "Packaging In Progress";
+                      const packagedAlready =
+                        r.packagingStatus === "Packaging Done" ||
+                        r.packagingStatus === "Ready for Dispatch" ||
+                        r.packagingStatus === "Dispatched";
+                      const isScanned = scannedIds.has(r.id) || (!isInProgress && packagedAlready);
+                      return (
+                        <div
+                          key={r.id}
+                          className={`rounded-lg border-2 p-3 flex flex-col gap-2 ${
+                            isScanned ? "border-emerald-400 bg-emerald-50/50" : "border-dashed border-border bg-card"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                              USBA Catering · Meal Label
+                            </span>
+                            {isScanned ? (
+                              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-600">
+                                <CheckCircle2 className="h-3 w-3" /> SCANNED
+                              </span>
+                            ) : isInProgress ? (
+                              <span className="text-[10px] font-bold text-amber-600">PENDING SCAN</span>
+                            ) : (
+                              <span className="text-[10px] font-bold text-muted-foreground">{r.packagingStatus}</span>
+                            )}
+                          </div>
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className="font-semibold text-sm">{r.mealName}</span>
+                            <span className="text-xs tabular-nums text-muted-foreground shrink-0">Qty {r.qty}</span>
+                          </div>
+                          <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+                            <span>Flight <b className="text-foreground">{r.flight}</b></span>
+                            <span>{r.mealType}</span>
+                            <span>{r.section}</span>
+                            {r.dspRef && <span>DSP <b className="text-foreground font-mono">{r.dspRef}</b></span>}
+                            {r.orderNo && <span>Order <b className="text-foreground font-mono">{r.orderNo}</b></span>}
+                            <span>Dep <b className="text-foreground">{r.depTime}</b></span>
+                          </div>
+                          {/* Barcode */}
+                          <div className="mt-1">
+                            <div className="flex items-end gap-[1px] h-8 w-full overflow-hidden" aria-hidden>
+                              {code.split("").flatMap((ch, i) =>
+                                [0, 1, 2, 3].map((k) => (
+                                  <span
+                                    key={`${i}-${k}`}
+                                    className="bg-slate-900"
+                                    style={{ width: ((ch.charCodeAt(0) >> k) & 1) ? 3 : 1, height: "100%" }}
+                                  />
+                                ))
+                              )}
+                            </div>
+                            <div className="text-center font-mono text-[11px] tracking-widest mt-1">{code}</div>
+                          </div>
+                          {/* Actions */}
+                          <div className="flex gap-2 mt-1">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 px-2 text-xs flex-1"
+                              onClick={() => { toast.success(`Label sent to printer — ${code}.`); }}
+                            >
+                              <Printer className="h-3 w-3 mr-1" /> Print
+                            </Button>
+                            {isInProgress && !scannedIds.has(r.id) && (
+                              <Button
+                                size="sm"
+                                className="h-7 px-2 text-xs flex-1"
+                                onClick={() => handleScanLabel(code)}
+                              >
+                                <ScanLine className="h-3 w-3 mr-1" /> Scan
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="px-6 py-4 border-t shrink-0 flex items-center justify-between gap-2">
+                  <p className="text-xs text-muted-foreground">
+                    {inProgress.length > 0
+                      ? "Print each label, then scan every item to complete packaging."
+                      : "All items on this flight are already packaged."}
+                  </p>
+                  <Button variant="outline" onClick={() => setLabelRow(null)}>Close</Button>
                 </div>
               </>
             );

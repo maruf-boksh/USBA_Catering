@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -492,6 +492,33 @@ export default function DelayManagementPage() {
     setDelayEvents((prev) => prev.filter((e) => e.id !== "DEL-0002" && e.id !== "DEL-DEMO"));
   }
 
+  // Normalise the terminal status so the flow ends at "Dispatched":
+  //  • Flip "Sent To Dispatch" → "Dispatched" once the linked delay dispatch is
+  //    actually dispatched (all its packaging rows reach "Dispatched").
+  //  • "Closed" is a retired state — migrate any lingering "Closed" event to
+  //    "Dispatched" so the list, KPI and timeline all read "Dispatched".
+  useEffect(() => {
+    setDelayEvents((prev) => {
+      let changed = false;
+      const next = prev.map((e) => {
+        if (e.status === "Closed") {
+          changed = true;
+          return { ...e, status: "Dispatched" as DelayStatus };
+        }
+        if (e.status === "Sent To Dispatch" && e.dispatchId) {
+          const rows = packagingRows.filter((r) => r.dspRef === e.dispatchId);
+          if (rows.length > 0 && rows.every((r) => r.packagingStatus === "Dispatched")) {
+            changed = true;
+            return { ...e, status: "Dispatched" as DelayStatus, updatedAt: stamp() };
+          }
+        }
+        return e;
+      });
+      return changed ? next : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [packagingRows]);
+
   // Handle ?del= deep-link from other modules
   const deepLinkId = searchParams.get("del");
   if (deepLinkId && view === "list" && delayEvents.some((e) => e.id === deepLinkId)) {
@@ -507,7 +534,10 @@ export default function DelayManagementPage() {
   const activeEvent    = delayEvents.find((e) => e.id === activeEventId) ?? null;
   const viewModalEvent = delayEvents.find((e) => e.id === viewModalEventId) ?? null;
 
-  const openFulfillment = (eventId: string) => { setActiveEventId(eventId); setView("fulfillment"); };
+  // "Fulfil" re-enters the flow at the Production / Stock Availability check
+  // (view "production") — from there Forward to Production or Forward to Instant
+  // Purchase continue the flow, so the rest is unchanged.
+  const openFulfillment = (eventId: string) => { setActiveEventId(eventId); setView("production"); };
 
   const createEvent = (ev: DelayEvent) => {
     setDelayEvents((prev) => [ev, ...prev]);
@@ -636,8 +666,10 @@ export default function DelayManagementPage() {
     // Compute delayed dep time in airline 12h standard (original ETD + delay hours)
     const rawDelayed = event.originalEtd ? addHoursToEtd(event.originalEtd, event.delayDurationHours) : null;
     const depTimeBase = rawDelayed ? to12h(rawDelayed) : (event.flightDate === today ? to12h(now.slice(11, 16)) : "00:00");
-    // Packaging rows display dep time with delay note so crew can identify it
-    const depTime = rawDelayed
+    // Packaging rows display dep time WITH the added delay hours so crew can
+    // identify the delayed departure — always annotate when there's a delay,
+    // even if the original ETD wasn't captured (base falls back to the slot time).
+    const depTime = event.delayDurationHours > 0
       ? `${depTimeBase} (+${event.delayDurationHours}h delay)`
       : depTimeBase;
     // Dispatch record keeps the clean dep time (no annotation) for detail modal display
@@ -698,8 +730,10 @@ export default function DelayManagementPage() {
       dispatch_sequence: maxSeq + 1,
     };
 
-    setPackagingRows((prev) => [...prev, ...newPkgRows]);
-    setDispatchRecords((prev) => [...prev, newRecord]);
+    // Prepend (like the regular New Dispatch flow) so the just-sent delay
+    // dispatch lands at the TOP of the Dispatch table / first page.
+    setPackagingRows((prev) => [...newPkgRows, ...prev]);
+    setDispatchRecords((prev) => [newRecord, ...prev]);
     setDelayEvents((prev) =>
       prev.map((e) =>
         e.id === event.id
@@ -892,7 +926,7 @@ function DelayList({
     });
   }, [events, search, filterStatus, filterFrom, filterTo]);
 
-  const active     = events.filter((e) => !["Closed", "Rejected"].includes(e.status)).length;
+  const active     = events.filter((e) => !["Closed", "Rejected", "Dispatched"].includes(e.status)).length;
   const pending    = events.filter((e) => e.status === "Approval Pending").length;
   const dispatched = events.filter((e) => e.status === "Dispatched" || e.status === "Sent To Dispatch").length;
 
@@ -2367,11 +2401,6 @@ function DelayDetailScreen({
         {event.status === "Sent To Production" && allProdCompleted && (
           <Button size="sm" className="bg-teal-600 text-white hover:bg-teal-700" onClick={onSendToDispatch}>
             <Truck className="h-3.5 w-3.5 mr-1.5" /> Send to Dispatch
-          </Button>
-        )}
-        {(event.status === "Dispatched" || event.status === "Sent To Dispatch") && (
-          <Button size="sm" variant="outline" onClick={onClose}>
-            <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" /> Close Event
           </Button>
         )}
         {event.dispatchId && (

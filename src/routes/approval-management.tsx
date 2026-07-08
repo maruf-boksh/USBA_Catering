@@ -1251,8 +1251,8 @@ export default function ApprovalManagementPage() {
         nextStatus = "Final Approved";
         stepName = "Final Authorization";
         designation = "MD/CEO";
-        // Apply stock delta + create stock adjustments for Production & Airport Store
-        if ((entry.wastageType === "Production" || entry.wastageType === "Airport Store") && entry.stockItemName) {
+        // Apply stock delta + create stock adjustments for Production, Airport Store & Transfer
+        if ((entry.wastageType === "Production" || entry.wastageType === "Airport Store" || entry.wastageType === "Transfer") && entry.stockItemName) {
           applyStockDeltas([{
             itemId: entry.stockItemName,
             delta: -entry.disposalQty,

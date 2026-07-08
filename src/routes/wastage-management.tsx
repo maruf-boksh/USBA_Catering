@@ -22,16 +22,45 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Trash2, Plus, Eye, Clock, CheckCircle2, X as XIcon,
   AlertTriangle, Search, History, FileText, Package, Download,
+  Pencil, HandCoins,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { useRole } from "@/lib/roles";
 import { useWorkflow, type WfProductionEntry } from "@/lib/workflow-store";
 import { resolveProductionItem } from "@/lib/meal-recipe";
+import { inventory, consumableItems } from "@/lib/sample-data";
 
 // ── Shared types (exported so approval-management can consume them) ────────────
 
-export type WastageType = "Production" | "Airport Store" | "Return Item";
+export type WastageType = "Production" | "Airport Store" | "Return Item" | "Transfer";
+
+// Wastage types whose disposal is backed by an inventory stock item (item-name
+// autocomplete + stock summary + stock reduction on Final Approval).
+export const STOCK_BACKED_TYPES: WastageType[] = ["Production", "Airport Store", "Transfer"];
+export const isStockBackedType = (t: WastageType | ""): boolean =>
+  t === "Production" || t === "Airport Store" || t === "Transfer";
+
+// Salvage-sale details captured when the Disposal Method is "Sell".
+export type WastageSaleDetails = {
+  buyer: string;
+  saleQty: number;
+  unit: string;
+  unitPrice: number;
+  totalValue: number;
+  paymentMode: string;
+  reference: string;
+  remarks: string;
+  saleDate: string;
+  // Payment-mode specific details
+  bankAccountNo?: string;   // Bank Transfer
+  mobileProvider?: string;  // Mobile Banking — Bkash / Nagad / <custom>
+  mobileNo?: string;        // Mobile Banking number
+  chequeNo?: string;        // Cheque
+  chequeImage?: string;     // Cheque image file name
+  otherMethod?: string;     // Other — payment method name
+  otherDocument?: string;   // Other — uploaded document file name
+};
 
 export type WastageStatus =
   | "Pending In-Charge"
@@ -86,6 +115,20 @@ export type WastageEntry = {
   returnRef?: string;
   stockItemName?: string;
   previousStock?: number;
+  saleDetails?: WastageSaleDetails;
+};
+
+// Minimal shape of a Transfer-module row (kind "Return") read from the shared
+// "transfer-rows" store — just what the returned-transfer picker needs.
+type TransferReturnLite = {
+  id: string;
+  date: string;
+  trRef: string;
+  from: string;
+  to: string;
+  kind: string;
+  status: string;
+  lines: { id: string; item: string; uom: string; requestedQty: number; transferredQty: number }[];
 };
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -110,9 +153,14 @@ const DISPOSAL_METHODS = [
   "Sewage / Drain",
   "Animal Feed",
   "Third-party Disposal",
+  "Destroy",
+  "Sell",
   "N/A",
   "Other (Specify)",
 ];
+
+const PAYMENT_MODES = ["Cash", "Bank Transfer", "Mobile Banking", "Cheque", "Other"];
+const MOBILE_PROVIDERS = ["Bkash", "Nagad", "Other"];
 
 const SECTIONS = [
   "Baunia Catering",
@@ -142,6 +190,11 @@ function nowStamp(): string {
 function todayDate(): string {
   const n = new Date();
   return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,"0")}-${String(n.getDate()).padStart(2,"0")}`;
+}
+
+function nowTime(): string {
+  const n = new Date();
+  return `${String(n.getHours()).padStart(2,"0")}:${String(n.getMinutes()).padStart(2,"0")}`;
 }
 
 function genId(entries: WastageEntry[]): string {
@@ -200,6 +253,25 @@ type FormState = {
   selectedReturnLineIdx: number;
   selectedRecookBatchIds: string[];
   recookBatchQtys: Record<string, string>;
+  // Returned-transfer picker (Transfer type)
+  selectedTransferReturnIds: string[];
+  selectedTransferLineIdx: number;
+  // Salvage-sale fields (used when Disposal Method === "Sell")
+  saleBuyer: string;
+  saleQty: string;
+  saleUnitPrice: string;
+  salePaymentMode: string;
+  saleReference: string;
+  saleRemarks: string;
+  // Payment-mode specific fields
+  saleBankAccountNo: string;
+  saleMobileProvider: string;
+  saleMobileProviderOther: string;
+  saleMobileNo: string;
+  saleChequeNo: string;
+  saleChequeImage: string;
+  saleOtherMethod: string;
+  saleOtherDocument: string;
 };
 
 const emptyForm = (): FormState => ({
@@ -230,6 +302,22 @@ const emptyForm = (): FormState => ({
   selectedReturnLineIdx: -1,
   selectedRecookBatchIds: [],
   recookBatchQtys: {},
+  selectedTransferReturnIds: [],
+  selectedTransferLineIdx: -1,
+  saleBuyer: "",
+  saleQty: "",
+  saleUnitPrice: "",
+  salePaymentMode: "",
+  saleReference: "",
+  saleRemarks: "",
+  saleBankAccountNo: "",
+  saleMobileProvider: "",
+  saleMobileProviderOther: "",
+  saleMobileNo: "",
+  saleChequeNo: "",
+  saleChequeImage: "",
+  saleOtherMethod: "",
+  saleOtherDocument: "",
 });
 
 // ── Main Component ────────────────────────────────────────────────────────────
@@ -244,6 +332,7 @@ export default function WastageManagementPage() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState<FormState>(emptyForm());
+  const [editId, setEditId] = useState<string | null>(null);
 
   const [viewOpen, setViewOpen] = useState(false);
   const [viewEntry, setViewEntry] = useState<WastageEntry | null>(null);
@@ -256,7 +345,24 @@ export default function WastageManagementPage() {
 
   // ── Inventory + Returns reads for form autocomplete ────────────────────────
 
-  const [inventoryItems] = usePersistedState<{ id?: string; name: string; stock: number; uom?: string; }[]>("inventory-items", []);
+  // Production / kitchen inventory. The persisted "inventory-items" store is
+  // only populated once the Inventory page has mounted; fall back to the full
+  // sample-data catalog so the item name → stock autocomplete always works.
+  const [persistedInventory] = usePersistedState<{ id?: string; name: string; stock: number; uom?: string; }[]>("inventory-items", []);
+  const kitchenItems = useMemo(
+    () =>
+      persistedInventory.length > 0
+        ? persistedInventory
+        : inventory.map((i) => ({ id: i.id, name: i.name, stock: i.stock, uom: i.uom })),
+    [persistedInventory],
+  );
+  // Airport store (airline consumables / galley) inventory — same key & seed as
+  // the Inventory page uses, so live stock is shared without clobbering.
+  const [persistedAirport] = usePersistedState<typeof consumableItems>("airline-consumables-items", consumableItems);
+  const airportItems = useMemo(
+    () => persistedAirport.map((c) => ({ id: c.id, name: c.name, stock: c.stock, uom: c.uom })),
+    [persistedAirport],
+  );
   const [consumableReturns] = usePersistedState<{ id: string; date: string; flight?: string; sector?: string; lines: { itemId?: string; itemName: string; qty: number; uom: string; }[] }[]>("consumable-returns", []);
 
   const [stockDropOpen, setStockDropOpen] = useState(false);
@@ -267,17 +373,58 @@ export default function WastageManagementPage() {
     [productionEntries]
   );
 
+  // Resolve the current on-hand quantity for an item from the correct source per
+  // wastage type: Airport Store → airport (galley) stock, Transfer → kitchen or
+  // airport inventory stock, Production → inventory stock if the FG is stocked,
+  // else the total produced quantity from production entries.
+  const stockForItem = (name: string, type: WastageType | ""): number => {
+    const q = name.trim().toLowerCase();
+    if (!q) return 0;
+    const kitchen = kitchenItems.find((i) => i.name.toLowerCase() === q);
+    const airport = airportItems.find((i) => i.name.toLowerCase() === q);
+    if (type === "Airport Store") return airport?.stock ?? 0;
+    if (type === "Transfer") return (kitchen ?? airport)?.stock ?? 0;
+    // Production (default): prefer stocked inventory, else total produced FG qty.
+    if (kitchen) return kitchen.stock;
+    return productionEntries
+      .filter((e) => (e.outputItemName ?? e.bom).trim().toLowerCase() === q)
+      .reduce((s, e) => s + (e.producedQty || 0), 0);
+  };
+
   const todayReturns = useMemo(() => {
     const today = todayDate();
     return consumableReturns.filter((r) => r.date === today);
   }, [consumableReturns]);
 
+  // Returned transfers (Transfer module rows with kind "Return"). Read-only from
+  // localStorage so we never clobber the Transfer page's own persisted store;
+  // re-read whenever the Create/Edit modal opens.
+  const returnedTransfers = useMemo<TransferReturnLite[]>(() => {
+    try {
+      const raw = window.localStorage.getItem("harvest-data-v1:transfer-rows");
+      const rows = raw ? (JSON.parse(raw) as TransferReturnLite[]) : [];
+      return rows.filter((t) => t.kind === "Return");
+    } catch {
+      return [];
+    }
+  }, [createOpen]);
+
   const stockSuggestions = useMemo(() => {
-    if (form.wastageType !== "Production" && form.wastageType !== "Airport Store") return [];
-    if (!form.itemName.trim()) return [];
-    const q = form.itemName.toLowerCase();
-    return inventoryItems.filter((i) => i.name.toLowerCase().includes(q)).slice(0, 8);
-  }, [inventoryItems, form.itemName, form.wastageType]);
+    if (!isStockBackedType(form.wastageType)) return [];
+    const q = form.itemName.trim().toLowerCase();
+    if (!q) return [];
+    // Production → kitchen items · Airport Store → airport items ·
+    // Transfer → both (items may be damaged while receiving either).
+    const source =
+      form.wastageType === "Airport Store" ? airportItems :
+      form.wastageType === "Transfer"      ? [...kitchenItems, ...airportItems] :
+                                             kitchenItems;
+    const seen = new Set<string>();
+    return source
+      .filter((i) => i.name.toLowerCase().includes(q))
+      .filter((i) => { const k = i.name.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; })
+      .slice(0, 8);
+  }, [kitchenItems, airportItems, form.itemName, form.wastageType]);
 
   // ── Derived ────────────────────────────────────────────────────────────────
 
@@ -315,8 +462,72 @@ export default function WastageManagementPage() {
     if (!form.compensationJustification.trim()) {
       toast.error("Compensation justification is required (Yes or No)."); return;
     }
+    if (form.disposalMethod === "Sell") {
+      if (!form.saleBuyer.trim()) { toast.error("Buyer / party is required for a salvage sale."); return; }
+      if (!form.saleUnitPrice || isNaN(Number(form.saleUnitPrice)) || Number(form.saleUnitPrice) < 0) {
+        toast.error("Valid unit price is required for a salvage sale."); return;
+      }
+      if (!form.salePaymentMode) { toast.error("Select a payment mode."); return; }
+      if (form.salePaymentMode === "Bank Transfer" && !form.saleBankAccountNo.trim()) {
+        toast.error("Provide the bank A/C no."); return;
+      }
+      if (form.salePaymentMode === "Mobile Banking") {
+        if (!form.saleMobileProvider) { toast.error("Select a mobile banking provider."); return; }
+        if (form.saleMobileProvider === "Other" && !form.saleMobileProviderOther.trim()) {
+          toast.error("Specify the mobile banking provider."); return;
+        }
+        if (!form.saleMobileNo.trim()) { toast.error("Provide the mobile banking no."); return; }
+      }
+      if (form.salePaymentMode === "Cheque" && !form.saleChequeNo.trim() && !form.saleChequeImage.trim()) {
+        toast.error("Provide the cheque no or upload a cheque image."); return;
+      }
+      if (form.salePaymentMode === "Other" && !form.saleOtherMethod.trim()) {
+        toast.error("Provide the other payment method."); return;
+      }
+    }
 
     const at = nowStamp();
+    const sysDate = todayDate();   // 09. Disposal Date — system generated
+    const sysTime = nowTime();     // 10. Disposal Time — system generated
+    const saleQtyNum = Number(form.saleQty) || Number(form.disposalQty) || 0;
+    const saleUnitPriceNum = Number(form.saleUnitPrice) || 0;
+    const saleDetails: WastageSaleDetails | undefined =
+      form.disposalMethod === "Sell"
+        ? {
+            buyer: form.saleBuyer.trim(),
+            saleQty: saleQtyNum,
+            unit: form.disposalQtyUnit,
+            unitPrice: saleUnitPriceNum,
+            totalValue: Math.round(saleQtyNum * saleUnitPriceNum * 100) / 100,
+            paymentMode: form.salePaymentMode,
+            reference: form.saleReference.trim() || "N/A",
+            remarks: form.saleRemarks.trim() || "N/A",
+            saleDate: sysDate,
+            ...(form.salePaymentMode === "Bank Transfer"
+              ? { bankAccountNo: form.saleBankAccountNo.trim() }
+              : {}),
+            ...(form.salePaymentMode === "Mobile Banking"
+              ? {
+                  mobileProvider: form.saleMobileProvider === "Other"
+                    ? (form.saleMobileProviderOther.trim() || "Other")
+                    : form.saleMobileProvider,
+                  mobileNo: form.saleMobileNo.trim(),
+                }
+              : {}),
+            ...(form.salePaymentMode === "Cheque"
+              ? {
+                  ...(form.saleChequeNo.trim() ? { chequeNo: form.saleChequeNo.trim() } : {}),
+                  ...(form.saleChequeImage.trim() ? { chequeImage: form.saleChequeImage.trim() } : {}),
+                }
+              : {}),
+            ...(form.salePaymentMode === "Other"
+              ? {
+                  otherMethod: form.saleOtherMethod.trim(),
+                  ...(form.saleOtherDocument.trim() ? { otherDocument: form.saleOtherDocument.trim() } : {}),
+                }
+              : {}),
+          }
+        : undefined;
     const newEntry: WastageEntry = {
       id: genId(entries),
       reportingDate: todayDate(),
@@ -334,8 +545,8 @@ export default function WastageManagementPage() {
       disposalMethod: form.disposalMethod === "Other (Specify)"
         ? (form.disposalMethodCustom.trim() || "N/A")
         : (form.disposalMethod || "N/A"),
-      disposalDate: form.disposalDate || "N/A",
-      disposalTime: form.disposalTime || "N/A",
+      disposalDate: sysDate,
+      disposalTime: sysTime,
       rootCause: form.rootCause.trim(),
       correction: form.correction.trim() || "N/A",
       correctiveActionPlan: form.correctiveActionPlan.filter((a) => a.trim()),
@@ -355,18 +566,47 @@ export default function WastageManagementPage() {
           at,
         },
       ],
-      ...((form.wastageType === "Production" || form.wastageType === "Airport Store") && form.stockItemName.trim()
+      ...(isStockBackedType(form.wastageType) && form.stockItemName.trim()
         ? { stockItemName: form.stockItemName.trim(), previousStock: Number(form.previousStock) || 0 }
         : {}),
       ...(form.wastageType === "Airport Store" && form.selectedReturnIds.length
         ? { returnRef: form.selectedReturnIds.join(", ") }
         : {}),
+      ...(form.wastageType === "Transfer" && form.selectedTransferReturnIds.length
+        ? { returnRef: form.selectedTransferReturnIds.join(", ") }
+        : {}),
+      ...(saleDetails ? { saleDetails } : {}),
     };
 
-    setEntries((prev) => [newEntry, ...prev]);
+    if (editId) {
+      // Edit mode — keep identity, ownership, approval trail & original
+      // system-generated disposal date/time; patch the rest.
+      setEntries((prev) =>
+        prev.map((e) =>
+          e.id === editId
+            ? {
+                ...newEntry,
+                id: e.id,
+                reportingDate: e.reportingDate,
+                preparedBy: e.preparedBy,
+                preparedByDesignation: e.preparedByDesignation,
+                preparedAt: e.preparedAt,
+                status: e.status,
+                approvalSteps: e.approvalSteps,
+                disposalDate: e.disposalDate,
+                disposalTime: e.disposalTime,
+              }
+            : e
+        )
+      );
+      toast.success(`${editId} updated.`);
+    } else {
+      setEntries((prev) => [newEntry, ...prev]);
+      toast.success(`${newEntry.id} submitted — pending Production In-Charge review.`);
+    }
     setCreateOpen(false);
+    setEditId(null);
     setForm(emptyForm());
-    toast.success(`${newEntry.id} submitted — pending Production In-Charge review.`);
   };
 
   // ── Update person helper ───────────────────────────────────────────────────
@@ -409,6 +649,7 @@ export default function WastageManagementPage() {
             <TabsTrigger value="all"           className="text-xs px-3 h-7">All</TabsTrigger>
             <TabsTrigger value="Production"    className="text-xs px-3 h-7">Production</TabsTrigger>
             <TabsTrigger value="Airport Store" className="text-xs px-3 h-7">Airport Store</TabsTrigger>
+            <TabsTrigger value="Transfer"      className="text-xs px-3 h-7">Transfer</TabsTrigger>
           </TabsList>
         </Tabs>
         <div className="flex items-center gap-2">
@@ -424,7 +665,7 @@ export default function WastageManagementPage() {
           <Button
             size="sm"
             className="h-8 gap-1.5 text-xs"
-            onClick={() => { setForm(emptyForm()); setCreateOpen(true); }}
+            onClick={() => { setEditId(null); setForm(emptyForm()); setCreateOpen(true); }}
           >
             <Plus className="h-3.5 w-3.5" /> New Wastage/Disposal
           </Button>
@@ -456,7 +697,7 @@ export default function WastageManagementPage() {
                       No wastage reports found.{" "}
                       <button
                         className="text-primary underline"
-                        onClick={() => { setForm(emptyForm()); setCreateOpen(true); }}
+                        onClick={() => { setEditId(null); setForm(emptyForm()); setCreateOpen(true); }}
                       >
                         Create the first report
                       </button>
@@ -479,6 +720,7 @@ export default function WastageManagementPage() {
                           "text-[10px] font-semibold px-2 py-0.5 rounded-full",
                           entry.wastageType === "Production"    ? "bg-orange-100 text-orange-700" :
                           entry.wastageType === "Airport Store" ? "bg-sky-100 text-sky-700" :
+                          entry.wastageType === "Transfer"      ? "bg-teal-100 text-teal-700" :
                                                                   "bg-violet-100 text-violet-700",
                         )}>
                           {entry.wastageType}
@@ -501,15 +743,17 @@ export default function WastageManagementPage() {
                       </TableCell>
                       <TableCell><StatusBadge status={entry.status} /></TableCell>
                       <TableCell className="text-right">
-                        <Button
-                          size="icon"
-                          variant="outline"
-                          className="h-7 w-7 text-muted-foreground hover:text-primary hover:border-primary/40"
-                          title="View details"
-                          onClick={() => { setViewEntry(entry); setViewOpen(true); }}
-                        >
-                          <Eye className="h-3.5 w-3.5" />
-                        </Button>
+                        <div className="flex items-center justify-end gap-1">
+                          <Button
+                            size="icon"
+                            variant="outline"
+                            className="h-7 w-7 text-muted-foreground hover:text-primary hover:border-primary/40"
+                            title="View details"
+                            onClick={() => { setViewEntry(entry); setViewOpen(true); }}
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))
@@ -521,12 +765,12 @@ export default function WastageManagementPage() {
       </Card>
 
       {/* ── Create Modal ──────────────────────────────────────────────────────── */}
-      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+      <Dialog open={createOpen} onOpenChange={(o) => { setCreateOpen(o); if (!o) setEditId(null); }}>
         <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-base">
-              <Trash2 className="h-5 w-5 text-red-500" />
-              New Wastage / Damaged Product Disposal
+              {editId ? <Pencil className="h-5 w-5 text-blue-500" /> : <Trash2 className="h-5 w-5 text-red-500" />}
+              {editId ? `Edit Wastage Report — ${editId}` : "New Wastage / Damaged Product Disposal"}
             </DialogTitle>
           </DialogHeader>
 
@@ -554,16 +798,142 @@ export default function WastageManagementPage() {
                     selectedReturnLineIdx: -1,
                     selectedRecookBatchIds: [],
                     recookBatchQtys: {},
+                    selectedTransferReturnIds: [],
+                    selectedTransferLineIdx: -1,
+                    itemName: "",
+                    disposalQty: "",
                   })}
                 >
                   <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select type" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="Production">Production Point</SelectItem>
                     <SelectItem value="Airport Store">Airport Store</SelectItem>
+                    <SelectItem value="Transfer">Transfer</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
             </div>
+
+            {/* Transfer — items damaged while receiving */}
+            {form.wastageType === "Transfer" && (
+              <div className="p-3 bg-teal-50 border border-teal-200 rounded-md flex items-start gap-2">
+                <Package className="h-4 w-4 text-teal-700 shrink-0 mt-0.5" />
+                <p className="text-[11px] text-teal-700 leading-relaxed">
+                  <strong>Transfer wastage</strong> records items found damaged while receiving a stock
+                  transfer. Select the returned transfer(s) below to populate the disposal — or search the
+                  received item manually. The damaged quantity is deducted from stock on Final Approval.
+                </p>
+              </div>
+            )}
+
+            {/* Returned Transfers — checkbox multi-select, shown under Transfer */}
+            {form.wastageType === "Transfer" && (
+              <div className="p-3 bg-teal-50 border border-teal-200 rounded-md space-y-3">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-teal-700">Select Returned Transfer(s)</h4>
+                <div>
+                  <Label className="text-xs">Returned Transfers <span className="text-red-500">*</span></Label>
+                  {returnedTransfers.length === 0 ? (
+                    <p className="text-[11px] text-amber-600 mt-1 flex items-center gap-1">
+                      <AlertTriangle className="h-3 w-3 shrink-0" />
+                      No returned transfers found. Return items from the Transfer module first.
+                    </p>
+                  ) : (
+                    <div className="mt-1 border border-border rounded-md overflow-hidden bg-background">
+                      {returnedTransfers.map((t) => (
+                        <label
+                          key={t.id}
+                          className="flex items-center gap-2.5 px-3 py-2 text-xs cursor-pointer hover:bg-muted/40 border-b border-border last:border-0"
+                        >
+                          <input
+                            type="checkbox"
+                            className="h-3.5 w-3.5 accent-primary"
+                            checked={form.selectedTransferReturnIds.includes(t.id)}
+                            onChange={(e) => {
+                              const ids = e.target.checked
+                                ? [...form.selectedTransferReturnIds, t.id]
+                                : form.selectedTransferReturnIds.filter((id) => id !== t.id);
+                              const allLines = ids.flatMap((id) => {
+                                const tr = returnedTransfers.find((x) => x.id === id);
+                                return tr?.lines ?? [];
+                              });
+                              const single = allLines.length === 1;
+                              const qty = single ? (allLines[0].transferredQty || allLines[0].requestedQty) : 0;
+                              setForm({
+                                ...form,
+                                selectedTransferReturnIds: ids,
+                                selectedTransferLineIdx: single ? 0 : -1,
+                                itemName: single ? allLines[0].item : "",
+                                stockItemName: single ? allLines[0].item : "",
+                                previousStock: single ? String(stockForItem(allLines[0].item, "Transfer")) : "",
+                                disposalQty: single ? String(qty) : "",
+                                disposalQtyUnit: single ? allLines[0].uom : form.disposalQtyUnit,
+                              });
+                            }}
+                          />
+                          <span className="font-medium">{t.id}</span>
+                          <span className="text-muted-foreground">· {t.from} → {t.to}</span>
+                          {t.trRef && <span className="text-muted-foreground">({t.trRef})</span>}
+                          <span className="ml-auto text-muted-foreground tabular-nums">{t.lines.length} item{t.lines.length !== 1 ? "s" : ""}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Combined line picker across all selected returned transfers */}
+                {form.selectedTransferReturnIds.length > 0 && (() => {
+                  const allLines = form.selectedTransferReturnIds.flatMap((id) => {
+                    const tr = returnedTransfers.find((x) => x.id === id);
+                    return (tr?.lines ?? []).map((line) => ({ ...line, fromId: id }));
+                  });
+                  if (allLines.length <= 1) return null;
+                  return (
+                    <div>
+                      <Label className="text-xs">Select Return Item <span className="text-red-500">*</span></Label>
+                      <div className="mt-1 border border-border rounded-md overflow-hidden">
+                        {allLines.map((line, idx) => {
+                          const qty = line.transferredQty || line.requestedQty;
+                          return (
+                            <div
+                              key={idx}
+                              onMouseDown={() => setForm({
+                                ...form,
+                                selectedTransferLineIdx: idx,
+                                itemName: line.item,
+                                stockItemName: line.item,
+                                previousStock: String(stockForItem(line.item, "Transfer")),
+                                disposalQty: String(qty),
+                                disposalQtyUnit: line.uom,
+                              })}
+                              className={cn(
+                                "px-3 py-2 text-xs cursor-pointer border-b border-border last:border-0 flex justify-between items-center",
+                                form.selectedTransferLineIdx === idx
+                                  ? "bg-primary/10 text-primary font-semibold"
+                                  : "hover:bg-muted/40",
+                              )}
+                            >
+                              <div className="flex flex-col">
+                                <span>{line.item}</span>
+                                <span className="text-[10px] text-muted-foreground font-normal">from {line.fromId}</span>
+                              </div>
+                              <span className="tabular-nums text-muted-foreground">{qty} {line.uom}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Auto-filled preview */}
+                {form.selectedTransferLineIdx >= 0 && form.itemName && (
+                  <div className="grid grid-cols-2 gap-2 text-xs p-2 bg-white/70 rounded border border-teal-200">
+                    <div><span className="text-muted-foreground">Item: </span><strong>{form.itemName}</strong></div>
+                    <div><span className="text-muted-foreground">Return Qty: </span><strong className="text-red-600">{form.disposalQty} {form.disposalQtyUnit}</strong></div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Re-Cook Batches — Production Point */}
             {form.wastageType === "Production" && recookBatches.length > 0 && (
@@ -599,7 +969,10 @@ export default function WastageManagementPage() {
                                   recookBatchQtys: newQtys,
                                   itemName: primary ? (primary.outputItemName ?? primary.bom) : "",
                                   stockItemName: primary ? (primary.outputItemName ?? primary.bom) : "",
-                                  previousStock: String(remaining.reduce((s, b) => s + b.producedQty, 0)),
+                                  previousStock: String(
+                                    [...new Set(remaining.map((b) => b.outputItemName ?? b.bom))]
+                                      .reduce((s, nm) => s + stockForItem(nm, "Production"), 0)
+                                  ),
                                   batchCode: newIds.length > 0 ? newIds[0] : "",
                                   productionDate: primary ? primary.date : "",
                                   disposalQtyUnit: "Units",
@@ -618,6 +991,7 @@ export default function WastageManagementPage() {
                           {isChecked && (() => {
                             const recipe = resolveProductionItem({ name: entry.outputItemName ?? entry.bom, code: entry.outputItemCode });
                             const batchQty = Number(form.recookBatchQtys[entry.id]) || 0;
+                            const itemStock = stockForItem(entry.outputItemName ?? entry.bom, "Production");
                             const isMulti = form.selectedRecookBatchIds.length > 1;
                             const hasMat = recipe.rawMaterials.length > 0 || recipe.packagingMaterials.length > 0 || recipe.otherConsumption.length > 0;
                             const matSections = [
@@ -656,7 +1030,7 @@ export default function WastageManagementPage() {
                                     <div className="grid grid-cols-3 border-b border-orange-200 text-center">
                                       <div className="px-2 py-2 border-r border-orange-200">
                                         <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">QTY Before</p>
-                                        <p className="text-xs font-bold mt-0.5">{entry.producedQty.toLocaleString()} Units</p>
+                                        <p className="text-xs font-bold mt-0.5">{itemStock.toLocaleString()} Units</p>
                                       </div>
                                       <div className="px-2 py-2 border-r border-orange-200">
                                         <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">Disposal</p>
@@ -664,7 +1038,7 @@ export default function WastageManagementPage() {
                                       </div>
                                       <div className="px-2 py-2">
                                         <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">Current QTY</p>
-                                        <p className="text-xs font-bold mt-0.5 text-primary">{entry.producedQty - batchQty} Units</p>
+                                        <p className="text-xs font-bold mt-0.5 text-primary">{itemStock - batchQty} Units</p>
                                       </div>
                                     </div>
                                     {batchQty === 0 ? (
@@ -741,6 +1115,8 @@ export default function WastageManagementPage() {
                                 selectedReturnIds: ids,
                                 selectedReturnLineIdx: single ? 0 : -1,
                                 itemName: single ? allLines[0].itemName : "",
+                                stockItemName: single ? allLines[0].itemName : "",
+                                previousStock: single ? String(stockForItem(allLines[0].itemName, "Airport Store")) : "",
                                 disposalQty: single ? String(allLines[0].qty) : "",
                                 disposalQtyUnit: single ? allLines[0].uom : form.disposalQtyUnit,
                               });
@@ -774,6 +1150,8 @@ export default function WastageManagementPage() {
                               ...form,
                               selectedReturnLineIdx: idx,
                               itemName: line.itemName,
+                              stockItemName: line.itemName,
+                              previousStock: String(stockForItem(line.itemName, "Airport Store")),
                               disposalQty: String(line.qty),
                               disposalQtyUnit: line.uom,
                             })}
@@ -813,7 +1191,7 @@ export default function WastageManagementPage() {
                 {!(form.wastageType === "Production" && form.selectedRecookBatchIds.length > 1) && (
                 <div>
                   <Label className="text-xs">01. Name of RM / PM / FG <span className="text-red-500">*</span></Label>
-                  {(form.wastageType === "Production" || form.wastageType === "Airport Store") ? (
+                  {isStockBackedType(form.wastageType) ? (
                     <div className="relative">
                       <Input
                         className="mt-1 h-9 text-sm"
@@ -863,12 +1241,12 @@ export default function WastageManagementPage() {
                   <Label className="text-xs">02. Package / Batch Size</Label>
                   <div className="relative mt-1">
                     <Input
-                      className={cn("h-9 text-sm", (form.wastageType === "Production" || form.wastageType === "Airport Store") && form.previousStock ? "pl-28" : "")}
+                      className={cn("h-9 text-sm", isStockBackedType(form.wastageType) && form.previousStock ? "pl-28" : "")}
                       value={form.packageBatchSize}
                       onChange={(e) => setForm({ ...form, packageBatchSize: e.target.value })}
                       placeholder="e.g. 25 Kg"
                     />
-                    {(form.wastageType === "Production" || form.wastageType === "Airport Store") && form.previousStock && (
+                    {isStockBackedType(form.wastageType) && form.previousStock && (
                       <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[11px] text-emerald-600 font-semibold tabular-nums bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 pointer-events-none">
                         Stock: {form.previousStock} {form.disposalQtyUnit}
                       </span>
@@ -955,44 +1333,250 @@ export default function WastageManagementPage() {
                   )}
                 </div>
                 <div>
-                  <Label className="text-xs">09. Disposal Date</Label>
+                  <Label className="text-xs">09. Disposal Date <span className="text-muted-foreground font-normal">(auto)</span></Label>
                   <Input
                     type="date"
-                    className="mt-1 h-9 text-sm"
-                    value={form.disposalDate}
-                    onChange={(e) => setForm({ ...form, disposalDate: e.target.value })}
+                    readOnly
+                    disabled
+                    className="mt-1 h-9 text-sm bg-muted/40 cursor-not-allowed"
+                    value={editId ? (form.disposalDate || todayDate()) : todayDate()}
+                    title="System-generated on submit"
                   />
                 </div>
                 <div>
-                  <Label className="text-xs">10. Disposal Time</Label>
+                  <Label className="text-xs">10. Disposal Time <span className="text-muted-foreground font-normal">(auto)</span></Label>
                   <Input
                     type="time"
-                    className="mt-1 h-9 text-sm"
-                    value={form.disposalTime}
-                    onChange={(e) => setForm({ ...form, disposalTime: e.target.value })}
+                    readOnly
+                    disabled
+                    className="mt-1 h-9 text-sm bg-muted/40 cursor-not-allowed"
+                    value={editId ? (form.disposalTime || nowTime()) : nowTime()}
+                    title="System-generated on submit"
                   />
                 </div>
               </div>
+              <p className="text-[11px] text-muted-foreground mt-2 flex items-center gap-1">
+                <Clock className="h-3 w-3 shrink-0" /> Disposal date &amp; time are recorded automatically by the system.
+              </p>
             </div>
 
-            {/* Stock QTY Summary — Production, Airport Store & Return Item */}
-            {(form.wastageType === "Production" || form.wastageType === "Airport Store") && (
+            {/* Selling Process — shown when Disposal Method is "Sell" */}
+            {form.disposalMethod === "Sell" && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-md space-y-3">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-emerald-700 flex items-center gap-1.5">
+                  <HandCoins className="h-3.5 w-3.5" /> Selling / Salvage Process
+                </h4>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <Label className="text-xs">Sold To (Buyer / Party) <span className="text-red-500">*</span></Label>
+                    <Input
+                      className="mt-1 h-9 text-sm"
+                      value={form.saleBuyer}
+                      onChange={(e) => setForm({ ...form, saleBuyer: e.target.value })}
+                      placeholder="e.g. Green Farms (animal feed)"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs">Sale Quantity</Label>
+                    <div className="flex gap-2 mt-1">
+                      <Input
+                        type="number"
+                        min="0"
+                        className="h-9 text-sm flex-1"
+                        value={form.saleQty}
+                        onChange={(e) => setForm({ ...form, saleQty: e.target.value })}
+                        placeholder={form.disposalQty || "0"}
+                      />
+                      <span className="inline-flex items-center px-2 h-9 rounded-md border border-border bg-muted/40 text-xs text-muted-foreground">{form.disposalQtyUnit}</span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">Defaults to disposal quantity ({form.disposalQty || 0} {form.disposalQtyUnit}).</p>
+                  </div>
+                  <div>
+                    <Label className="text-xs">Unit Price (Tk.) <span className="text-red-500">*</span></Label>
+                    <Input
+                      type="number"
+                      min="0"
+                      className="mt-1 h-9 text-sm"
+                      value={form.saleUnitPrice}
+                      onChange={(e) => setForm({ ...form, saleUnitPrice: e.target.value })}
+                      placeholder="0.00"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs">Payment Mode <span className="text-red-500">*</span></Label>
+                    <Select
+                      value={form.salePaymentMode}
+                      onValueChange={(v) => setForm({
+                        ...form,
+                        salePaymentMode: v,
+                        // reset mode-specific fields when the mode changes
+                        saleBankAccountNo: "",
+                        saleMobileProvider: "",
+                        saleMobileProviderOther: "",
+                        saleMobileNo: "",
+                        saleChequeNo: "",
+                        saleChequeImage: "",
+                        saleOtherMethod: "",
+                        saleOtherDocument: "",
+                      })}
+                    >
+                      <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select Payment Mode" /></SelectTrigger>
+                      <SelectContent>{PAYMENT_MODES.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}</SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label className="text-xs">Invoice / Reference No</Label>
+                    <Input
+                      className="mt-1 h-9 text-sm"
+                      value={form.saleReference}
+                      onChange={(e) => setForm({ ...form, saleReference: e.target.value })}
+                      placeholder="e.g. SAL-2026-0007"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs">Remarks</Label>
+                    <Input
+                      className="mt-1 h-9 text-sm"
+                      value={form.saleRemarks}
+                      onChange={(e) => setForm({ ...form, saleRemarks: e.target.value })}
+                      placeholder="Optional note"
+                    />
+                  </div>
+                </div>
+
+                {/* Payment-mode specific details */}
+                {form.salePaymentMode === "Bank Transfer" && (
+                  <div className="p-2.5 bg-white/70 border border-emerald-200 rounded-md">
+                    <Label className="text-xs">Bank A/C No <span className="text-red-500">*</span></Label>
+                    <Input
+                      className="mt-1 h-9 text-sm"
+                      value={form.saleBankAccountNo}
+                      onChange={(e) => setForm({ ...form, saleBankAccountNo: e.target.value })}
+                      placeholder="Provide account number"
+                    />
+                  </div>
+                )}
+
+                {form.salePaymentMode === "Mobile Banking" && (
+                  <div className="p-2.5 bg-white/70 border border-emerald-200 rounded-md grid grid-cols-2 gap-4">
+                    <div>
+                      <Label className="text-xs">Provider <span className="text-red-500">*</span></Label>
+                      <Select
+                        value={form.saleMobileProvider}
+                        onValueChange={(v) => setForm({ ...form, saleMobileProvider: v, saleMobileProviderOther: "" })}
+                      >
+                        <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select provider" /></SelectTrigger>
+                        <SelectContent>{MOBILE_PROVIDERS.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}</SelectContent>
+                      </Select>
+                      {form.saleMobileProvider === "Other" && (
+                        <Input
+                          className="mt-2 h-9 text-sm"
+                          value={form.saleMobileProviderOther}
+                          onChange={(e) => setForm({ ...form, saleMobileProviderOther: e.target.value })}
+                          placeholder="Specify provider"
+                        />
+                      )}
+                    </div>
+                    {form.saleMobileProvider && (
+                      <div>
+                        <Label className="text-xs">Mobile Banking No <span className="text-red-500">*</span></Label>
+                        <Input
+                          className="mt-1 h-9 text-sm"
+                          value={form.saleMobileNo}
+                          onChange={(e) => setForm({ ...form, saleMobileNo: e.target.value })}
+                          placeholder="Provide mobile banking no"
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {form.salePaymentMode === "Cheque" && (
+                  <div className="p-2.5 bg-white/70 border border-emerald-200 rounded-md grid grid-cols-2 gap-4">
+                    <div>
+                      <Label className="text-xs">Cheque No</Label>
+                      <Input
+                        className="mt-1 h-9 text-sm"
+                        value={form.saleChequeNo}
+                        onChange={(e) => setForm({ ...form, saleChequeNo: e.target.value })}
+                        placeholder="Provide cheque no"
+                      />
+                    </div>
+                    <div>
+                      <Label className="text-xs">or Upload Cheque Image</Label>
+                      <Input
+                        type="file"
+                        accept="image/*"
+                        className="mt-1 h-9 text-sm file:text-xs file:mr-2"
+                        onChange={(e) => setForm({ ...form, saleChequeImage: e.target.files?.[0]?.name ?? "" })}
+                      />
+                      {form.saleChequeImage && (
+                        <p className="text-[10px] text-emerald-700 mt-0.5 truncate">Attached: {form.saleChequeImage}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {form.salePaymentMode === "Other" && (
+                  <div className="p-2.5 bg-white/70 border border-emerald-200 rounded-md grid grid-cols-2 gap-4">
+                    <div>
+                      <Label className="text-xs">Other Payment Method <span className="text-red-500">*</span></Label>
+                      <Input
+                        className="mt-1 h-9 text-sm"
+                        value={form.saleOtherMethod}
+                        onChange={(e) => setForm({ ...form, saleOtherMethod: e.target.value })}
+                        placeholder="Provide payment method"
+                      />
+                    </div>
+                    <div>
+                      <Label className="text-xs">Upload Document</Label>
+                      <Input
+                        type="file"
+                        accept="image/*,application/pdf"
+                        className="mt-1 h-9 text-sm file:text-xs file:mr-2"
+                        onChange={(e) => setForm({ ...form, saleOtherDocument: e.target.files?.[0]?.name ?? "" })}
+                      />
+                      {form.saleOtherDocument && (
+                        <p className="text-[10px] text-emerald-700 mt-0.5 truncate">Attached: {form.saleOtherDocument}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between p-2.5 bg-white/70 border border-emerald-200 rounded-md">
+                  <span className="text-xs font-semibold text-emerald-700">Total Sale Value</span>
+                  <span className="text-sm font-bold text-emerald-700 tabular-nums">
+                    Tk. {((Number(form.saleQty) || Number(form.disposalQty) || 0) * (Number(form.saleUnitPrice) || 0)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Stock QTY Summary — Production, Airport Store & Transfer */}
+            {isStockBackedType(form.wastageType) && (() => {
+              // Issued QTY is resolved live from the relevant source (inventory /
+              // galley stock / production) for the selected item; falls back to
+              // the captured previous stock for multi-select / manual entries.
+              const resolvedStock = stockForItem(form.stockItemName || form.itemName, form.wastageType);
+              const issuedQty = resolvedStock > 0 ? resolvedStock : (Number(form.previousStock) || 0);
+              const disposalQty = Number(form.disposalQty) || 0;
+              return (
               <div className="space-y-2">
                 <div className="grid grid-cols-3 gap-2 p-2 bg-orange-50 border border-orange-200 rounded-md">
                   <div className="text-center">
-                    <p className="text-[10px] text-muted-foreground font-semibold uppercase tracking-wider">QTY Before Wastage</p>
-                    <p className="text-sm font-bold mt-0.5">{Number(form.previousStock) || 0} {form.disposalQtyUnit}</p>
+                    <p className="text-[10px] text-muted-foreground font-semibold uppercase tracking-wider">Issued QTY</p>
+                    <p className="text-sm font-bold mt-0.5">{issuedQty.toLocaleString()} {form.disposalQtyUnit}</p>
                   </div>
                   <div className="text-center">
                     <p className="text-[10px] text-muted-foreground font-semibold uppercase tracking-wider">Disposal QTY</p>
                     <p className="text-sm font-bold mt-0.5 text-red-600">
-                      {Number(form.disposalQty) > 0 ? `−${Number(form.disposalQty)}` : "0"} {form.disposalQtyUnit}
+                      {disposalQty > 0 ? `−${disposalQty}` : "0"} {form.disposalQtyUnit}
                     </p>
                   </div>
                   <div className="text-center">
                     <p className="text-[10px] text-muted-foreground font-semibold uppercase tracking-wider">Current QTY</p>
                     <p className="text-sm font-bold mt-0.5 text-primary">
-                      {(Number(form.previousStock) || 0) - (Number(form.disposalQty) || 0)} {form.disposalQtyUnit}
+                      {(issuedQty - disposalQty).toLocaleString()} {form.disposalQtyUnit}
                     </p>
                   </div>
                 </div>
@@ -1001,7 +1585,8 @@ export default function WastageManagementPage() {
                   Stock will be reduced by {form.disposalQty || "0"} {form.disposalQtyUnit} upon Final Approval.
                 </p>
               </div>
-            )}
+              );
+            })()}
 
 
             {/* Root Cause */}
@@ -1210,9 +1795,9 @@ export default function WastageManagementPage() {
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
+            <Button variant="outline" onClick={() => { setCreateOpen(false); setEditId(null); }}>Cancel</Button>
             <Button onClick={handleSubmit} className="gap-1.5">
-              <CheckCircle2 className="h-4 w-4" /> Submit for Approval
+              <CheckCircle2 className="h-4 w-4" /> {editId ? "Save Changes" : "Submit for Approval"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1422,6 +2007,46 @@ export default function WastageManagementPage() {
                 </div>
               )}
 
+              {/* Selling / Salvage Details */}
+              {viewEntry.saleDetails && (
+                <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-md">
+                  <p className="text-xs font-bold text-emerald-700 mb-2 flex items-center gap-1.5">
+                    <HandCoins className="h-3.5 w-3.5" /> Selling / Salvage Details
+                  </p>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                    <div><span className="text-muted-foreground">Sold To: </span><strong>{viewEntry.saleDetails.buyer}</strong></div>
+                    <div><span className="text-muted-foreground">Sale Qty: </span><strong>{viewEntry.saleDetails.saleQty} {viewEntry.saleDetails.unit}</strong></div>
+                    <div><span className="text-muted-foreground">Unit Price: </span><strong>Tk. {viewEntry.saleDetails.unitPrice.toLocaleString()}</strong></div>
+                    <div><span className="text-muted-foreground">Total Value: </span><strong className="text-emerald-700">Tk. {viewEntry.saleDetails.totalValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></div>
+                    <div><span className="text-muted-foreground">Payment: </span><strong>{viewEntry.saleDetails.paymentMode}</strong></div>
+                    {viewEntry.saleDetails.bankAccountNo && (
+                      <div><span className="text-muted-foreground">A/C No: </span><strong className="font-mono">{viewEntry.saleDetails.bankAccountNo}</strong></div>
+                    )}
+                    {viewEntry.saleDetails.mobileProvider && (
+                      <div><span className="text-muted-foreground">Provider: </span><strong>{viewEntry.saleDetails.mobileProvider}</strong></div>
+                    )}
+                    {viewEntry.saleDetails.mobileNo && (
+                      <div><span className="text-muted-foreground">Mobile No: </span><strong className="font-mono">{viewEntry.saleDetails.mobileNo}</strong></div>
+                    )}
+                    {viewEntry.saleDetails.chequeNo && (
+                      <div><span className="text-muted-foreground">Cheque No: </span><strong className="font-mono">{viewEntry.saleDetails.chequeNo}</strong></div>
+                    )}
+                    {viewEntry.saleDetails.chequeImage && (
+                      <div><span className="text-muted-foreground">Cheque Image: </span><strong>{viewEntry.saleDetails.chequeImage}</strong></div>
+                    )}
+                    {viewEntry.saleDetails.otherMethod && (
+                      <div><span className="text-muted-foreground">Method: </span><strong>{viewEntry.saleDetails.otherMethod}</strong></div>
+                    )}
+                    {viewEntry.saleDetails.otherDocument && (
+                      <div><span className="text-muted-foreground">Document: </span><strong>{viewEntry.saleDetails.otherDocument}</strong></div>
+                    )}
+                    <div><span className="text-muted-foreground">Reference: </span><strong className="font-mono">{viewEntry.saleDetails.reference}</strong></div>
+                    <div><span className="text-muted-foreground">Sale Date: </span><strong>{viewEntry.saleDetails.saleDate}</strong></div>
+                    <div className="col-span-2"><span className="text-muted-foreground">Remarks: </span>{viewEntry.saleDetails.remarks}</div>
+                  </div>
+                </div>
+              )}
+
               {/* Approval Log Timeline */}
               <div>
                 <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3 flex items-center gap-2">
@@ -1566,7 +2191,7 @@ export default function WastageManagementPage() {
                 <div className="flex items-center gap-1"><span className="text-muted-foreground">Status: </span><StatusBadge status={stockLogEntry.status} /></div>
               </div>
 
-              {stockLogEntry.wastageType === "Production" && stockLogEntry.stockItemName ? (
+              {(stockLogEntry.wastageType === "Production" || stockLogEntry.wastageType === "Transfer") && stockLogEntry.stockItemName ? (
                 <div className="border border-border rounded-md overflow-hidden">
                   <Table>
                     <TableHeader className="bg-muted/40">
