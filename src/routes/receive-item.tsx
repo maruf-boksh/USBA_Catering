@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { flagArrival, useArrivalFlash } from "@/lib/arrival-flash";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -9,7 +9,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X, Zap, BarChart2 } from "lucide-react";
-import { receiveItems, vendors, activeItems } from "@/lib/sample-data";
+import { receiveItems, vendors, activeItems, inventory } from "@/lib/sample-data";
+import { applyReceiptToPR } from "@/lib/purchase-requisitions";
+import { roundQty } from "@/lib/num";
 import { KpiCard } from "@/components/common/KpiCard";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
@@ -44,6 +46,14 @@ type FormLine = {
   qty: number;
   uom: string;
   expiry: string;
+  rate: number;
+  /** Ordered qty carried from the PO line (read-only reference on the GRN). */
+  orderedQty?: number;
+  /** Supplier batch / lot number for this received line. */
+  batchNo?: string;
+  /** Set when this line was prefilled from a Purchase Requisition shortfall —
+   *  the PR line id to write the received qty back to on save. */
+  prLineId?: string;
 };
 
 // Store/receiving personnel who can sign for an inbound delivery.
@@ -77,6 +87,19 @@ function wfGRNToRows(grn: WfGRN): GRNRow[] {
   }));
 }
 
+/**
+ * Resolve a GRN row to the matching inventory item id (INV-####) so the Check
+ * Stock deep-link lands on the right Inventory row. Prefers a real INV id already
+ * on the row; otherwise matches by item name against the inventory master.
+ * (Runtime GRN lines carry a form-line id, and seed GRNs carry none, so a name
+ * match is the reliable fallback.)
+ */
+function resolveInventoryId(r: GRNRow): string {
+  if (r.inventoryId && inventory.some((i) => i.id === r.inventoryId)) return r.inventoryId;
+  const byName = inventory.find((i) => i.name.toLowerCase() === r.item.trim().toLowerCase());
+  return byName?.id ?? r.inventoryId ?? r.item;
+}
+
 export default function ReceiveItem() {
   useArrivalFlash();
   const navigate = useNavigate();
@@ -86,11 +109,17 @@ export default function ReceiveItem() {
   const [grnOpen, setGrnOpen] = useState(false);
   const [selectedPORef, setSelectedPORef] = useState("");
   const [receivedBy, setReceivedBy] = useState("");
+  // Standard GRN header fields.
+  const [grnDate, setGrnDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [grnChallanNo, setGrnChallanNo] = useState("");
+  const [grnInvoiceNo, setGrnInvoiceNo] = useState("");
+  const [grnVehicleNo, setGrnVehicleNo] = useState("");
+  const [grnRemarks, setGrnRemarks] = useState("");
   const [grnOfficeId, setGrnOfficeId] = useState("OFF-001");
   const [grnWarehouseId, setGrnWarehouseId] = useState("WH-001");
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
-  const [formLines, setFormLines] = useState<FormLine[]>([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "" }]);
+  const [formLines, setFormLines] = useState<FormLine[]>([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
 
   // ── Direct Purchase (spot buy — no prior PO) ────────────────────────────────
   const [directOpen, setDirectOpen] = useState(false);
@@ -99,10 +128,22 @@ export default function ReceiveItem() {
   const [dpOfficeId, setDpOfficeId] = useState("OFF-001");
   const [dpWarehouseId, setDpWarehouseId] = useState("WH-001");
   const [dpJustification, setDpJustification] = useState("");
-  const [dpLines, setDpLines] = useState<FormLine[]>([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "" }]);
+  const [dpInvoiceNo, setDpInvoiceNo] = useState("");
+  const [dpDate, setDpDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [dpChallanNo, setDpChallanNo] = useState("");
+  const [dpVehicleNo, setDpVehicleNo] = useState("");
+  // Set when the Direct Receive was launched from a Purchase Requisition shortfall
+  // — used to write received quantities back to that PR on save.
+  const [dpSourcePrId, setDpSourcePrId] = useState<string | undefined>(undefined);
+  const [dpLines, setDpLines] = useState<FormLine[]>([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
+
+  // Purchase totals for the direct-receive lines.
+  const dpLineTotal = (l: FormLine) => roundQty((Number(l.qty) || 0) * (Number(l.rate) || 0), 2);
+  const dpGrandTotal = roundQty(dpLines.reduce((s, l) => s + (Number(l.qty) || 0) * (Number(l.rate) || 0), 0), 2);
+  const fmtBdt = (n: number) => `৳ ${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   const dpAddLine = () =>
-    setDpLines(prev => [...prev, { id: `d${Date.now()}`, name: "", qty: 1, uom: "Kg", expiry: "" }]);
+    setDpLines(prev => [...prev, { id: `d${Date.now()}`, name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
   const dpRemoveLine = (id: string) => setDpLines(prev => prev.filter(l => l.id !== id));
   const dpUpdateLine = <K extends keyof FormLine>(id: string, field: K, value: FormLine[K]) =>
     setDpLines(prev => prev.map(l => l.id === id ? { ...l, [field]: value } : l));
@@ -115,24 +156,63 @@ export default function ReceiveItem() {
 
   const resetDirect = () => {
     setDpVendor(""); setDpReceivedBy(""); setDpOfficeId("OFF-001"); setDpWarehouseId("WH-001");
-    setDpJustification(""); setDpLines([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "" }]);
+    setDpJustification(""); setDpInvoiceNo(""); setDpSourcePrId(undefined);
+    setDpDate(new Date().toISOString().slice(0, 10)); setDpChallanNo(""); setDpVehicleNo("");
+    setDpLines([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
   };
+
+  // Auto-open the Direct Receive dialog pre-filled when navigated here from a
+  // Demand Request's shortfall table (stashes a payload in sessionStorage).
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem("direct-receive-prefill");
+      if (!raw) return;
+      sessionStorage.removeItem("direct-receive-prefill");
+      const p = JSON.parse(raw) as {
+        source?: string; prId?: string; justification?: string; officeId?: string; warehouseId?: string;
+        lines?: { name: string; qty: number; uom?: string; prLineId?: string }[];
+      };
+      if (p.officeId) setDpOfficeId(p.officeId);
+      if (p.warehouseId) setDpWarehouseId(p.warehouseId);
+      if (p.justification) setDpJustification(p.justification);
+      if (p.prId) setDpSourcePrId(p.prId);
+      if (p.lines?.length) {
+        setDpLines(p.lines.map((l, i) => ({
+          id: `d${i + 1}`, name: l.name, qty: l.qty, uom: l.uom ?? "Kg", expiry: "", rate: 0,
+          prLineId: l.prLineId,
+        })));
+      }
+      setDirectOpen(true);
+      toast.info(
+        p.source
+          ? `Direct Receive pre-filled from ${p.source} — ${p.lines?.length ?? 0} item(s). Add vendor & receiver to record.`
+          : `Direct Receive pre-filled — add vendor & receiver to record.`,
+      );
+    } catch {
+      /* malformed payload — ignore */
+    }
+  }, []);
 
   // Record a direct purchase as a GRN (no PO). Like any receipt, its lines start
   // "Pending" and flow through Quality Control → Stock Overview — the standard
   // process — but the PO Ref is a generated DP reference marking it as direct.
   const saveDirect = () => {
     if (!dpVendor) { toast.error("Select a vendor."); return; }
+    if (!dpDate) { toast.error("Receipt date is required."); return; }
     if (!dpReceivedBy) { toast.error("Received By is required."); return; }
     if (!dpWarehouseId) { toast.error("Warehouse is required."); return; }
     if (!dpJustification.trim()) { toast.error("A justification is required for a direct receive."); return; }
     if (dpLines.some(l => !l.name.trim())) { toast.error("All item rows must have an item name."); return; }
+    if (dpLines.some(l => (Number(l.qty) || 0) <= 0)) { toast.error("Every item needs a quantity greater than zero."); return; }
+    if (dpLines.some(l => (Number(l.rate) || 0) <= 0)) { toast.error("Every item needs a purchase rate greater than zero."); return; }
 
     const stamp = Date.now().toString().slice(-5);
     const grnId = `GRN-${stamp}`;
     const dpRef = `DP-${new Date().getFullYear()}-${stamp}`;
     const lines: WfGRNLine[] = dpLines.map(l => ({
       itemId: l.id, name: l.name, qty: l.qty, uom: l.uom, temp: "", expiry: l.expiry, qcStatus: "Pending",
+      batchNo: l.batchNo?.trim() || undefined,
+      rate: Number(l.rate) || 0,
     }));
     addGRN({
       id: grnId,
@@ -140,13 +220,31 @@ export default function ReceiveItem() {
       vendor: dpVendor,
       receivedBy: dpReceivedBy,
       date: new Date().toLocaleString(),
+      grnDate: dpDate,
+      challanNo: dpChallanNo.trim() || undefined,
+      vehicleNo: dpVehicleNo.trim() || undefined,
       lines,
       officeId: dpOfficeId,
       warehouseId: dpWarehouseId,
       direct: true,
       note: dpJustification.trim(),
+      invoiceNo: dpInvoiceNo.trim() || undefined,
+      amount: dpGrandTotal,
     });
-    toast.success(`Direct receive ${dpRef} recorded — ${lines.length} line(s) sent to Quality Control.`);
+    // If this direct receive answers a Purchase Requisition shortfall, write the
+    // received quantities back to the PR so its procurement stage updates live.
+    if (dpSourcePrId) {
+      const receipts = dpLines
+        .filter((l) => l.prLineId)
+        .map((l) => ({ lineId: l.prLineId as string, qty: Number(l.qty) || 0 }));
+      if (receipts.length) applyReceiptToPR(dpSourcePrId, receipts);
+    }
+
+    toast.success(
+      dpSourcePrId
+        ? `Direct receive ${dpRef} recorded — ${lines.length} line(s), ${fmtBdt(dpGrandTotal)} — sent to Quality Control. ${dpSourcePrId} updated.`
+        : `Direct receive ${dpRef} recorded — ${lines.length} line(s), ${fmtBdt(dpGrandTotal)} — sent to Quality Control.`,
+    );
     setDirectOpen(false);
     resetDirect();
   };
@@ -166,7 +264,7 @@ export default function ReceiveItem() {
   const handleSelectPO = (poId: string) => {
     setSelectedPORef(poId);
     if (!poId) {
-      setFormLines([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "" }]);
+      setFormLines([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
       return;
     }
     const po = wfPurchaseOrders.find(p => p.id === poId);
@@ -180,13 +278,16 @@ export default function ReceiveItem() {
         id: `l${i}`,
         name: l.name,
         qty: l.qty,
+        orderedQty: l.qty,
         uom: l.uom,
         expiry: "",
+        rate: l.unitPrice ?? 0,
+        batchNo: "",
       })));
       toast.success(`${po.lineItems.length} item${po.lineItems.length === 1 ? "" : "s"} loaded from ${po.id}.`);
     } else {
       // PO without line items — start a clean single empty row.
-      setFormLines([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "" }]);
+      setFormLines([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
       toast.info(`${po?.id ?? poId} has no item details. Add rows manually.`);
     }
   };
@@ -199,6 +300,7 @@ export default function ReceiveItem() {
 
   const saveGRN = () => {
     if (!selectedPORef) { toast.error("Please select a PO."); return; }
+    if (!grnDate) { toast.error("GRN date is required."); return; }
     if (!receivedBy.trim()) { toast.error("Received By is required."); return; }
     if (!grnOfficeId) { toast.error("Office is required."); return; }
     if (!grnWarehouseId) { toast.error("Warehouse is required."); return; }
@@ -211,10 +313,13 @@ export default function ReceiveItem() {
       itemId: l.id,
       name: l.name,
       qty: l.qty,
+      orderedQty: l.orderedQty,
       uom: l.uom,
       temp: "",
       expiry: l.expiry,
+      batchNo: l.batchNo?.trim() || undefined,
       qcStatus: "Pending",
+      rate: l.rate || undefined,
     }));
 
     // Find linked demand via PO → Requisition → Demand chain
@@ -227,6 +332,11 @@ export default function ReceiveItem() {
       vendor: selectedPO?.vendor ?? "Unknown",
       receivedBy,
       date: new Date().toLocaleString(),
+      grnDate,
+      challanNo: grnChallanNo.trim() || undefined,
+      invoiceNo: grnInvoiceNo.trim() || undefined,
+      vehicleNo: grnVehicleNo.trim() || undefined,
+      note: grnRemarks.trim() || undefined,
       lines,
       linkedDemandRef: linkedDemand?.id,
       officeId: grnOfficeId,
@@ -251,7 +361,9 @@ export default function ReceiveItem() {
     setGrnOpen(false);
     setSelectedPORef("");
     setReceivedBy("");
-    setFormLines([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "" }]);
+    setGrnDate(new Date().toISOString().slice(0, 10));
+    setGrnChallanNo(""); setGrnInvoiceNo(""); setGrnVehicleNo(""); setGrnRemarks("");
+    setFormLines([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
   };
 
   // Build display rows from seed + workflow GRNs
@@ -336,7 +448,7 @@ export default function ReceiveItem() {
               variant="ghost"
               className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground gap-1"
               onClick={() => {
-                flagArrival({ target: "inv-alerts", ids: [r.inventoryId ?? r.item] });
+                flagArrival({ target: "inv-alerts", ids: [resolveInventoryId(r)] });
                 navigate("/inventory");
               }}
               title="Check Stock"
@@ -357,6 +469,19 @@ export default function ReceiveItem() {
 
           <div className="grid grid-cols-2 gap-4">
             <div>
+              <Label>GRN No</Label>
+              <Input disabled value="Auto-generated on save" className="mt-1 bg-muted/50 text-muted-foreground" />
+            </div>
+            <div>
+              <Label>GRN Date *</Label>
+              <Input
+                type="date"
+                value={grnDate}
+                onChange={(e) => setGrnDate(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+            <div>
               <Label>PO Reference *</Label>
               <select
                 value={selectedPORef}
@@ -375,7 +500,7 @@ export default function ReceiveItem() {
               <Label>Vendor (auto-filled)</Label>
               <Input disabled value={selectedPO?.vendor ?? ""} className="mt-1 bg-muted/50" placeholder="Select PO first" />
             </div>
-            <div className="col-span-2">
+            <div>
               <Label>Received By *</Label>
               <select
                 value={receivedBy}
@@ -388,25 +513,64 @@ export default function ReceiveItem() {
                 ))}
               </select>
             </div>
+            <div>
+              <Label>Delivery Challan / DO No</Label>
+              <Input
+                value={grnChallanNo}
+                onChange={(e) => setGrnChallanNo(e.target.value)}
+                className="mt-1"
+                placeholder="Supplier delivery note no"
+              />
+            </div>
             <LocationPicker
               officeId={grnOfficeId}
               warehouseId={grnWarehouseId}
               onChange={(n) => { setGrnOfficeId(n.officeId); setGrnWarehouseId(n.warehouseId); }}
             />
+            <div>
+              <Label>Supplier Invoice No</Label>
+              <Input
+                value={grnInvoiceNo}
+                onChange={(e) => setGrnInvoiceNo(e.target.value)}
+                className="mt-1"
+                placeholder="Invoice / bill reference"
+              />
+            </div>
+            <div>
+              <Label>Vehicle / Transport No</Label>
+              <Input
+                value={grnVehicleNo}
+                onChange={(e) => setGrnVehicleNo(e.target.value)}
+                className="mt-1"
+                placeholder="e.g. Dhaka Metro-Ga-11-2233"
+              />
+            </div>
+            <div className="col-span-2">
+              <Label>Remarks</Label>
+              <Textarea
+                value={grnRemarks}
+                onChange={(e) => setGrnRemarks(e.target.value)}
+                rows={2}
+                className="mt-1"
+                placeholder="Condition on receipt, discrepancies, short/damaged items, etc."
+              />
+            </div>
           </div>
 
           {/* Line items */}
-          <div className="mt-2">
+          <div className="mt-2 min-w-0">
             <div className="flex items-center justify-between mb-2">
               <Label>Items Received</Label>
             </div>
-            <div className="rounded-md border border-border overflow-hidden">
-              <table className="w-full text-sm">
+            <div className="rounded-md border border-border overflow-x-auto">
+              <table className="w-full text-sm min-w-[620px]">
                 <thead className="bg-muted/50">
                   <tr>
                     <th className="p-2 text-left font-semibold">Item</th>
-                    <th className="p-2 text-left font-semibold w-20">Qty</th>
+                    <th className="p-2 text-left font-semibold w-20">Ordered</th>
+                    <th className="p-2 text-left font-semibold w-20">Received</th>
                     <th className="p-2 text-left font-semibold w-16">UOM</th>
+                    <th className="p-2 text-left font-semibold w-32">Batch / Lot</th>
                     <th className="p-2 text-left font-semibold w-28">Expiry</th>
                     <th className="w-8" />
                   </tr>
@@ -424,6 +588,14 @@ export default function ReceiveItem() {
                       </td>
                       <td className="p-2">
                         <Input
+                          value={line.orderedQty ?? "—"}
+                          readOnly
+                          tabIndex={-1}
+                          className="h-7 text-xs w-16 bg-muted/50 text-muted-foreground cursor-default text-right tabular-nums"
+                        />
+                      </td>
+                      <td className="p-2">
+                        <Input
                           type="number" min={0}
                           value={line.qty}
                           onChange={(e) => updateLine(line.id, "qty", Number(e.target.value))}
@@ -436,6 +608,14 @@ export default function ReceiveItem() {
                           readOnly
                           tabIndex={-1}
                           className="h-7 text-xs w-16 bg-muted/50 text-muted-foreground cursor-default"
+                        />
+                      </td>
+                      <td className="p-2">
+                        <Input
+                          value={line.batchNo ?? ""}
+                          onChange={(e) => updateLine(line.id, "batchNo", e.target.value)}
+                          className="h-7 text-xs"
+                          placeholder="Batch / lot"
                         />
                       </td>
                       <td className="p-2">
@@ -479,6 +659,15 @@ export default function ReceiveItem() {
 
           <div className="grid grid-cols-2 gap-4">
             <div>
+              <Label>Receipt Date *</Label>
+              <Input
+                type="date"
+                value={dpDate}
+                onChange={(e) => setDpDate(e.target.value)}
+                className="mt-1"
+              />
+            </div>
+            <div>
               <Label>Vendor *</Label>
               <select
                 value={dpVendor}
@@ -500,11 +689,38 @@ export default function ReceiveItem() {
                 {RECEIVERS.map((r) => <option key={r} value={r}>{r}</option>)}
               </select>
             </div>
+            <div>
+              <Label>Delivery Challan / DO No</Label>
+              <Input
+                value={dpChallanNo}
+                onChange={(e) => setDpChallanNo(e.target.value)}
+                className="mt-1"
+                placeholder="Supplier delivery note no"
+              />
+            </div>
             <LocationPicker
               officeId={dpOfficeId}
               warehouseId={dpWarehouseId}
               onChange={(n) => { setDpOfficeId(n.officeId); setDpWarehouseId(n.warehouseId); }}
             />
+            <div>
+              <Label>Invoice / Bill No</Label>
+              <Input
+                value={dpInvoiceNo}
+                onChange={(e) => setDpInvoiceNo(e.target.value)}
+                className="mt-1"
+                placeholder="Supplier invoice / bill reference"
+              />
+            </div>
+            <div>
+              <Label>Vehicle / Transport No</Label>
+              <Input
+                value={dpVehicleNo}
+                onChange={(e) => setDpVehicleNo(e.target.value)}
+                className="mt-1"
+                placeholder="e.g. Dhaka Metro-Ga-11-2233"
+              />
+            </div>
             <div className="col-span-2">
               <Label>Justification *</Label>
               <Textarea
@@ -518,20 +734,23 @@ export default function ReceiveItem() {
           </div>
 
           {/* Line items — entered manually for a direct buy */}
-          <div className="mt-2">
+          <div className="mt-2 min-w-0">
             <div className="flex items-center justify-between mb-2">
               <Label>Items Received</Label>
               <Button size="sm" variant="outline" onClick={dpAddLine}>
                 <Plus className="h-3.5 w-3.5 mr-1" /> Add Row
               </Button>
             </div>
-            <div className="rounded-md border border-border overflow-hidden">
-              <table className="w-full text-sm">
+            <div className="rounded-md border border-border overflow-x-auto">
+              <table className="w-full text-sm min-w-[740px]">
                 <thead className="bg-muted/50">
                   <tr>
                     <th className="p-2 text-left font-semibold">Item</th>
                     <th className="p-2 text-left font-semibold w-20">Qty</th>
-                    <th className="p-2 text-left font-semibold w-20">UOM</th>
+                    <th className="p-2 text-left font-semibold w-16">UOM</th>
+                    <th className="p-2 text-right font-semibold w-24">Rate</th>
+                    <th className="p-2 text-right font-semibold w-28">Total</th>
+                    <th className="p-2 text-left font-semibold w-32">Batch / Lot</th>
                     <th className="p-2 text-left font-semibold w-28">Expiry</th>
                     <th className="w-8" />
                   </tr>
@@ -546,6 +765,9 @@ export default function ReceiveItem() {
                           className="w-full h-7 text-xs rounded-md border border-input bg-background px-2"
                         >
                           <option value="">Select item…</option>
+                          {line.name && !dpItemOptions.some((it) => it.name === line.name) && (
+                            <option value={line.name}>{line.name}</option>
+                          )}
                           {dpItemOptions.map((it) => (
                             <option key={it.id} value={it.name}>{it.name}</option>
                           ))}
@@ -564,7 +786,27 @@ export default function ReceiveItem() {
                           value={line.uom}
                           readOnly
                           tabIndex={-1}
-                          className="h-7 text-xs w-16 bg-muted/50 text-muted-foreground cursor-default"
+                          className="h-7 text-xs w-14 bg-muted/50 text-muted-foreground cursor-default"
+                        />
+                      </td>
+                      <td className="p-2">
+                        <Input
+                          type="number" min={0} step="any"
+                          value={line.rate || ""}
+                          placeholder="0.00"
+                          onChange={(e) => dpUpdateLine(line.id, "rate", Number(e.target.value))}
+                          className="h-7 text-xs text-right tabular-nums"
+                        />
+                      </td>
+                      <td className="p-2 text-right text-xs font-medium tabular-nums whitespace-nowrap">
+                        {fmtBdt(dpLineTotal(line))}
+                      </td>
+                      <td className="p-2">
+                        <Input
+                          value={line.batchNo ?? ""}
+                          onChange={(e) => dpUpdateLine(line.id, "batchNo", e.target.value)}
+                          className="h-7 text-xs"
+                          placeholder="Batch / lot"
                         />
                       </td>
                       <td className="p-2">
@@ -583,6 +825,17 @@ export default function ReceiveItem() {
                     </tr>
                   ))}
                 </tbody>
+                <tfoot className="border-t border-border bg-muted/30">
+                  <tr>
+                    <td className="p-2 text-xs font-semibold text-muted-foreground" colSpan={4}>
+                      Grand Total ({dpLines.length} item{dpLines.length === 1 ? "" : "s"})
+                    </td>
+                    <td className="p-2 text-right text-sm font-bold tabular-nums whitespace-nowrap">
+                      {fmtBdt(dpGrandTotal)}
+                    </td>
+                    <td colSpan={3} />
+                  </tr>
+                </tfoot>
               </table>
             </div>
             <p className="mt-1.5 text-[11px] text-muted-foreground">

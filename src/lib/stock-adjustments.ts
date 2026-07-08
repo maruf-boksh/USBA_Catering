@@ -3,6 +3,8 @@
 // Management reads the list via `getStockAdjustments()` and flips status via
 // `setStockAdjustmentStatus()` so the two stay in sync.
 
+import { roundQty } from "@/lib/num";
+
 export type AdjType = "Increase" | "Decrease";
 export type AdjReason =
   | "Wastage" | "Expiry Writeoff" | "Damage"
@@ -120,7 +122,7 @@ export function applyInventoryStock(idOrName: string, delta: number): void {
     const items = JSON.parse(raw) as Array<{ id?: string; name: string; stock: number; [k: string]: unknown }>;
     const updated = items.map((i) =>
       i.id === idOrName || i.name.toLowerCase() === key
-        ? { ...i, stock: Math.max(0, (i.stock as number) + delta) }
+        ? { ...i, stock: roundQty(Math.max(0, (i.stock as number) + delta)) }
         : i,
     );
     window.localStorage.setItem(INV_KEY, JSON.stringify(updated));

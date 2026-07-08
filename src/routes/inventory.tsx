@@ -30,7 +30,7 @@ import {
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-import { useArrivalFlash } from "@/lib/arrival-flash";
+import { useArrivalFlash, peekArrivalRows } from "@/lib/arrival-flash";
 import { useWorkflow } from "@/lib/workflow-store";
 import { getStockAdjustments } from "@/lib/stock-adjustments";
 import { getItemProfiles } from "@/lib/item-profiles";
@@ -111,6 +111,10 @@ const SELECT_CLS = "w-full mt-1 rounded-md border border-input bg-background px-
 
 export default function Inventory() {
   useArrivalFlash();
+  // If we arrived here from a deep link that targets a specific item (e.g.
+  // Receive Items → Check Stock), grab the target row id once so the table can
+  // jump to the page holding it — otherwise a paginated-away row never flashes.
+  const [arrivalRowId] = useState<string | undefined>(() => peekArrivalRows()[0]);
   // Re-render when any item's FIFO/FEFO method is toggled.
   useSyncExternalStore(subscribeAllocationMethod, getAllocationVersion, getAllocationVersion);
   const { role } = useRole();
@@ -734,6 +738,7 @@ export default function Inventory() {
         columns={cols}
         searchKeys={["name", "category", "status", "batch"]}
         selectable={false}
+        flashRowId={arrivalRowId}
         actions={(row) => (
           <div className="flex items-center gap-1">
             <Button

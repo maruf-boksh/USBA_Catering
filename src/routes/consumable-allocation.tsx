@@ -1,5 +1,6 @@
 import { Fragment, useState } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
+import { roundQty } from "@/lib/num";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Card, CardContent } from "@/components/ui/card";
@@ -81,7 +82,7 @@ export default function FlightAllocationPage() {
         const issuedQty = r.lines
           .filter((l) => l.itemId === item.id)
           .reduce((s, l) => s + l.qty, 0);
-        return issuedQty > 0 ? { ...item, stock: item.stock - issuedQty } : item;
+        return issuedQty > 0 ? { ...item, stock: roundQty(item.stock - issuedQty) } : item;
       }),
     );
     setAllocations((prev) => [r, ...prev]);

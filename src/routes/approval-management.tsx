@@ -34,6 +34,7 @@ import {
 } from "@/lib/workflow-store";
 import { inventory, warehouses, consumableItems, type ConsumableItem } from "@/lib/sample-data";
 import { getItemStock } from "@/lib/inventory-stock";
+import { roundQty } from "@/lib/num";
 import { useFlightOrders, updateFlightOrdersWhere, type FlightOrder } from "@/lib/flight-orders-store";
 import { useApprovalReviews, setReview, reviewKey } from "@/lib/approval-reviews";
 import { getRfqs, setRfqStatus } from "@/lib/rfqs";
@@ -961,7 +962,7 @@ export default function ApprovalManagementPage() {
     const tagged = dr.items.map((it) => {
       const onHand = onHandFor(it.name);
       const toIssue = Math.min(onHand, it.qty);
-      return { ...it, onHand, toIssue, shortfall: Math.max(0, it.qty - onHand) };
+      return { ...it, onHand, toIssue, shortfall: roundQty(Math.max(0, it.qty - onHand)) };
     });
     const hasInStock = tagged.some((t) => t.toIssue > 0);
     const hasShortfall = tagged.some((t) => t.shortfall > 0);
@@ -1590,7 +1591,7 @@ export default function ApprovalManagementPage() {
       .map((it) => {
         const inv = inventory.find((i) => i.name.toLowerCase() === it.name.toLowerCase());
         const onHand = getItemStock(it.name);
-        const shortfall = Math.max(0, it.qty - onHand);
+        const shortfall = roundQty(Math.max(0, it.qty - onHand));
         const raw = shortfallQtys[it.id];
         const parsed = raw !== undefined ? parseFloat(raw) : NaN;
         const finalQty = !isNaN(parsed) && parsed > 0 ? parsed : shortfall;
@@ -3010,13 +3011,16 @@ export default function ApprovalManagementPage() {
                 )}
               </div>
 
-              {/* Summary */}
-              <div className="rounded-md border border-border bg-muted/30 p-3">
-                <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
-                  Summary
+              {/* Summary — hidden for Demand Requests (the item tables below
+                  already carry the detail; the note is redundant there). */}
+              {detailItem.category !== "Demand Request" && (
+                <div className="rounded-md border border-border bg-muted/30 p-3">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1">
+                    Summary
+                  </div>
+                  <div className="text-sm leading-relaxed">{detailItem.summary}</div>
                 </div>
-                <div className="text-sm leading-relaxed">{detailItem.summary}</div>
-              </div>
+              )}
 
               {/* Flight / Crew orders — flight legs in this order */}
               {(detailItem.category === "Flight Orders" || detailItem.category === "Crew Orders") && (() => {
@@ -3238,7 +3242,7 @@ export default function ApprovalManagementPage() {
                 const taggedItems = dr.items.map((item) => {
                   const inv = inventory.find((i) => i.id === item.id || i.name.toLowerCase() === item.name.toLowerCase());
                   const inStock = getItemStock(item.id || item.name);
-                  const shortfall = item.qty - inStock;
+                  const shortfall = roundQty(item.qty - inStock);
                   return { ...item, inStock, shortfall, insufficient: shortfall > 0 };
                 });
                 const sufficientItems = taggedItems.filter((it) => !it.insufficient);
@@ -3287,23 +3291,6 @@ export default function ApprovalManagementPage() {
                             </tbody>
                           </table>
                         </div>
-                        {detailItem.status === "Pending" && (
-                          <div className="flex justify-end mt-2">
-                            {fulfillStoreDone ? (
-                              <Button size="sm" variant="outline" disabled className="h-7 px-3 text-[11px] border-success/40 text-success">
-                                <CheckCircle2 className="h-3 w-3 mr-1.5" /> Fulfilled from Store ✓
-                              </Button>
-                            ) : (
-                              <Button
-                                size="sm"
-                                className="h-7 px-3 text-[11px] bg-success text-success-foreground hover:bg-success/90"
-                                onClick={() => handleFulfillFromStore(dr)}
-                              >
-                                <PackageCheck className="h-3 w-3 mr-1.5" /> Fulfill From Store
-                              </Button>
-                            )}
-                          </div>
-                        )}
                       </div>
                     )}
 

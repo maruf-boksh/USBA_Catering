@@ -17,8 +17,9 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  FileText, ClipboardList, CheckCircle, Plus, Save, Send, Trash2, Pencil, Eye,
+  FileText, ClipboardList, CheckCircle, Plus, Save, Send, Trash2, Pencil, Eye, ArrowLeft, ShoppingCart,
 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { activeItems } from "@/lib/sample-data";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
@@ -26,6 +27,10 @@ import { useWorkflow, type WfRequisition, type WfDemandItem } from "@/lib/workfl
 import { useArrivalFlash } from "@/lib/arrival-flash";
 import {
   seedRequisitions,
+  procurementStage,
+  prReceived,
+  matchesStatusFilter,
+  PR_STATUS_FILTERS,
   type PRLineItem,
   type Priority,
   type PurchaseRequisition,
@@ -95,17 +100,25 @@ function wfReqToPurchaseRequisition(wf: WfRequisition): PurchaseRequisition {
 }
 
 type PRPrefill = {
-  itemName: string;
-  uom: string;
-  qty: number;
-  rate: number;
+  // Single-item prefill (e.g. from Stock Overview). Optional so a multi-line
+  // payload (from a Demand Request's shortfall table) can omit them.
+  itemName?: string;
+  uom?: string;
+  qty?: number;
+  rate?: number;
   priority?: Priority;
   justification?: string;
   source?: string;
+  requestedBy?: string;
+  officeId?: string;
+  warehouseId?: string;
+  /** Multi-line prefill — takes precedence over the single-item fields. */
+  lines?: PRLineItem[];
 };
 
 export default function PurchaseRequisitionPage() {
   useArrivalFlash();
+  const navigate = useNavigate();
   const { wfRequisitions, updateRequisition } = useWorkflow();
   const [requisitions, setRequisitions] = usePersistedState<PurchaseRequisition[]>("purchase-requisitions", seedRequisitions);
   const [view, setView] = useState<"list" | "create">("list");
@@ -113,6 +126,7 @@ export default function PurchaseRequisitionPage() {
   const [editing, setEditing] = useState<PurchaseRequisition | null>(null);
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
+  const [filterStatus, setFilterStatus] = useState("All");
   const [prefill, setPrefill] = useState<PRPrefill | null>(null);
 
   // Status values where a requisition is still mutable. Once approved /
@@ -160,10 +174,12 @@ export default function PurchaseRequisitionPage() {
       const parsed = JSON.parse(raw) as PRPrefill;
       setPrefill(parsed);
       setView("create");
+      const count = parsed.lines?.length ?? (parsed.itemName ? 1 : 0);
+      const what = count === 1 && parsed.itemName ? parsed.itemName : `${count} item${count === 1 ? "" : "s"}`;
       toast.success(
         parsed.source
-          ? `New PR pre-filled from ${parsed.source} — ${parsed.itemName}.`
-          : `New PR pre-filled with ${parsed.itemName}.`,
+          ? `New PR pre-filled from ${parsed.source} — ${what}.`
+          : `New PR pre-filled with ${what}.`,
       );
     } catch {
       /* malformed payload — ignore */
@@ -176,18 +192,29 @@ export default function PurchaseRequisitionPage() {
     setPrefill(null);
   };
 
+  // Back from the Create view: if it was opened via an external prefill (e.g.
+  // the Demand Request shortfall flow) return to the previous page; otherwise
+  // just drop back to this module's list.
+  const handleBack = () => {
+    if (prefill) { setPrefill(null); navigate(-1); }
+    else setView("list");
+  };
+
   // Workflow-store requisitions (MRP, kitchen demand, etc.) bridged in for display.
   // De-dupe in case any local PR happens to share an id with a workflow record.
+  // Local requisitions come FIRST so a freshly created PR (prepended in
+  // addRequisition) lands at the top of page 1 instead of behind the bridged rows.
   const bridged: PurchaseRequisition[] = wfRequisitions.map(wfReqToPurchaseRequisition);
   const localIds = new Set(requisitions.map((r) => r.id));
   const combined = [
-    ...bridged.filter((b) => !localIds.has(b.id)),
     ...requisitions,
+    ...bridged.filter((b) => !localIds.has(b.id)),
   ];
 
   const filtered = combined.filter((r) => {
     if (filterOffice && r.officeId !== filterOffice) return false;
     if (filterWarehouse && r.warehouseId !== filterWarehouse) return false;
+    if (!matchesStatusFilter(r, filterStatus)) return false;
     return true;
   });
 
@@ -223,7 +250,13 @@ export default function PurchaseRequisitionPage() {
         </Badge>
       ),
     },
-    { key: "status", header: "Status", render: (r) => <StatusBadge status={r.status} /> },
+    {
+      // Combined status: the procurement stage IS the status — it folds the
+      // approval state (Draft / Pending / Rejected / Cancelled / Closed) and the
+      // receipt-driven stage (Processing / Partial Order / Full Order) into one.
+      key: "status", header: "Status",
+      render: (r) => <StatusBadge status={procurementStage(r)} />,
+    },
   ];
 
   return (
@@ -232,10 +265,17 @@ export default function PurchaseRequisitionPage() {
         title="Purchase Requisition"
         subtitle="Create and track requisitions before issuing purchase orders"
         actions={
-          <Button onClick={() => setView(view === "create" ? "list" : "create")}>
-            <Plus className="h-4 w-4 mr-1" />
-            {view === "create" ? "View List" : "Create Requisition"}
-          </Button>
+          view === "create" ? (
+            <Button variant="outline" onClick={handleBack}>
+              <ArrowLeft className="h-4 w-4 mr-1" />
+              Back
+            </Button>
+          ) : (
+            <Button onClick={() => setView("create")}>
+              <Plus className="h-4 w-4 mr-1" />
+              Create Requisition
+            </Button>
+          )
         }
       />
 
@@ -248,12 +288,24 @@ export default function PurchaseRequisitionPage() {
             <KpiCard label="Approved"           value={approvedCount} icon={CheckCircle}   tone="success" />
           </div>
 
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <LocationFilter
-              officeId={filterOffice}
-              warehouseId={filterWarehouse}
-              onChange={(n) => { setFilterOffice(n.officeId); setFilterWarehouse(n.warehouseId); }}
-            />
+          <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+            <div className="flex flex-wrap items-end gap-3">
+              <LocationFilter
+                officeId={filterOffice}
+                warehouseId={filterWarehouse}
+                onChange={(n) => { setFilterOffice(n.officeId); setFilterWarehouse(n.warehouseId); }}
+              />
+              <div>
+                <Label className="text-xs uppercase tracking-wider text-muted-foreground">Status</Label>
+                <select
+                  value={filterStatus}
+                  onChange={(e) => setFilterStatus(e.target.value)}
+                  className={selectCls + " min-w-[160px]"}
+                >
+                  {PR_STATUS_FILTERS.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+            </div>
             <span className="text-xs text-muted-foreground">
               Showing <strong className="text-foreground tabular-nums">{filtered.length}</strong> of {combined.length}
             </span>
@@ -328,9 +380,9 @@ function PurchaseRequisitionCreate({
 
   // Header state
   const [prDate, setPrDate] = useState(today);
-  const [officeId, setOfficeId] = useState("OFF-001");
-  const [warehouseId, setWarehouseId] = useState("WH-001");
-  const [requestedBy, setRequestedBy] = useState("");
+  const [officeId, setOfficeId] = useState(prefill?.officeId ?? "OFF-001");
+  const [warehouseId, setWarehouseId] = useState(prefill?.warehouseId ?? "WH-001");
+  const [requestedBy, setRequestedBy] = useState(prefill?.requestedBy ?? "");
   const [requiredBy, setRequiredBy] = useState("");
   const [priority, setPriority] = useState<Priority>(prefill?.priority ?? "Normal");
   const [justification, setJustification] = useState(prefill?.justification ?? "");
@@ -345,16 +397,18 @@ function PurchaseRequisitionCreate({
   const [uom, setUom] = useState(UOMS[0]);
   const [rate, setRate] = useState("");
   const [lines, setLines] = useState<PRLineItem[]>(
-    prefill
-      ? [{
-          id: `LN-PREFILL-${Date.now()}`,
-          itemName: prefill.itemName,
-          description: "",
-          qty: prefill.qty,
-          uom: prefill.uom,
-          rate: prefill.rate,
-        }]
-      : [],
+    prefill?.lines?.length
+      ? prefill.lines.map((l, i) => ({ ...l, id: l.id || `LN-PREFILL-${i + 1}` }))
+      : prefill?.itemName
+        ? [{
+            id: `LN-PREFILL-${Date.now()}`,
+            itemName: prefill.itemName,
+            description: "",
+            qty: prefill.qty ?? 0,
+            uom: prefill.uom ?? UOMS[0],
+            rate: prefill.rate ?? 0,
+          }]
+        : [],
   );
 
   const totalAmount = lines.reduce((s, l) => s + l.qty * l.rate, 0);
@@ -715,6 +769,39 @@ function PurchaseRequisitionCreate({
 function RequisitionDetailsDialog({
   requisition, onClose,
 }: { requisition: PurchaseRequisition | null; onClose: () => void }) {
+  const navigate = useNavigate();
+  const stage = requisition ? procurementStage(requisition) : null;
+  const totals = requisition ? prReceived(requisition) : null;
+  // Direct (local) purchase is offered whenever the requisitioned amount hasn't
+  // been fully received — i.e. received < requisition — except on terminal PRs.
+  const isTerminal = stage === "Closed" || stage === "Cancelled" || stage === "Rejected";
+  const canDirectReceive = !!totals && totals.remaining > 0 && !isTerminal;
+
+  // Hand the still-outstanding lines to Receive Items → Direct Receive (prefilled).
+  // On save there, applyReceiptToPR writes the received qty back to this PR.
+  const handleDirectReceive = () => {
+    if (!requisition) return;
+    const short = requisition.lines
+      .map((l) => ({ l, remaining: Math.max(l.qty - (l.receivedQty ?? 0), 0) }))
+      .filter((x) => x.remaining > 0);
+    if (short.length === 0) return;
+    sessionStorage.setItem(
+      "direct-receive-prefill",
+      JSON.stringify({
+        source: requisition.id,
+        prId: requisition.id,
+        justification: `Direct (local) purchase against Purchase Requisition ${requisition.id} — ${short.length} short line${short.length === 1 ? "" : "s"}.`,
+        officeId: requisition.officeId,
+        warehouseId: requisition.warehouseId,
+        lines: short.map(({ l, remaining }) => ({
+          name: l.itemName, qty: remaining, uom: l.uom, prLineId: l.id,
+        })),
+      }),
+    );
+    onClose();
+    navigate("/receive-item");
+  };
+
   return (
     <Dialog open={!!requisition} onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-w-3xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
@@ -748,11 +835,45 @@ function RequisitionDetailsDialog({
               </div>
               <div>
                 <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Status</div>
-                <div className="mt-1"><StatusBadge status={requisition.status} /></div>
+                <div className="mt-1"><StatusBadge status={stage ?? requisition.status} /></div>
               </div>
               <Field label="Items" value={requisition.lines.length.toString()} />
               <Field label="Total Est." value={`৳ ${requisition.totalAmount.toLocaleString()}`} bold />
             </div>
+
+            {/* Procurement stage — where the whole order stands right now */}
+            {stage && totals && (
+              <div className="rounded-md border border-border bg-muted/30 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+                    Receipt Progress
+                  </span>
+                  <div className="text-xs text-muted-foreground tabular-nums">
+                    <strong className="text-foreground">{totals.received}</strong> of{" "}
+                    <strong className="text-foreground">{totals.ordered}</strong> units received
+                    {totals.remaining > 0 && (
+                      <span className="text-amber-700"> · {totals.remaining} pending</span>
+                    )}
+                  </div>
+                </div>
+                {/* progress bar */}
+                <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className={`h-full rounded-full ${totals.pct >= 100 ? "bg-green-600" : "bg-primary"}`}
+                    style={{ width: `${totals.pct}%` }}
+                  />
+                </div>
+                <div className="mt-1 flex items-center justify-between">
+                  <span className="text-[11px] text-muted-foreground">{totals.pct}% received</span>
+                  {canDirectReceive && (
+                    <Button size="sm" className="h-8" onClick={handleDirectReceive}>
+                      <ShoppingCart className="h-3.5 w-3.5 mr-1.5" />
+                      Direct Purchase ({totals.remaining})
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
 
             {requisition.justification && (
               <div>
@@ -769,14 +890,17 @@ function RequisitionDetailsDialog({
               <div className="text-[11px] uppercase tracking-wider text-muted-foreground mb-2">
                 Line Items
               </div>
-              <div className="border border-border rounded-md overflow-hidden">
+              <div className="border border-border rounded-md overflow-x-auto">
                 <Table>
                   <TableHeader className="bg-muted/40">
                     <TableRow>
                       <TableHead className="w-14 text-xs uppercase tracking-wider">SL</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider">Description</TableHead>
-                      <TableHead className="text-xs uppercase tracking-wider text-right">Qty</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Requisition</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Ordered</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Received</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Pending</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider">UoM</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider text-right">Rate</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider text-right">Amount</TableHead>
@@ -791,6 +915,15 @@ function RequisitionDetailsDialog({
                           {l.description || "—"}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">{l.qty}</TableCell>
+                        <TableCell className="text-right tabular-nums text-muted-foreground">
+                          {l.orderedQty ?? 0}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums text-green-700">
+                          {l.receivedQty ?? 0}
+                        </TableCell>
+                        <TableCell className={"text-right tabular-nums " + (Math.max(l.qty - (l.receivedQty ?? 0), 0) > 0 ? "text-amber-700 font-medium" : "text-muted-foreground")}>
+                          {Math.max(l.qty - (l.receivedQty ?? 0), 0)}
+                        </TableCell>
                         <TableCell>{l.uom}</TableCell>
                         <TableCell className="text-right tabular-nums">{l.rate.toLocaleString()}</TableCell>
                         <TableCell className="text-right tabular-nums">
@@ -799,7 +932,7 @@ function RequisitionDetailsDialog({
                       </TableRow>
                     ))}
                     <TableRow className="bg-muted/30 font-semibold">
-                      <TableCell colSpan={6} className="text-right uppercase text-xs tracking-wider">
+                      <TableCell colSpan={9} className="text-right uppercase text-xs tracking-wider">
                         Total
                       </TableCell>
                       <TableCell className="text-right tabular-nums">

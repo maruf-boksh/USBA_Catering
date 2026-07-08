@@ -24,6 +24,7 @@ import {
   ExternalLink, Trash2, PlusCircle, ListChecks, Zap, History, X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { roundQty } from "@/lib/num";
 import { toast } from "sonner";
 import { useFlightOrders } from "@/lib/flight-orders-store";
 import { vendors } from "@/lib/sample-data";
@@ -1911,7 +1912,7 @@ function DelayProductionScreen({
                 Required: <span className="font-semibold">{stockLogLine.qty} {stockLogLine.uom}</span>
                 {" · "}
                 Shortfall: <span className="font-semibold text-red-600">
-                  {Math.max(0, stockLogLine.qty - stockLogLine.stockBefore)} {stockLogLine.uom}
+                  {roundQty(Math.max(0, stockLogLine.qty - stockLogLine.stockBefore))} {stockLogLine.uom}
                 </span>
               </div>
             </div>

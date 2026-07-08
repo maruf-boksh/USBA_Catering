@@ -31,6 +31,8 @@ import {
   type FlightOrderRow, type MealSlot, type ItemMaster,
 } from "@/lib/sample-data";
 import { getItemStock } from "@/lib/inventory-stock";
+import { roundQty } from "@/lib/num";
+import { logAudit } from "@/lib/audit-log";
 import {
   useProductionBasisSettings, effectiveBasis, productionQtyForBasis,
   PRODUCTION_BASIS_LABEL, type ProductionBasis,
@@ -316,7 +318,7 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
     code: entry.outputItemCode,
   });
   const orderQty = entry.orderQty ?? entry.producedQty;
-  const remaining = Math.max(0, orderQty - entry.producedQty);
+  const remaining = roundQty(Math.max(0, orderQty - entry.producedQty));
   const materials = orderQty > 0
     ? aggregateMaterials([{ id: entry.id, itemCode: recipe.code, itemName: recipe.name, qty: orderQty }])
     : null;
@@ -685,6 +687,12 @@ export default function ProductionEntryPage() {
 
   const addEntry = (entry: ProductionEntry) => {
     addProductionEntry(entry);
+    logAudit({
+      action: "Created production order",
+      module: "Production",
+      entity: entry.id,
+      detail: `${entry.outputItemName ?? entry.bom} · order qty ${entry.orderQty ?? 0}${entry.date ? ` · ${entry.date}` : ""}`,
+    });
     // Connection: posting a production order auto-advances every flight order
     // for that same date from the production pipeline (Approved / Production)
     // into Dispatched, so they appear on the Dispatch page automatically.
@@ -771,7 +779,7 @@ export default function ProductionEntryPage() {
       ...mats.other.map((m) => ({ ...m, bucket: "Other" as const })),
     ].map((m) => {
       const onHand = getMrpOnHand(m.itemName);
-      return { ...m, onHand, shortfall: Math.max(0, m.reqQty - onHand) };
+      return { ...m, onHand, shortfall: roundQty(Math.max(0, m.reqQty - onHand)) };
     });
     if (tagged.length === 0) return { skippedNoRecipe: skipped };
 
@@ -801,11 +809,11 @@ export default function ProductionEntryPage() {
           type: s.bucket,
         };
       }),
-      note: `Auto-generated from bulk meal-plan creation. Covers ${orders.length} production order${orders.length === 1 ? "" : "s"} (${lines.length} with recipes). On approval, an Issue + PR will be auto-created from current stock levels.`,
+      note: `Auto-generated from bulk meal-plan creation. Covers ${orders.length} production order${orders.length === 1 ? "" : "s"} (${lines.length} with recipes). Lists every material with its in-stock vs shortfall split. Approval does not auto-create an Issue or PR — it stops for review.`,
       source: "Kitchen",
       officeId: "OFF-001",
       warehouseId: "WH-003",
-      autoFulfill: true,
+      autoFulfill: false,
     };
     addDemands([dr]);
 
@@ -865,6 +873,12 @@ export default function ProductionEntryPage() {
         warehouseId: "WH-003",
       };
       addProductionEntry(entry);
+      logAudit({
+        action: "Created production order",
+        module: "Production",
+        entity: entry.id,
+        detail: `${entry.outputItemName} · order qty ${entry.orderQty ?? 0} · ${entry.date} (from meal plan)`,
+      });
       created.push(entry);
     });
 
@@ -877,7 +891,7 @@ export default function ProductionEntryPage() {
 
     if (dr) {
       toast.success(
-        `Created: ${parts.join(" · ")}. Approve the demand in Demand Orders to auto-issue stock and raise the PR for shortfalls.`,
+        `Created: ${parts.join(" · ")}. Review the in-stock vs shortfall items in Demand Orders — approval stops there for now.`,
         { duration: 8000 },
       );
     } else if (skippedNoRecipe === created.length) {
@@ -960,8 +974,9 @@ export default function ProductionEntryPage() {
   // delta; the original completed order is left untouched (as-produced record).
   const raiseTopUp = (r: NumberedEntry, delta: number) => {
     const qty = Math.max(1, Math.round(delta));
+    const topUpId = `PRO-LMC-${Date.now().toString(36).slice(-5).toUpperCase()}`;
     addProductionEntry({
-      id: `PRO-LMC-${Date.now().toString(36).slice(-5).toUpperCase()}`,
+      id: topUpId,
       date: r.date,
       bom: r.bom,
       outputItemName: r.outputItemName,
@@ -971,6 +986,12 @@ export default function ProductionEntryPage() {
       status: "Pending",
       officeId: r.officeId,
       warehouseId: r.warehouseId,
+    });
+    logAudit({
+      action: "Raised top-up production order",
+      module: "Production",
+      entity: topUpId,
+      detail: `${qty} × ${r.outputItemName ?? "item"} (LMC shortfall vs ${r.id})`,
     });
     toast.success(`Top-up order raised — ${qty} × ${r.outputItemName ?? "item"} (LMC shortfall). Original order untouched.`);
   };
@@ -1042,7 +1063,7 @@ export default function ProductionEntryPage() {
       className: "text-right",
       render: (r) => {
         const order = r.orderQty ?? r.producedQty;
-        const remaining = Math.max(0, order - r.producedQty);
+        const remaining = roundQty(Math.max(0, order - r.producedQty));
         return (
           <span className={`tabular-nums ${remaining > 0 ? "text-warning font-medium" : "text-success"}`}>
             {remaining.toLocaleString()}
@@ -1082,11 +1103,11 @@ export default function ProductionEntryPage() {
                   className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700"
                   title={`Produced ${r.producedQty}, now required ${req.qty} — ${r.producedQty - req.qty} surplus. Reallocate or hold; not auto-wasted.`}
                 >
-                  <AlertCircle className="h-3 w-3" /> {r.producedQty - req.qty} surplus
+                  <AlertCircle className="h-3 w-3" /> {roundQty(r.producedQty - req.qty)} surplus
                 </span>
               ) : req.qty > r.producedQty ? (
                 <Button size="sm" variant="outline" className="h-7 px-2 text-[11px] border-sky-300 text-sky-700 hover:bg-sky-50" onClick={() => raiseTopUp(r, req.qty - r.producedQty)}>
-                  <Plus className="h-3 w-3 mr-1" /> Raise top-up ({req.qty - r.producedQty})
+                  <Plus className="h-3 w-3 mr-1" /> Raise top-up ({roundQty(req.qty - r.producedQty)})
                 </Button>
               ) : (
                 <span className="inline-flex items-center gap-1 text-[11px] text-emerald-600"><CheckCircle2 className="h-3 w-3" /> In sync</span>
@@ -2996,9 +3017,9 @@ function MealPlanningDetailsDialog({
                     const stock = getItemStock(it.name);
                     const uom = inv?.uom ?? "";
                     const req = it.computedQty ?? 0;
-                    const shortfall = Math.max(0, req - stock);
+                    const shortfall = roundQty(Math.max(0, req - stock));
                     const basis = basisForRow(i, it.name);
-                    const produceQty = productionQtyForBasis(basis, req, stock);
+                    const produceQty = roundQty(productionQtyForBasis(basis, req, stock));
                     const checked = selectedIdx.has(i);
                     return (
                       <TableRow
@@ -3603,7 +3624,7 @@ function MaterialRequirementPlanningDialog({
   // Flatten + enrich every material with stock + shortfall + supplier
   const enrichMaterial = (m: AggregatedMaterial, bucket: "Raw" | "Packaging" | "Other"): WfMrpMaterial => {
     const onHand = getMrpOnHand(m.itemName);
-    const shortfall = Math.max(0, m.reqQty - onHand);
+    const shortfall = roundQty(Math.max(0, m.reqQty - onHand));
     return {
       itemCode: m.itemCode,
       itemName: m.itemName,
