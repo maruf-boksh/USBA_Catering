@@ -757,6 +757,11 @@ export type EquipmentAsset = {
   grnNumber?: string;
   purchaseDate?: string;
   supplierName?: string;
+  /** Date the asset was entered into the register (defaults to today). */
+  registrationDate?: string;
+  /** Warranty coverage window — start typically = purchase/GRN date. */
+  warrantyStart?: string;
+  warrantyEnd?: string;
   attachments?: EquipmentAttachment[];
 };
 
@@ -2111,6 +2116,14 @@ export const items: ItemMaster[] = RAW_ITEMS.map((row, i) => ({
 
 /** Active master items only (use this in pickers/DDLs by default) */
 export const activeItems: ItemMaster[] = items.filter((i) => i.status === "Active");
+
+/** Unit/book cost of an equipment asset, resolved by name from the Asset item
+ *  master — the same cost basis the Stock Overview report values assets at.
+ *  Returns undefined when no matching asset item exists. */
+export function assetCostByName(name: string): number | undefined {
+  const key = name.trim().toLowerCase();
+  return items.find((i) => i.itemType === "Asset" && i.name.toLowerCase() === key)?.costPrice;
+}
 
 /** Filter items by item type (e.g. "Raw Material", "Finished Good") */
 export const itemsByType = (...types: ItemMaster["itemType"][]): ItemMaster[] =>

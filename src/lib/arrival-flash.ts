@@ -39,6 +39,21 @@ export function flagArrival(payload: ArrivalPayload) {
 }
 
 /**
+ * Read the stashed arrival row ids WITHOUT consuming them, so a destination page
+ * can react before the flash runs — e.g. jump its (paginated) table to the page
+ * holding the first target row so `useArrivalFlash` can then find and flash it.
+ */
+export function peekArrivalRows(): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = sessionStorage.getItem(STORAGE_ROWS_KEY);
+    return raw ? raw.split("|").filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Drop-in hook for destination pages. Reads the stashed arrival target from
  * sessionStorage, finds `[data-arrival-id="<id>"]`, scrolls it into view, and
  * flashes a green ring for ~2.5s. If row ids were also stashed, flashes each

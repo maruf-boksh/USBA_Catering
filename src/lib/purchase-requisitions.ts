@@ -10,6 +10,13 @@ export type PRLineItem = {
   qty: number;
   uom: string;
   rate: number;
+  /** Quantity placed on a Purchase Order against this requisition line. Absent /
+   *  0 until a PO is raised — this is procurement (PO), separate from the
+   *  requisitioned (requested) qty above. */
+  orderedQty?: number;
+  /** Quantity physically received against this line (via GRN / Direct Receive).
+   *  Absent / 0 means nothing received yet. Drives the procurement stage. */
+  receivedQty?: number;
 };
 
 export type Priority = "Normal" | "Urgent";
@@ -56,9 +63,9 @@ export const seedRequisitions: PurchaseRequisition[] = [
     requestedBy: "F. Begum",
     requiredBy: "2026-05-19", priority: "Urgent", justification: "Salmon stock fell below reorder level after weekend rush.",
     lines: [
-      { id: "L1", itemName: "Salmon Fillet", description: "Frozen, premium grade", qty: 40, uom: "Kg",  rate: 1400 },
-      { id: "L2", itemName: "Lemon",         description: "Fresh",                 qty: 20, uom: "Kg",  rate: 60   },
-      { id: "L3", itemName: "Olive Oil",     description: "Extra virgin",          qty: 10, uom: "Litre", rate: 850 },
+      { id: "L1", itemName: "Salmon Fillet", description: "Frozen, premium grade", qty: 40, uom: "Kg",  rate: 1400, orderedQty: 40, receivedQty: 40 },
+      { id: "L2", itemName: "Lemon",         description: "Fresh",                 qty: 20, uom: "Kg",  rate: 60,   orderedQty: 20, receivedQty: 10 },
+      { id: "L3", itemName: "Olive Oil",     description: "Extra virgin",          qty: 10, uom: "Litre", rate: 850, orderedQty: 10, receivedQty: 0 },
     ],
     status: "Approved", totalAmount: 65700,
   },
@@ -67,9 +74,9 @@ export const seedRequisitions: PurchaseRequisition[] = [
     requestedBy: "A. Khan",
     requiredBy: "2026-05-18", priority: "Normal", justification: "Replenish beverage stock for international flights.",
     lines: [
-      { id: "L1", itemName: "Mineral Water",      description: "500ml",     qty: 50,  uom: "Box",    rate: 480 },
-      { id: "L2", itemName: "Orange Juice",       description: "1L tetra",  qty: 30,  uom: "Box",    rate: 720 },
-      { id: "L3", itemName: "Disposable Cup",     description: "8oz paper", qty: 100, uom: "Pack",   rate: 95  },
+      { id: "L1", itemName: "Mineral Water",      description: "500ml",     qty: 50,  uom: "Box",    rate: 480, orderedQty: 50,  receivedQty: 50 },
+      { id: "L2", itemName: "Orange Juice",       description: "1L tetra",  qty: 30,  uom: "Box",    rate: 720, orderedQty: 30,  receivedQty: 30 },
+      { id: "L3", itemName: "Disposable Cup",     description: "8oz paper", qty: 100, uom: "Pack",   rate: 95,  orderedQty: 100, receivedQty: 100 },
     ],
     status: "Closed", totalAmount: 55100,
   },
@@ -98,4 +105,98 @@ export function getPurchaseRequisitions(): PurchaseRequisition[] {
     /* unavailable / corrupt — fall through to seed */
   }
   return seedRequisitions;
+}
+
+// ── Procurement stage ────────────────────────────────────────────────────────
+// A PR moves through: draft/pending (pre-approval) → approved → goods start
+// arriving. Once approved, the stage is DERIVED from how much has been received:
+//   Processing     — approved, nothing received yet
+//   Partial Order  — some (but not all) ordered qty received
+//   Full Order     — every line fully received (== Complete)
+// Terminal manual states (Closed / Cancelled / Rejected) short-circuit the above.
+
+export type ProcurementStage =
+  | "Draft" | "Pending" | "Rejected" | "Cancelled" | "Closed"
+  | "Processing" | "Partial Order" | "Full Order";
+
+/** All filter labels shown in the PR Status dropdown (in display order). */
+export const PR_STATUS_FILTERS = [
+  "All", "Pending", "Processing", "Partial Order", "Full Order",
+  "Complete", "Approved", "Closed", "Cancelled",
+] as const;
+
+/** Ordered / received / remaining totals across a requisition's lines. */
+export function prReceived(pr: PurchaseRequisition): {
+  ordered: number; received: number; remaining: number; pct: number;
+} {
+  const ordered = pr.lines.reduce((s, l) => s + l.qty, 0);
+  const received = pr.lines.reduce((s, l) => s + Math.min(l.receivedQty ?? 0, l.qty), 0);
+  const remaining = Math.max(ordered - received, 0);
+  const pct = ordered > 0 ? Math.round((received / ordered) * 100) : 0;
+  return { ordered, received, remaining, pct };
+}
+
+/** The single canonical procurement stage for a requisition. */
+export function procurementStage(pr: PurchaseRequisition): ProcurementStage {
+  const s = pr.status.toLowerCase();
+  if (s === "draft") return "Draft";
+  if (s === "pending approval" || s === "pending") return "Pending";
+  if (s === "rejected") return "Rejected";
+  if (s === "cancelled") return "Cancelled";
+  if (s === "closed") return "Closed";
+  // Approved (or any other post-approval state) — derive from receipts.
+  const { ordered, received } = prReceived(pr);
+  if (received <= 0) return "Processing";
+  if (received < ordered) return "Partial Order";
+  return "Full Order";
+}
+
+/** Whether a requisition matches the selected Status-dropdown filter. Note the
+ *  filters intentionally overlap: "Approved" is broad (any approved PR), while
+ *  Processing / Partial Order / Full Order are the finer receipt-driven stages. */
+export function matchesStatusFilter(pr: PurchaseRequisition, filter: string): boolean {
+  if (!filter || filter === "All") return true;
+  const stage = procurementStage(pr);
+  const s = pr.status.toLowerCase();
+  const { ordered, received } = prReceived(pr);
+  switch (filter) {
+    case "Pending":       return stage === "Pending" || stage === "Draft";
+    case "Approved":      return s === "approved";
+    case "Processing":    return stage === "Processing";
+    case "Partial Order": return stage === "Partial Order";
+    case "Full Order":    return stage === "Full Order";
+    case "Complete":      return ordered > 0 && received >= ordered;
+    case "Closed":        return stage === "Closed";
+    case "Cancelled":     return stage === "Cancelled" || stage === "Rejected";
+    default:              return true;
+  }
+}
+
+/**
+ * Live write-back: record received quantities against a PR's lines. Called from
+ * the Receive Items → Direct Receive flow (which runs while the PR route is
+ * unmounted), so it mutates the persisted list in localStorage directly; the PR
+ * screen re-reads the fresh value on its next mount. Received qty is capped at
+ * the ordered qty per line so the stage math never goes negative.
+ */
+export function applyReceiptToPR(
+  prId: string,
+  receipts: { lineId: string; qty: number }[],
+): void {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const list: PurchaseRequisition[] = raw != null ? JSON.parse(raw) : seedRequisitions;
+    const next = list.map((pr) => {
+      if (pr.id !== prId) return pr;
+      const lines = pr.lines.map((l) => {
+        const r = receipts.find((x) => x.lineId === l.id);
+        if (!r || !(r.qty > 0)) return l;
+        return { ...l, receivedQty: Math.min((l.receivedQty ?? 0) + r.qty, l.qty) };
+      });
+      return { ...pr, lines };
+    });
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    /* best-effort — localStorage may be unavailable */
+  }
 }

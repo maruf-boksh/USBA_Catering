@@ -217,6 +217,7 @@ export function RowActions({
   onEdit,
   onSave,
   onDelete,
+  extraActions,
 }: {
   row: Record<string, unknown>;
   actions?: ActionKey[];
@@ -240,6 +241,17 @@ export function RowActions({
   onSave?: (updatedRow: Record<string, unknown>) => void;
   /** When provided, Delete removes the record by calling this with the row. */
   onDelete?: (row: Record<string, unknown>) => void;
+  /**
+   * Extra, page-owned menu items appended after the built-in actions. Each
+   * handles its own behaviour (e.g. opening a page-level dialog) via onClick.
+   */
+  extraActions?: {
+    key: string;
+    label: string;
+    icon?: ReactNode;
+    danger?: boolean;
+    onClick: (row: Record<string, unknown>) => void;
+  }[];
 }) {
   const [open, setOpen] = useState<ModalKind>(null);
   const [rejectionReason, setRejectionReason] = useState("");
@@ -284,6 +296,15 @@ export function RowActions({
       label: m.label,
       danger: m.danger,
       onClick: () => handle(a),
+    });
+  });
+  (extraActions ?? []).forEach((ea) => {
+    menuItems.push({
+      key: ea.key,
+      icon: ea.icon,
+      label: ea.label,
+      danger: ea.danger,
+      onClick: () => ea.onClick(row),
     });
   });
 

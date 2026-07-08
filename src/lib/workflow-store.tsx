@@ -118,6 +118,14 @@ export type WfGRNLine = {
   uom: string;
   temp: string;
   expiry: string;
+  /** Unit purchase rate — captured on a direct/spot buy (line total = qty × rate). */
+  rate?: number;
+  /** Ordered quantity carried from the PO line — lets receiving compare received
+   *  vs ordered on the GRN (a short/over delivery is visible immediately). */
+  orderedQty?: number;
+  /** Supplier batch / lot number for the received goods — food-traceability
+   *  standard; also feeds batch-tracked inventory. */
+  batchNo?: string;
   /** Set on receipt to "Pending"; the Quality Control module inspects the line
    *  and moves it to Accepted / On Hold / Rejected. Only "Accepted" lines post
    *  to the Stock Overview ledger. */
@@ -142,10 +150,21 @@ export type WfGRN = {
   linkedDemandRef?: string;
   officeId?: string;
   warehouseId?: string;
+  /** Official goods-receipt (document) date, distinct from the system `date`
+   *  timestamp — the date the goods were actually received/recorded on the GRN. */
+  grnDate?: string;
+  /** Supplier delivery challan / delivery-note number accompanying the goods. */
+  challanNo?: string;
+  /** Delivery vehicle / transport reference (logistics traceability). */
+  vehicleNo?: string;
   /** True for a spot/direct purchase received without a prior PO. */
   direct?: boolean;
-  /** Justification captured for a direct purchase (audit trail). */
+  /** Justification / receiving remarks (audit trail) — direct buy or GRN. */
   note?: string;
+  /** Supplier invoice / bill reference (direct buy or GRN). */
+  invoiceNo?: string;
+  /** Purchase value of a direct receive — Σ(line qty × rate). */
+  amount?: number;
 };
 
 export type StockDelta = {

@@ -66,6 +66,8 @@ import ConfigMealSlotsPage from "@/routes/config-meal-slots";
 import ConfigProductionBasisPage from "@/routes/config-production-basis";
 import ConfigAccessControlPage from "@/routes/config-access-control";
 import ConfigAccessControlPermissionsPage from "@/routes/config-access-control-permissions";
+import ConfigRoleSetupPage from "@/routes/config-role-setup";
+import ConfigRolePermissionEditorPage from "@/routes/config-role-permission-editor";
 import ReportBuilderPage from "@/routes/report-builder";
 import OperationsOverviewPage from "@/routes/operations-overview";
 import ProductionOverviewPage from "@/routes/production-overview";
@@ -156,6 +158,8 @@ export function App() {
             <Route path="/config-production-basis" element={<ConfigProductionBasisPage />} />
             <Route path="/config-access-control" element={<ConfigAccessControlPage />} />
             <Route path="/config-access-control/permissions" element={<ConfigAccessControlPermissionsPage />} />
+            <Route path="/config-role-setup" element={<ConfigRoleSetupPage />} />
+            <Route path="/config-role-permission-editor" element={<ConfigRolePermissionEditorPage />} />
             <Route path="/report-builder" element={<ReportBuilderPage />} />
             <Route path="/operations-overview" element={<OperationsOverviewPage />} />
             <Route path="/production-overview" element={<ProductionOverviewPage />} />

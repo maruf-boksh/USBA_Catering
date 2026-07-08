@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
-import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -14,12 +13,15 @@ import {
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
-import { Trash2, Boxes, ShieldAlert, CircleSlash } from "lucide-react";
+import { Trash2, Boxes, ShieldAlert, CircleSlash, Plus, X } from "lucide-react";
 import { toast } from "sonner";
 import {
   equipmentAssets as SEED_ASSETS,
+  assetCostByName,
   type EquipmentAsset,
 } from "@/lib/sample-data";
+
+const fmtBdt = (n: number) => `৳${n.toLocaleString()}`;
 
 // Disposal shares the canonical asset register (same persisted key as the Assets
 // page), so destroying an asset here updates the single source of truth every
@@ -35,7 +37,8 @@ type DisposalRecord = {
   reason: string;
   method: string;
   date: string;
-  approvedBy: string;
+  /** Book/unit cost at disposal, resolved from the Stock Overview asset cost. */
+  cost?: number;
   note?: string;
 };
 
@@ -56,17 +59,33 @@ export default function AssetDisposalPage() {
   const [assets, setAssets] = usePersistedState<EquipmentAsset[]>(ASSETS_KEY, SEED_ASSETS);
   const [disposals, setDisposals] = usePersistedState<DisposalRecord[]>(DISPOSALS_KEY, []);
 
-  const [assetId, setAssetId] = useState("");
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [pendingId, setPendingId] = useState(""); // current DDL choice, before "Add"
   const [reason, setReason] = useState<string>(DISPOSAL_REASONS[0]);
   const [method, setMethod] = useState<string>(DISPOSAL_METHODS[0]);
   const [date, setDate] = useState(today());
-  const [approvedBy, setApprovedBy] = useState("");
   const [note, setNote] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   // Already-destroyed assets can't be destroyed again.
   const destroyable = useMemo(() => assets.filter((a) => a.status !== "Destroyed"), [assets]);
-  const selectedAsset = assets.find((a) => a.id === assetId) ?? null;
+  const selectedAssets = useMemo(
+    () => destroyable.filter((a) => selectedIds.includes(a.id)),
+    [destroyable, selectedIds],
+  );
+  const totalValue = selectedAssets.reduce((s, a) => s + (assetCostByName(a.name) ?? 0), 0);
+  // Assets still available to add (destroyable and not already on the list).
+  const availableToAdd = useMemo(
+    () => destroyable.filter((a) => !selectedIds.includes(a.id)),
+    [destroyable, selectedIds],
+  );
+
+  const addAsset = () => {
+    if (!pendingId || selectedIds.includes(pendingId)) return;
+    setSelectedIds((prev) => [...prev, pendingId]);
+    setPendingId("");
+  };
+  const removeAsset = (id: string) => setSelectedIds((prev) => prev.filter((x) => x !== id));
 
   const activeAssets = assets.filter((a) => a.status !== "Destroyed" && a.status !== "Retired").length;
   const destroyedTotal = assets.filter((a) => a.status === "Destroyed").length;
@@ -74,35 +93,38 @@ export default function AssetDisposalPage() {
   const destroyedThisMonth = disposals.filter((d) => d.date.startsWith(thisMonthPrefix)).length;
 
   const requestDestroy = () => {
-    if (!assetId) { toast.error("Select an asset to destroy."); return; }
-    if (!approvedBy.trim()) { toast.error("Approver is required to destroy an asset."); return; }
+    if (selectedIds.length === 0) { toast.error("Select at least one asset to destroy."); return; }
     setConfirmOpen(true);
   };
 
   const confirmDestroy = () => {
-    const asset = assets.find((a) => a.id === assetId);
-    if (!asset) { setConfirmOpen(false); return; }
+    if (selectedAssets.length === 0) { setConfirmOpen(false); return; }
 
-    const record: DisposalRecord = {
-      id: `DSP-${String(disposals.length + 1).padStart(3, "0")}`,
-      assetId,
+    // One disposal record per selected asset, each costed from Stock Overview.
+    const records: DisposalRecord[] = selectedAssets.map((asset, i) => ({
+      id: `DSP-${String(disposals.length + 1 + i).padStart(3, "0")}`,
+      assetId: asset.id,
       assetName: asset.name,
       reason,
       method,
       date,
-      approvedBy: approvedBy.trim(),
+      cost: assetCostByName(asset.name),
       note: note.trim() || undefined,
-    };
+    }));
 
-    setDisposals((prev) => [record, ...prev]);
+    setDisposals((prev) => [...records, ...prev]);
     setAssets((prev) => prev.map((a) =>
-      a.id === assetId ? { ...a, status: "Destroyed", location: "Disposed" } : a,
+      selectedIds.includes(a.id) ? { ...a, status: "Destroyed", location: "Disposed" } : a,
     ));
-    toast.success(`${asset.name} (${assetId}) has been destroyed and removed from the fleet.`);
+    toast.success(
+      selectedAssets.length === 1
+        ? `${selectedAssets[0].name} (${selectedAssets[0].id}) has been destroyed and removed from the fleet.`
+        : `${selectedAssets.length} assets destroyed · ${fmtBdt(totalValue)} written off.`,
+    );
 
     setConfirmOpen(false);
-    setAssetId("");
-    setApprovedBy("");
+    setSelectedIds([]);
+    setPendingId("");
     setNote("");
   };
 
@@ -123,16 +145,68 @@ export default function AssetDisposalPage() {
         <CardContent className="pt-6 pb-6">
           <h3 className="text-sm font-semibold uppercase tracking-wider mb-6 text-destructive">Destroy / Decommission Asset</h3>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 mb-6">
-            <div>
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Asset *</Label>
-              <select value={assetId} onChange={(e) => setAssetId(e.target.value)} className={selectCls}>
-                <option value="">Select asset…</option>
-                {destroyable.map((a) => (
+          {/* Asset picker — choose from the DDL and Add multiple; cost per asset
+              shown in its own field, pulled from the Stock Overview report. */}
+          <div className="mb-6">
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Assets *</Label>
+            <div className="flex gap-2 mt-1">
+              <select value={pendingId} onChange={(e) => setPendingId(e.target.value)} className={selectCls}>
+                <option value="">
+                  {availableToAdd.length ? "Select asset to add…" : "All assets added"}
+                </option>
+                {availableToAdd.map((a) => (
                   <option key={a.id} value={a.id}>{a.id} — {a.name} ({a.status})</option>
                 ))}
               </select>
+              <Button type="button" onClick={addAsset} disabled={!pendingId} className="shrink-0">
+                <Plus className="h-4 w-4 mr-1" /> Add
+              </Button>
             </div>
+
+            {selectedAssets.length > 0 && (
+              <div className="mt-3 rounded-md border border-input overflow-hidden">
+                <div className="grid grid-cols-[1fr_150px_36px] gap-2 px-3 py-1.5 bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <div>Asset</div>
+                  <div className="text-right">Cost (Stock Overview)</div>
+                  <div />
+                </div>
+                {selectedAssets.map((a) => {
+                  const cost = assetCostByName(a.name);
+                  return (
+                    <div key={a.id} className="grid grid-cols-[1fr_150px_36px] gap-2 items-center px-3 py-2 border-t border-border">
+                      <div className="min-w-0">
+                        <div className="text-sm truncate">{a.name}</div>
+                        <div className="font-mono text-[11px] text-muted-foreground">{a.id} · {a.status}</div>
+                      </div>
+                      <Input
+                        readOnly
+                        disabled
+                        value={cost != null ? fmtBdt(cost) : "—"}
+                        className="h-8 text-right tabular-nums bg-muted/50"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => removeAsset(a.id)}
+                        className="justify-self-center text-muted-foreground hover:text-destructive"
+                        aria-label={`Remove ${a.name}`}
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  );
+                })}
+                <div className="grid grid-cols-[1fr_150px_36px] gap-2 items-center px-3 py-2 border-t border-border bg-muted/20">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground text-right">
+                    Total book value
+                  </div>
+                  <div className="text-right text-sm font-semibold tabular-nums">{fmtBdt(totalValue)}</div>
+                  <div />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 mb-6">
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Reason *</Label>
               <select value={reason} onChange={(e) => setReason(e.target.value)} className={selectCls}>
@@ -149,10 +223,6 @@ export default function AssetDisposalPage() {
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Disposal Date</Label>
               <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="mt-1 tabular-nums" />
             </div>
-            <div>
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Approved By *</Label>
-              <Input value={approvedBy} onChange={(e) => setApprovedBy(e.target.value)} placeholder="Authorising officer" className="mt-1" />
-            </div>
             <div className="md:col-span-2">
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Note</Label>
               <Textarea
@@ -166,7 +236,7 @@ export default function AssetDisposalPage() {
 
           <div className="flex justify-end">
             <Button variant="destructive" onClick={requestDestroy}>
-              <Trash2 className="h-4 w-4 mr-1.5" /> Destroy Asset
+              <Trash2 className="h-4 w-4 mr-1.5" /> Destroy {selectedIds.length > 1 ? `${selectedIds.length} Assets` : "Asset"}
             </Button>
           </div>
         </CardContent>
@@ -182,8 +252,8 @@ export default function AssetDisposalPage() {
               <TableHead className="text-xs uppercase tracking-wider">Asset</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Reason</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Method</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider text-right">Value</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">Approved By</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -204,8 +274,10 @@ export default function AssetDisposalPage() {
                   </TableCell>
                   <TableCell className="text-sm">{d.reason}</TableCell>
                   <TableCell className="text-sm">{d.method}</TableCell>
+                  <TableCell className="tabular-nums text-xs text-right">
+                    {d.cost != null ? fmtBdt(d.cost) : <span className="text-muted-foreground">—</span>}
+                  </TableCell>
                   <TableCell className="tabular-nums text-xs">{d.date}</TableCell>
-                  <TableCell className="text-xs">{d.approvedBy}</TableCell>
                 </TableRow>
               ))
             )}
@@ -216,23 +288,31 @@ export default function AssetDisposalPage() {
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Destroy this asset?</DialogTitle>
+            <DialogTitle>Destroy {selectedAssets.length === 1 ? "this asset" : `these ${selectedAssets.length} assets`}?</DialogTitle>
           </DialogHeader>
           <div className="space-y-3 text-sm">
             <p className="text-muted-foreground">
-              This permanently marks the asset as <span className="font-semibold text-destructive">Destroyed</span> and
-              removes it from the active fleet. This can’t be undone.
+              This permanently marks {selectedAssets.length === 1 ? "the asset" : "the assets"} as <span className="font-semibold text-destructive">Destroyed</span> and
+              removes {selectedAssets.length === 1 ? "it" : "them"} from the active fleet. This can’t be undone.
             </p>
-            {selectedAsset && (
-              <div className="rounded-md border border-border bg-muted/30 p-3 space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="font-medium">{selectedAsset.name}</span>
-                  <StatusBadge status={selectedAsset.status} />
-                </div>
-                <div className="font-mono text-xs text-muted-foreground">{selectedAsset.id}</div>
-                <div className="text-xs text-muted-foreground">{reason} · {method}</div>
-              </div>
-            )}
+            <div className="rounded-md border border-border bg-muted/30 p-3 space-y-2 max-h-52 overflow-y-auto">
+              {selectedAssets.map((a) => {
+                const cost = assetCostByName(a.name);
+                return (
+                  <div key={a.id} className="flex items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="font-medium truncate">{a.name}</div>
+                      <div className="font-mono text-[11px] text-muted-foreground">{a.id}</div>
+                    </div>
+                    <span className="tabular-nums text-xs shrink-0">{cost != null ? fmtBdt(cost) : "—"}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-muted-foreground">{reason} · {method}</span>
+              <span>Total book value: <span className="font-semibold tabular-nums">{fmtBdt(totalValue)}</span></span>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmOpen(false)}>Cancel</Button>

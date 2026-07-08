@@ -33,6 +33,15 @@ type RegisterStatus = (typeof REGISTER_STATUSES)[number];
 const ATTACHMENT_LABELS = ["Purchase Invoice", "Warranty Document", "Other"] as const;
 type AttachmentLabel = (typeof ATTACHMENT_LABELS)[number];
 
+/** Add N years to an ISO date (yyyy-mm-dd); returns "" for an unparseable date.
+ *  Used to derive the default Warranty End (1 year from receipt). */
+function addYears(dateStr: string, years: number): string {
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return "";
+  d.setFullYear(d.getFullYear() + years);
+  return d.toISOString().slice(0, 10);
+}
+
 type AttachmentEntry = {
   uid: string;
   label: AttachmentLabel;
@@ -180,6 +189,20 @@ function AssetViewModal({ asset, onClose }: { asset: EquipmentAsset; onClose: ()
               <Field label="Supplier" value={asset.supplierName} />
             </div>
           </div>
+
+          {/* Registration & warranty — shown when captured (new registrations) */}
+          {(asset.registrationDate || asset.warrantyStart || asset.warrantyEnd) && (
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+                Registration & Warranty
+              </div>
+              <div className="grid grid-cols-2 gap-x-8 gap-y-4">
+                <Field label="Asset Registration Date" value={asset.registrationDate} />
+                <Field label="Warranty Start Date" value={asset.warrantyStart} />
+                <Field label="Warranty End Date" value={asset.warrantyEnd} />
+              </div>
+            </div>
+          )}
 
           {/* Legacy fields — shown only if present (existing seed assets) */}
           {(asset.location || asset.rfidTag || asset.nextMaintenance) && (
@@ -382,24 +405,40 @@ function AssetCreate({ nextId, onSave }: { nextId: string; onSave: (a: Equipment
   const [grnNumber, setGrnNumber] = useState("");
   const [purchaseDate, setPurchaseDate] = useState(today);
   const [supplierName, setSupplierName] = useState("");
+  const [registrationDate, setRegistrationDate] = useState(today);
+  const [warrantyStart, setWarrantyStart] = useState("");
+  const [warrantyEnd, setWarrantyEnd] = useState("");
   const [attachments, setAttachments] = useState<AttachmentEntry[]>([
     { uid: "att-1", label: "Purchase Invoice", fileName: "", fileRef: null },
   ]);
+
+  // Pull every field the GRN can supply onto the form: vendor, purchase date,
+  // the received item's name, and a default 1-year warranty window starting at
+  // the receipt date. Warranty end / name stay editable afterwards.
+  const applyGrnData = (opts: { vendor: string; date: string; itemName?: string }) => {
+    const date = opts.date.slice(0, 10);
+    setSupplierName(opts.vendor);
+    setPurchaseDate(date);
+    if (opts.itemName) setName(opts.itemName);
+    setWarrantyStart(date);
+    setWarrantyEnd(addYears(date, 1));
+  };
 
   const handleGrnSelect = (grnId: string) => {
     setGrnNumber(grnId);
     const staticGrn = equipmentGrns.find((g) => g.id === grnId);
     if (staticGrn) {
-      setSupplierName(staticGrn.vendor);
-      setPurchaseDate(staticGrn.date);
+      applyGrnData({ vendor: staticGrn.vendor, date: staticGrn.date, itemName: staticGrn.description });
       return;
     }
     const wfGrn = wfGrns.find((g) => g.id === grnId);
     if (wfGrn) {
-      setSupplierName(wfGrn.vendor);
-      setPurchaseDate(wfGrn.date.slice(0, 10));
+      applyGrnData({ vendor: wfGrn.vendor, date: wfGrn.date, itemName: wfGrn.lines[0]?.name });
     } else {
+      // Cleared selection — reset the auto-filled fields.
       setSupplierName("");
+      setWarrantyStart("");
+      setWarrantyEnd("");
     }
   };
 
@@ -442,6 +481,9 @@ function AssetCreate({ nextId, onSave }: { nextId: string; onSave: (a: Equipment
       grnNumber: grnNumber.trim() || undefined,
       purchaseDate,
       supplierName: supplierName.trim() || undefined,
+      registrationDate: registrationDate || undefined,
+      warrantyStart: warrantyStart || undefined,
+      warrantyEnd: warrantyEnd || undefined,
       attachments: savedAttachments.length ? savedAttachments : undefined,
     });
     toast.success(`${name.trim()} registered as ${nextId}.`);
@@ -529,6 +571,23 @@ function AssetCreate({ nextId, onSave }: { nextId: string; onSave: (a: Equipment
               placeholder="Auto-filled on GRN selection"
               className="mt-1"
             />
+          </div>
+
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Asset Registration Date</Label>
+            <Input type="date" value={registrationDate} onChange={(e) => setRegistrationDate(e.target.value)} className="mt-1 tabular-nums" />
+          </div>
+
+          <div className="hidden md:block" aria-hidden />
+
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Warranty Start Date</Label>
+            <Input type="date" value={warrantyStart} onChange={(e) => setWarrantyStart(e.target.value)} className="mt-1 tabular-nums" />
+          </div>
+
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Warranty End Date</Label>
+            <Input type="date" value={warrantyEnd} onChange={(e) => setWarrantyEnd(e.target.value)} className="mt-1 tabular-nums" />
           </div>
         </div>
 

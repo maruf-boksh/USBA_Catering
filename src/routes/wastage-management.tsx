@@ -62,6 +62,19 @@ export type WastageSaleDetails = {
   otherDocument?: string;   // Other — uploaded document file name
 };
 
+// Display labels for wastage types. The stored VALUES stay stable ("Production",
+// "Airport Store", "Return Item") so all branching / persisted data is untouched;
+// only what the user sees is renamed here.
+const WASTAGE_TYPE_LABELS: Record<WastageType, string> = {
+  "Production": "Production",
+  "Airport Store": "Galley Returns",
+  "Return Item": "Return Item",
+  "Transfer": "Transfer",
+};
+function wastageTypeLabel(t: WastageType | ""): string {
+  return t ? WASTAGE_TYPE_LABELS[t] : "Unspecified";
+}
+
 export type WastageStatus =
   | "Pending In-Charge"
   | "Pending GM"
@@ -449,7 +462,6 @@ export default function WastageManagementPage() {
   // ── Submit ─────────────────────────────────────────────────────────────────
 
   const handleSubmit = () => {
-    if (!form.wastageType) { toast.error("Wastage type is required."); return; }
     if (!form.itemName.trim()) { toast.error("Item name is required."); return; }
     if (!form.disposalQty || isNaN(Number(form.disposalQty)) || Number(form.disposalQty) <= 0) {
       toast.error("Valid disposal quantity is required."); return;
@@ -531,7 +543,7 @@ export default function WastageManagementPage() {
     const newEntry: WastageEntry = {
       id: genId(entries),
       reportingDate: todayDate(),
-      wastageType: form.wastageType as WastageType, // guaranteed non-empty (validated above)
+      wastageType: form.wastageType as WastageType, // optional — may be "" (Unspecified); type-specific features just don't trigger
       itemName: form.itemName.trim(),
       packageBatchSize: form.packageBatchSize.trim() || "N/A",
       batchCode: form.batchCode.trim() || "N/A",
@@ -629,7 +641,7 @@ export default function WastageManagementPage() {
     <>
       <PageHeader
         title="Wastage Management"
-        subtitle="Production & Airport Store Wastage — Disposal Reports & Approval Tracking"
+        subtitle="Production & Galley Returns Wastage — Disposal Reports & Approval Tracking"
       />
 
       <div className="usb-livery-stripe h-1 rounded-full mb-5" aria-hidden />
@@ -648,7 +660,7 @@ export default function WastageManagementPage() {
           <TabsList className="h-8">
             <TabsTrigger value="all"           className="text-xs px-3 h-7">All</TabsTrigger>
             <TabsTrigger value="Production"    className="text-xs px-3 h-7">Production</TabsTrigger>
-            <TabsTrigger value="Airport Store" className="text-xs px-3 h-7">Airport Store</TabsTrigger>
+            <TabsTrigger value="Airport Store" className="text-xs px-3 h-7">Galley Returns</TabsTrigger>
             <TabsTrigger value="Transfer"      className="text-xs px-3 h-7">Transfer</TabsTrigger>
           </TabsList>
         </Tabs>
@@ -721,9 +733,10 @@ export default function WastageManagementPage() {
                           entry.wastageType === "Production"    ? "bg-orange-100 text-orange-700" :
                           entry.wastageType === "Airport Store" ? "bg-sky-100 text-sky-700" :
                           entry.wastageType === "Transfer"      ? "bg-teal-100 text-teal-700" :
-                                                                  "bg-violet-100 text-violet-700",
+                          entry.wastageType === "Return Item"   ? "bg-violet-100 text-violet-700" :
+                                                                  "bg-slate-100 text-slate-600",
                         )}>
-                          {entry.wastageType}
+                          {wastageTypeLabel(entry.wastageType)}
                         </span>
                       </TableCell>
                       <TableCell className="text-sm font-medium max-w-[150px] truncate">{entry.itemName}</TableCell>
@@ -785,7 +798,7 @@ export default function WastageManagementPage() {
             {/* Type selector */}
             <div className="grid grid-cols-3 gap-4">
               <div>
-                <Label className="text-xs">Wastage Type <span className="text-red-500">*</span></Label>
+                <Label className="text-xs">Wastage Type</Label>
                 <Select
                   value={form.wastageType}
                   onValueChange={(v) => setForm({
@@ -806,8 +819,8 @@ export default function WastageManagementPage() {
                 >
                   <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select type" /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="Production">Production Point</SelectItem>
-                    <SelectItem value="Airport Store">Airport Store</SelectItem>
+                    <SelectItem value="Production">Production</SelectItem>
+                    <SelectItem value="Airport Store">Galley Returns</SelectItem>
                     <SelectItem value="Transfer">Transfer</SelectItem>
                   </SelectContent>
                 </Select>
@@ -1818,7 +1831,7 @@ export default function WastageManagementPage() {
               {/* Report meta */}
               <div className="grid grid-cols-3 gap-2 text-xs p-3 bg-muted/30 rounded-md border border-border">
                 <div><span className="text-muted-foreground">Reporting Date: </span><strong>{viewEntry.reportingDate}</strong></div>
-                <div><span className="text-muted-foreground">Type: </span><strong>{viewEntry.wastageType}</strong></div>
+                <div><span className="text-muted-foreground">Type: </span><strong>{wastageTypeLabel(viewEntry.wastageType)}</strong></div>
                 <div className="flex items-center gap-1"><span className="text-muted-foreground">Status: </span><StatusBadge status={viewEntry.status} /></div>
                 {viewEntry.returnRef && (
                   <div className="col-span-3"><span className="text-muted-foreground">Return Ref: </span><strong className="font-mono">{viewEntry.returnRef}</strong></div>
@@ -2121,7 +2134,7 @@ export default function WastageManagementPage() {
                       `─────────────────────────────────────────`,
                       `Report ID    : ${viewEntry.id}`,
                       `Reporting Date: ${viewEntry.reportingDate}`,
-                      `Wastage Type : ${viewEntry.wastageType}`,
+                      `Wastage Type : ${wastageTypeLabel(viewEntry.wastageType)}`,
                       `Status       : ${viewEntry.status}`,
                       ``,
                       `DISPOSAL DETAILS`,
@@ -2186,7 +2199,7 @@ export default function WastageManagementPage() {
             <div className="space-y-4 py-1">
               <div className="grid grid-cols-2 gap-3 text-xs p-3 bg-muted/30 rounded-md">
                 <div><span className="text-muted-foreground">Item: </span><strong>{stockLogEntry.itemName}</strong></div>
-                <div><span className="text-muted-foreground">Type: </span><strong>{stockLogEntry.wastageType}</strong></div>
+                <div><span className="text-muted-foreground">Type: </span><strong>{wastageTypeLabel(stockLogEntry.wastageType)}</strong></div>
                 <div><span className="text-muted-foreground">Qty Disposed: </span><strong className="text-red-600">{stockLogEntry.disposalQty} {stockLogEntry.disposalQtyUnit}</strong></div>
                 <div className="flex items-center gap-1"><span className="text-muted-foreground">Status: </span><StatusBadge status={stockLogEntry.status} /></div>
               </div>

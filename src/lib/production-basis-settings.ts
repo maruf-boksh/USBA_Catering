@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { roundQty } from "@/lib/num";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Production-quantity basis — single source of truth.
@@ -141,5 +142,5 @@ export function productionQtyForBasis(
   requiredQty: number,
   currentStock: number,
 ): number {
-  return basis === "shortfall" ? Math.max(0, requiredQty - currentStock) : requiredQty;
+  return basis === "shortfall" ? roundQty(Math.max(0, requiredQty - currentStock)) : requiredQty;
 }

@@ -14,6 +14,7 @@
 
 import type { WfGRN, WfTransferNote, StockDelta } from "@/lib/workflow-store";
 import type { Adjustment } from "@/lib/stock-adjustments";
+import { roundQty } from "@/lib/num";
 
 export type LedgerEntry = {
   date: string;
@@ -225,7 +226,7 @@ export function buildItemLedger(
 
   let balance = opening;
   for (const m of within) {
-    balance += m.inQty - m.outQty;
+    balance = roundQty(balance + m.inQty - m.outQty);
     rows.push({ ...m, balance });
   }
 

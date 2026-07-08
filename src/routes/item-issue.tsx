@@ -20,6 +20,7 @@ import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover
 import { toast } from "sonner";
 import { inventory, allocateFefo, type FefoAllocation } from "@/lib/sample-data";
 import { getItemStockByWarehouse, getItemStock } from "@/lib/inventory-stock";
+import { roundQty } from "@/lib/num";
 import { applyInventoryStock } from "@/lib/stock-adjustments";
 import { logAudit } from "@/lib/audit-log";
 import { useWorkflow, type WfTransferNote, type WfDemandRequest } from "@/lib/workflow-store";
@@ -386,19 +387,91 @@ function DemandViewDialog({
   onClose: () => void;
   onIssue: (id: string) => void;
 }) {
+  const navigate = useNavigate();
+  const { role } = useRole();
+  // Shortfall procurement builder: which rows are checked + the (editable) qty.
+  const [prSel, setPrSel] = useState<Record<string, boolean>>({});
+  const [prQty, setPrQty] = useState<Record<string, string>>({});
+
   const tagged = useMemo(() => {
     if (!demand) return [];
     return demand.items.map((item) => {
       const currentStock = getItemStock(item.id || item.name);
-      const shortfall = item.qty - currentStock;
+      const shortfall = roundQty(item.qty - currentStock);
       return { ...item, currentStock, shortfall, insufficient: shortfall > 0 };
     });
+  }, [demand]);
+
+  // Seed the builder when a demand opens: rows start unchecked, qty = shortfall.
+  useEffect(() => {
+    if (!demand) { setPrSel({}); setPrQty({}); return; }
+    const qty: Record<string, string> = {};
+    for (const it of demand.items) {
+      const short = roundQty(it.qty - getItemStock(it.id || it.name));
+      if (short > 0) qty[it.id] = String(short);
+    }
+    setPrSel({});
+    setPrQty(qty);
   }, [demand]);
 
   if (!demand) return null;
 
   const sufficientItems = tagged.filter((it) => !it.insufficient);
   const shortfallItems = tagged.filter((it) => it.insufficient);
+  // Procurement is locked until the demand is approved.
+  const canProcure = demand.status !== "Pending Approval" && demand.status !== "Rejected";
+
+  const pickedLines = () =>
+    tagged
+      .filter((it) => it.insufficient && prSel[it.id])
+      .map((it) => ({ ...it, procureQty: roundQty(Number(prQty[it.id]) || 0) }))
+      .filter((l) => l.procureQty > 0);
+
+  // Hand the checked shortfall rows to the Purchase Requisition page (prefilled).
+  const createPrFromShortfall = () => {
+    const picks = pickedLines();
+    if (picks.length === 0) {
+      toast.warning("Select at least one shortfall item with a quantity greater than zero.");
+      return;
+    }
+    sessionStorage.setItem(
+      "pr-prefill-from-inventory",
+      JSON.stringify({
+        source: demand.id,
+        requestedBy: role,
+        justification: `Raised from Demand Request ${demand.id} to cover ${picks.length} shortfall material${picks.length === 1 ? "" : "s"}.`,
+        officeId: demand.officeId,
+        warehouseId: demand.warehouseId,
+        lines: picks.map((it, i) => ({
+          id: `LN-${demand.id}-${i + 1}`, itemName: it.name, description: it.id,
+          qty: it.procureQty, uom: it.uom, rate: 0,
+        })),
+      }),
+    );
+    onClose();
+    navigate("/purchase-requisition");
+  };
+
+  // Hand the checked shortfall rows to the Receive Item Direct Receive flow.
+  const directReceiveFromShortfall = () => {
+    const picks = pickedLines();
+    if (picks.length === 0) {
+      toast.warning("Select at least one shortfall item with a quantity greater than zero.");
+      return;
+    }
+    sessionStorage.setItem(
+      "direct-receive-prefill",
+      JSON.stringify({
+        source: demand.id,
+        justification: `Direct receive against Demand Request ${demand.id} — ${picks.length} shortfall material${picks.length === 1 ? "" : "s"}.`,
+        officeId: demand.officeId,
+        warehouseId: demand.warehouseId,
+        lines: picks.map((it) => ({ name: it.name, qty: it.procureQty, uom: it.uom })),
+      }),
+    );
+    onClose();
+    navigate("/receive-item");
+  };
 
   return (
     <Dialog open={!!demand} onOpenChange={(open) => !open && onClose()}>
@@ -458,47 +531,107 @@ function DemandViewDialog({
                   </div>
                 </div>
               )}
-              {shortfallItems.length > 0 && (
-                <div>
-                  <div className="flex items-center gap-1.5 mb-2">
-                    <AlertTriangle className="h-3 w-3 text-destructive" />
-                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
-                      Shortfall Items ({shortfallItems.length})
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 px-3 mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
-                    <div>Item</div>
-                    <div className="text-center">In Stock</div>
-                    <div className="text-center">Required</div>
-                    <div className="text-center">Status</div>
-                  </div>
-                  <div className="space-y-2">
-                    {shortfallItems.map((item) => (
-                      <div key={item.id} className="rounded-lg border border-red-200 bg-red-50/50 p-3">
-                        <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 items-center">
-                          <div className="font-semibold text-sm">{item.name}</div>
-                          <div className="text-center">
-                            <span className="text-sm font-semibold text-red-600">{item.currentStock}</span>
-                            <div className="text-[10px] text-muted-foreground">{item.uom}</div>
-                          </div>
-                          <div className="text-center">
-                            <span className="text-sm font-semibold">{item.qty}</span>
-                            <div className="text-[10px] text-muted-foreground">{item.uom}</div>
-                          </div>
-                          <div className="text-center">
-                            <span className="text-sm font-bold text-red-600">−{item.shortfall}</span>
-                            <div className="text-[10px] text-red-500">{item.uom} short</div>
-                          </div>
-                        </div>
-                        <div className="mt-2 flex items-center gap-1.5 text-[11px] text-red-600">
-                          <AlertTriangle className="h-3 w-3 shrink-0" />
-                          Stock insufficient — {item.shortfall} {item.uom} must be procured
-                        </div>
+              {shortfallItems.length > 0 && (() => {
+                const selCount = shortfallItems.filter((it) => prSel[it.id]).length;
+                const allChecked = selCount === shortfallItems.length && selCount > 0;
+                const toggleAll = () => {
+                  const target = !allChecked;
+                  setPrSel((p) => {
+                    const next = { ...p };
+                    shortfallItems.forEach((it) => { next[it.id] = target; });
+                    return next;
+                  });
+                };
+                const cols = "grid grid-cols-[32px_88px_minmax(96px,1fr)_46px_80px_88px_80px_120px] gap-2 px-3 items-center";
+                return (
+                  <div>
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <div className="flex items-center gap-1.5">
+                        <AlertTriangle className="h-3 w-3 text-destructive" />
+                        <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                          Shortfall Items ({shortfallItems.length})
+                        </span>
+                        {!canProcure && (
+                          <span className="text-[10px] normal-case tracking-normal text-amber-700 font-medium">
+                            · available after approval
+                          </span>
+                        )}
                       </div>
-                    ))}
+                      {canProcure && selCount > 0 && (
+                        <div className="flex items-center gap-2">
+                          <Button size="sm" variant="outline" className="h-8" onClick={directReceiveFromShortfall}>
+                            <PackageCheck className="h-3.5 w-3.5 mr-1.5" />
+                            Direct Receive ({selCount})
+                          </Button>
+                          <Button size="sm" className="h-8" onClick={createPrFromShortfall}>
+                            <Plus className="h-3.5 w-3.5 mr-1.5" />
+                            Create Purchase Requisition ({selCount})
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                    <div className="rounded-lg border border-red-200 overflow-x-auto">
+                      <div className="min-w-[700px]">
+                        <div className={`${cols} py-2 bg-red-50 border-b border-red-200 text-[10px] uppercase tracking-wider text-red-700/80 font-medium`}>
+                          <div className="flex items-center justify-center">
+                            <input
+                              type="checkbox"
+                              aria-label="Select all shortfall items"
+                              checked={allChecked}
+                              onChange={toggleAll}
+                              disabled={!canProcure}
+                              className="h-4 w-4 accent-red-600 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+                            />
+                          </div>
+                          <div>Code</div>
+                          <div>Item</div>
+                          <div>UoM</div>
+                          <div className="text-right">Required</div>
+                          <div className="text-right">Current Stock</div>
+                          <div className="text-right">Shortage</div>
+                          <div className="text-right">Requested Qty</div>
+                        </div>
+                        {shortfallItems.map((item) => (
+                          <div key={item.id} className={`${cols} py-2 border-b border-red-100 last:border-b-0 bg-red-50/30`}>
+                            <div className="flex items-center justify-center">
+                              <input
+                                type="checkbox"
+                                aria-label={`Select ${item.name}`}
+                                checked={!!prSel[item.id]}
+                                onChange={(e) => setPrSel((p) => ({ ...p, [item.id]: e.target.checked }))}
+                                disabled={!canProcure}
+                                className="h-4 w-4 accent-red-600 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+                              />
+                            </div>
+                            <div className="text-xs font-mono text-muted-foreground truncate" title={item.id}>{item.id}</div>
+                            <div className="text-sm font-medium truncate" title={item.name}>{item.name}</div>
+                            <div className="text-xs text-muted-foreground">{item.uom}</div>
+                            <div className="text-right text-sm font-semibold tabular-nums">{item.qty}</div>
+                            <div className="text-right text-sm tabular-nums text-muted-foreground">{item.currentStock}</div>
+                            <div className="text-right text-sm font-semibold tabular-nums text-red-600">{item.shortfall}</div>
+                            <div className="flex justify-end">
+                              <Input
+                                type="number"
+                                min={0}
+                                step="any"
+                                value={prQty[item.id] ?? ""}
+                                onChange={(e) => setPrQty((p) => ({ ...p, [item.id]: e.target.value }))}
+                                disabled={!canProcure || !prSel[item.id]}
+                                className="h-8 w-28 text-right tabular-nums"
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <p className="mt-1.5 text-[11px] text-muted-foreground">
+                      {canProcure
+                        ? "Checked rows raise a Purchase Requisition or go to Direct Receive. Requested quantity defaults to the shortfall — edit as needed."
+                        : "This demand must be approved before shortfall items can be procured."}
+                    </p>
                   </div>
-                </div>
-              )}
+                );
+              })()}
             </>
           )}
         </div>
@@ -991,7 +1124,7 @@ function CreateIssueDialog({
                 visibleItems.map((inv, i) => {
                   const reqN = requestedFor(inv.id);
                   const issN = Number(issuedMap[inv.id]) || 0;
-                  const remaining = Math.max(0, reqN - issN);
+                  const remaining = roundQty(Math.max(0, reqN - issN));
                   const over = issN > reqN && reqN > 0;
                   const avail = availableIn(inv.name);
                   const lowStock = issN > 0 && issN > avail;

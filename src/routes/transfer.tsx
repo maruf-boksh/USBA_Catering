@@ -1,6 +1,7 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePersistedState } from "@/lib/use-persisted-state";
+import { roundQty } from "@/lib/num";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { RowActions } from "@/components/common/RowActions";
@@ -308,7 +309,7 @@ export default function TransferPage() {
     // Per-line accepted (clamped to what's in transit) and what remains in transit.
     const split = target.lines.map((l) => {
       const received = Math.max(0, Math.min(l.transferredQty, qty[l.id] ?? l.transferredQty));
-      return { line: l, received, remaining: l.transferredQty - received };
+      return { line: l, received, remaining: roundQty(l.transferredQty - received) };
     });
     const totalReceived = split.reduce((s, x) => s + x.received, 0);
     const totalRemaining = split.reduce((s, x) => s + x.remaining, 0);

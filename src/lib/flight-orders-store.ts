@@ -292,6 +292,33 @@ function migrateCrewMerge(added: FlightOrder[]): FlightOrder[] {
   return next;
 }
 
+// ── LMC-testable orders ───────────────────────────────────────────────────────
+// The seeded order book is anchored to a fixed demo date (2026-06-01), so against
+// the real clock every "upcoming" flight is either already departed (edit locked)
+// or too far out to count as a Last-Minute Change. That leaves no editable flight
+// inside the LMC window, so the LMC flow can't be exercised by editing an order.
+// These few orders depart a couple of hours from *now* (recomputed each load) —
+// editable AND in-window — so amending their PAX/meals immediately flags an LMC
+// and surfaces it on the LMC control tower. Not persisted (regenerated per load);
+// edits still persist via the amendment overlay like any seed order.
+function makeInWindowDemoOrders(): FlightOrder[] {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const dateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const etdIn = (mins: number) => {
+    const t = new Date(now.getTime() + mins * 60_000);
+    return `${pad(t.getHours())}:${pad(t.getMinutes())}`;
+  };
+  // Stamp createdAt so these sort to the top of Order Management (latest first),
+  // above the far-future seed rows. Decreasing so leg 1 leads its order group.
+  const t = now.getTime();
+  return [
+    { id: "FO-LMC-1", orderNo: "ORD-9101", flight: "BS-901", airline: "US-Bangla", sector: "DAC → DXB", date: dateStr, etd: etdIn(90),  pax: 168, crew: 8,  specialMeals: 10, status: "Approved", direction: "Outbound", createdAt: t },
+    { id: "FO-LMC-2", orderNo: "ORD-9101", flight: "BS-902", airline: "US-Bangla", sector: "DXB → DAC", date: dateStr, etd: etdIn(150), pax: 160, crew: 8,  specialMeals: 8,  status: "Approved", direction: "Return",   createdAt: t - 1 },
+    { id: "FO-LMC-3", orderNo: "ORD-9102", flight: "BG-905", airline: "Air Astra", sector: "DAC → KUL", date: dateStr, etd: etdIn(210), pax: 182, crew: 12, specialMeals: 14, status: "Approved", direction: "Outbound", createdAt: t - 2 },
+  ];
+}
+
 const overlay = loadOverlay();
 const rawAdded = loadAddedOrders();
 const persistedAdded = migrateCrewMerge(migrateCrewOrderNos(rawAdded));
@@ -299,7 +326,7 @@ const addedIds = new Set<string>(persistedAdded.map((o) => o.id));
 // Persisted creates take precedence over (and sit above) the seed snapshot.
 // Then re-apply each order's persisted head edits (LMC amendments) so edits to
 // SEED orders survive a reload — the added-delta only covers created orders.
-let current: FlightOrder[] = [...persistedAdded, ...seedFlightOrders, ...seedCrewOrders].map((o) => {
+let current: FlightOrder[] = [...makeInWindowDemoOrders(), ...persistedAdded, ...seedFlightOrders, ...seedCrewOrders].map((o) => {
   const ov = overlay.get(o.id);
   return ov && Object.keys(ov.head).length ? { ...o, ...ov.head } : o;
 });

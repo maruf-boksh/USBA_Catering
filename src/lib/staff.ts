@@ -13,9 +13,31 @@ export type StaffMember = {
   email: string;
   phone: string;
   role: Role;
-  location: string;
+  location: string;          // Office / primary site — read by other modules
   lastLogin: string;
   status: "Active" | "Inactive";
+  // ── HR / employee profile (all optional; added on the User Management form) ──
+  designation?: string;
+  hrPosition?: string;
+  employeeType?: string;
+  joiningDate?: string;
+  confirmationDate?: string;
+  siteLocation?: string;     // free-text "Location" line from the form
+  attendanceCardNo?: string;
+  department?: string;
+  departmentSection?: string;
+  religion?: string;
+  gender?: string;
+  bloodGroup?: string;
+  fatherName?: string;
+  motherName?: string;
+  dateOfBirth?: string;
+  officialContact?: string;
+  nid?: string;              // NID / Citizen / Civil / NIN / ID number
+  presentAddress?: string;
+  // System access can span multiple offices / warehouses (ids).
+  officeAccess?: string[];
+  warehouseAccess?: string[];
 };
 
 export const STAFF_SEED: StaffMember[] = [
