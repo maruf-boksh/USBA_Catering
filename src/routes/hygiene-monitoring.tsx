@@ -1,9 +1,10 @@
 import { useState, useMemo, useRef, useEffect } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
-import { ClipboardCheck, Plus, Pencil, Trash2, Lock, Smartphone, ChevronRight, X as XIcon, Clock } from "lucide-react";
+import { ClipboardCheck, Plus, Pencil, Trash2, Lock, Smartphone, ChevronRight, X as XIcon, Clock, Gavel, Eye } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
@@ -12,6 +13,7 @@ import {
 } from "@/components/ui/select";
 import { toast } from "sonner";
 import { useRole } from "@/lib/roles";
+import { usePersistedState } from "@/lib/use-persisted-state";
 
 // ── Dataset (unchanged) ────────────────────────────────────────────────────────
 const CHECKLIST_ITEMS = [
@@ -33,6 +35,11 @@ const CHECKLIST_ITEMS = [
 ];
 
 const TIME_SLOTS = ["6:00AM", "8:00AM", "10:00AM", "12:00PM", "2:00PM", "4:00PM", "6:00PM", "8:00PM", "10:00PM"];
+
+// When true, a slot only becomes fillable once its scheduled time has arrived
+// (the next slot opens after the current slot's time). Kept OFF for now so the
+// whole flow (fill all slots → submit → approval) can be tested end-to-end.
+const ENFORCE_SLOT_ORDER = false;
 
 const AUTHORIZED_PERSONNEL = [
   "Manager — Catering Operations",
@@ -64,6 +71,41 @@ type LogEntry = {
   slots: string[];
   authorizedBy?: string;
   authorizedAt?: string;
+};
+
+// Appeal raised against missed inspection time slots for a checklist item.
+// Written here and read by Approval Management (Food Safety Approval) — shared
+// via the "hygiene-slot-appeals" localStorage key.
+export type HygieneSlotAppeal = {
+  id: string;
+  date: string;          // checklist date the slots were missed on
+  item: string;          // checklist item the appeal is for
+  slots: string[];       // missed time slots being appealed
+  justification: string; // why the slots were missed
+  submittedBy: string;
+  submittedAt: string;
+  status: "Pending" | "Approved" | "Rejected";
+  reviewedBy?: string;
+  reviewedAt?: string;
+  rejectionReason?: string;
+};
+
+// A submitted day's checklist ("slot closing submit") sent to Approval Management
+// → Food Safety Approval → Daily Hygiene Monitoring. Shared via the
+// "hygiene-daily-submissions" localStorage key.
+export type HygieneDailySubmission = {
+  id: string;
+  date: string;
+  submittedBy: string;
+  submittedAt: string;
+  failCount: number;
+  failItems: string[];
+  slots: string[];
+  rows: { item: string; values: Record<string, "—" | "✓" | "✗">; remarks: string }[];
+  status: "Pending" | "Approved" | "Rejected";
+  reviewedBy?: string;
+  reviewedAt?: string;
+  rejectionReason?: string;
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -133,6 +175,14 @@ export default function HygieneMonitoring() {
   const [authPanelVisible, setAuthPanelVisible] = useState(false);
   const [currentLogId, setCurrentLogId] = useState<string | null>(null);
 
+  // Missed-slot appeals — shared with Approval Management via localStorage.
+  const [slotAppeals, setSlotAppeals] = usePersistedState<HygieneSlotAppeal[]>("hygiene-slot-appeals", []);
+  // Submitted daily checklists — shared with Approval Management via localStorage.
+  const [, setDailySubmissions] = usePersistedState<HygieneDailySubmission[]>("hygiene-daily-submissions", []);
+  const [appealOpen, setAppealOpen] = useState(false);
+  const [appealRowIdx, setAppealRowIdx] = useState<number | null>(null);
+  const [appealJustification, setAppealJustification] = useState("");
+
   // Modal open state
   const [addItemOpen, setAddItemOpen] = useState(false);
   const [editRowOpen, setEditRowOpen] = useState(false);
@@ -148,6 +198,12 @@ export default function HygieneMonitoring() {
   const [editRowDesc, setEditRowDesc] = useState("");
   const [editRowSlot, setEditRowSlot] = useState("");
   const [deleteRowIdx, setDeleteRowIdx] = useState<number | null>(null);
+  // Manage Checklist modal — inline item editing
+  const [manageEditIdx, setManageEditIdx] = useState<number | null>(null);
+  const [manageEditVal, setManageEditVal] = useState("");
+  // View checklist item
+  const [viewRowOpen, setViewRowOpen] = useState(false);
+  const [viewRowIdx, setViewRowIdx] = useState<number | null>(null);
   const [draftSlotPick, setDraftSlotPick] = useState("");
   const [authName, setAuthName] = useState("");
   const [selectedLog, setSelectedLog] = useState<LogEntry | null>(null);
@@ -179,9 +235,19 @@ export default function HygieneMonitoring() {
     );
   }, [selectedDate, todayStr, allSlots, savedSlots]);
 
+  // Slots whose scheduled time has not arrived yet — "not open". Only enforced
+  // when ENFORCE_SLOT_ORDER is on (kept off for now, so this is always empty).
+  const futureSlots = useMemo<Set<string>>(() => {
+    if (!ENFORCE_SLOT_ORDER) return new Set();
+    if (selectedDate !== todayStr) return new Set();
+    const now = new Date();
+    const nowMin = now.getHours() * 60 + now.getMinutes();
+    return new Set(allSlots.filter((slot) => nowMin < parseSlotMinutes(slot)));
+  }, [selectedDate, todayStr, allSlots]);
+
   const availableToSave = useMemo(
-    () => allSlots.filter((slot) => !savedSlots[slot] && !missedSlots.has(slot)),
-    [allSlots, savedSlots, missedSlots]
+    () => allSlots.filter((slot) => !savedSlots[slot] && !missedSlots.has(slot) && !futureSlots.has(slot)),
+    [allSlots, savedSlots, missedSlots, futureSlots]
   );
 
   const allSlotsFinalized = useMemo(
@@ -211,7 +277,7 @@ export default function HygieneMonitoring() {
 
   // ── Handlers ─────────────────────────────────────────────────────────────
   const handleCellClick = (rowIdx: number, slot: string) => {
-    if (savedSlots[slot] || missedSlots.has(slot) || isSubmitted) return;
+    if (savedSlots[slot] || missedSlots.has(slot) || futureSlots.has(slot) || isSubmitted) return;
     setEditRows((prev) =>
       prev.map((row, i) =>
         i === rowIdx ? { ...row, values: { ...row.values, [slot]: cycleCell(row.values[slot]) } } : row
@@ -236,40 +302,70 @@ export default function HygieneMonitoring() {
     setRemarkErrors(new Set());
   };
 
-  // Add item (optionally with a new time slot)
+  // Add a new checklist item (from the Manage modal — keeps the modal open).
   const saveNewItem = () => {
     const desc = newItemDesc.trim();
     if (!desc) { toast.error("Description is required."); return; }
-
-    let slots = allSlots;
-    if (newItemSlot) {
-      const [hStr, mStr] = newItemSlot.split(":");
-      const h = parseInt(hStr);
-      const m = (mStr || "00").padStart(2, "0");
-      const period = h >= 12 ? "PM" : "AM";
-      const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
-      const slotLabel = `${h12}:${m}${period}`;
-      if (!allSlots.includes(slotLabel)) {
-        slots = insertSlotSorted(allSlots, slotLabel);
-        setAllSlots(slots);
-        setEditRows((prev) =>
-          prev.map((row) => ({ ...row, values: { ...row.values, [slotLabel]: "—" as CellValue } }))
-        );
-      }
-    }
-
     const newRow: ChecklistRow = {
       id: `r-${Date.now()}`,
       item: desc,
-      values: Object.fromEntries(slots.map((t) => [t, "—" as CellValue])),
+      values: Object.fromEntries(allSlots.map((t) => [t, "—" as CellValue])),
       remarks: "",
     };
     setEditRows((prev) => [...prev, newRow]);
     setNewItemDesc("");
-    setNewItemSlot("");
-    setAddItemOpen(false);
     toast.success("Checklist item added.");
   };
+
+  // Add a new inspection time slot (from the Manage modal).
+  const addManageSlot = () => {
+    if (!newItemSlot) { toast.error("Select a time first."); return; }
+    const [hStr, mStr] = newItemSlot.split(":");
+    const h = parseInt(hStr);
+    const m = (mStr || "00").padStart(2, "0");
+    const period = h >= 12 ? "PM" : "AM";
+    const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+    const slotLabel = `${h12}:${m}${period}`;
+    if (allSlots.includes(slotLabel)) { toast.error("Time slot already exists."); setNewItemSlot(""); return; }
+    setAllSlots(insertSlotSorted(allSlots, slotLabel));
+    setEditRows((prev) =>
+      prev.map((row) => ({ ...row, values: { ...row.values, [slotLabel]: "—" as CellValue } }))
+    );
+    setNewItemSlot("");
+    toast.success(`Time slot ${slotLabel} added.`);
+  };
+
+  // Remove an inspection time slot (from the Manage modal).
+  const removeManageSlot = (slot: string) => {
+    if (allSlots.length <= 1) { toast.error("At least one time slot is required."); return; }
+    setAllSlots((prev) => prev.filter((s) => s !== slot));
+    setEditRows((prev) =>
+      prev.map((row) => {
+        const values = { ...row.values };
+        delete values[slot];
+        return { ...row, values };
+      })
+    );
+    setSavedSlots((prev) => { const next = { ...prev }; delete next[slot]; return next; });
+    toast.success(`Time slot ${slot} removed.`);
+  };
+
+  // Inline item edit / delete (from the Manage modal).
+  const saveManageEdit = (idx: number) => {
+    const desc = manageEditVal.trim();
+    if (!desc) { toast.error("Description cannot be empty."); return; }
+    setEditRows((prev) => prev.map((row, i) => (i === idx ? { ...row, item: desc } : row)));
+    setManageEditIdx(null);
+    setManageEditVal("");
+  };
+  const removeManageItem = (idx: number) => {
+    setEditRows((prev) => prev.filter((_, i) => i !== idx));
+    if (manageEditIdx === idx) { setManageEditIdx(null); setManageEditVal(""); }
+    toast.success("Checklist item removed.");
+  };
+
+  // View a checklist item row (read-only).
+  const openViewRow = (idx: number) => { setViewRowIdx(idx); setViewRowOpen(true); };
 
   // Edit row
   const openEditRow = (idx: number) => {
@@ -310,6 +406,40 @@ export default function HygieneMonitoring() {
     setEditRows((prev) => prev.filter((_, i) => i !== deleteRowIdx));
     setDeleteRowOpen(false);
     toast.success("Checklist item removed.");
+  };
+
+  // Appeal missed slots — the existing appeal for the current date + item, if any.
+  const appealForRow = (item: string) =>
+    slotAppeals.find((a) => a.date === selectedDate && a.item === item);
+
+  const openAppeal = (idx: number) => {
+    setAppealRowIdx(idx);
+    setAppealJustification("");
+    setAppealOpen(true);
+  };
+
+  const submitAppeal = () => {
+    if (appealRowIdx === null) return;
+    const justification = appealJustification.trim();
+    if (!justification) { toast.error("Justification is required for the missed slots."); return; }
+    const row = editRows[appealRowIdx];
+    const missed = allSlots.filter((s) => missedSlots.has(s));
+    if (missed.length === 0) { toast.error("No missed slots to appeal."); return; }
+    const now = new Date();
+    const submittedAt = `${selectedDate} ${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}`;
+    const appeal: HygieneSlotAppeal = {
+      id: `HSA-${Date.now()}`,
+      date: selectedDate,
+      item: row.item,
+      slots: missed,
+      justification,
+      submittedBy: role,
+      submittedAt,
+      status: "Pending",
+    };
+    setSlotAppeals((prev) => [appeal, ...prev]);
+    setAppealOpen(false);
+    toast.success("Appeal submitted — sent to Approval Management (Food Safety Approval).");
   };
 
   // Save Draft
@@ -354,10 +484,24 @@ export default function HygieneMonitoring() {
     };
     setLogs((prev) => [logEntry, ...prev]);
     setCurrentLogId(logId);
+    // Route the submitted day's checklist to Approval Management → Food Safety
+    // Approval → Daily Hygiene Monitoring.
+    const submission: HygieneDailySubmission = {
+      id: `DHM-${Date.now()}`,
+      date: selectedDate,
+      submittedBy: role,
+      submittedAt: `${selectedDate} ${submittedAt}`,
+      failCount: failureSummary.count,
+      failItems: failureSummary.items,
+      slots: [...allSlots],
+      rows: editRows.map((r) => ({ item: r.item, values: { ...r.values }, remarks: r.remarks })),
+      status: "Pending",
+    };
+    setDailySubmissions((prev) => [submission, ...prev]);
     setIsSubmitted(true);
     setSubmitOpen(false);
     setAuthPanelVisible(true);
-    toast.success("Checklist submitted successfully.");
+    toast.success("Checklist submitted — sent to Approval Management (Food Safety Approval).");
   };
 
   const handleAuthorize = () => {
@@ -408,8 +552,20 @@ export default function HygieneMonitoring() {
     };
     setLogs(prev => [logEntry, ...prev]);
     setCurrentLogId(logId);
+    const submission: HygieneDailySubmission = {
+      id: `DHM-${Date.now()}`,
+      date: selectedDate,
+      submittedBy: role,
+      submittedAt: `${selectedDate} ${submittedAt}`,
+      failCount: failureSummary.count,
+      failItems: failureSummary.items,
+      slots: [...allSlots],
+      rows: editRows.map(r => ({ item: r.item, values: { ...r.values }, remarks: r.remarks })),
+      status: "Pending",
+    };
+    setDailySubmissions(prev => [submission, ...prev]);
     setIsSubmitted(true);
-    toast.success("Checklist submitted successfully.");
+    toast.success("Checklist submitted — sent to Approval Management (Food Safety Approval).");
   };
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -424,7 +580,7 @@ export default function HygieneMonitoring() {
               <Button
                 size="sm"
                 className="bg-indigo-600 hover:bg-indigo-700 text-white"
-                onClick={() => { setNewItemDesc(""); setNewItemSlot(""); setAddItemOpen(true); }}
+                onClick={() => { setNewItemDesc(""); setNewItemSlot(""); setManageEditIdx(null); setManageEditVal(""); setAddItemOpen(true); }}
               >
                 <Plus className="h-4 w-4 mr-1" /> Add New
               </Button>
@@ -534,7 +690,7 @@ export default function HygieneMonitoring() {
                 );
               })}
               <th className="text-left px-3 py-2.5 font-semibold text-xs" style={{ minWidth: 140 }}>Remarks</th>
-              <th className="text-center px-3 py-2.5 font-semibold text-xs" style={{ minWidth: 90 }}>Actions</th>
+              <th className="text-center px-3 py-2.5 font-semibold text-xs" style={{ minWidth: 130 }}>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -548,17 +704,18 @@ export default function HygieneMonitoring() {
                   {allSlots.map((t) => {
                     const locked = !!savedSlots[t] || isSubmitted;
                     const missed = missedSlots.has(t);
+                    const future = futureSlots.has(t);
                     const v = row.values[t];
                     return (
                       <td key={t} className="text-center px-1 py-1">
                         <button
                           type="button"
-                          disabled={locked || missed || isSubmitted}
+                          disabled={locked || missed || future || isSubmitted}
                           onClick={() => handleCellClick(i, t)}
-                          className={`w-8 h-8 rounded flex items-center justify-center mx-auto transition-colors ${cellCls(v, locked || isSubmitted, missed)}`}
-                          title={locked ? "Slot saved — locked" : missed ? "Slot missed" : "Click: Pass → Fail → Reset"}
+                          className={`w-8 h-8 rounded flex items-center justify-center mx-auto transition-colors ${future ? "bg-slate-50 cursor-not-allowed" : cellCls(v, locked || isSubmitted, missed)}`}
+                          title={future ? `Opens at ${t}` : locked ? "Slot saved — locked" : missed ? "Slot missed" : "Click: Pass → Fail → Reset"}
                         >
-                          {cellContent(v, missed)}
+                          {future ? <Clock className="h-3.5 w-3.5 text-slate-300" /> : cellContent(v, missed)}
                         </button>
                       </td>
                     );
@@ -587,21 +744,41 @@ export default function HygieneMonitoring() {
                   <td className="px-3 py-1.5 text-center">
                     {!isSubmitted && (
                       <div className="flex items-center gap-1 justify-center">
+                        {(() => {
+                          const existing = appealForRow(row.item);
+                          if (existing) {
+                            const tone =
+                              existing.status === "Approved" ? "bg-green-100 text-green-700 border-green-300"
+                              : existing.status === "Rejected" ? "bg-red-100 text-red-700 border-red-300"
+                              : "bg-amber-100 text-amber-700 border-amber-300";
+                            return (
+                              <span
+                                className={`text-[10px] font-semibold px-2 py-1 rounded border whitespace-nowrap ${tone}`}
+                                title={existing.status === "Rejected" && existing.rejectionReason ? `Rejected: ${existing.rejectionReason}` : `Appeal ${existing.status}`}
+                              >
+                                {existing.status === "Pending" ? "Appeal Pending" : `Appeal ${existing.status}`}
+                              </span>
+                            );
+                          }
+                          return (
+                            <Button
+                              size="sm" variant="ghost"
+                              className="h-7 px-2 text-[11px] text-amber-600 hover:text-amber-700 disabled:opacity-40"
+                              onClick={() => openAppeal(i)}
+                              disabled={missedSlots.size === 0}
+                              title={missedSlots.size === 0 ? "No missed slots to appeal" : "Appeal missed slots"}
+                            >
+                              <Gavel className="h-3 w-3 mr-1" /> Appeal
+                            </Button>
+                          );
+                        })()}
                         <Button
                           size="sm" variant="ghost"
-                          className="h-7 w-7 p-0"
-                          onClick={() => openEditRow(i)}
-                          title="Edit item"
+                          className="h-7 w-7 p-0 text-muted-foreground hover:text-primary"
+                          onClick={() => openViewRow(i)}
+                          title="View item"
                         >
-                          <Pencil className="h-3 w-3" />
-                        </Button>
-                        <Button
-                          size="sm" variant="ghost"
-                          className="h-7 w-7 p-0 text-red-500 hover:text-red-700"
-                          onClick={() => openDeleteRow(i)}
-                          title="Delete item"
-                        >
-                          <Trash2 className="h-3 w-3" />
+                          <Eye className="h-3.5 w-3.5" />
                         </Button>
                       </div>
                     )}
@@ -670,35 +847,233 @@ export default function HygieneMonitoring() {
 
       {/* ── Modals ─────────────────────────────────────────────────────────── */}
 
-      {/* Add New Item */}
+      {/* Manage Checklist Items & Time Slots */}
       <Dialog open={addItemOpen} onOpenChange={setAddItemOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader><DialogTitle>Add New Checklist Item</DialogTitle></DialogHeader>
-          <div className="space-y-4">
-            <div>
-              <Label>Checklist Item Description *</Label>
-              <Input
-                value={newItemDesc}
-                onChange={(e) => setNewItemDesc(e.target.value)}
-                placeholder="Enter description"
-                className="mt-1"
-                onKeyDown={(e) => e.key === "Enter" && saveNewItem()}
-              />
-            </div>
-            <div>
-              <Label>Time Schedule <span className="text-muted-foreground font-normal">(Optional)</span></Label>
-              <p className="text-xs text-muted-foreground mb-1">Select a time to also add a new inspection time slot for this item.</p>
-              <Input
-                type="time"
-                value={newItemSlot}
-                onChange={(e) => setNewItemSlot(e.target.value)}
-                className="mt-1"
-              />
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden flex flex-col p-0 gap-0">
+          <DialogHeader className="px-5 py-4 border-b border-border shrink-0">
+            <DialogTitle className="flex items-center gap-2">
+              <Plus className="h-4 w-4 text-primary" /> Manage Checklist Items &amp; Time Slots
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto">
+            <div className="grid grid-cols-2 divide-x divide-border min-h-0">
+
+              {/* ── Checklist Items ── */}
+              <div className="p-4 space-y-3">
+                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Checklist Items <span className="font-normal normal-case">({editRows.length})</span>
+                </p>
+                <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+                  {editRows.map((row, idx) => (
+                    <div key={row.id} className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 bg-background">
+                      {manageEditIdx === idx ? (
+                        <input
+                          autoFocus
+                          className="flex-1 text-sm bg-transparent border-0 focus:outline-none"
+                          value={manageEditVal}
+                          onChange={(e) => setManageEditVal(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") saveManageEdit(idx);
+                            if (e.key === "Escape") { setManageEditIdx(null); setManageEditVal(""); }
+                          }}
+                        />
+                      ) : (
+                        <span className="flex-1 text-sm leading-snug">{row.item}</span>
+                      )}
+                      {manageEditIdx === idx ? (
+                        <button
+                          onClick={() => saveManageEdit(idx)}
+                          className="text-[10px] font-semibold text-primary hover:underline shrink-0"
+                        >
+                          Save
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => { setManageEditIdx(idx); setManageEditVal(row.item); }}
+                          className="text-muted-foreground hover:text-foreground shrink-0"
+                          title="Edit"
+                        >
+                          <Pencil className="h-3 w-3" />
+                        </button>
+                      )}
+                      <button
+                        onClick={() => removeManageItem(idx)}
+                        className="text-muted-foreground hover:text-destructive shrink-0"
+                        title="Delete"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                  {editRows.length === 0 && (
+                    <p className="text-xs text-muted-foreground text-center py-4">No checklist items yet.</p>
+                  )}
+                </div>
+                <div className="flex gap-2 pt-1">
+                  <Input
+                    value={newItemDesc}
+                    onChange={(e) => setNewItemDesc(e.target.value)}
+                    placeholder="New checklist item…"
+                    className="h-8 text-xs"
+                    onKeyDown={(e) => { if (e.key === "Enter") saveNewItem(); }}
+                  />
+                  <Button
+                    size="sm"
+                    className="h-8 px-2.5 shrink-0 bg-indigo-600 hover:bg-indigo-700 text-white"
+                    onClick={saveNewItem}
+                    title="Add item"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
+
+              {/* ── Inspection Time Slots ── */}
+              <div className="p-4 space-y-3">
+                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  Inspection Time Slots <span className="font-normal normal-case">({allSlots.length})</span>
+                </p>
+                <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+                  {allSlots.map((slot) => (
+                    <div key={slot} className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 bg-background">
+                      <Clock className="h-3.5 w-3.5 text-muted-foreground/60 shrink-0" />
+                      <span className="flex-1 text-sm">{slot}</span>
+                      {savedSlots[slot] && (
+                        <span className="text-[9px] text-green-600 font-medium shrink-0">saved</span>
+                      )}
+                      <button
+                        onClick={() => removeManageSlot(slot)}
+                        className="text-muted-foreground hover:text-destructive shrink-0"
+                        title="Delete slot"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex gap-2 pt-1">
+                  <Input
+                    type="time"
+                    value={newItemSlot}
+                    onChange={(e) => setNewItemSlot(e.target.value)}
+                    className="h-8 text-xs"
+                  />
+                  <Button
+                    size="sm"
+                    className="h-8 px-2.5 shrink-0 bg-indigo-600 hover:bg-indigo-700 text-white"
+                    onClick={addManageSlot}
+                    title="Add time slot"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
+
             </div>
           </div>
+
+          <DialogFooter className="px-5 py-3 border-t border-border bg-muted/20 shrink-0">
+            <p className="text-[11px] text-muted-foreground flex-1">Add, edit, or remove checklist items and inspection time slots.</p>
+            <Button variant="outline" onClick={() => setAddItemOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* View Checklist Item */}
+      <Dialog open={viewRowOpen} onOpenChange={setViewRowOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader><DialogTitle className="flex items-center gap-2"><Eye className="h-4 w-4 text-primary" /> Checklist Item Details</DialogTitle></DialogHeader>
+          {viewRowIdx !== null && editRows[viewRowIdx] && (
+            <div className="space-y-4">
+              <div className="rounded-md border border-border bg-muted/30 px-3 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-0.5">Checklist Item</p>
+                <p className="font-medium text-sm leading-snug">{editRows[viewRowIdx].item}</p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1.5">Recorded Status by Time Slot</p>
+                <div className="grid grid-cols-3 gap-2">
+                  {allSlots.map((s) => {
+                    const v = editRows[viewRowIdx].values[s];
+                    const missed = missedSlots.has(s);
+                    return (
+                      <div key={s} className="rounded-md border border-border px-2 py-1.5 text-center">
+                        <p className="text-[11px] font-medium text-muted-foreground">{s}</p>
+                        <p className="text-sm font-bold mt-0.5">
+                          {missed ? <span className="text-amber-500 text-[11px] font-semibold">Missed</span>
+                            : v === "✓" ? <span className="text-green-700">✓</span>
+                            : v === "✗" ? <span className="text-red-700">✗</span>
+                            : <span className="text-muted-foreground">—</span>}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="rounded-md border border-border bg-muted/30 px-3 py-2">
+                <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-0.5">Remarks</p>
+                <p className="text-sm">{editRows[viewRowIdx].remarks || "—"}</p>
+              </div>
+
+              {/* Missed slot appeal — justification, status, reviewer, approval date & time */}
+              {(() => {
+                const appeal = appealForRow(editRows[viewRowIdx].item);
+                if (!appeal) return null;
+                const tone =
+                  appeal.status === "Approved" ? "bg-green-100 text-green-700 border-green-300"
+                  : appeal.status === "Rejected" ? "bg-red-100 text-red-700 border-red-300"
+                  : "bg-amber-100 text-amber-700 border-amber-300";
+                return (
+                  <div className="rounded-md border border-amber-200 bg-amber-50/40 px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[10px] uppercase tracking-wider text-amber-700 font-semibold flex items-center gap-1.5">
+                        <Gavel className="h-3.5 w-3.5" /> Missed Slot Appeal
+                      </p>
+                      <span className={`text-[10px] font-semibold px-2 py-0.5 rounded border ${tone}`}>{appeal.status}</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                      <div className="col-span-2">
+                        <span className="text-muted-foreground">Missed Slots: </span>
+                        <span className="font-medium">{appeal.slots.join(", ") || "—"}</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">Submitted By: </span>
+                        <span className="font-medium">{appeal.submittedBy}</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">Submitted At: </span>
+                        <span className="font-medium tabular-nums">{appeal.submittedAt}</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">
+                          {appeal.status === "Rejected" ? "Rejected By" : appeal.status === "Approved" ? "Approved By" : "Reviewer"}:{" "}
+                        </span>
+                        <span className="font-medium">{appeal.reviewedBy || "—"}</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">
+                          {appeal.status === "Pending" ? "Decision Date & Time" : "Approval Date & Time"}:{" "}
+                        </span>
+                        <span className="font-medium tabular-nums">{appeal.reviewedAt || "Pending review"}</span>
+                      </div>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-0.5">Justification</p>
+                      <p className="text-xs">{appeal.justification}</p>
+                    </div>
+                    {appeal.status === "Rejected" && appeal.rejectionReason && (
+                      <div>
+                        <p className="text-[10px] uppercase tracking-wider text-red-600 font-medium mb-0.5">Rejection Reason</p>
+                        <p className="text-xs text-red-700">{appeal.rejectionReason}</p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setAddItemOpen(false)}>Cancel</Button>
-            <Button onClick={saveNewItem}>Save Item</Button>
+            <Button variant="outline" onClick={() => setViewRowOpen(false)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -746,6 +1121,50 @@ export default function HygieneMonitoring() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteRowOpen(false)}>Cancel</Button>
             <Button variant="destructive" onClick={confirmDeleteRow}>Delete</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Appeal Missed Slots */}
+      <Dialog open={appealOpen} onOpenChange={setAppealOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader><DialogTitle className="flex items-center gap-2"><Gavel className="h-4 w-4 text-amber-600" /> Appeal Missed Slots</DialogTitle></DialogHeader>
+          <div className="space-y-4">
+            {appealRowIdx !== null && (
+              <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
+                <p className="font-medium leading-snug">{editRows[appealRowIdx].item}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">Date: {selectedDate}</p>
+              </div>
+            )}
+            <div>
+              <Label className="text-xs mb-1 block">Missed Time Slots</Label>
+              <div className="flex flex-wrap gap-1.5">
+                {allSlots.filter((s) => missedSlots.has(s)).map((s) => (
+                  <span key={s} className="inline-flex items-center gap-1 rounded bg-amber-100 text-amber-700 text-xs font-medium px-2 py-1 border border-amber-200">
+                    <Lock className="h-3 w-3" /> {s}
+                  </span>
+                ))}
+                {allSlots.filter((s) => missedSlots.has(s)).length === 0 && (
+                  <span className="text-xs text-muted-foreground">No missed slots.</span>
+                )}
+              </div>
+            </div>
+            <div>
+              <Label>Justification *</Label>
+              <p className="text-xs text-muted-foreground mb-1">
+                Explain why these slots were missed. This appeal is reviewed in Approval Management → Food Safety Approval.
+              </p>
+              <Textarea
+                value={appealJustification}
+                onChange={(e) => setAppealJustification(e.target.value)}
+                placeholder="Reason for missing the scheduled inspection..."
+                className="min-h-24"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAppealOpen(false)}>Cancel</Button>
+            <Button className="bg-amber-500 hover:bg-amber-600 text-white" onClick={submitAppeal}>Submit Appeal</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
