@@ -1144,14 +1144,8 @@ function TransferFields({
           <div className="flex items-center justify-between mb-6 flex-wrap gap-2">
             <h3 className="text-sm font-semibold uppercase tracking-wider">Transfer Details</h3>
             <div className="flex items-center gap-2">
-              <Button variant="outline" onClick={() => save("Pending")}>
-                <Save className="h-4 w-4 mr-1.5" /> Save Pending
-              </Button>
-              <Button variant="outline" onClick={() => save("In Transit")}>
-                <Truck className="h-4 w-4 mr-1.5" /> Mark In Transit
-              </Button>
-              <Button onClick={() => save("Completed")}>
-                <CheckCircle className="h-4 w-4 mr-1.5" /> Complete
+              <Button onClick={() => save("Pending")}>
+                <Save className="h-4 w-4 mr-1.5" /> Save
               </Button>
             </div>
           </div>
