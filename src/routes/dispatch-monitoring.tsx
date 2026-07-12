@@ -585,6 +585,7 @@ export default function DispatchMonitoring() {
   const [hocRemarksInput, setHocRemarksInput] = useState("");
   // Daily Product Dispatch Monitoring — table search + date-range filter.
   const [dmSearch, setDmSearch] = useState("");
+  const [dmStatus, setDmStatus] = useState("all");
   const [dmFrom, setDmFrom] = useState("");
   const [dmTo, setDmTo] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
@@ -1211,6 +1212,7 @@ export default function DispatchMonitoring() {
   // KPI totals above stay based on the full `entries` set.
   const dmQuery = dmSearch.trim().toLowerCase();
   const visibleEntries = entries.filter((e) => {
+    if (dmStatus !== "all" && dispatchStatusBadge(e).label !== dmStatus) return false;
     if (dmFrom && e.packagingDate < dmFrom) return false;
     if (dmTo && e.packagingDate > dmTo) return false;
     if (dmQuery) {
@@ -1253,15 +1255,29 @@ export default function DispatchMonitoring() {
         </div>
 
         <div className="flex items-center gap-1.5">
+          <span className="text-xs text-muted-foreground whitespace-nowrap">Status</span>
+          <Select value={dmStatus} onValueChange={setDmStatus}>
+            <SelectTrigger className="h-9 w-44 text-sm"><SelectValue placeholder="All statuses" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All statuses</SelectItem>
+              <SelectItem value="Pending">Pending</SelectItem>
+              <SelectItem value="Verified">Verified</SelectItem>
+              <SelectItem value="Forwarded to Airport">Forwarded to Airport</SelectItem>
+              <SelectItem value="Received by Airport">Received by Airport</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="flex items-center gap-1.5">
           <span className="text-xs text-muted-foreground whitespace-nowrap">From</span>
           <Input type="date" value={dmFrom} onChange={(e) => setDmFrom(e.target.value)}
             className="h-9 w-36 tabular-nums" />
           <span className="text-xs text-muted-foreground whitespace-nowrap">To</span>
           <Input type="date" value={dmTo} onChange={(e) => setDmTo(e.target.value)}
             className="h-9 w-36 tabular-nums" />
-          {(dmFrom || dmTo || dmSearch) && (
+          {(dmFrom || dmTo || dmSearch || dmStatus !== "all") && (
             <Button size="sm" variant="ghost" className="h-9 text-xs text-muted-foreground"
-              onClick={() => { setDmFrom(""); setDmTo(""); setDmSearch(""); }}>
+              onClick={() => { setDmFrom(""); setDmTo(""); setDmSearch(""); setDmStatus("all"); }}>
               Clear
             </Button>
           )}
