@@ -1266,15 +1266,6 @@ export default function DispatchMonitoring() {
             </Button>
           )}
         </div>
-
-        <Button
-          className="h-9 ml-auto bg-navy text-navy-foreground hover:opacity-90"
-          onClick={() => navigate("/transfer")}
-          title="Open the Transfer module to receive items on the Transfer In Transit tab"
-        >
-          <Truck className="h-4 w-4 mr-1.5" /> Go to Transfer In Transit for Item Receive
-          <ChevronRight className="h-4 w-4 ml-1" />
-        </Button>
       </div>
 
       {/* Entries Table */}
@@ -1323,10 +1314,16 @@ export default function DispatchMonitoring() {
                           <Eye className="h-3.5 w-3.5" />
                         </Button>
 
-                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50"
-                          onClick={() => { setDeleteId(entry.id); setDeleteOpen(true); }}>
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
+                        {entry.receivedAt && (
+                          <Button
+                            size="sm"
+                            className="no-brand h-6 px-2.5 text-[10px] bg-[#CD7F32] hover:bg-[#b06e2b] text-white border-0 shadow-sm"
+                            onClick={() => navigate("/transfer", { state: { receiveInTransit: true } })}
+                            title="Receive these items into store on the Transfer In Transit tab"
+                          >
+                            <Truck className="h-3 w-3 mr-1" /> Receive In Store
+                          </Button>
+                        )}
                         {entry.approvalStage >= 3 && !entry.receivedAt && (
                           <Button
                             size="sm"

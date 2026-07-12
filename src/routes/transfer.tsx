@@ -1,5 +1,5 @@
-import { useState, useEffect, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useEffect, useRef, type ReactNode } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { roundQty } from "@/lib/num";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -28,6 +28,7 @@ import { useWorkflow, type WfTransferNote, type StockDelta } from "@/lib/workflo
 import { applyInventoryStock } from "@/lib/stock-adjustments";
 import { useArrivalFlash } from "@/lib/arrival-flash";
 import { INITIAL_RECORDS as DISPATCH_RECORDS, type DispatchRecord, type DispatchStatus } from "@/routes/dispatch";
+import { loadDispatchEntries, flightLabel, type DispatchEntry } from "@/routes/dispatch-monitoring";
 
 
 type TransferStatus = "Pending" | "In Transit" | "Completed" | "Rejected";
@@ -227,6 +228,34 @@ function wfDispatchNoteToTransfer(wf: WfTransferNote): Transfer {
   };
 }
 
+// A dispatch that has been "Received by Airport" (receivedAt set) becomes an
+// In-Transit transfer awaiting receipt into store — so it lists on the Transfer
+// In Transit tab and can be received / returned with the existing flow.
+function dispatchEntryToTransfer(e: DispatchEntry): Transfer {
+  const route = flightLabel(e.flightId);           // "BS-141 — DAC-CXB"
+  const origin = route.includes("—") ? route.split("—")[1].trim().split("-")[0] : "Catering Point";
+  return {
+    id: `TRF-DM-${e.id}`,
+    date: e.receivedAt || e.packagingDate,
+    trRef: e.dispatchNo || "Dispatch",
+    from: `${route.split("—")[0].trim()} · ${origin} Airport`,
+    to: "Cold Kitchen",
+    issuedBy: e.checkedByApt || "—",
+    receivedBy: "—",
+    lines: e.mealLines.map((l, i) => ({
+      id: `TRF-DM-${e.id}-L${i + 1}`,
+      item: `${l.type} Meal`,
+      uom: "Tray",
+      requestedQty: Number(l.qty) || 0,
+      transferredQty: Number(l.qty) || 0,
+    })),
+    status: "In Transit",
+    kind: "Outbound",
+    officeId: "OFF-001",
+    warehouseId: "WH-001",
+  };
+}
+
 export default function TransferPage() {
   useArrivalFlash();
   const { transferNotes, applyStockDeltas } = useWorkflow();
@@ -262,6 +291,18 @@ export default function TransferPage() {
       return toAdd.length ? [...toAdd, ...prev] : prev;
     });
   }, [transferNotes, setRows]);
+
+  // Dispatches already "Received by Airport" are materialized once as In-Transit
+  // transfers so they list on the Transfer In Transit tab for receipt into store.
+  useEffect(() => {
+    const receivedAtAirport = loadDispatchEntries().filter((e) => e.receivedAt);
+    if (receivedAtAirport.length === 0) return;
+    setRows((prev) => {
+      const have = new Set(prev.map((r) => r.id));
+      const toAdd = receivedAtAirport.map(dispatchEntryToTransfer).filter((t) => !have.has(t.id));
+      return toAdd.length ? [...toAdd, ...prev] : prev;
+    });
+  }, [setRows]);
 
   // Workflow-store transfer notes (MRP, item-issue allocations, etc.) bridged
   // in for display. Dispatch notes are excluded — they're materialized above.
@@ -744,9 +785,35 @@ function TransferTabs({
   onClearBlink: () => void;
 }) {
   const navigate = useNavigate();
-  const [tab, setTab] = useState("out");
+  const location = useLocation();
+  // A dispatch row's "Receive Items" shortcut lands here asking to open the
+  // Transfer In Transit tab and blink the rows waiting to be received.
+  const wantReceive = (location.state as { receiveInTransit?: boolean } | null)?.receiveInTransit === true;
+  const [tab, setTab] = useState(wantReceive ? "transit" : "out");
   // Opening the received tab is what the blink is nudging toward — clear it then.
   const changeTab = (v: string) => { setTab(v); if (v === "received") onClearBlink(); };
+
+  // Blink the In Transit rows once when arrived via "Receive Items". The Ant
+  // rows mount a tick after the tab activates, so retry briefly until found.
+  const blinkedRef = useRef(false);
+  useEffect(() => {
+    if (!wantReceive || blinkedRef.current || tab !== "transit") return;
+    let done = false;
+    const paint = () => {
+      if (done) return;
+      const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-arrival-row-id]"));
+      if (rows.length === 0) return;
+      done = true;
+      blinkedRef.current = true;
+      rows.forEach((el) => { el.classList.remove("arrival-row-flash"); void el.offsetWidth; el.classList.add("arrival-row-flash"); });
+      rows[0].scrollIntoView({ behavior: "smooth", block: "center" });
+    };
+    const timers = [60, 200, 500, 900].map((d) => setTimeout(paint, d));
+    const clear = setTimeout(() => {
+      document.querySelectorAll(".arrival-row-flash").forEach((el) => el.classList.remove("arrival-row-flash"));
+    }, 4600);
+    return () => { timers.forEach(clearTimeout); clearTimeout(clear); };
+  }, [wantReceive, tab]);
 
   // Transfer Out lists every active outbound transfer (pending or shipped) as a
   // data log with the quantity breakdown — receipt happens on the In Transit tab.
@@ -825,7 +892,6 @@ function TransferTabs({
           data={received}
           emptyHint="No received transfers yet."
           editors={editors}
-          onGoToTransit={() => changeTab("transit")}
         />
       </TabsContent>
     </Tabs>
