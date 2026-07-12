@@ -21,7 +21,7 @@ export type WfPOStatus =
   | "Approved"
   | "Rejected"
   | "Ordered"
-  | "Delivered"
+  | "Received"
   | "Closed"
   | "Issued to Vendor";
 
@@ -166,6 +166,90 @@ export type WfGRN = {
   /** Purchase value of a direct receive — Σ(line qty × rate). */
   amount?: number;
 };
+
+// ── Supplier payment (Purchase Payment module) ────────────────────────────────
+export type WfPaymentMethod = "Cash" | "Bank Transfer" | "Cheque" | "Mobile Banking";
+
+/** How much of a single GRN's payable value this payment settles. Partial
+ *  payments are allowed, so `amount` may be less than the GRN's balance. */
+export type WfPaymentAllocation = { grnRef: string; amount: number };
+
+/** A payment made to a supplier settling (part of) one or more received GRNs. */
+export type WfSupplierPayment = {
+  id: string;                 // PAY-YYYY-NNNNN
+  vendor: string;
+  /** Payment date (yyyy-mm-dd). */
+  date: string;
+  method: WfPaymentMethod;
+  /** Cheque no / bank txn id / mobile-banking ref. */
+  reference?: string;
+  /** Total paid — Σ of the per-GRN allocations. */
+  amount: number;
+  /** Per-GRN amounts settled by this payment (supports partial settlement). */
+  allocations: WfPaymentAllocation[];
+  note?: string;
+  paidBy: string;
+  /** System timestamp the payment was recorded. */
+  recordedAt: string;
+  officeId?: string;
+  /** Cash/Bank account the money was drawn from (WfFinancialAccount.id). */
+  accountId?: string;
+};
+
+// ── Cash & Bank accounts (Accounts module) ────────────────────────────────────
+export type WfAccountType = "Cash" | "Bank";
+
+/** A cash-in-hand or bank account the business pays suppliers from. */
+export type WfFinancialAccount = {
+  id: string;                 // ACC-###
+  name: string;
+  type: WfAccountType;
+  bankName?: string;          // Bank accounts only
+  accountNo?: string;         // Bank accounts only
+  /** Balance carried when the account was first added to the system. */
+  openingBalance: number;
+  active: boolean;
+};
+
+export type WfCashTxnType = "Deposit" | "Withdrawal" | "Adjustment";
+
+/** A manual movement on a Cash/Bank account (top-up, cash-out, correction). */
+export type WfCashTxn = {
+  id: string;                 // TXN-###
+  accountId: string;
+  type: WfCashTxnType;
+  /** Signed delta on the balance — Deposit +, Withdrawal −, Adjustment ±. */
+  amount: number;
+  date: string;
+  reference?: string;
+  note?: string;
+  by: string;
+  recordedAt: string;
+};
+
+/** Live balance = opening + cash movements − supplier payments drawn from it. */
+export function accountBalance(
+  accountId: string,
+  openingBalance: number,
+  cashTxns: WfCashTxn[],
+  payments: WfSupplierPayment[],
+): number {
+  const moves = cashTxns
+    .filter((t) => t.accountId === accountId)
+    .reduce((s, t) => s + t.amount, 0);
+  const paid = payments
+    .filter((p) => p.accountId === accountId)
+    .reduce((s, p) => s + p.amount, 0);
+  return openingBalance + moves - paid;
+}
+
+/** Payable value of a GRN — Σ(qty × rate) over lines not QC-rejected.
+ *  Rejected lines are returned to the vendor, so they are never payable. */
+export function grnPayableAmount(lines: { qty: number; rate?: number; qcStatus?: WfGRNQcStatus }[]): number {
+  return lines
+    .filter((l) => l.qcStatus !== "Rejected")
+    .reduce((sum, l) => sum + (Number(l.qty) || 0) * (Number(l.rate) || 0), 0);
+}
 
 export type StockDelta = {
   itemId: string;
@@ -350,6 +434,17 @@ type WorkflowCtx = {
    *  with optional captured inspection details (temp / complied qty / remarks / reason). */
   updateGRNLineQC: (grnId: string, lineIdx: number, status: WfGRNQcStatus, details?: WfGRNQcDetails) => void;
 
+  /** Supplier payments settling received GRNs (Purchase Payment module). */
+  supplierPayments: WfSupplierPayment[];
+  addSupplierPayment: (payment: WfSupplierPayment) => void;
+
+  /** Cash & Bank accounts and their manual movements (Accounts module). */
+  financialAccounts: WfFinancialAccount[];
+  addFinancialAccount: (account: WfFinancialAccount) => void;
+  updateFinancialAccount: (id: string, patch: Partial<WfFinancialAccount>) => void;
+  cashTxns: WfCashTxn[];
+  addCashTxn: (txn: WfCashTxn) => void;
+
   transferNotes: WfTransferNote[];
   addTransferNote: (tn: WfTransferNote) => void;
   acknowledgeTransfer: (id: string) => void;
@@ -399,6 +494,9 @@ const WorkflowContext = createContext<WorkflowCtx>({
   wfRequisitions: [], addRequisition: () => {}, updateRequisitionStatus: () => {}, updateRequisition: () => {},
   wfPurchaseOrders: [], addPurchaseOrder: () => {}, updatePOStatus: () => {}, updatePurchaseOrder: () => {}, deletePurchaseOrder: () => {},
   grns: [], addGRN: () => {}, updateGRNLineQC: () => {},
+  supplierPayments: [], addSupplierPayment: () => {},
+  financialAccounts: [], addFinancialAccount: () => {}, updateFinancialAccount: () => {},
+  cashTxns: [], addCashTxn: () => {},
   transferNotes: [], addTransferNote: () => {}, acknowledgeTransfer: () => {},
   stockDeltas: [], applyStockDeltas: () => {},
   prdStatuses: {}, prdProgress: {}, setPRDStatus: () => {},
@@ -476,8 +574,8 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       receivedBy: "M. Karim", date: "2026-07-05 09:10",
       officeId: "OFF-001", warehouseId: "WH-001",
       lines: [
-        { itemId: "l0", name: "Basmati Rice", qty: 200, uom: "Kg", temp: "Ambient", expiry: "2026-12-31", qcStatus: "Pending" },
-        { itemId: "l1", name: "Sunflower Oil 5L", qty: 40, uom: "Can", temp: "Ambient", expiry: "2027-03-15", qcStatus: "Pending" },
+        { itemId: "l0", name: "Basmati Rice", qty: 200, uom: "Kg", temp: "Ambient", expiry: "2026-12-31", qcStatus: "Pending", rate: 120 },
+        { itemId: "l1", name: "Sunflower Oil 5L", qty: 40, uom: "Can", temp: "Ambient", expiry: "2027-03-15", qcStatus: "Pending", rate: 850 },
       ],
     },
     {
@@ -485,10 +583,39 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       receivedBy: "S. Ahmed", date: "2026-07-05 10:25",
       officeId: "OFF-001", warehouseId: "WH-001",
       lines: [
-        { itemId: "l0", name: "Mutton Leg", qty: 60, uom: "Kg", temp: "-2°C", expiry: "2026-07-12", qcStatus: "Pending" },
+        { itemId: "l0", name: "Mutton Leg", qty: 60, uom: "Kg", temp: "-2°C", expiry: "2026-07-12", qcStatus: "Pending", rate: 950 },
       ],
     },
   ]);
+  // One part-payment already made against GRN-6001 (rice & oil, ৳58,000 payable)
+  // — leaves a ৳28,000 balance outstanding to Green Valley Foods.
+  const [supplierPayments, setSupplierPayments] = useState<WfSupplierPayment[]>([
+    {
+      id: "PAY-2026-30001",
+      vendor: "Green Valley Foods",
+      date: "2026-07-08",
+      method: "Bank Transfer",
+      reference: "CB-TXN-88231",
+      amount: 30000,
+      allocations: [{ grnRef: "GRN-6001", amount: 30000 }],
+      note: "Part payment against rice & oil delivery.",
+      paidBy: "A. Rahman",
+      recordedAt: "2026-07-08 11:20",
+      accountId: "ACC-002",
+    },
+  ]);
+
+  // Cash & Bank accounts the business settles suppliers from.
+  const [financialAccounts, setFinancialAccounts] = useState<WfFinancialAccount[]>([
+    { id: "ACC-001", name: "Cash in Hand", type: "Cash", openingBalance: 250000, active: true },
+    { id: "ACC-002", name: "City Bank — Current A/C", type: "Bank", bankName: "City Bank PLC", accountNo: "1102-3345-90021", openingBalance: 4500000, active: true },
+    { id: "ACC-003", name: "Petty Cash", type: "Cash", openingBalance: 60000, active: true },
+  ]);
+  const [cashTxns, setCashTxns] = useState<WfCashTxn[]>([
+    { id: "TXN-1001", accountId: "ACC-002", type: "Deposit", amount: 500000, date: "2026-07-01", reference: "Owner capital top-up", by: "A. Rahman", recordedAt: "2026-07-01 09:30" },
+    { id: "TXN-1002", accountId: "ACC-001", type: "Withdrawal", amount: -75000, date: "2026-07-04", reference: "Cash drawn for market purchase", by: "M. Karim", recordedAt: "2026-07-04 10:15" },
+  ]);
+
   const [transferNotes, setTransferNotes] = useState<WfTransferNote[]>([
     {
       id: "TN-50001",
@@ -673,6 +800,16 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
             ? { ...g, lines: g.lines.map((l, i) => i === lineIdx ? { ...l, qcStatus: status, ...(details ?? {}) } : l) }
             : g,
         )),
+
+      supplierPayments,
+      addSupplierPayment: (payment) => setSupplierPayments(prev => [payment, ...prev]),
+
+      financialAccounts,
+      addFinancialAccount: (account) => setFinancialAccounts(prev => [...prev, account]),
+      updateFinancialAccount: (id, patch) =>
+        setFinancialAccounts(prev => prev.map(a => a.id === id ? { ...a, ...patch } : a)),
+      cashTxns,
+      addCashTxn: (txn) => setCashTxns(prev => [txn, ...prev]),
 
       transferNotes,
       addTransferNote: (tn) => setTransferNotes(prev => [tn, ...prev]),

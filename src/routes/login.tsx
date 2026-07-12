@@ -142,6 +142,18 @@ function LeftPanel() {
   );
 }
 
+// Partially hide an email for the OTP banner: keep the first 4 local-part chars
+// (or all of them if shorter), replace the rest with "***", keep the domain.
+// e.g. "md.hossain@usbair.com" → "md.h***@usbair.com".
+function maskEmail(email: string): string {
+  const at = email.indexOf("@");
+  if (at <= 0) return email || "your email";
+  const local = email.slice(0, at);
+  const domain = email.slice(at);
+  const visible = local.slice(0, 4);
+  return `${visible}***${domain}`;
+}
+
 // ── OTP grid ──────────────────────────────────────────────────────────────────
 function OtpGrid({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
   const refs = useRef<(HTMLInputElement | null)[]>([]);
@@ -275,7 +287,12 @@ function RightPanel() {
     setOtp(Array(6).fill(""));
   }
 
-  const maskedEmail  = "md.h***@usbair.com";
+  // Mask the email of the account actually being signed in. Credentials are
+  // already validated by the time the OTP step renders, so we can read the real
+  // address instead of showing a hardcoded one. Shows the first 4 local-part
+  // chars, then "***", then the domain (e.g. ikramul.khan@… → "ikra***@…").
+  const signingInEmail = validateCredentials(userId, password)?.email ?? "";
+  const maskedEmail = maskEmail(signingInEmail);
   const countdownStr = `0:${String(countdown).padStart(2, "0")}`;
 
   return (

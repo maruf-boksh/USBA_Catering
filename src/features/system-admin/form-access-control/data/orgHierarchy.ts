@@ -1,48 +1,24 @@
 import type { Tenant } from "../types/formAccessControl.types";
+import { companies, offices, warehouses } from "@/lib/sample-data";
 
-// Illustrative org hierarchy — two tenants, each with a few concerns and
-// sub-concerns. Static reference data per the FAC domain spec.
-export const TENANTS: Tenant[] = [
-  {
-    code: "USBA",
-    name: "USBA Group",
-    concerns: [
-      {
-        code: "CATERING",
-        name: "Catering",
-        subConcerns: [
-          { code: "FLIGHT-KTC", name: "Flight Kitchen — Chattogram" },
-          { code: "FLIGHT-KTD", name: "Flight Kitchen — Dhaka" },
-          { code: "LOUNGE", name: "Lounge Services" },
-        ],
-      },
-      {
-        code: "GROUND-HANDLING",
-        name: "Ground Handling",
-        subConcerns: [
-          { code: "RAMP", name: "Ramp Services" },
-          { code: "CARGO", name: "Cargo Handling" },
-        ],
-      },
-    ],
-  },
-  {
-    code: "HARVEST",
-    name: "Harvest Holdings",
-    concerns: [
-      {
-        code: "RETAIL",
-        name: "Retail Catering",
-        subConcerns: [
-          { code: "OUTLET-DHK", name: "Outlet — Dhaka" },
-          { code: "OUTLET-CTG", name: "Outlet — Chattogram" },
-        ],
-      },
-      {
-        code: "CORP",
-        name: "Corporate",
-        subConcerns: [],
-      },
-    ],
-  },
-];
+// Org hierarchy for the Form Access Control scope — derived from the app's real
+// Company → Office → Warehouse master data (the same hierarchy the Location
+// picker uses across the app) so FAC rules scope to actual org units instead of
+// illustrative placeholders. Codes are the canonical entity ids (CMP-/OFF-/WH-)
+// so a rule's scope lines up with the officeId / warehouseId used everywhere.
+//   Tenant       = Company
+//   Concern      = Office      (office.companyId → company)
+//   Sub-concern  = Warehouse   (warehouse.officeId → office)
+export const TENANTS: Tenant[] = companies.map((company) => ({
+  code: company.id,
+  name: company.name,
+  concerns: offices
+    .filter((office) => office.companyId === company.id)
+    .map((office) => ({
+      code: office.id,
+      name: office.name,
+      subConcerns: warehouses
+        .filter((wh) => wh.officeId === office.id)
+        .map((wh) => ({ code: wh.id, name: wh.name })),
+    })),
+}));

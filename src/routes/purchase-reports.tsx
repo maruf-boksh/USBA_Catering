@@ -43,7 +43,7 @@ const STATUS_COLORS: Record<string, string> = {
   "Pending Approval": "#F59E0B",
   Approved:           "#0EA5A4",
   Ordered:            "#3B82F6",
-  Delivered:          "#10b981",
+  Received:           "#10b981",
   Closed:             "#94a3b8",
   Open:               "#6366F1",
 };

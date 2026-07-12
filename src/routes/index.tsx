@@ -782,12 +782,8 @@ export default function Dashboard() {
         }
       />
 
-      {/* Harvest decorative brand stripe */}
-      <div style={{
-        height: 3, borderRadius: 99, margin: '18px 0 22px',
-        background: 'linear-gradient(90deg, var(--color-primary, #E10101) 0%, var(--color-primary-dark, #a60303) 46%, var(--color-primary-dark, #1a0204) 100%)',
-        opacity: 0.9,
-      }} aria-hidden />
+      {/* Spacer — brand stripe removed, spacing preserved */}
+      <div style={{ height: 3, margin: '18px 0 22px' }} aria-hidden />
 
       {data.lmc.count > 0 && (
         <Link

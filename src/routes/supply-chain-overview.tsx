@@ -18,7 +18,7 @@ const STATUS_COLORS: Record<string, string> = {
   "Pending Approval": "#D97706",
   Approved: "#0EA5E9",
   Ordered: "#7C3AED",
-  Delivered: "#0F766E",
+  Received: "#0F766E",
   Closed: "#059669",
   Rejected: "#EF4444",
 };
@@ -29,7 +29,7 @@ const STATUS_BADGE: Record<string, string> = {
   "Pending Approval": "bg-amber-100 text-amber-800",
   Approved: "bg-sky-100 text-sky-800",
   Ordered: "bg-violet-100 text-violet-800",
-  Delivered: "bg-teal-100 text-teal-800",
+  Received: "bg-teal-100 text-teal-800",
   Closed: "bg-emerald-100 text-emerald-800",
   Rejected: "bg-red-100 text-red-800",
 };
@@ -75,7 +75,7 @@ export default function SupplyChainOverviewPage() {
       openPRs,
       pendingApproval: byStatus["Pending Approval"] ?? 0,
       ordered: byStatus.Ordered ?? 0,
-      delivered: (byStatus.Delivered ?? 0) + (byStatus.Closed ?? 0),
+      delivered: (byStatus.Received ?? 0) + (byStatus.Closed ?? 0),
       vendorChart, recentPOs, topVendors, avgRating,
     };
   }, [wfRequisitions, wfPurchaseOrders, grns]);
@@ -94,7 +94,7 @@ export default function SupplyChainOverviewPage() {
         <KpiCard label="PO Value"          value={`৳ ${(stats.poValue / 1000).toFixed(0)}k`} icon={Wallet} tone="navy" sub={`৳ ${stats.poValue.toLocaleString()}`} />
         <KpiCard label="Pending Approval"  value={stats.pendingApproval.toLocaleString()} icon={FileText} tone="warning" />
         <KpiCard label="Ordered"           value={stats.ordered.toLocaleString()} icon={Truck} tone="warning" sub="Awaiting receipt" />
-        <KpiCard label="Delivered"         value={stats.delivered.toLocaleString()} icon={PackageCheck} tone="success" />
+        <KpiCard label="Received"          value={stats.delivered.toLocaleString()} icon={PackageCheck} tone="success" />
         <KpiCard label="Open PRs"          value={stats.openPRs.toLocaleString()} icon={Undo2} tone="warning" />
         <KpiCard label="GRNs"              value={stats.grnCount.toLocaleString()} icon={Clock} tone="navy" />
         <KpiCard label="Avg Vendor Rating" value={stats.avgRating} icon={Star} tone={Number(stats.avgRating) >= 4 ? "success" : "warning"} sub={`${vendors.length} vendors`} />

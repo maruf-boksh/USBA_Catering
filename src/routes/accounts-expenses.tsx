@@ -1,275 +1,165 @@
 import { useMemo } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { KpiCard } from "@/components/common/KpiCard";
-import { Download, Wallet, TrendingUp, Clock, XCircle } from "lucide-react";
-import { toast } from "sonner";
+import { Wallet, TrendingUp, Clock, ReceiptText } from "lucide-react";
+import { useWorkflow } from "@/lib/workflow-store";
+import { buildBills, vendorSpend } from "@/lib/payables";
 
-type InvStatus = "Pending" | "Approved" | "Paid" | "Rejected";
-
-interface Invoice {
-  id: string;
-  vendor: string;
-  poRef: string;
-  flight: string;
-  amount: number;
-  submittedBy: string;
-  date: string;
-  paymentMethod: string;
-  status: InvStatus;
-}
-
-const INVOICES: Invoice[] = [
-  { id: "INV-1041", vendor: "Fresh Farms Ltd", poRef: "PO-2025-0451", flight: "BS-315", amount: 24500, submittedBy: "S. Ahmed", date: "2025-11-05", paymentMethod: "Bank Transfer", status: "Paid" },
-  { id: "INV-1042", vendor: "Premium Supplies Co", poRef: "PO-2025-0452", flight: "BS-316", amount: 30000, submittedBy: "M. Karim", date: "2025-11-05", paymentMethod: "Bank Transfer", status: "Approved" },
-  { id: "INV-1043", vendor: "AlRahman Trading", poRef: "PO-2025-0450", flight: "BS-307", amount: 18400, submittedBy: "N. Hasan", date: "2025-11-06", paymentMethod: "Cheque", status: "Pending" },
-  { id: "INV-1044", vendor: "Metro Wholesale", poRef: "PO-2025-0449", flight: "BS-203", amount: 45200, submittedBy: "A. Khan", date: "2025-11-06", paymentMethod: "Bank Transfer", status: "Pending" },
-  { id: "INV-1045", vendor: "Halal Meats Co.", poRef: "PO-2025-0448", flight: "BS-141", amount: 22800, submittedBy: "S. Ahmed", date: "2025-11-07", paymentMethod: "Cheque", status: "Rejected" },
-  { id: "INV-1046", vendor: "Fresh Farms Ltd", poRef: "PO-2025-0447", flight: "BS-225", amount: 16900, submittedBy: "M. Karim", date: "2025-11-07", paymentMethod: "Bank Transfer", status: "Paid" },
-];
-
-function statusColor(status: string) {
-  switch (status) {
-    case "Pending": return "bg-amber-100 text-amber-800";
-    case "Approved": return "bg-blue-100 text-blue-800";
-    case "Paid": return "bg-green-100 text-green-800";
-    case "Rejected": return "bg-red-100 text-red-800";
-    default: return "bg-gray-100 text-gray-800";
-  }
-}
+const fmtBdt = (n: number) => `৳${n.toLocaleString()}`;
 
 export default function ExpenseOverview() {
-  const totalInvoiced = useMemo(() => INVOICES.reduce((s, i) => s + i.amount, 0), []);
-  const totalPaid = useMemo(() => INVOICES.filter(i => i.status === "Paid").reduce((s, i) => s + i.amount, 0), []);
-  const totalOutstanding = useMemo(() =>
-    INVOICES.filter(i => i.status === "Pending" || i.status === "Approved").reduce((s, i) => s + i.amount, 0), []);
-  const totalRejected = useMemo(() => INVOICES.filter(i => i.status === "Rejected").reduce((s, i) => s + i.amount, 0), []);
+  const { grns, supplierPayments } = useWorkflow();
 
-  // Vendor breakdown
-  const vendorBreakdown = useMemo(() => {
-    const map: Record<string, { invoices: number; total: number; paid: number; outstanding: number; rejected: number }> = {};
-    INVOICES.forEach(inv => {
-      if (!map[inv.vendor]) map[inv.vendor] = { invoices: 0, total: 0, paid: 0, outstanding: 0, rejected: 0 };
-      map[inv.vendor].invoices += 1;
-      map[inv.vendor].total += inv.amount;
-      if (inv.status === "Paid") map[inv.vendor].paid += inv.amount;
-      else if (inv.status === "Rejected") map[inv.vendor].rejected += inv.amount;
-      else map[inv.vendor].outstanding += inv.amount;
-    });
-    return Object.entries(map)
-      .map(([vendor, d]) => ({ vendor, ...d }))
-      .sort((a, b) => b.total - a.total);
-  }, []);
+  const bills = useMemo(() => buildBills(grns, supplierPayments), [grns, supplierPayments]);
+  const vendors = useMemo(() => vendorSpend(bills), [bills]);
 
-  // Payment method breakdown
+  const totalBilled = bills.reduce((s, b) => s + b.payable, 0);
+  const totalPaid = bills.reduce((s, b) => s + b.paid, 0);
+  const totalOutstanding = bills.reduce((s, b) => s + b.balance, 0);
+  const payRate = totalBilled > 0 ? Math.round((totalPaid / totalBilled) * 100) : 0;
+
+  // Payment method breakdown from actual supplier payments.
   const methodBreakdown = useMemo(() => {
-    const map: Record<string, { invoices: number; total: number }> = {};
-    INVOICES.forEach(inv => {
-      if (!map[inv.paymentMethod]) map[inv.paymentMethod] = { invoices: 0, total: 0 };
-      map[inv.paymentMethod].invoices += 1;
-      map[inv.paymentMethod].total += inv.amount;
-    });
-    return Object.entries(map)
+    const map = new Map<string, { count: number; total: number }>();
+    for (const p of supplierPayments) {
+      const m = map.get(p.method) ?? { count: 0, total: 0 };
+      m.count += 1;
+      m.total += p.amount;
+      map.set(p.method, m);
+    }
+    return [...map.entries()]
       .map(([method, d]) => ({ method, ...d }))
       .sort((a, b) => b.total - a.total);
-  }, []);
+  }, [supplierPayments]);
 
-  // Recent paid invoices
-  const recentPaid = useMemo(() =>
-    INVOICES.filter(i => i.status === "Paid").sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5),
-    []
+  const recentPayments = useMemo(
+    () => [...supplierPayments].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 6),
+    [supplierPayments],
   );
-
-  const payRate = totalInvoiced > 0 ? Math.round((totalPaid / totalInvoiced) * 100) : 0;
 
   return (
     <>
       <PageHeader
         title="Expense Overview"
-        subtitle="Financial spend summary — vendor-wise breakdown, payment status and settlement tracking"
-        actions={
-          <Button variant="outline" onClick={() => toast.success("Export started.")}>
-            <Download className="h-4 w-4 mr-1" /> Export
-          </Button>
-        }
+        subtitle="Procurement spend — vendor-wise billing, settlement status and payment mix"
       />
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
-        <KpiCard label="Total Invoiced" value={`৳${totalInvoiced.toLocaleString()}`} icon={Wallet} tone="navy" />
-        <KpiCard
-          label="Total Paid"
-          value={`৳${totalPaid.toLocaleString()}`}
-          sub={`${payRate}% settlement rate`}
-          icon={TrendingUp}
-          tone="success"
-        />
-        <KpiCard
-          label="Outstanding"
-          value={`৳${totalOutstanding.toLocaleString()}`}
-          sub="Pending + Approved"
-          icon={Clock}
-          tone="warning"
-        />
-        <KpiCard label="Rejected Amount" value={`৳${totalRejected.toLocaleString()}`} icon={XCircle} tone="red" />
+        <KpiCard label="Total Billed" value={fmtBdt(totalBilled)} icon={Wallet} tone="navy" />
+        <KpiCard label="Total Paid" value={fmtBdt(totalPaid)} sub={`${payRate}% settlement rate`} icon={TrendingUp} tone="success" />
+        <KpiCard label="Outstanding" value={fmtBdt(totalOutstanding)} icon={Clock} tone="warning" />
+        <KpiCard label="Vendor Bills" value={bills.length} icon={ReceiptText} tone="navy" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
-
-        {/* Vendor Breakdown */}
+        {/* Vendor spend breakdown */}
         <div className="lg:col-span-2">
           <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-semibold">Vendor Spend Breakdown</CardTitle>
-            </CardHeader>
+            <CardHeader className="pb-3"><CardTitle className="text-sm font-semibold">Vendor Spend Breakdown</CardTitle></CardHeader>
             <CardContent className="p-0">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b bg-muted/50">
-                      {["Vendor", "Invoices", "Total (৳)", "Paid (৳)", "Outstanding (৳)", "Status"].map(h => (
+                      {["Vendor", "Bills", "Billed (৳)", "Paid (৳)", "Outstanding (৳)", "Status"].map((h) => (
                         <th key={h} className="p-3 text-left font-semibold">{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
-                    {vendorBreakdown.map(row => {
-                      const cleared = row.outstanding === 0 && row.rejected === 0;
-                      const allRejected = row.paid === 0 && row.outstanding === 0;
-                      const statusLabel = cleared ? "Cleared" : allRejected ? "Rejected" : row.outstanding > 0 ? "Outstanding" : "Partial";
-                      const sColor = cleared ? "bg-green-100 text-green-800" : allRejected ? "bg-red-100 text-red-800" : "bg-amber-100 text-amber-800";
+                    {vendors.length === 0 ? (
+                      <tr><td colSpan={6} className="p-6 text-center text-muted-foreground">No vendor spend recorded.</td></tr>
+                    ) : vendors.map((row) => {
+                      const cleared = row.outstanding <= 0;
+                      const statusLabel = cleared ? "Cleared" : row.paid > 0 ? "Partial" : "Outstanding";
+                      const sColor = cleared ? "bg-green-100 text-green-800" : row.paid > 0 ? "bg-amber-100 text-amber-800" : "bg-slate-200 text-slate-700";
                       return (
                         <tr key={row.vendor} className="border-b hover:bg-muted/30">
                           <td className="p-3 font-medium">{row.vendor}</td>
-                          <td className="p-3 text-center">{row.invoices}</td>
-                          <td className="p-3 font-medium">৳{row.total.toLocaleString()}</td>
-                          <td className="p-3 text-success">৳{row.paid.toLocaleString()}</td>
-                          <td className="p-3 text-amber-600">
-                            {row.outstanding > 0 ? `৳${row.outstanding.toLocaleString()}` : "—"}
-                          </td>
-                          <td className="p-3">
-                            <span className={`px-2 py-1 rounded text-xs font-medium ${sColor}`}>{statusLabel}</span>
-                          </td>
+                          <td className="p-3 text-center">{row.bills}</td>
+                          <td className="p-3 font-medium tabular-nums">{fmtBdt(row.payable)}</td>
+                          <td className="p-3 text-success tabular-nums">{fmtBdt(row.paid)}</td>
+                          <td className="p-3 text-amber-600 tabular-nums">{row.outstanding > 0 ? fmtBdt(row.outstanding) : "—"}</td>
+                          <td className="p-3"><span className={`px-2 py-1 rounded text-xs font-medium ${sColor}`}>{statusLabel}</span></td>
                         </tr>
                       );
                     })}
                   </tbody>
-                  <tfoot>
-                    <tr className="border-t bg-muted/30 font-semibold">
-                      <td className="p-3">Total</td>
-                      <td className="p-3 text-center">{INVOICES.length}</td>
-                      <td className="p-3">৳{totalInvoiced.toLocaleString()}</td>
-                      <td className="p-3 text-success">৳{totalPaid.toLocaleString()}</td>
-                      <td className="p-3 text-amber-600">৳{totalOutstanding.toLocaleString()}</td>
-                      <td className="p-3"></td>
-                    </tr>
-                  </tfoot>
+                  {vendors.length > 0 && (
+                    <tfoot>
+                      <tr className="border-t bg-muted/30 font-semibold">
+                        <td className="p-3">Total</td>
+                        <td className="p-3 text-center">{bills.length}</td>
+                        <td className="p-3 tabular-nums">{fmtBdt(totalBilled)}</td>
+                        <td className="p-3 text-success tabular-nums">{fmtBdt(totalPaid)}</td>
+                        <td className="p-3 text-amber-600 tabular-nums">{fmtBdt(totalOutstanding)}</td>
+                        <td className="p-3"></td>
+                      </tr>
+                    </tfoot>
+                  )}
                 </table>
               </div>
             </CardContent>
           </Card>
         </div>
 
-        {/* Right column */}
+        {/* Payment method breakdown */}
         <div className="space-y-6">
-
-          {/* Payment Method Breakdown */}
           <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-semibold">Payment Method Breakdown</CardTitle>
-            </CardHeader>
+            <CardHeader className="pb-3"><CardTitle className="text-sm font-semibold">Payment Method Breakdown</CardTitle></CardHeader>
             <CardContent className="p-0">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b bg-muted/50">
                     <th className="p-3 text-left font-semibold">Method</th>
-                    <th className="p-3 text-left font-semibold">Invoices</th>
+                    <th className="p-3 text-left font-semibold">Payments</th>
                     <th className="p-3 text-left font-semibold">Amount (৳)</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {methodBreakdown.map(row => (
+                  {methodBreakdown.length === 0 ? (
+                    <tr><td colSpan={3} className="p-6 text-center text-muted-foreground">No payments yet.</td></tr>
+                  ) : methodBreakdown.map((row) => (
                     <tr key={row.method} className="border-b hover:bg-muted/30">
                       <td className="p-3">{row.method}</td>
-                      <td className="p-3 text-center">{row.invoices}</td>
-                      <td className="p-3 font-medium">৳{row.total.toLocaleString()}</td>
+                      <td className="p-3 text-center">{row.count}</td>
+                      <td className="p-3 font-medium tabular-nums">{fmtBdt(row.total)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </CardContent>
           </Card>
-
-          {/* Payment Status Summary */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm font-semibold">Status Summary</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                {(["Paid", "Approved", "Pending", "Rejected"] as InvStatus[]).map(status => {
-                  const count = INVOICES.filter(i => i.status === status).length;
-                  const amount = INVOICES.filter(i => i.status === status).reduce((s, i) => s + i.amount, 0);
-                  const pct = totalInvoiced > 0 ? Math.round((amount / totalInvoiced) * 100) : 0;
-                  return (
-                    <div key={status}>
-                      <div className="flex items-center justify-between text-sm mb-1">
-                        <span className="flex items-center gap-2">
-                          <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColor(status)}`}>{status}</span>
-                          <span className="text-muted-foreground">{count} invoice{count !== 1 ? "s" : ""}</span>
-                        </span>
-                        <span className="font-medium">৳{amount.toLocaleString()}</span>
-                      </div>
-                      <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-                        <div
-                          className={
-                            status === "Paid" ? "h-full rounded-full bg-green-500"
-                            : status === "Approved" ? "h-full rounded-full bg-blue-500"
-                            : status === "Pending" ? "h-full rounded-full bg-amber-500"
-                            : "h-full rounded-full bg-red-400"
-                          }
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
-                      <div className="text-right text-xs text-muted-foreground mt-0.5">{pct}%</div>
-                    </div>
-                  );
-                })}
-              </div>
-            </CardContent>
-          </Card>
         </div>
       </div>
 
-      {/* Recent Payments */}
+      {/* Recent payments */}
       <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-semibold">Recent Payments</CardTitle>
-        </CardHeader>
+        <CardHeader className="pb-3"><CardTitle className="text-sm font-semibold">Recent Payments</CardTitle></CardHeader>
         <CardContent className="p-0">
-          {recentPaid.length === 0 ? (
-            <p className="p-6 text-center text-sm text-muted-foreground">No payments recorded</p>
+          {recentPayments.length === 0 ? (
+            <p className="p-6 text-center text-sm text-muted-foreground">No payments recorded.</p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b bg-muted/50">
-                    {["Invoice #", "Vendor", "PO Ref", "Flight", "Amount (৳)", "Payment Method", "Paid By", "Date"].map(h => (
+                    {["Payment #", "Vendor", "Bills", "Amount (৳)", "Method", "Paid By", "Date"].map((h) => (
                       <th key={h} className="p-3 text-left font-semibold">{h}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {recentPaid.map(inv => (
-                    <tr key={inv.id} className="border-b hover:bg-muted/30">
-                      <td className="p-3 font-medium">{inv.id}</td>
-                      <td className="p-3">{inv.vendor}</td>
-                      <td className="p-3 text-muted-foreground">{inv.poRef}</td>
-                      <td className="p-3">{inv.flight}</td>
-                      <td className="p-3 font-medium">৳{inv.amount.toLocaleString()}</td>
-                      <td className="p-3 text-muted-foreground">{inv.paymentMethod}</td>
-                      <td className="p-3">{inv.submittedBy}</td>
-                      <td className="p-3 text-muted-foreground">{inv.date}</td>
+                  {recentPayments.map((p) => (
+                    <tr key={p.id} className="border-b hover:bg-muted/30">
+                      <td className="p-3 font-medium">{p.id}</td>
+                      <td className="p-3">{p.vendor}</td>
+                      <td className="p-3 text-xs text-muted-foreground">{p.allocations.map((a) => a.grnRef).join(", ")}</td>
+                      <td className="p-3 font-medium tabular-nums">{fmtBdt(p.amount)}</td>
+                      <td className="p-3 text-muted-foreground">{p.method}</td>
+                      <td className="p-3">{p.paidBy}</td>
+                      <td className="p-3 text-muted-foreground">{p.date}</td>
                     </tr>
                   ))}
                 </tbody>

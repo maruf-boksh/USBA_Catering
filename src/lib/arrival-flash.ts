@@ -150,20 +150,20 @@ export function useArrivalFlash() {
 
     // First attempt synchronously, then retry up to ~1.5s in case the list
     // renders lazily (e.g. after a deep-link pagination jump).
-    const initialContainer = flashContainer();
+    flashContainer();
     const initialRows = flashRows();
     consumeIfDone();
 
-    // Toast fallback so the user always gets a visible cue even if the
-    // target element renders later or is somehow missing.
-    if (!initialContainer && initialRows === 0) {
-      toast.success(`Linked from dashboard → ${target ?? "rows"}`, { duration: 2500 });
-    } else if (rowIds.length > 0 && initialRows < rowIds.length) {
-      // Show how many rows we found vs requested (helps when paginated).
-      // Suppress for trivial counts.
-      if (rowIds.length >= 3) {
-        toast.success(`Highlighted ${initialRows} of ${rowIds.length} ${rowIds.length === 1 ? "row" : "rows"}.`, { duration: 2000 });
-      }
+    // Row-count cue: only when this page holds SOME (but not all) of the
+    // requested rows — e.g. the rest are on another pagination page. We
+    // deliberately do NOT toast when nothing matched: a stale or cross-page
+    // arrival payload (target not on this page) would otherwise announce itself
+    // on an unrelated page — e.g. "Linked from dashboard → qc-issues" popping up
+    // on Production Order. The visual flash (green ring / amber row tint) is the
+    // real cue, and late-rendering targets are still flashed by the retries
+    // below without any toast.
+    if (rowIds.length >= 3 && initialRows > 0 && initialRows < rowIds.length) {
+      toast.success(`Highlighted ${initialRows} of ${rowIds.length} rows.`, { duration: 2000 });
     }
 
     const retries: ReturnType<typeof setTimeout>[] = [];

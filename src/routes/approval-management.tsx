@@ -48,6 +48,7 @@ import { type WastageEntry, type WastageApprovalStep } from "@/routes/wastage-ma
 import { SEED_RETURNS, type PurchaseReturn } from "@/routes/purchase-return";
 import { type DelayEvent, type DelayApprovalRecord } from "@/routes/delay-management";
 import { getCriticalLmcsForApproval, LMC_APPROVALS_KEY, LMC_CHARGE, type LmcDecision } from "@/routes/lmc";
+import { APT_EXECUTIVES, HOC_NAMES, APT_EXEC_DESIG, HOC_DESIG } from "@/routes/dispatch-monitoring";
 
 type Category =
   | "Flight Orders"
@@ -172,7 +173,25 @@ function formatGalleyDuration(sec: number): string {
   return h > 0 ? `${h}h ${m}m ${s}s` : `${m}m ${s}s`;
 }
 
-const HOC_NAMES = ["Cmd. A. Rahman", "M. Jahangir", "S. Karim", "R. Ahmed"];
+const galleyAptDesig = (n: string) => APT_EXEC_DESIG[n] ?? "APT Executive";
+const galleyHocDesig = (n: string) => HOC_DESIG[n] ?? "Head of Catering";
+
+// Roster-backed signatory dropdown for galley sign-off — captured here at
+// approval (moved out of Loading QC), then stamped onto the record on approve.
+function GalleySignSelect({ label, value, options, desig, onChange }: {
+  label: string; value: string; options: readonly string[]; desig: (n: string) => string; onChange: (v: string) => void;
+}) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-0.5">{label}</div>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+        <SelectContent>{options.map((o) => <SelectItem key={o} value={o}>{o}</SelectItem>)}</SelectContent>
+      </Select>
+      <div className="text-[10px] text-slate-500 mt-0.5">{desig(value)}</div>
+    </div>
+  );
+}
 
 type ApprovalStatus = "Pending" | "Approved" | "Rejected" | "Reviewed";
 
@@ -465,6 +484,22 @@ export default function ApprovalManagementPage() {
   const [galleyDetailRecord, setGalleyDetailRecord] = useState<GalleyLoadingRecord | null>(null);
   const [galleyEditMode, setGalleyEditMode] = useState(false);
   const [galleyEditPlan, setGalleyEditPlan] = useState<GalleyPlan>({});
+  // Sign-off signatories captured here at approval (moved out of Loading QC).
+  const [galleySignPicks, setGalleySignPicks] = useState({ physicallyBy: "", checkedBy: "", handedBy: "" });
+
+  // Open the galley detail modal, seeding the sign-off picks from the record
+  // (or roster defaults) so the approver can confirm/adjust before approving.
+  const openGalleyDetail = (rec: GalleyLoadingRecord) => {
+    setGalleyDetailRecord(rec);
+    setGalleyEditMode(false);
+    setGalleyEditPlan(rec.galleyPlan);
+    setGalleySignPicks({
+      physicallyBy: rec.signOff?.physicallyHandedBy?.name || APT_EXECUTIVES[1],
+      checkedBy: rec.signOff?.flightCheckedBy?.name || APT_EXECUTIVES[2],
+      handedBy: rec.signOff?.handedOverBy?.name || HOC_NAMES[0],
+    });
+    setGalleyDetailOpen(true);
+  };
 
   // Poll sessionStorage for galley records from the other page
   useEffect(() => {
@@ -480,15 +515,33 @@ export default function ApprovalManagementPage() {
   }, []);
 
   function approveGalley(record: GalleyLoadingRecord, by: string) {
+    const { physicallyBy, checkedBy, handedBy } = galleySignPicks;
+    if (!physicallyBy || !checkedBy || !handedBy) {
+      toast.error("Complete the sign-off signatories before approving.");
+      return;
+    }
+    const at = new Date().toISOString().slice(0, 16).replace("T", " ");
+    // Capture the sign-off here (Loading QC no longer collects it). Keep an
+    // existing preparedBy if the sheet already carried one; otherwise stamp the
+    // approver as preparer.
+    const prepared = record.signOff?.preparedBy?.name
+      ? record.signOff.preparedBy
+      : { name: `${role} (GM/Admin)`, designation: "GM/Admin", signedAt: at };
+    const signOff: GalleyLoadingRecord["signOff"] = {
+      preparedBy: prepared,
+      physicallyHandedBy: { name: physicallyBy, designation: galleyAptDesig(physicallyBy), signedAt: at },
+      flightCheckedBy: { name: checkedBy, designation: galleyAptDesig(checkedBy), signedAt: at },
+      handedOverBy: { name: handedBy, designation: galleyHocDesig(handedBy), signedAt: at },
+    };
     const updated = galleyLoadingRecords.map((r) =>
       r.id === record.id
-        ? { ...r, galleyStatus: "approved" as GalleyStatus, approvedAt: new Date().toISOString().slice(0, 16).replace("T", " "), approvedBy: by }
+        ? { ...r, signOff, galleyStatus: "approved" as GalleyStatus, approvedAt: at, approvedBy: by }
         : r,
     );
     setGalleyLoadingRecords(updated);
     sessionStorage.setItem("galley_loading", JSON.stringify(updated));
     setGalleyDetailOpen(false);
-    toast.success("Galley approved — Ready To Fly!");
+    toast.success("Galley signed off & approved — Ready To Fly!");
   }
 
   function saveGalleyEdits(record: GalleyLoadingRecord, plan: GalleyPlan) {
@@ -1956,7 +2009,7 @@ export default function ApprovalManagementPage() {
                                 size="icon"
                                 variant="outline"
                                 className="h-7 w-7 text-muted-foreground hover:text-sky-600 hover:border-sky-400"
-                                onClick={() => { setGalleyDetailRecord(rec); setGalleyEditMode(false); setGalleyEditPlan(rec.galleyPlan); setGalleyDetailOpen(true); }}
+                                onClick={() => openGalleyDetail(rec)}
                                 title="View galley details"
                               >
                                 <Eye className="h-3.5 w-3.5" />
@@ -1996,7 +2049,7 @@ export default function ApprovalManagementPage() {
                                   size="icon"
                                   variant="outline"
                                   className="h-7 w-7 text-muted-foreground hover:text-emerald-600 hover:border-emerald-400"
-                                  onClick={() => { setGalleyDetailRecord(rec); setGalleyEditMode(false); setGalleyEditPlan(rec.galleyPlan); setGalleyDetailOpen(true); }}
+                                  onClick={() => openGalleyDetail(rec)}
                                   title="View galley details"
                                 >
                                   <Eye className="h-3.5 w-3.5" />
@@ -3622,27 +3675,40 @@ export default function ApprovalManagementPage() {
 
           {galleyDetailRecord && (
             <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
-              {/* Sign-off section */}
+              {/* Sign-off section — editable while awaiting approval, read-only once approved */}
               <div>
                 <p className="text-[10px] font-bold uppercase tracking-widest text-sky-700 mb-2">Sign-Off</p>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 rounded-md border border-sky-100 bg-sky-50/40 p-3 text-sm">
-                  {[
-                    ["Dispatch Sheet Prepared By", galleyDetailRecord.signOff.preparedBy],
-                    ["Physically Handed By", galleyDetailRecord.signOff.physicallyHandedBy],
-                    ["Flight Checked By", galleyDetailRecord.signOff.flightCheckedBy],
-                    ["Handed Over By", galleyDetailRecord.signOff.handedOverBy],
-                  ].map(([label, entry]) => {
-                    const log = entry as SignOffLog;
-                    return (
-                      <div key={label as string}>
-                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">{label as string}</div>
-                        <div className="font-semibold mt-0.5 text-sm">{log?.name || "—"}</div>
-                        {log?.designation && <div className="text-[10px] text-slate-500">{log.designation}</div>}
-                        {log?.signedAt && <div className="text-[10px] text-slate-400 tabular-nums">{log.signedAt}</div>}
-                      </div>
-                    );
-                  })}
-                </div>
+                {galleyDetailRecord.galleyStatus === "awaiting_approval" ? (
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3 rounded-md border border-sky-100 bg-sky-50/40 p-3">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-0.5">Dispatch Sheet Prepared By</div>
+                      <div className="font-semibold text-sm">{galleyDetailRecord.signOff?.preparedBy?.name || `${role} (GM/Admin)`}</div>
+                      <div className="text-[10px] text-slate-500">{galleyDetailRecord.signOff?.preparedBy?.designation || "GM/Admin"}</div>
+                    </div>
+                    <GalleySignSelect label="Physically Handed Over By" value={galleySignPicks.physicallyBy} options={APT_EXECUTIVES} desig={galleyAptDesig} onChange={(v) => setGalleySignPicks((p) => ({ ...p, physicallyBy: v }))} />
+                    <GalleySignSelect label="Flight Checked Over By" value={galleySignPicks.checkedBy} options={APT_EXECUTIVES} desig={galleyAptDesig} onChange={(v) => setGalleySignPicks((p) => ({ ...p, checkedBy: v }))} />
+                    <GalleySignSelect label="Flight Handed Over By" value={galleySignPicks.handedBy} options={HOC_NAMES} desig={galleyHocDesig} onChange={(v) => setGalleySignPicks((p) => ({ ...p, handedBy: v }))} />
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 rounded-md border border-sky-100 bg-sky-50/40 p-3 text-sm">
+                    {[
+                      ["Dispatch Sheet Prepared By", galleyDetailRecord.signOff.preparedBy],
+                      ["Physically Handed By", galleyDetailRecord.signOff.physicallyHandedBy],
+                      ["Flight Checked By", galleyDetailRecord.signOff.flightCheckedBy],
+                      ["Handed Over By", galleyDetailRecord.signOff.handedOverBy],
+                    ].map(([label, entry]) => {
+                      const log = entry as SignOffLog;
+                      return (
+                        <div key={label as string}>
+                          <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">{label as string}</div>
+                          <div className="font-semibold mt-0.5 text-sm">{log?.name || "—"}</div>
+                          {log?.designation && <div className="text-[10px] text-slate-500">{log.designation}</div>}
+                          {log?.signedAt && <div className="text-[10px] text-slate-400 tabular-nums">{log.signedAt}</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               {/* Loading timeline */}
@@ -3729,7 +3795,7 @@ export default function ApprovalManagementPage() {
                 className="bg-emerald-600 hover:bg-emerald-700 text-white"
                 onClick={() => approveGalley(galleyDetailRecord, role || HOC_NAMES[0])}
               >
-                Approve
+                Sign Off & Approve
               </Button>
             )}
             <Button variant="outline" onClick={() => { setGalleyDetailOpen(false); setGalleyEditMode(false); }}>Close</Button>

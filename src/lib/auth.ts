@@ -44,6 +44,16 @@ export const DEMO_USERS: ReadonlyArray<{ userId: string; password: string; user:
     },
   },
   {
+    userId: "ikramul",
+    password: "ikramul123",
+    user: {
+      userId: "ikramul",
+      name: "Ikramul Haque Khan",
+      email: "ikramul.khan@usbair.com",
+      role: "GM/Admin",
+    },
+  },
+  {
     userId: "manager",
     password: "manager123",
     user: {

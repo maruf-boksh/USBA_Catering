@@ -118,7 +118,7 @@ export const INITIAL_ROLE_PERMISSIONS: RolePermissionsByRole = {
 
   // Reports & Analytics — read-only across reporting surfaces, org scope.
   [REPORTS]: merge(
-    grantModules(['dashboard', 'reports', 'accounts', 'archive'], 'read', 'organization'),
+    grantModules(['dashboard', 'reports', 'accounts'], 'read', 'organization'),
   ),
 };
 

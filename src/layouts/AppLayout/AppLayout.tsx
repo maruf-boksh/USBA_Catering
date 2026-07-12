@@ -213,6 +213,14 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
       onSignOut?.();
       return;
     }
+    if (key === 'view-profile') {
+      navigate('/profile');
+      return;
+    }
+    if (key === 'settings') {
+      navigate('/account-settings');
+      return;
+    }
     if (key.startsWith('role:')) {
       setRole(key.slice('role:'.length));
     }

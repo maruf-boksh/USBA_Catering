@@ -34,7 +34,7 @@ function scopeLabel(rule: FormAccessRule): string {
   const concern = findConcern(TENANTS, rule.tenantCode, rule.concernCode)?.name ?? rule.concernCode;
   const sub = rule.subConcernCode
     ? findSubConcern(TENANTS, rule.tenantCode, rule.concernCode, rule.subConcernCode)?.name ?? rule.subConcernCode
-    : "All sub-concerns";
+    : "All warehouses";
   return `${tenant} › ${concern} › ${sub}`;
 }
 
@@ -75,7 +75,7 @@ export default function FormAccessControlPage() {
     <>
       <PageHeader
         title="Form Access Control"
-        subtitle="Control which fields are visible and mandatory on a form, per tenant / concern / sub-concern scope."
+        subtitle="Control which fields are visible and mandatory on a form, per company / office / warehouse scope."
         actions={
           view === "list" ? (
             <Button onClick={openCreate}><Plus className="h-4 w-4 mr-1" /> New Rule</Button>
@@ -227,7 +227,7 @@ function RuleEditor({
 
   function save() {
     if (!tenantCode || !concernCode) {
-      toast.error("Tenant and Concern are required.");
+      toast.error("Company and Office are required.");
       return;
     }
     const duplicate = allRules.some((r) =>
@@ -280,26 +280,26 @@ function RuleEditor({
               </select>
             </div>
             <div>
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Tenant <span className="text-destructive">*</span></Label>
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Company <span className="text-destructive">*</span></Label>
               <select value={tenantCode} onChange={(e) => changeTenant(e.target.value)} disabled={isEdit} className={selectCls}>
                 {TENANTS.map((t) => <option key={t.code} value={t.code}>{t.name}</option>)}
               </select>
             </div>
             <div>
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Concern <span className="text-destructive">*</span></Label>
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Office <span className="text-destructive">*</span></Label>
               <select value={concernCode} onChange={(e) => changeConcern(e.target.value)} disabled={isEdit} className={selectCls}>
                 {tenant?.concerns.map((c) => <option key={c.code} value={c.code}>{c.name}</option>)}
               </select>
             </div>
             <div>
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Sub-Concern</Label>
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">Warehouse</Label>
               <select
                 value={subConcernCode || ALL_SUB_CONCERNS}
                 onChange={(e) => setSubConcernCode(e.target.value === ALL_SUB_CONCERNS ? "" : e.target.value)}
                 disabled={isEdit}
                 className={selectCls}
               >
-                <option value={ALL_SUB_CONCERNS}>All sub-concerns</option>
+                <option value={ALL_SUB_CONCERNS}>All warehouses</option>
                 {concern?.subConcerns.map((s) => <option key={s.code} value={s.code}>{s.name}</option>)}
               </select>
             </div>

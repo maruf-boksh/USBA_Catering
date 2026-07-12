@@ -1,5 +1,7 @@
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { usePersistedState } from "@/lib/use-persisted-state";
+import { flagArrival } from "@/lib/arrival-flash";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -126,6 +128,7 @@ export default function ComparativeStatementPage() {
   const [view, setView] = useState<"list" | "create">("list");
   const [rows, setRows] = usePersistedState<ComparativeStatement[]>("comparative-statement-rows", SEED_CS);
   const { addPurchaseOrder } = useWorkflow();
+  const navigate = useNavigate();
 
   const nextId = `CS-${new Date().getFullYear()}-${String(rows.length + 22).padStart(4, "0")}`;
 
@@ -139,6 +142,10 @@ export default function ComparativeStatementPage() {
   // quotation rate (not the item's list cost). This closes the loop from
   // RFQ → Quotation → Comparison → Award straight into a costed PO.
   const generatePOs = (cs: ComparativeStatement) => {
+    if (cs.status !== "Approved") {
+      toast.error("Only approved comparative statements can generate a Purchase Order.");
+      return;
+    }
     if (cs.poGeneratedAt) { toast.info(`POs were already generated from ${cs.id}.`); return; }
     const awarded = cs.lines.filter((l) => l.awardedSupplier);
     if (awarded.length === 0) { toast.error("Award every line to a supplier first."); return; }
@@ -187,6 +194,9 @@ export default function ComparativeStatementPage() {
     toast.success(
       `${created.length} Purchase Order${created.length === 1 ? "" : "s"} generated from ${cs.id} — ${created.join(", ")} (Pending Approval).`,
     );
+    // Take the user to the Purchase Orders page, flashing the newly created rows.
+    flagArrival({ target: "po-list", ids: created });
+    navigate("/procurement");
   };
 
   return (
@@ -258,6 +268,13 @@ function CsList({ rows, editors, onGeneratePO }: {
         selectable={false}
         actions={(r) => {
           const hasAward = r.lines.some((l) => l.awardedSupplier);
+          const isApproved = r.status === "Approved";
+          const canGenerate = isApproved && hasAward;
+          const generateTitle = !isApproved
+            ? "Only approved comparative statements can generate a PO"
+            : !hasAward
+              ? "Award lines to a supplier first"
+              : "Generate Purchase Order(s) from the awarded lines";
           return (
             <div className="flex items-center justify-end gap-1.5">
               {r.poGeneratedAt ? (
@@ -269,8 +286,8 @@ function CsList({ rows, editors, onGeneratePO }: {
                   size="sm"
                   variant="outline"
                   className="h-7 px-2 text-xs disabled:opacity-40"
-                  disabled={!hasAward}
-                  title={hasAward ? "Generate Purchase Order(s) from the awarded lines" : "Award lines to a supplier first"}
+                  disabled={!canGenerate}
+                  title={generateTitle}
                   onClick={() => onGeneratePO(r)}
                 >
                   <ShoppingCart className="h-3.5 w-3.5 mr-1" /> Generate PO

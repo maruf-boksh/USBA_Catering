@@ -23,12 +23,12 @@ import RequestForQuotationPage from "@/routes/request-for-quotation";
 import QuotationEntryPage from "@/routes/quotation-entry";
 import ComparativeStatementPage from "@/routes/comparative-statement";
 import ProcurementPage from "@/routes/procurement";
+import PurchasePaymentPage from "@/routes/purchase-payment";
 import ReceiveItemPage from "@/routes/receive-item";
 import QualityControlPage from "@/routes/quality-control";
 import PurchaseReturnPage from "@/routes/purchase-return";
 import PurchaseReportsPage from "@/routes/purchase-reports";
 import AccountsInvoicesPage from "@/routes/accounts-invoices";
-import AccountsApprovalsPage from "@/routes/accounts-approvals";
 import AccountsExpensesPage from "@/routes/accounts-expenses";
 import AccountsPage from "@/routes/accounts";
 import HygieneMonitoringPage from "@/routes/hygiene-monitoring";
@@ -75,6 +75,9 @@ import ProductionOverviewPage from "@/routes/production-overview";
 import InventoryOverviewPage from "@/routes/inventory-overview";
 import SupplyChainOverviewPage from "@/routes/supply-chain-overview";
 import AccountsOverviewPage from "@/routes/accounts-overview";
+import AccountsCashBankPage from "@/routes/accounts-cash-bank";
+import ProfilePage from "@/routes/profile";
+import AccountSettingsPage from "@/routes/account-settings";
 import FoodSafetyOverviewPage from "@/routes/food-safety-overview";
 import PackagingDispatchOverviewPage from "@/routes/packaging-dispatch-overview";
 import AirlineConsumablesOverviewPage from "@/routes/airline-consumables-overview";
@@ -117,9 +120,9 @@ export function App() {
             <Route path="/receive-item" element={<ReceiveItemPage />} />
             <Route path="/quality-control" element={<QualityControlPage />} />
             <Route path="/purchase-return" element={<PurchaseReturnPage />} />
+            <Route path="/purchase-payment" element={<PurchasePaymentPage />} />
             <Route path="/purchase-reports" element={<PurchaseReportsPage />} />
             <Route path="/accounts-invoices" element={<AccountsInvoicesPage />} />
-            <Route path="/accounts-approvals" element={<AccountsApprovalsPage />} />
             <Route path="/accounts-expenses" element={<AccountsExpensesPage />} />
             <Route path="/accounts" element={<AccountsPage />} />
             <Route path="/hygiene-monitoring" element={<HygieneMonitoringPage />} />
@@ -143,6 +146,8 @@ export function App() {
             <Route path="/equipment-damage" element={<EquipmentDamagePage />} />
             <Route path="/maintenance" element={<MaintenancePage />} />
             <Route path="/reports" element={<ReportsPage />} />
+            <Route path="/profile" element={<ProfilePage />} />
+            <Route path="/account-settings" element={<AccountSettingsPage />} />
             <Route path="/users" element={<UsersPage />} />
             <Route path="/audit" element={<AuditPage />} />
             <Route path="/approval-management" element={<ApprovalManagementPage />} />
@@ -168,6 +173,7 @@ export function App() {
             <Route path="/inventory-overview" element={<InventoryOverviewPage />} />
             <Route path="/supply-chain-overview" element={<SupplyChainOverviewPage />} />
             <Route path="/accounts-overview" element={<AccountsOverviewPage />} />
+            <Route path="/accounts-cash-bank" element={<AccountsCashBankPage />} />
             <Route path="/food-safety-overview" element={<FoodSafetyOverviewPage />} />
             <Route path="/packaging-dispatch-overview" element={<PackagingDispatchOverviewPage />} />
             <Route path="/airline-consumables-overview" element={<AirlineConsumablesOverviewPage />} />

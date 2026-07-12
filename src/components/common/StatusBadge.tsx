@@ -14,6 +14,7 @@ const MAP: Record<string, string> = {
   ok:                    "bg-[#ECFDF5] text-[#059669] border border-[#A7F3D0]",
   approved:              "bg-[#ECFDF5] text-[#059669] border border-[#A7F3D0]",
   delivered:             "bg-[#ECFDF5] text-[#059669] border border-[#A7F3D0]",
+  received:              "bg-[#ECFDF5] text-[#059669] border border-[#A7F3D0]",
   pass:                  "bg-[#ECFDF5] text-[#059669] border border-[#A7F3D0]",
   imported:              "bg-[#ECFDF5] text-[#059669] border border-[#A7F3D0]",
   operational:           "bg-[#ECFDF5] text-[#059669] border border-[#A7F3D0]",

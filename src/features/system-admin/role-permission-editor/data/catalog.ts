@@ -182,7 +182,6 @@ const MODULE_ICON: Record<string, string> = {
   reports: 'BarChart3',
   admin: 'Users',
   config: 'Settings',
-  archive: 'Archive',
   accounts: 'Wallet',
 };
 

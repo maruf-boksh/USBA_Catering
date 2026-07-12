@@ -134,7 +134,7 @@ const SRC: Record<string, Group> = {
   },
   "/supply-chain-overview": {
     columns: [["col:po-num", "PO #"], ["col:vendor", "Vendor"], ["col:date", "Date"], ["col:items", "Items"], ["col:amount", "Amount"], ["col:status", "Status"]],
-    kpis: [["kpi-total-pos", "Total POs"], ["kpi-po-value", "PO Value"], ["kpi-pending-approval", "Pending Approval"], ["kpi-ordered", "Ordered"], ["kpi-delivered", "Delivered"], ["kpi-open-prs", "Open PRs"], ["kpi-grns", "GRNs"], ["kpi-avg-vendor-rating", "Avg Vendor Rating"]],
+    kpis: [["kpi-total-pos", "Total POs"], ["kpi-po-value", "PO Value"], ["kpi-pending-approval", "Pending Approval"], ["kpi-ordered", "Ordered"], ["kpi-received", "Received"], ["kpi-open-prs", "Open PRs"], ["kpi-grns", "GRNs"], ["kpi-avg-vendor-rating", "Avg Vendor Rating"]],
     sections: [["section-pos-by-status", "POs by Status"], ["section-spend-by-vendor-top-6", "Spend by Vendor (Top 6)"], ["section-recent-purchase-orders", "Recent Purchase Orders"]],
   },
   "/purchase-requisition": {
@@ -202,12 +202,6 @@ const SRC: Record<string, Group> = {
     kpis: [["kpi-total-invoiced", "Total Invoiced"], ["kpi-pending-review", "Pending Review"], ["kpi-approved", "Approved"], ["kpi-total-paid", "Total Paid"]],
     actions: [["action-export", "Export"], ["action-record-invoice", "Record Invoice"]],
     fields: [["field-vendor", "Vendor"], ["field-linked-po", "Linked PO"], ["field-flight-ref", "Flight Ref"], ["field-invoice-date", "Invoice Date"], ["field-due-date", "Due Date"], ["field-amount", "Amount (৳)"], ["field-payment-method", "Payment Method"], ["field-submitted-by", "Submitted By"], ["field-notes", "Notes"]],
-  },
-  "/accounts-approvals": {
-    columns: [["col:invoice", "Invoice #"], ["col:vendor", "Vendor"], ["col:po-ref", "PO Ref"], ["col:flight", "Flight"], ["col:amount", "Amount (৳)"], ["col:due-date", "Due Date"], ["col:submitted-by", "Submitted By"], ["col:status", "Status"], ["col:actions", "Actions"]],
-    kpis: [["kpi-awaiting-approval", "Awaiting Approval"], ["kpi-approved-pending-payment", "Approved — Pending Payment"], ["kpi-paid-this-period", "Paid This Period"], ["kpi-rejected", "Rejected"]],
-    fields: [["field-rejection-reason", "Rejection Reason"]],
-    sections: [["section-purchase-orders-awaiting-approval", "Purchase Orders Awaiting Approval"], ["section-awaiting-approval", "Awaiting Approval"], ["section-approved-awaiting-payment", "Approved — Awaiting Payment"]],
   },
   "/accounts-expenses": {
     columns: [["col:vendor", "Vendor"], ["col:invoices", "Invoices"], ["col:total", "Total (৳)"], ["col:paid", "Paid (৳)"], ["col:outstanding", "Outstanding (৳)"], ["col:status", "Status"]],

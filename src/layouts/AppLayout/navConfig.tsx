@@ -38,6 +38,7 @@ import {
   Receipt,
   BadgeCheck,
   PieChart,
+  Landmark,
   ShieldCheck,
   ThermometerSun,
   PackageCheck,
@@ -58,7 +59,6 @@ import {
   BadgeDollarSign,
   GitBranch,
   Trash2,
-  Archive,
   Replace,
 } from 'lucide-react';
 
@@ -123,10 +123,10 @@ export const NAV_MODULES: NavModule[] = [
   // ── Procurement (top-level, directly below Production) ──────────────────────
   {
     key: 'supply',
-    label: 'Procurement',
+    label: 'Local Purchase',
     icon: I(ShoppingCart),
     children: [
-      { key: '/supply-chain-overview',  label: 'Procurement Dashboard',  icon: I(LayoutDashboard) },
+      { key: '/supply-chain-overview',  label: 'Purchase Dashboard',     icon: I(LayoutDashboard) },
       { key: '/purchase-requisition',   label: 'Purchase Requisition',   icon: I(FileText) },
       { key: '/request-for-quotation',  label: 'Request for Quotation',  icon: I(MailQuestion) },
       { key: '/quotation-entry',        label: 'Quotation Entry',        icon: I(ClipboardList) },
@@ -135,6 +135,7 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/receive-item',           label: 'Receive Items',          icon: I(Truck) },
       { key: '/quality-control',        label: 'Quality Control',        icon: I(ShieldCheck) },
       { key: '/purchase-return',        label: 'Purchase Return',        icon: I(Undo2) },
+      { key: '/purchase-payment',       label: 'Purchase Payment',       icon: I(Wallet) },
       { key: '/purchase-reports',       label: 'Purchase Reports',       icon: I(LineChart) },
     ],
   },
@@ -152,6 +153,20 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/transfer',          label: 'Transfer',         icon: I(MoveRight) },
       { key: '/inventory',         label: 'Stock Overview',   icon: I(Package) },
       { key: '/stock-adjustment',  label: 'Stock Adjustment', icon: I(SlidersHorizontal) },
+    ],
+  },
+
+  // ── Accounts (under Inventory & Store) ──────────────────────────────────────
+  {
+    key: 'accounts',
+    label: 'Accounts',
+    icon: I(Wallet),
+    children: [
+      { key: '/accounts-overview',  label: 'Accounts Dashboard',    icon: I(LayoutDashboard) },
+      { key: '/accounts-invoices',  label: 'Invoices & Payments',   icon: I(Receipt) },
+      { key: '/accounts-cash-bank', label: 'Finance & Banking',      icon: I(Landmark) },
+      { key: '/accounts-expenses',  label: 'Expense Overview',      icon: I(PieChart) },
+      { key: '/accounts',           label: 'Accounts Summary',      icon: I(Wallet) },
     ],
   },
 
@@ -263,27 +278,6 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/config-role-setup', label: 'Role Setup', icon: I(UserCog) },
       { key: '/config-role-permission-editor', label: 'Role Permission Editor', icon: I(KeyRound) },
       { key: '/config-form-access-control', label: 'Form Access Control', icon: I(LockKeyhole) },
-    ],
-  },
-
-  // ── 15. Archive (Accounts) ──────────────────────────────────────────────────
-  {
-    key: 'archive',
-    label: 'Archive',
-    icon: I(Archive),
-    children: [
-      {
-        key: 'accounts',
-        label: 'Accounts',
-        icon: I(Wallet),
-        children: [
-          { key: '/accounts-overview',  label: 'Accounts Dashboard',    icon: I(LayoutDashboard) },
-          { key: '/accounts-invoices',  label: 'Invoices & Payments',   icon: I(Receipt) },
-          { key: '/accounts-approvals', label: 'Payment Approvals',     icon: I(BadgeCheck) },
-          { key: '/accounts-expenses',  label: 'Expense Overview',      icon: I(PieChart) },
-          { key: '/accounts',           label: 'Accounts Summary',      icon: I(Wallet) },
-        ],
-      },
     ],
   },
 ];
