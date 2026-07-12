@@ -12,12 +12,15 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
 import { toast } from "sonner";
 import {
   Plus, Minus, Truck, Pencil, Trash2, ThermometerSun, ShieldCheck,
   AlertOctagon, AlertTriangle, PlaneTakeoff, PlaneLanding, Warehouse,
   Clock, User, CheckCircle2, Eye, Smartphone, ChevronRight, QrCode, X as CloseIcon, Timer, Play,
-  Search,
+  Search, Package, ScanLine, MoreHorizontal,
 } from "lucide-react";
 import {
   flights as FLIGHT_BOARD, seedFlightOrders, activeOffices, activeWarehousesByOffice,
@@ -25,7 +28,7 @@ import {
   type Aircraft, type Airline,
 } from "@/lib/sample-data";
 import { getFlightOrders } from "@/lib/flight-orders-store";
-import { INITIAL_RECORDS as DISPATCH_SEED_RECORDS } from "@/routes/dispatch";
+import { INITIAL_RECORDS as DISPATCH_SEED_RECORDS, INITIAL_PACKAGING_ROWS, type PackagingRow } from "@/routes/dispatch";
 import { useRole } from "@/lib/roles";
 import { useWorkflow } from "@/lib/workflow-store";
 import { useDispatchMonitoringSettings } from "@/lib/dispatch-monitoring-settings";
@@ -114,6 +117,31 @@ export type DispatchEntry = {
   receivedBy: string; receivedDesignation: string; receivedAt: string; receivedRemarks: string;
   /** Human-friendly dispatch number (e.g. DSP-0001), assigned on creation. */
   dispatchNo?: string;
+  /** Label-scan summary captured on airport receipt. */
+  containersScanned?: number;
+  containersTotal?: number;
+};
+
+// A dispatched meal item (one Production line) scanned on airport receipt.
+// Sourced from the Dispatch table's packaging rows so the round-trip legs,
+// order, and per-meal warehouse/production data all show through.
+type ScanMealRow = {
+  id: string;
+  productionOrderId: string;
+  mealName: string;
+  mealType: string;
+  qty: number;
+  warehouse: string;
+  label: string;          // scannable label revealed on demand
+};
+type AirportLeg = {
+  flight: string;
+  direction: string;      // Outbound / Return
+  sector: string;
+  depTime: string;
+  date: string;
+  rows: ScanMealRow[];
+  totalQty: number;
 };
 type FormState = {
   flightId: string; packagingDate: string; mealLines: MealLine[];
@@ -412,6 +440,14 @@ const totalQty   = (lines: MealLine[]) => lines.reduce((s, l) => s + (parseInt(l
 export const flightLabel = (id: string) => { const f = flights.find((x) => x.id === id); return f ? `${f.flight} — ${f.sector}` : id; };
 const flightNo    = (id: string) => { const f = flights.find((x) => x.id === id); return f ? f.flight : id; };
 const flightDest  = (id: string) => { const f = flights.find((x) => x.id === id); return f ? f.sector.split("-").pop() ?? "—" : "—"; };
+// Meal-type badge tones for the Order Details table (Dispatch's own map is not exported).
+const MEAL_TYPE_TONE: Record<string, string> = {
+  Breakfast: "bg-amber-100 text-amber-700",
+  Lunch: "bg-orange-100 text-orange-700",
+  Dinner: "bg-indigo-100 text-indigo-700",
+  Snack: "bg-sky-100 text-sky-700",
+  Special: "bg-fuchsia-100 text-fuchsia-700",
+};
 function dispatchStatusBadge(entry: DispatchEntry) {
   if (entry.receivedAt) return { label: "Received by Airport", cls: "bg-emerald-100 text-emerald-700" };
   if (entry.approvalStage >= 3) return { label: "Forwarded to Airport", cls: "bg-blue-100 text-blue-700" };
@@ -549,6 +585,7 @@ export default function DispatchMonitoring() {
   const [hocRemarksInput, setHocRemarksInput] = useState("");
   // Daily Product Dispatch Monitoring — table search + date-range filter.
   const [dmSearch, setDmSearch] = useState("");
+  const [dmStatus, setDmStatus] = useState("all");
   const [dmFrom, setDmFrom] = useState("");
   const [dmTo, setDmTo] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
@@ -560,6 +597,20 @@ export default function DispatchMonitoring() {
   // ── Airport receive panel state ──────────────────────────────────────────────
   const [showAirportPanel, setShowAirportPanel] = useState(false);
   const [isAirportReceiveMode, setIsAirportReceiveMode] = useState(false);
+  // Airport-receipt scanning — sourced from the Dispatch table's packaging rows.
+  const [dispatchPackagingRows] = usePersistedState<PackagingRow[]>("dispatch-packaging-rows", INITIAL_PACKAGING_ROWS);
+  const [scannedRowIds, setScannedRowIds] = useState<Set<string>>(new Set());
+  const [activeScanRowId, setActiveScanRowId] = useState<string | null>(null);
+  const [orderDetailFlight, setOrderDetailFlight] = useState<string | null>(null);
+  // Order Details opens in scan mode (scan icons shown) only from ⋯ → Scan Items;
+  // the Meals-column / View action opens it read-only.
+  const [orderDetailScanMode, setOrderDetailScanMode] = useState(false);
+  // Gate temperature locks once entered (recorded value can't be changed).
+  const [gateTempLocked, setGateTempLocked] = useState(false);
+  // Dispatched-batch table filters.
+  const [batchFrom, setBatchFrom] = useState("");
+  const [batchTo, setBatchTo] = useState("");
+  const [batchStatus, setBatchStatus] = useState("all");
 
   // ── Mobile App View state ───────────────────────────────────────────────────
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -626,6 +677,92 @@ export default function DispatchMonitoring() {
   const filteredFlights = depTime ? flights.filter((f) => f.dep === depTime) : flights;
   const selectedFlight = flights.find((f) => f.id === form.flightId);
 
+  // Fetch the dispatch being received from the Dispatch table (persisted
+  // packaging rows), matched by the entry's flight. This surfaces the whole
+  // round trip — both legs, the order #, and every meal's production/warehouse
+  // — instead of the monitoring entry's own thin meal lines.
+  const airportDispatch = useMemo<{ dispatchId: string; orderNo: string; legs: AirportLeg[] }>(() => {
+    const fno = flightNo(form.flightId);
+    const myRows = dispatchPackagingRows.filter((r) => r.flight === fno);
+    const dspRef = myRows[0]?.dspRef;
+    const orderNo = myRows[0]?.orderNo;
+    const allRows = dspRef ? dispatchPackagingRows.filter((r) => r.dspRef === dspRef) : myRows;
+    const orders = getFlightOrders();
+    const toRow = (r: PackagingRow): ScanMealRow => ({
+      id: r.id,
+      productionOrderId: r.productionOrderId ?? "—",
+      mealName: r.mealName,
+      mealType: r.mealType,
+      qty: r.qty,
+      warehouse: r.section,
+      // Exact label printed at the catering point (matches Dispatch's labelCode).
+      label: `LBL-${r.id}`,
+    });
+
+    if (allRows.length > 0) {
+      const legFlights: string[] = [];
+      for (const r of allRows) if (!legFlights.includes(r.flight)) legFlights.push(r.flight);
+      const legs: AirportLeg[] = legFlights.map((lf) => {
+        const rows = allRows.filter((r) => r.flight === lf);
+        const fo = orders.find((o) => o.flight === lf && (!orderNo || o.orderNo === orderNo)) ?? orders.find((o) => o.flight === lf);
+        const meta = flights.find((f) => f.flight === lf);
+        return {
+          flight: lf,
+          direction: fo?.direction ?? "Outbound",
+          sector: fo?.sector ?? meta?.sector ?? "—",
+          depTime: rows[0]?.depTime ?? meta?.dep ?? "—",
+          date: rows[0]?.date ?? "—",
+          rows: rows.map(toRow),
+          totalQty: rows.reduce((s, r) => s + r.qty, 0),
+        };
+      });
+      return { dispatchId: dspRef ?? formDispatchNo, orderNo: orderNo ?? "—", legs };
+    }
+
+    // Fallback — no Dispatch-table match: show the entry's own meal lines as one leg.
+    const rows: ScanMealRow[] = form.mealLines.filter((l) => l.qty).map((l, i) => ({
+      id: `ml-${i}`, productionOrderId: "—", mealName: l.type, mealType: "Regular",
+      qty: Number(l.qty) || 0, warehouse: "—", label: `LBL-${formDispatchNo}-${i + 1}`,
+    }));
+    return {
+      dispatchId: formDispatchNo,
+      orderNo: "—",
+      legs: rows.length ? [{
+        flight: fno, direction: "Outbound", sector: selectedFlight?.sector ?? "—",
+        depTime: selectedFlight?.dep ?? "—", date: form.packagingDate, rows,
+        totalQty: rows.reduce((s, r) => s + r.qty, 0),
+      }] : [],
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.flightId, form.mealLines, form.packagingDate, dispatchPackagingRows, formDispatchNo]);
+
+  const airportScanRows = airportDispatch.legs.flatMap((l) => l.rows);
+  const allRowsScanned = airportScanRows.length > 0 && airportScanRows.every((r) => scannedRowIds.has(r.id));
+  const legScanned = (leg: AirportLeg) => leg.rows.length > 0 && leg.rows.every((r) => scannedRowIds.has(r.id));
+
+  // Batch table rows after the date-range + status filters.
+  const visibleLegs = airportDispatch.legs.filter((leg) => {
+    if (batchFrom && leg.date < batchFrom) return false;
+    if (batchTo && leg.date > batchTo) return false;
+    if (batchStatus !== "all" && (legScanned(leg) ? "Scan Completed" : "Pending Scanning") !== batchStatus) return false;
+    return true;
+  });
+
+  const openOrderDetails = (flight: string, scan = false) => { setOrderDetailFlight(flight); setOrderDetailScanMode(scan); setActiveScanRowId(null); };
+
+  // Scan one meal item's label. When every item across both legs is scanned the
+  // dispatch reads "Scan Completed".
+  const scanRow = (rowId: string) => {
+    const next = new Set(scannedRowIds); next.add(rowId);
+    setScannedRowIds(next);
+    setActiveScanRowId(null);
+    if (airportScanRows.length > 0 && airportScanRows.every((r) => next.has(r.id))) {
+      toast.success("All items scanned — Scan Completed. Ready to Save And Accept.");
+    } else {
+      toast.success("Scan Completed.");
+    }
+  };
+
   const handleFlightSelect = (flightId: string) => {
     const f = flights.find((x) => x.id === flightId);
     setForm((prev) => ({
@@ -641,6 +778,8 @@ export default function DispatchMonitoring() {
     setShowAirportPanel(false); setIsAirportReceiveMode(false);
     setFormLoadStartIso(""); setFormTimerTick(0);
     setUnloadStartIso(""); setUnloadEndTime(""); setUnloadTimerTick(0);
+    setScannedRowIds(new Set()); setActiveScanRowId(null); setOrderDetailFlight(null);
+    setOrderDetailScanMode(false); setGateTempLocked(false);
   };
 
   const openNew = () => {
@@ -752,6 +891,11 @@ export default function DispatchMonitoring() {
     setShowAirportPanel(true);
     setIsAirportReceiveMode(true);
     setUnloadStartIso(""); setUnloadEndTime(""); setUnloadTimerTick(0);
+    // Fresh scan session — the dispatched items are fetched live from the
+    // Dispatch table via the airportDispatch memo.
+    setScannedRowIds(new Set()); setActiveScanRowId(null); setOrderDetailFlight(null);
+    setOrderDetailScanMode(false); setGateTempLocked(!!entry.gateTempGate08);
+    setBatchFrom(""); setBatchTo(""); setBatchStatus("all");
   };
 
   const validate = () => {
@@ -908,6 +1052,8 @@ export default function DispatchMonitoring() {
       receivedRemarks: form.receiverRemarks,
       forwardedToAirportAt: existing?.forwardedToAirportAt,
       dispatchNo: existing?.dispatchNo ?? nextDispatchNo,
+      containersScanned: airportScanRows.filter((r) => scannedRowIds.has(r.id)).length,
+      containersTotal: airportScanRows.length,
     };
     if (editId) {
       setEntries((prev) => prev.map((e) => e.id === editId ? { ...e, ...base } : e));
@@ -1066,6 +1212,7 @@ export default function DispatchMonitoring() {
   // KPI totals above stay based on the full `entries` set.
   const dmQuery = dmSearch.trim().toLowerCase();
   const visibleEntries = entries.filter((e) => {
+    if (dmStatus !== "all" && dispatchStatusBadge(e).label !== dmStatus) return false;
     if (dmFrom && e.packagingDate < dmFrom) return false;
     if (dmTo && e.packagingDate > dmTo) return false;
     if (dmQuery) {
@@ -1108,28 +1255,33 @@ export default function DispatchMonitoring() {
         </div>
 
         <div className="flex items-center gap-1.5">
+          <span className="text-xs text-muted-foreground whitespace-nowrap">Status</span>
+          <Select value={dmStatus} onValueChange={setDmStatus}>
+            <SelectTrigger className="h-9 w-44 text-sm"><SelectValue placeholder="All statuses" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All statuses</SelectItem>
+              <SelectItem value="Pending">Pending</SelectItem>
+              <SelectItem value="Verified">Verified</SelectItem>
+              <SelectItem value="Forwarded to Airport">Forwarded to Airport</SelectItem>
+              <SelectItem value="Received by Airport">Received by Airport</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div className="flex items-center gap-1.5">
           <span className="text-xs text-muted-foreground whitespace-nowrap">From</span>
           <Input type="date" value={dmFrom} onChange={(e) => setDmFrom(e.target.value)}
             className="h-9 w-36 tabular-nums" />
           <span className="text-xs text-muted-foreground whitespace-nowrap">To</span>
           <Input type="date" value={dmTo} onChange={(e) => setDmTo(e.target.value)}
             className="h-9 w-36 tabular-nums" />
-          {(dmFrom || dmTo || dmSearch) && (
+          {(dmFrom || dmTo || dmSearch || dmStatus !== "all") && (
             <Button size="sm" variant="ghost" className="h-9 text-xs text-muted-foreground"
-              onClick={() => { setDmFrom(""); setDmTo(""); setDmSearch(""); }}>
+              onClick={() => { setDmFrom(""); setDmTo(""); setDmSearch(""); setDmStatus("all"); }}>
               Clear
             </Button>
           )}
         </div>
-
-        <Button
-          className="h-9 ml-auto bg-navy text-navy-foreground hover:opacity-90"
-          onClick={() => navigate("/transfer")}
-          title="Open the Transfer module to receive items on the Transfer In Transit tab"
-        >
-          <Truck className="h-4 w-4 mr-1.5" /> Go to Transfer In Transit for Item Receive
-          <ChevronRight className="h-4 w-4 ml-1" />
-        </Button>
       </div>
 
       {/* Entries Table */}
@@ -1178,10 +1330,16 @@ export default function DispatchMonitoring() {
                           <Eye className="h-3.5 w-3.5" />
                         </Button>
 
-                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50"
-                          onClick={() => { setDeleteId(entry.id); setDeleteOpen(true); }}>
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
+                        {entry.receivedAt && (
+                          <Button
+                            size="sm"
+                            className="no-brand h-6 px-2.5 text-[10px] bg-[#CD7F32] hover:bg-[#b06e2b] text-white border-0 shadow-sm"
+                            onClick={() => navigate("/transfer", { state: { receiveInTransit: true } })}
+                            title="Receive these items into store on the Transfer In Transit tab"
+                          >
+                            <Truck className="h-3 w-3 mr-1" /> Receive In Store
+                          </Button>
+                        )}
                         {entry.approvalStage >= 3 && !entry.receivedAt && (
                           <Button
                             size="sm"
@@ -1273,13 +1431,14 @@ export default function DispatchMonitoring() {
         <DialogContent className="w-full max-w-5xl max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden">
           <div className="px-6 pt-5 pb-4 border-b shrink-0">
             <DialogTitle className="text-base font-semibold">
-              {editId ? "Edit Dispatch Entry" : "New Dispatch Entry"}
+              {isAirportReceiveMode ? "Airport Receive" : editId ? "Edit Dispatch Entry" : "New Dispatch Entry"}
             </DialogTitle>
           </div>
           <div className="flex-1 overflow-y-auto px-6 py-4">
-            <div className={`grid grid-cols-1 ${showAirportPanel ? "xl:grid-cols-2" : ""} gap-5`}>
+            <div className={`grid grid-cols-1 ${showAirportPanel && !isAirportReceiveMode ? "xl:grid-cols-2" : ""} gap-5`}>
 
-              {/* ══ LEFT: Catering Point ══════════════════════════════════════ */}
+              {/* ══ LEFT: Catering Point — hidden in Airport Receive mode (shown via the row's View action) ══ */}
+              {!isAirportReceiveMode && (
               <div className="rounded-xl border border-blue-300 bg-white shadow-sm overflow-hidden">
                 <div className="bg-gradient-to-r from-indigo-700 to-indigo-600 text-white px-5 py-3.5 flex items-center justify-between">
                   <div className="flex items-center gap-2.5">
@@ -1608,6 +1767,7 @@ export default function DispatchMonitoring() {
                   })()}
                 </div>
               </div>
+              )}
 
               {/* ══ RIGHT: Airport Point (only shown when Airport Receive is triggered) ══ */}
               {showAirportPanel && <div className="rounded-xl border border-emerald-300 bg-white shadow-sm overflow-hidden self-start">
@@ -1625,15 +1785,33 @@ export default function DispatchMonitoring() {
                 <div className="p-5 space-y-4">
                   <MaxTempBanner />
 
-                  {/* ─ Gate Details — 3-col horizontal ─ */}
+                  {/* ─ Airport Receiving Protocol (moved to top) ─ */}
+                  <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3.5">
+                    <p className="text-xs font-bold text-emerald-800 flex items-center gap-1.5 mb-2">
+                      <ShieldCheck className="h-3.5 w-3.5" /> Airport Receiving Protocol
+                    </p>
+                    <ul className="text-xs text-emerald-700 space-y-1">
+                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>Verify vehicle temperature at gate before unloading begins</li>
+                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>Check product seal integrity and packaging condition upon arrival</li>
+                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>Record unloading time accurately in the system</li>
+                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>APT executive must physically verify and countersign</li>
+                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>Any temperature breach must be escalated immediately</li>
+                    </ul>
+                  </div>
+
+                  {/* ─ Gate Details — temp entry (locks once recorded) + timer ─ */}
                   <Divider label="Airport Gate Details — Gate No. 08" color="emerald" />
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <Label className="text-xs">Gate 08 Temp (°C)</Label>
                       <Input type="number" step="0.1" placeholder="e.g. 6.5" value={form.gateTempGate08}
+                        disabled={gateTempLocked}
                         onChange={(e) => { sf("gateTempGate08", e.target.value); sf("ackGate08", false); }}
-                        className={`mt-1 h-9 ${vehOOR(form.gateTempGate08) ? "border-red-400 bg-red-50" : ""}`} />
-                      <TempHint note="Max: +8°C at gate" />
+                        onBlur={() => { if (form.gateTempGate08 !== "") setGateTempLocked(true); }}
+                        className={`mt-1 h-9 ${vehOOR(form.gateTempGate08) ? "border-red-400 bg-red-50" : ""} ${gateTempLocked ? "bg-slate-100 text-slate-600" : ""}`} />
+                      {gateTempLocked
+                        ? <p className="text-[11px] text-slate-500 mt-0.5 italic flex items-center gap-1"><ShieldCheck className="h-3 w-3" /> Recorded — cannot be changed</p>
+                        : <TempHint note="Max: +8°C at gate" />}
                       {vehOOR(form.gateTempGate08) && <p className="text-xs text-red-600 mt-0.5 font-semibold">⚠ Exceeds +8°C</p>}
                       <OorAck show={vehOOR(form.gateTempGate08)} checked={form.ackGate08} onChange={(v) => sf("ackGate08", v)} label="Acknowledge" />
                       <FieldErr msg={errors.ackGate08} />
@@ -1701,31 +1879,141 @@ export default function DispatchMonitoring() {
                     </div>
                   </div>
 
-                  {/* Protocol */}
-                  <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3.5">
-                    <p className="text-xs font-bold text-emerald-800 flex items-center gap-1.5 mb-2">
-                      <ShieldCheck className="h-3.5 w-3.5" /> Airport Receiving Protocol
-                    </p>
-                    <ul className="text-xs text-emerald-700 space-y-1">
-                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>Verify vehicle temperature at gate before unloading begins</li>
-                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>Check product seal integrity and packaging condition upon arrival</li>
-                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>Record unloading time accurately in the system</li>
-                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>APT executive must physically verify and countersign</li>
-                      <li className="flex items-start gap-1.5"><span className="text-emerald-500 mt-0.5">✔</span>Any temperature breach must be escalated immediately</li>
-                    </ul>
-                  </div>
-
-                  {/* Cold chain visual */}
+                  {/* Cold chain visual — catering-point temp (left) → airport gate temp (right) */}
                   <div className="rounded-lg bg-slate-50 border border-slate-200 p-4 text-center">
-                    <div className="flex items-center justify-center gap-2 text-xs text-slate-600">
-                      <span className="px-2.5 py-1 rounded-md bg-blue-100 text-blue-700 font-semibold">Catering Kitchen</span>
-                      <span className="flex-1 border-t-2 border-dashed border-slate-300 relative">
+                    <div className="flex items-start justify-center gap-2 text-xs text-slate-600">
+                      <div className="flex flex-col items-center gap-1">
+                        <span className="px-2.5 py-1 rounded-md bg-blue-100 text-blue-700 font-semibold">Catering Kitchen</span>
+                        <span className="text-[11px] font-bold tabular-nums text-blue-700">{form.vehicleTempBegin !== "" ? `${form.vehicleTempBegin}°C` : "—"}</span>
+                      </div>
+                      <span className="flex-1 border-t-2 border-dashed border-slate-300 relative mt-4">
                         <span className="absolute -top-3 left-1/2 -translate-x-1/2 bg-amber-100 text-amber-700 text-[10px] px-1.5 py-0.5 rounded-full font-medium whitespace-nowrap">≤ +8°C</span>
                       </span>
-                      <span className="px-2.5 py-1 rounded-md bg-emerald-100 text-emerald-700 font-semibold">Airport Gate 08</span>
+                      <div className="flex flex-col items-center gap-1">
+                        <span className="px-2.5 py-1 rounded-md bg-emerald-100 text-emerald-700 font-semibold">Airport Gate 08</span>
+                        <span className={`text-[11px] font-bold tabular-nums ${vehOOR(form.gateTempGate08) ? "text-red-600" : "text-emerald-700"}`}>{form.gateTempGate08 !== "" ? `${form.gateTempGate08}°C` : "—"}</span>
+                      </div>
                     </div>
                     <p className="text-[10px] text-muted-foreground mt-3">Cold chain must be unbroken from kitchen to gate</p>
                   </div>
+
+                  {/* ─ Batch filters — date range + status ─ */}
+                  <div className="flex flex-wrap items-end gap-3">
+                    <div>
+                      <Label className="text-xs">From</Label>
+                      <Input type="date" value={batchFrom} onChange={(e) => setBatchFrom(e.target.value)} className="mt-1 h-8 w-36 text-xs tabular-nums" />
+                    </div>
+                    <div>
+                      <Label className="text-xs">To</Label>
+                      <Input type="date" value={batchTo} min={batchFrom || undefined} onChange={(e) => setBatchTo(e.target.value)} className="mt-1 h-8 w-36 text-xs tabular-nums" />
+                    </div>
+                    <div>
+                      <Label className="text-xs">Status</Label>
+                      <Select value={batchStatus} onValueChange={setBatchStatus}>
+                        <SelectTrigger className="mt-1 h-8 w-44 text-xs"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All Statuses</SelectItem>
+                          <SelectItem value="Pending Scanning">Pending Scanning</SelectItem>
+                          <SelectItem value="Scan Completed">Scan Completed</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {(batchFrom || batchTo || batchStatus !== "all") && (
+                      <Button type="button" size="sm" variant="ghost" className="h-8 text-xs text-muted-foreground" onClick={() => { setBatchFrom(""); setBatchTo(""); setBatchStatus("all"); }}>
+                        Clear
+                      </Button>
+                    )}
+                  </div>
+
+                  {/* ─ Dispatched batch — fetched from the Dispatch table (round trip = one row per leg) ─ */}
+                  <Divider label="Dispatched Batch" color="emerald" />
+                  <div className="rounded-lg border border-slate-200 overflow-x-auto">
+                    <table className="w-full text-[11px] border-collapse" style={{ minWidth: 760 }}>
+                      <thead>
+                        <tr className="bg-slate-100 text-slate-600 uppercase tracking-wider">
+                          <th className="px-2.5 py-2 text-left font-semibold">SL</th>
+                          <th className="px-2.5 py-2 text-left font-semibold">Dispatch ID</th>
+                          <th className="px-2.5 py-2 text-left font-semibold">Flight</th>
+                          <th className="px-2.5 py-2 text-left font-semibold">Order</th>
+                          <th className="px-2.5 py-2 text-left font-semibold">Date</th>
+                          <th className="px-2.5 py-2 text-left font-semibold">Dep Time</th>
+                          <th className="px-2.5 py-2 text-left font-semibold">Meals</th>
+                          <th className="px-2.5 py-2 text-left font-semibold">Status</th>
+                          <th className="px-2.5 py-2 text-left font-semibold">Food Safety &amp; QC</th>
+                          <th className="px-2.5 py-2 text-right font-semibold">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {visibleLegs.length === 0 ? (
+                          <tr><td colSpan={10} className="px-2.5 py-6 text-center text-muted-foreground">{airportDispatch.legs.length === 0 ? "No dispatched items found." : "No legs match the current filters."}</td></tr>
+                        ) : visibleLegs.map((leg, li) => {
+                          const done = legScanned(leg);
+                          return (
+                            <tr key={leg.flight} className="border-t border-slate-100 bg-white align-top">
+                              {li === 0 && (
+                                <>
+                                  <td className="px-2.5 py-2 text-slate-500" rowSpan={visibleLegs.length}>1</td>
+                                  <td className="px-2.5 py-2 font-semibold text-slate-800 whitespace-nowrap" rowSpan={visibleLegs.length}>
+                                    {airportDispatch.dispatchId}
+                                    {airportDispatch.legs.length > 1 && <div className="text-[9px] font-medium text-amber-600 mt-0.5">Round trip · {airportDispatch.legs.length} legs</div>}
+                                  </td>
+                                </>
+                              )}
+                              <td className="px-2.5 py-2 whitespace-nowrap">
+                                <span className="font-semibold text-blue-700">{leg.flight}</span>
+                                <span className={`ml-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-semibold ${leg.direction === "Return" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>{leg.direction}</span>
+                              </td>
+                              {li === 0 && <td className="px-2.5 py-2 font-mono text-slate-700 whitespace-nowrap" rowSpan={visibleLegs.length}>{airportDispatch.orderNo}</td>}
+                              {li === 0 && <td className="px-2.5 py-2 whitespace-nowrap text-slate-600" rowSpan={visibleLegs.length}>{leg.date}</td>}
+                              {li === 0 && <td className="px-2.5 py-2 whitespace-nowrap text-slate-600" rowSpan={visibleLegs.length}>{leg.depTime}</td>}
+                              <td className="px-2.5 py-2 whitespace-nowrap">
+                                <button type="button" className="inline-flex items-center gap-1 text-slate-700 hover:text-indigo-700" onClick={() => openOrderDetails(leg.flight, false)} title="View items">
+                                  <Eye className="h-3.5 w-3.5 text-slate-400" />
+                                  {leg.rows.length} items · {leg.totalQty}
+                                </button>
+                              </td>
+                              <td className="px-2.5 py-2 whitespace-nowrap">
+                                {done ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700"><CheckCircle2 className="h-3 w-3" /> Scan Completed</span>
+                                ) : (
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700">Pending Scanning</span>
+                                )}
+                              </td>
+                              <td className="px-2.5 py-2 whitespace-nowrap">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700"><ShieldCheck className="h-3 w-3" /> QC Done</span>
+                              </td>
+                              <td className="px-2.5 py-2">
+                                <div className="flex items-center justify-end gap-1">
+                                  <Button type="button" size="icon" variant="ghost" className="h-7 w-7 text-slate-500 hover:text-indigo-700" title="View catering dispatch point entry" onClick={() => { if (editId) setViewEntryId(editId); }}>
+                                    <Eye className="h-3.5 w-3.5" />
+                                  </Button>
+                                  <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                      <Button type="button" size="icon" variant="ghost" className="h-7 w-7 text-slate-500 hover:text-slate-700" title="More actions">
+                                        <MoreHorizontal className="h-4 w-4" />
+                                      </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="end">
+                                      <DropdownMenuItem onClick={() => openOrderDetails(leg.flight, true)}>
+                                        <ScanLine className="h-3.5 w-3.5 mr-2" /> Scan Items
+                                      </DropdownMenuItem>
+                                    </DropdownMenuContent>
+                                  </DropdownMenu>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  {airportScanRows.length > 0 && (
+                    <p className={`text-[11px] font-medium ${allRowsScanned ? "text-emerald-600" : "text-amber-600"}`}>
+                      {allRowsScanned
+                        ? "✓ All items scanned (both legs) — Scan Completed. Ready to Save And Accept."
+                        : `${airportScanRows.filter((r) => scannedRowIds.has(r.id)).length}/${airportScanRows.length} items scanned · use ⋯ → Scan Items.`}
+                    </p>
+                  )}
 
                   {/* ─ Receipt Log ─ */}
                   <Divider label="Receipt Log" color="emerald" />
@@ -1752,12 +2040,17 @@ export default function DispatchMonitoring() {
                       <Button
                         type="button"
                         size="sm"
-                        className="h-8 text-xs bg-emerald-600 hover:bg-emerald-700 text-white border-0 px-4"
+                        disabled={airportScanRows.length > 0 && !allRowsScanned}
+                        className="h-8 text-xs bg-emerald-600 hover:bg-emerald-700 text-white border-0 px-4 disabled:opacity-50"
                         onClick={acceptReceipt}
+                        title={airportScanRows.length > 0 && !allRowsScanned ? "Scan all items (both legs) before accepting" : undefined}
                       >
                         <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" /> Save And Accept
                       </Button>
                     </div>
+                    {airportScanRows.length > 0 && !allRowsScanned && (
+                      <p className="text-[10px] text-amber-600 font-medium text-right">Scan all items for both legs (Meals → Scan) to enable Save And Accept.</p>
+                    )}
                   </div>
                 </div>
               </div>}
@@ -1774,6 +2067,159 @@ export default function DispatchMonitoring() {
               )}
             </div>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Order Details — meal breakdown with per-item label scanning ──────── */}
+      <Dialog open={!!orderDetailFlight} onOpenChange={(v) => { if (!v) { setOrderDetailFlight(null); setActiveScanRowId(null); } }}>
+        <DialogContent className="w-full max-w-full sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+          {(() => {
+            const leg = airportDispatch.legs.find((l) => l.flight === orderDetailFlight);
+            if (!leg) return null;
+            const scannedCount = leg.rows.filter((r) => scannedRowIds.has(r.id)).length;
+            return (
+              <>
+                <DialogHeader>
+                  <DialogTitle>Order Details — {airportDispatch.orderNo}</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 text-sm">
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                    <div><span className="text-muted-foreground">Flight:</span><span className="font-semibold ml-1">{leg.flight} <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${leg.direction === "Return" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>{leg.direction}</span></span></div>
+                    <div><span className="text-muted-foreground">Sector:</span><span className="font-semibold ml-1">{leg.sector}</span></div>
+                    <div><span className="text-muted-foreground">Order:</span><span className="font-semibold ml-1">{airportDispatch.orderNo}</span></div>
+                    <div><span className="text-muted-foreground">Dispatch Ref:</span><span className="font-semibold ml-1">{airportDispatch.dispatchId}</span></div>
+                    <div><span className="text-muted-foreground">Dep Time:</span><span className="font-semibold ml-1">{leg.depTime}</span></div>
+                    <div><span className="text-muted-foreground">Date:</span><span className="font-semibold ml-1">{leg.date}</span></div>
+                  </div>
+
+                  <div className="pt-2 border-t border-border flex gap-3 flex-wrap items-center">
+                    <div><span className="text-muted-foreground">Status:</span>
+                      {legScanned(leg)
+                        ? <span className="ml-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">Scan Completed</span>
+                        : <span className="ml-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700">Pending Scanning</span>}
+                    </div>
+                    <div><span className="text-muted-foreground">QC:</span><span className="ml-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">QC Done</span></div>
+                  </div>
+
+                  <div>
+                    <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-1 flex items-center justify-between">
+                      <span>Meals ({leg.rows.length})</span>
+                      {orderDetailScanMode && <span className="text-[10px] text-muted-foreground normal-case tracking-normal">{scannedCount}/{leg.rows.length} scanned</span>}
+                    </div>
+                    <div className="overflow-x-auto">
+                    <table className="w-full text-xs border border-slate-200 rounded-md overflow-hidden" style={{ minWidth: orderDetailScanMode ? 560 : 440 }}>
+                      <thead className="bg-slate-50 border-b border-slate-200">
+                        <tr>
+                          <th className="p-2 text-left font-semibold">Production</th>
+                          <th className="p-2 text-left font-semibold">Meal</th>
+                          <th className="p-2 text-left font-semibold">Type</th>
+                          <th className="p-2 text-right font-semibold">Qty</th>
+                          <th className="p-2 text-left font-semibold">Warehouse</th>
+                          {orderDetailScanMode && <th className="p-2 text-right font-semibold">Scan</th>}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {leg.rows.map((r) => {
+                          const done = scannedRowIds.has(r.id);
+                          return (
+                            <tr key={r.id} className="border-t border-slate-100 align-middle">
+                              <td className="p-2 font-mono text-primary">{r.productionOrderId}</td>
+                              <td className="p-2">{r.mealName}</td>
+                              <td className="p-2"><span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${MEAL_TYPE_TONE[r.mealType] ?? "bg-slate-100 text-slate-600"}`}>{r.mealType}</span></td>
+                              <td className="p-2 text-right tabular-nums font-medium">{r.qty}</td>
+                              <td className="p-2 text-muted-foreground">{r.warehouse}</td>
+                              {orderDetailScanMode && (
+                                <td className="p-2 text-right">
+                                  {done ? (
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700"><CheckCircle2 className="h-3 w-3" /> Scan Completed</span>
+                                  ) : (
+                                    <Button type="button" size="icon" variant="outline" className="h-7 w-7" title="Show label & scan" onClick={() => setActiveScanRowId(r.id)}>
+                                      <QrCode className="h-3.5 w-3.5" />
+                                    </Button>
+                                  )}
+                                </td>
+                              )}
+                            </tr>
+                          );
+                        })}
+                        <tr className="border-t-2 border-slate-300 bg-slate-50/80">
+                          <td className="p-2 font-bold" colSpan={3}>Total</td>
+                          <td className="p-2 text-right font-bold tabular-nums">{leg.totalQty}</td>
+                          <td colSpan={orderDetailScanMode ? 2 : 1}></td>
+                        </tr>
+                      </tbody>
+                    </table>
+                    </div>
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => { setOrderDetailFlight(null); setActiveScanRowId(null); }}>Close</Button>
+                </DialogFooter>
+              </>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Meal Label — barcode card shown when a scan icon is clicked (Scan only) ── */}
+      <Dialog open={!!activeScanRowId} onOpenChange={(v) => { if (!v) setActiveScanRowId(null); }}>
+        <DialogContent className="max-w-xs border-0 bg-transparent p-0 shadow-none">
+          {(() => {
+            let ctx: { leg: AirportLeg; row: ScanMealRow } | null = null;
+            for (const leg of airportDispatch.legs) {
+              const row = leg.rows.find((r) => r.id === activeScanRowId);
+              if (row) { ctx = { leg, row }; break; }
+            }
+            if (!ctx) return null;
+            const { leg, row } = ctx;
+            const scanned = scannedRowIds.has(row.id);
+            return (
+              <>
+                <DialogHeader className="sr-only"><DialogTitle>Meal Label — {row.mealName}</DialogTitle></DialogHeader>
+                <div className="rounded-lg border-2 border-emerald-300 bg-white p-4 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-700">USBA Catering · Meal Label</span>
+                    {scanned
+                      ? <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-600"><CheckCircle2 className="h-3 w-3" /> SCANNED</span>
+                      : <span className="text-[10px] font-bold text-amber-600">PENDING SCAN</span>}
+                  </div>
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="font-semibold text-sm">{row.mealName}</span>
+                    <span className="text-xs tabular-nums text-muted-foreground shrink-0">Qty {row.qty}</span>
+                  </div>
+                  <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+                    <span>Flight <b className="text-foreground">{leg.flight}</b></span>
+                    <span>{row.mealType}</span>
+                    <span>{row.warehouse}</span>
+                    <span>DSP <b className="text-foreground font-mono">{airportDispatch.dispatchId}</b></span>
+                    <span>Order <b className="text-foreground font-mono">{airportDispatch.orderNo}</b></span>
+                    <span>Dep <b className="text-foreground">{leg.depTime}</b></span>
+                  </div>
+                  {/* Barcode */}
+                  <div className="mt-1">
+                    <div className="flex items-end gap-[1px] h-8 w-full overflow-hidden" aria-hidden>
+                      {row.label.split("").flatMap((ch, i) =>
+                        [0, 1, 2, 3].map((k) => (
+                          <span key={`${i}-${k}`} className="bg-slate-900" style={{ width: ((ch.charCodeAt(0) >> k) & 1) ? 3 : 1, height: "100%" }} />
+                        ))
+                      )}
+                    </div>
+                    <div className="text-center font-mono text-[11px] tracking-widest mt-1">{row.label}</div>
+                  </div>
+                  {/* Scan only (no Print) */}
+                  <div className="mt-1">
+                    {scanned ? (
+                      <div className="inline-flex items-center justify-center gap-1 w-full text-xs font-semibold text-emerald-600 h-9"><CheckCircle2 className="h-3.5 w-3.5" /> Scan Completed</div>
+                    ) : (
+                      <Button size="sm" className="h-9 w-full text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => scanRow(row.id)}>
+                        <ScanLine className="h-3.5 w-3.5 mr-1.5" /> Scan
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </>
+            );
+          })()}
         </DialogContent>
       </Dialog>
 

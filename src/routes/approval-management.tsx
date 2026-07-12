@@ -24,7 +24,7 @@ import {
   FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, ArrowLeft, Layers, UserCog, Users,
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
   PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane, MailQuestion, PlaneLanding, PlaneTakeoff,
-  BadgeDollarSign, Wrench, MessageSquare, CornerUpLeft, LayoutGrid, Timer, Trash2, Undo2,
+  BadgeDollarSign, Wrench, MessageSquare, CornerUpLeft, LayoutGrid, Timer, Trash2, Undo2, Gavel,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -44,6 +44,7 @@ import { logAudit } from "@/lib/audit-log";
 import { resolveProductionItem } from "@/lib/meal-recipe";
 import { useRole } from "@/lib/roles";
 import { type PersonalHygieneRecord, PHSignOffPanel, PHFormGrid, phNotOkCount } from "@/routes/personal-hygiene-monitoring";
+import { type HygieneSlotAppeal, type HygieneDailySubmission } from "@/routes/hygiene-monitoring";
 import { type WastageEntry, type WastageApprovalStep } from "@/routes/wastage-management";
 import { SEED_RETURNS, type PurchaseReturn } from "@/routes/purchase-return";
 import { type DelayEvent, type DelayApprovalRecord } from "@/routes/delay-management";
@@ -70,6 +71,7 @@ type Category =
   | "Purchase Return"
   | "Galley Loading"
   | "Personal Hygiene"
+  | "Daily Hygiene Monitoring"
   | "Wastage Entry"
   | "Delay Refreshment Fulfillment"
   | "Last-Minute Change";
@@ -143,6 +145,7 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Purchase Return",      label: "Purchase Returns",   icon: Undo2           },
   { key: "Galley Loading",       label: "Galley Loading",     icon: LayoutGrid      },
   { key: "Personal Hygiene",    label: "Personal Hygiene",   icon: Users           },
+  { key: "Daily Hygiene Monitoring", label: "Daily Hygiene Monitoring", icon: ClipboardCheck },
   { key: "Wastage Entry",       label: "Damaged Product Disposal",    icon: Trash2          },
   { key: "Delay Refreshment Fulfillment", label: "Delay Refreshment", icon: Timer           },
   { key: "Last-Minute Change",  label: "Last-Minute Change", icon: AlertTriangle   },
@@ -160,7 +163,7 @@ const APPROVAL_SECTIONS: { label: string; keys: Category[] }[] = [
   { label: "Asset Management Approval", keys: ["Maintenance"] },
   { label: "Consumable Returns Approval", keys: ["Return Items"] },
   { label: "Galley Loading Approval",     keys: ["Galley Loading"]   },
-  { label: "Food Safety Approval",        keys: ["Personal Hygiene"] },
+  { label: "Food Safety Approval",        keys: ["Personal Hygiene", "Daily Hygiene Monitoring"] },
   { label: "Wastage Management Approval", keys: ["Wastage Entry"]   },
   { label: "Delay Refreshment Approval", keys: ["Delay Refreshment Fulfillment"] },
 ];
@@ -429,6 +432,17 @@ export default function ApprovalManagementPage() {
   );
   const [phDetailOpen, setPhDetailOpen]     = useState(false);
   const [phDetailRecord, setPhDetailRecord] = useState<PersonalHygieneRecord | null>(null);
+
+  // ── Hygiene missed-slot appeals (shared via localStorage with hygiene-monitoring) ──
+  const [slotAppeals, setSlotAppeals] = usePersistedState<HygieneSlotAppeal[]>(
+    "hygiene-slot-appeals",
+    [],
+  );
+  // ── Daily hygiene monitoring submissions (shared via localStorage with hygiene-monitoring) ──
+  const [dailySubmissions, setDailySubmissions] = usePersistedState<HygieneDailySubmission[]>(
+    "hygiene-daily-submissions",
+    [],
+  );
 
   // ── Delay approval records (shared via localStorage with delay-management) ──
   const [delayApprovals, setDelayApprovals] = usePersistedState<DelayApprovalRecord[]>(
@@ -903,6 +917,63 @@ export default function ApprovalManagementPage() {
       });
   }, [phRecords]);
 
+  const hygieneAppealItems: ApprovalItem[] = useMemo(() => {
+    return slotAppeals.map((a) => {
+      const status: ApprovalStatus =
+        a.status === "Approved" ? "Approved" : a.status === "Rejected" ? "Rejected" : "Pending";
+      const slotList = a.slots.join(", ") || "—";
+      return {
+        id:          `HSA-AP-${a.id}`,
+        category:    "Daily Hygiene Monitoring" as Category,
+        refId:       a.id,
+        title:       `Missed Slot Appeal — ${a.item}`,
+        requestedBy: a.submittedBy,
+        requestedAt: a.submittedAt,
+        summary:     `${a.slots.length} missed slot${a.slots.length !== 1 ? "s" : ""} (${slotList}) on ${a.date} · Justification: ${a.justification}`,
+        itemsCount:  a.slots.length,
+        status,
+        processedBy: a.reviewedBy,
+        processedAt: a.reviewedAt,
+        rejectionReason: a.rejectionReason,
+        fields: [
+          { label: "Checklist Item", value: a.item },
+          { label: "Checklist Date", value: a.date },
+          { label: "Missed Slots",   value: slotList },
+          { label: "Submitted By",   value: a.submittedBy },
+          { label: "Justification",  value: a.justification },
+        ],
+      };
+    });
+  }, [slotAppeals]);
+
+  const hygieneDailyItems: ApprovalItem[] = useMemo(() => {
+    return dailySubmissions.map((s) => {
+      const status: ApprovalStatus =
+        s.status === "Approved" ? "Approved" : s.status === "Rejected" ? "Rejected" : "Pending";
+      return {
+        id:          `DHM-AP-${s.id}`,
+        category:    "Daily Hygiene Monitoring" as Category,
+        refId:       s.id,
+        title:       `Daily Hygiene Monitoring — ${s.date}`,
+        requestedBy: s.submittedBy,
+        requestedAt: s.submittedAt,
+        summary:     `${s.slots.length} time slot${s.slots.length !== 1 ? "s" : ""} recorded · ${s.failCount === 0 ? "All items passed" : `${s.failCount} failure${s.failCount !== 1 ? "s" : ""}`}${s.failItems.length ? ` (${s.failItems.slice(0, 2).join(", ")}${s.failItems.length > 2 ? " +more" : ""})` : ""}`,
+        itemsCount:  s.rows.length,
+        status,
+        processedBy: s.reviewedBy,
+        processedAt: s.reviewedAt,
+        rejectionReason: s.rejectionReason,
+        fields: [
+          { label: "Date",         value: s.date },
+          { label: "Submitted By", value: s.submittedBy },
+          { label: "Time Slots",   value: s.slots.join(", ") },
+          { label: "Result",       value: s.failCount === 0 ? "All items passed" : `${s.failCount} failure${s.failCount !== 1 ? "s" : ""}` },
+          ...(s.failItems.length ? [{ label: "Failed Items", value: s.failItems.join("; ") }] : []),
+        ],
+      };
+    });
+  }, [dailySubmissions]);
+
   const wastageItems: ApprovalItem[] = useMemo(() => {
     return wastageEntries
       .filter((e) => e.status !== "Final Approved")
@@ -950,7 +1021,7 @@ export default function ApprovalManagementPage() {
   }, [delayApprovals]);
 
   const allItems = useMemo(() => {
-    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...wastageItems, ...delayApprovalItems, ...items];
+    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...hygieneAppealItems, ...hygieneDailyItems, ...wastageItems, ...delayApprovalItems, ...items];
     // Overlay "Reviewed" (returned for correction) onto still-pending requests.
     return base.map((it) => {
       const rv = reviews[reviewKey(it.category, it.refId)];
@@ -959,7 +1030,7 @@ export default function ApprovalManagementPage() {
       }
       return it;
     });
-  }, [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, wastageItems, delayApprovalItems, items, reviews]);
+  }, [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, hygieneAppealItems, hygieneDailyItems, wastageItems, delayApprovalItems, items, reviews]);
 
   const counts = useMemo(() => {
     const pendingByCat = new Map<Category, number>();
@@ -1285,6 +1356,28 @@ export default function ApprovalManagementPage() {
       if (!silent) toast.success(`LMC ${it.refId} approved — cleared to action & chargeable.`);
       return;
     }
+    if (it.category === "Daily Hygiene Monitoring") {
+      if (it.id.startsWith("DHM-AP-")) {
+        setDailySubmissions((prev) =>
+          prev.map((s) =>
+            s.id === it.refId
+              ? { ...s, status: "Approved", reviewedBy: `${role} (GM/Admin)`, reviewedAt: stamp() }
+              : s,
+          ),
+        );
+        if (!silent) toast.success(`${it.refId} — Daily hygiene monitoring approved.`);
+      } else {
+        setSlotAppeals((prev) =>
+          prev.map((a) =>
+            a.id === it.refId
+              ? { ...a, status: "Approved", reviewedBy: `${role} (GM/Admin)`, reviewedAt: stamp() }
+              : a,
+          ),
+        );
+        if (!silent) toast.success(`${it.refId} — Missed slot appeal approved.`);
+      }
+      return;
+    }
     if (it.category === "Wastage Entry") {
       const entry = wastageEntries.find((e) => e.id === it.refId);
       if (!entry) { if (!silent) toast.error(`Wastage ${it.refId} not found.`); return; }
@@ -1489,6 +1582,24 @@ export default function ApprovalManagementPage() {
       );
     } else if (it.category === "Last-Minute Change") {
       setLmcDecisions((p) => ({ ...p, [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason } }));
+    } else if (it.category === "Daily Hygiene Monitoring") {
+      if (it.id.startsWith("DHM-AP-")) {
+        setDailySubmissions((prev) =>
+          prev.map((s) =>
+            s.id === it.refId
+              ? { ...s, status: "Rejected", reviewedBy: `${role} (GM/Admin)`, reviewedAt: stamp(), rejectionReason: reason }
+              : s,
+          ),
+        );
+      } else {
+        setSlotAppeals((prev) =>
+          prev.map((a) =>
+            a.id === it.refId
+              ? { ...a, status: "Rejected", reviewedBy: `${role} (GM/Admin)`, reviewedAt: stamp(), rejectionReason: reason }
+              : a,
+          ),
+        );
+      }
     } else if (it.category === "Wastage Entry") {
       const entry = wastageEntries.find((e) => e.id === it.refId);
       const stepName =
@@ -1727,6 +1838,24 @@ export default function ApprovalManagementPage() {
             : ra,
         ),
       );
+    } else if (detailItem.category === "Daily Hygiene Monitoring") {
+      if (detailItem.id.startsWith("DHM-AP-")) {
+        setDailySubmissions((prev) =>
+          prev.map((s) =>
+            s.id === detailItem.refId
+              ? { ...s, status: "Rejected", reviewedBy: `${role} (GM/Admin)`, reviewedAt: stamp(), rejectionReason: reason }
+              : s,
+          ),
+        );
+      } else {
+        setSlotAppeals((prev) =>
+          prev.map((a) =>
+            a.id === detailItem.refId
+              ? { ...a, status: "Rejected", reviewedBy: `${role} (GM/Admin)`, reviewedAt: stamp(), rejectionReason: reason }
+              : a,
+          ),
+        );
+      }
     } else if (detailItem.category === "Wastage Entry") {
       const entry = wastageEntries.find((e) => e.id === detailItem.refId);
       const stepName =
