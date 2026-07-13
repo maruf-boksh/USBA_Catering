@@ -81,6 +81,20 @@ export function HygieneScreen({ nav }) {
   const [submittedLogs, setSubmittedLogs] = useState([]);
   const [selectedLog, setSelectedLog]     = useState(null);
   const [remarkErrors, setRemarkErrors]   = useState(new Set());
+  // Missed-slot appeals (mirrors the web appeal flow → Approval Management)
+  const [appeals, setAppeals]             = useState({});   // slot -> { note, at }
+  const [appealSlot, setAppealSlot]       = useState('');   // slot with its appeal form open
+  const [appealNote, setAppealNote]       = useState('');
+
+  const openAppeal = (slot) => { setAppealSlot(slot); setAppealNote(''); };
+  const submitAppeal = (slot) => {
+    if (!appealNote.trim()) return;
+    const now = new Date();
+    const at = `${now.toISOString().slice(0, 10)} ${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+    setAppeals(prev => ({ ...prev, [slot]: { note: appealNote.trim(), at } }));
+    setAppealSlot('');
+    setAppealNote('');
+  };
 
   // A slot counts as finalised if it was saved OR it has already passed (Missed)
   const allSlotsFinalized = TIME_SLOTS.every(s => savedSlots[s] || isSlotPast(s));
@@ -256,7 +270,7 @@ export function HygieneScreen({ nav }) {
       <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
         <button onClick={() => nav.goBack()} style={BTN_BACK}>←</button>
         <div style={{ flex: 1 }}>
-          <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Hygiene Monitoring</div>
+          <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Daily Hygiene Monitoring</div>
           <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>USBA-FSH-DFSHM-01</div>
         </div>
         {isSubmitted && (
@@ -290,6 +304,7 @@ export function HygieneScreen({ nav }) {
               const isActive = !saved && !isSubmitted && !missed;
               const passCount = rows.filter(r => r.values[slot] === '✓').length;
               const failCount = rows.filter(r => r.values[slot] === '✗').length;
+              const appeal = appeals[slot];
               return (
                 <div key={slot}
                   onClick={() => isActive && (setCurrentSlot(slot), setScreen('record'))}
@@ -298,14 +313,22 @@ export function HygieneScreen({ nav }) {
                     border: `1.5px solid ${saved ? T.statusApproved + '50' : missed ? T.statusPending + '40' : T.border}`,
                     borderRadius: T.radiusLg, padding: '12px 14px', marginBottom: 8,
                     cursor: isActive ? 'pointer' : 'default',
-                    opacity: (isSubmitted && !saved && !missed) || missed ? 0.6 : 1,
+                    opacity: (isSubmitted && !saved && !missed) ? 0.6 : 1,
                   }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontSize: 14, fontWeight: 700, color: missed ? T.textTertiary : T.textPrimary, fontFamily: T.fontBody }}>{slot}</span>
                     {saved
                       ? <span style={{ fontSize: 10, background: T.statusApproved, color: '#fff', borderRadius: T.radiusFull, padding: '2px 8px', fontWeight: 700, fontFamily: T.fontBody }}>✓ {saved}</span>
                       : missed
-                        ? <span style={{ fontSize: 10, background: T.statusPendingBg, color: T.statusPending, borderRadius: T.radiusFull, padding: '2px 8px', fontWeight: 700, fontFamily: T.fontBody }}>🔒 Missed</span>
+                        ? (appeal
+                            ? <span style={{ fontSize: 10, background: T.statusInfoBg, color: T.statusInfo, borderRadius: T.radiusFull, padding: '2px 8px', fontWeight: 700, fontFamily: T.fontBody }}>⏳ Appeal Submitted</span>
+                            : <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                <span style={{ fontSize: 10, background: T.statusPendingBg, color: T.statusPending, borderRadius: T.radiusFull, padding: '2px 8px', fontWeight: 700, fontFamily: T.fontBody }}>🔒 Missed</span>
+                                <button onClick={(e) => { e.stopPropagation(); openAppeal(slot); }}
+                                  style={{ fontSize: 10, background: T.primaryLight, color: T.primary, border: `1px solid ${T.primary}40`, borderRadius: T.radiusFull, padding: '3px 10px', fontWeight: 700, fontFamily: T.fontBody, cursor: 'pointer' }}>
+                                  Appeal
+                                </button>
+                              </div>)
                         : isActive
                           ? <span style={{ fontSize: 10, background: T.primaryLight, color: T.primary, borderRadius: T.radiusFull, padding: '2px 8px', fontWeight: 700, fontFamily: T.fontBody }}>Tap to record →</span>
                           : null}
@@ -313,6 +336,36 @@ export function HygieneScreen({ nav }) {
                   {saved && (
                     <div style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 3 }}>
                       {failCount} fail · {passCount} pass · {CHECKLIST_ITEMS.length - failCount - passCount} unchecked
+                    </div>
+                  )}
+                  {/* Appeal justification form */}
+                  {missed && appealSlot === slot && !appeal && (
+                    <div onClick={(e) => e.stopPropagation()} style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: T.statusPending, fontFamily: T.fontBody, marginBottom: 6 }}>Appeal Justification *</div>
+                      <textarea
+                        value={appealNote}
+                        onChange={e => setAppealNote(e.target.value)}
+                        placeholder="Reason this slot was missed…"
+                        rows={2}
+                        style={{ width: '100%', boxSizing: 'border-box', resize: 'none', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '7px 10px', fontSize: 11, fontFamily: T.fontBody, background: T.bgSurface, color: T.textPrimary, outline: 'none' }}
+                      />
+                      <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                        <button onClick={() => setAppealSlot('')}
+                          style={{ flex: 1, padding: '8px 0', background: 'none', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, fontSize: 12, fontWeight: 600, color: T.textSecondary, fontFamily: T.fontBody, cursor: 'pointer' }}>
+                          Cancel
+                        </button>
+                        <button onClick={() => submitAppeal(slot)} disabled={!appealNote.trim()}
+                          style={{ flex: 2, padding: '8px 0', background: appealNote.trim() ? T.statusPending : T.textDisabled, border: 'none', borderRadius: T.radiusMd, fontSize: 12, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: appealNote.trim() ? 'pointer' : 'not-allowed' }}>
+                          Submit Appeal
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {/* Submitted appeal summary */}
+                  {missed && appeal && (
+                    <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+                      <div style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, fontStyle: 'italic' }}>"{appeal.note}"</div>
+                      <div style={{ fontSize: 9, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 3 }}>Appealed {appeal.at} · Pending approval</div>
                     </div>
                   )}
                 </div>

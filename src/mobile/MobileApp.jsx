@@ -10,6 +10,7 @@ import { MealPlanningScreen }    from './screens/MealPlanningScreen';
 import { ProductionScreen }      from './screens/ProductionScreen';
 import { QCScreen }              from './screens/QCScreen';
 import { HygieneScreen }         from './screens/HygieneScreen';
+import { PersonalHygieneScreen } from './screens/PersonalHygieneScreen';
 import { CookingTempScreen }     from './screens/CookingTempScreen';
 import { DispatchScreen }        from './screens/DispatchScreen';
 import { DispatchMonScreen }     from './screens/DispatchMonScreen';
@@ -69,7 +70,7 @@ function tabForScreen(screen) {
   if (['home', 'alerts'].includes(screen))                                         return 'home';
   if (['orders', 'meal-planning'].includes(screen))                                return 'orders';
   if (['production'].includes(screen))                                             return 'production';
-  if (['qc', 'hygiene', 'cooking-temp'].includes(screen))                          return 'qc';
+  if (['qc', 'hygiene', 'personal-hygiene', 'cooking-temp'].includes(screen))      return 'qc';
   if (['more', 'dispatch', 'dispatch-mon', 'approvals',
        'stock', 'demands', 'purchase-orders'].includes(screen))                    return 'more';
   return 'home';
@@ -120,6 +121,7 @@ export function MobileApp({ onClose }) {
       case 'production':      return <ProductionScreen nav={nav} />;
       case 'qc':              return <QCScreen nav={nav} />;
       case 'hygiene':         return <HygieneScreen nav={nav} />;
+      case 'personal-hygiene': return <PersonalHygieneScreen nav={nav} />;
       case 'cooking-temp':    return <CookingTempScreen nav={nav} />;
       case 'dispatch-mon':    return <DispatchMonScreen nav={nav} />;
       case 'dispatch':        return <DispatchScreen nav={nav} />;

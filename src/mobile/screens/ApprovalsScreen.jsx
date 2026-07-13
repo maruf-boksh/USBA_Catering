@@ -1,15 +1,57 @@
 import { useState } from 'react';
 import { T } from '../theme';
-import { MOCK_APPROVALS, MOCK_POS, MOCK_DEMANDS } from '../mockData';
+import { MOCK_APPROVALS, MOCK_POS, MOCK_DEMANDS, MOCK_APPROVAL_DOCS } from '../mockData';
 
 const TYPE_ICONS = {
-  'Purchase Order':   '🛒',
-  'Payment Approval': '💳',
-  'Demand Request':   '📝',
+  'Purchase Order':          '🛒',
+  'Payment Approval':        '💳',
+  'Demand Request':          '📝',
+  'Flight Orders':           '✈️',
+  'Crew Orders':             '👥',
+  'Request for Quotation':   '✉️',
+  'Quotation':               '💰',
+  'Purchase Requisition':    '📄',
+  'Goods Receipt':           '📦',
+  'Transfer Request':        '🔁',
+  'Stock Adjustment':        '⚖️',
+  'Production Order':        '🏭',
+  'Bill of Materials':       '🧾',
+  'User Account':            '👤',
+  'Dispatch':                '🚚',
+  'Maintenance':             '🔧',
+  'Return Items':            '↩️',
+  'Purchase Return':         '🔙',
+  'Galley Loading':          '🗄️',
+  'Personal Hygiene':        '🧼',
+  'Daily Hygiene Monitoring':'🧽',
+  'Damaged Product Disposal':'🗑️',
+  'Delay Refreshment':       '⏱️',
+  'Last-Minute Change':      '⚠️',
 };
 
 // ── Reference document resolver (simulates web fetch) ────────────────────────
 function resolveRefData(ref) {
+  // Approval Management docs brought over from the web — full detail per ID.
+  const mapped = MOCK_APPROVAL_DOCS[ref];
+  if (mapped) {
+    const st = mapped.status || 'active';
+    const color =
+      st === 'approved' ? T.statusApproved :
+      st === 'rejected' ? T.statusRejected :
+      st === 'pending'  ? T.statusPending  : T.statusInfo;
+    const colorBg =
+      st === 'approved' ? T.statusApprovedBg :
+      st === 'rejected' ? T.statusRejectedBg :
+      st === 'pending'  ? T.statusPendingBg  : T.statusInfoBg;
+    return {
+      docType: mapped.docType,
+      icon: TYPE_ICONS[mapped.docType] || '📄',
+      color, colorBg,
+      statusLabel: st,
+      sections: mapped.sections,
+    };
+  }
+
   if (ref.startsWith('PO-')) {
     const po = MOCK_POS.find(p => p.id === ref);
     if (po) {
@@ -140,6 +182,11 @@ export function ApprovalsScreen({ nav }) {
   const [rejectNote, setRejectNote]     = useState('');
   const [showRejectPanel, setShowRejectPanel] = useState(false);
   const [refPage, setRefPage]           = useState(null); // null | 'loading' | { ref, doc }
+  const [search, setSearch]             = useState('');
+  const [tab, setTab]                   = useState('pending'); // 'pending' | 'log'
+  const [todayOnly, setTodayOnly]       = useState(false);
+  const [dateFrom, setDateFrom]         = useState('');
+  const [dateTo, setDateTo]             = useState('');
 
   const handleAction = (id, action, note = null) => {
     setItems(p => p.map(a => a.id === id ? { ...a, status: action, rejectionNote: note } : a));
@@ -157,8 +204,24 @@ export function ApprovalsScreen({ nav }) {
     }, 900);
   };
 
-  const pending = items.filter(a => a.status === 'pending');
-  const done    = items.filter(a => a.status !== 'pending');
+  const q = search.trim().toLowerCase();
+  const matchesSearch = (a) =>
+    !q || [a.type, a.ref, a.requestedBy, a.amount, a.status]
+      .some(v => (v || '').toString().toLowerCase().includes(q));
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const inDateFilter = (a) => {
+    if (todayOnly) return a.date === todayStr;
+    if (dateFrom && a.date < dateFrom) return false;
+    if (dateTo && a.date > dateTo) return false;
+    return true;
+  };
+  const visible = items.filter(a => matchesSearch(a) && inDateFilter(a));
+  const pending = visible.filter(a => a.status === 'pending');
+  const done    = visible.filter(a => a.status !== 'pending');
+  const totalPending = items.filter(a => a.status === 'pending').length;
+
+  const toggleToday = () => setTodayOnly(v => { const nv = !v; if (nv) { setDateFrom(''); setDateTo(''); } return nv; });
+  const clearDates  = () => { setTodayOnly(false); setDateFrom(''); setDateTo(''); };
 
   // ── Reference document page ───────────────────────────────────────────────
   if (refPage !== null) {
@@ -375,7 +438,7 @@ export function ApprovalsScreen({ nav }) {
         <button onClick={() => nav.goBack()} style={{ background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: T.radiusFull, width: 32, height: 32, cursor: 'pointer', color: '#fff', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>←</button>
         <div>
           <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Approvals</div>
-          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{pending.length} pending</div>
+          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{totalPending} pending</div>
         </div>
       </div>
 
@@ -387,58 +450,135 @@ export function ApprovalsScreen({ nav }) {
         </div>
       )}
 
-      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 14px 16px', position: 'relative' }}>
-        {pending.length > 0 && (
-          <>
-            <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: 8, marginBottom: 4 }}>Pending</div>
-            {pending.map((item) => (
-              <div
-                key={item.id}
-                onClick={() => setDetailItem(item)}
-                style={{ background: T.bgSurface, border: `1.5px solid ${T.statusPending}`, borderRadius: T.radiusLg, padding: '12px 14px', marginTop: 10, boxShadow: T.shadowSm, cursor: 'pointer' }}
-              >
-                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
-                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flex: 1, minWidth: 0 }}>
-                    <div style={{ width: 36, height: 36, borderRadius: T.radiusMd, background: T.statusPendingBg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>{TYPE_ICONS[item.type] || '📄'}</div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{item.type}</div>
-                      <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>{item.ref} · {item.requestedBy}</div>
-                      {item.amount && <div style={{ fontSize: 13, fontWeight: 700, color: T.statusPending, fontFamily: T.fontBody, marginTop: 4 }}>{item.amount}</div>}
-                    </div>
-                  </div>
-                  <span style={{ fontSize: 14, color: T.textTertiary, flexShrink: 0 }}>›</span>
+      {/* Search filter — sits on top of all approval cards */}
+      <div style={{ padding: '10px 14px 6px', flexShrink: 0, background: T.bgBase }}>
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+          <span style={{ position: 'absolute', left: 12, fontSize: 14, color: T.textTertiary, pointerEvents: 'none' }}>🔍</span>
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search by ID, type, requester…"
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              padding: '10px 34px 10px 34px',
+              border: `1px solid ${T.border}`, borderRadius: T.radiusFull,
+              background: T.bgSurface, color: T.textPrimary,
+              fontSize: 13, fontFamily: T.fontBody, outline: 'none',
+              boxShadow: T.shadowSm,
+            }}
+          />
+          {search && (
+            <span
+              onClick={() => setSearch('')}
+              style={{ position: 'absolute', right: 12, fontSize: 15, color: T.textTertiary, cursor: 'pointer', lineHeight: 1 }}
+            >×</span>
+          )}
+        </div>
+      </div>
+
+      {/* Date filter — Today toggle + date range */}
+      <div style={{ padding: '0 14px 8px', flexShrink: 0, background: T.bgBase, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <button
+          onClick={toggleToday}
+          style={{
+            padding: '7px 14px', borderRadius: T.radiusFull, cursor: 'pointer',
+            fontSize: 12, fontWeight: 700, fontFamily: T.fontBody,
+            border: `1px solid ${todayOnly ? T.primary : T.border}`,
+            background: todayOnly ? T.primary : T.bgSurface,
+            color: todayOnly ? '#fff' : T.textSecondary,
+          }}
+        >
+          Today
+        </button>
+        <input
+          type="date"
+          value={dateFrom}
+          onChange={e => { setDateFrom(e.target.value); setTodayOnly(false); }}
+          style={{ flex: 1, minWidth: 0, boxSizing: 'border-box', padding: '7px 8px', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, background: T.bgSurface, color: T.textPrimary, fontSize: 11, fontFamily: T.fontBody, outline: 'none' }}
+        />
+        <span style={{ fontSize: 12, color: T.textTertiary }}>–</span>
+        <input
+          type="date"
+          value={dateTo}
+          onChange={e => { setDateTo(e.target.value); setTodayOnly(false); }}
+          style={{ flex: 1, minWidth: 0, boxSizing: 'border-box', padding: '7px 8px', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, background: T.bgSurface, color: T.textPrimary, fontSize: 11, fontFamily: T.fontBody, outline: 'none' }}
+        />
+        {(todayOnly || dateFrom || dateTo) && (
+          <span onClick={clearDates} style={{ fontSize: 11, fontWeight: 600, color: T.textTertiary, fontFamily: T.fontBody, cursor: 'pointer' }}>Clear</span>
+        )}
+      </div>
+
+      {/* Tabs — Pending / Log */}
+      <div style={{ padding: '0 14px 8px', flexShrink: 0, background: T.bgBase, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          {tab === 'pending' ? 'Pending' : 'Log'}
+        </div>
+        <div style={{ display: 'flex', background: T.bgSubtle, border: `1px solid ${T.border}`, borderRadius: T.radiusFull, padding: 2 }}>
+          {[['pending', `Pending`], ['log', 'Log']].map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              style={{
+                padding: '5px 14px', borderRadius: T.radiusFull, cursor: 'pointer', border: 'none',
+                fontSize: 12, fontWeight: 700, fontFamily: T.fontBody,
+                background: tab === key ? T.primary : 'transparent',
+                color: tab === key ? '#fff' : T.textSecondary,
+              }}
+            >
+              {label}{key === 'pending' && totalPending > 0 ? ` ${pending.length}` : ''}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: '4px 14px 16px', position: 'relative' }}>
+        {tab === 'pending' && pending.map((item) => (
+          <div
+            key={item.id}
+            onClick={() => setDetailItem(item)}
+            style={{ background: T.bgSurface, border: `1.5px solid ${T.statusPending}`, borderRadius: T.radiusLg, padding: '12px 14px', marginTop: 10, boxShadow: T.shadowSm, cursor: 'pointer' }}
+          >
+            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flex: 1, minWidth: 0 }}>
+                <div style={{ width: 36, height: 36, borderRadius: T.radiusMd, background: T.statusPendingBg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>{TYPE_ICONS[item.type] || '📄'}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{item.type}</div>
+                  <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>{item.ref} · {item.requestedBy}</div>
+                  {item.amount && <div style={{ fontSize: 13, fontWeight: 700, color: T.statusPending, fontFamily: T.fontBody, marginTop: 4 }}>{item.amount}</div>}
                 </div>
               </div>
-            ))}
-          </>
-        )}
+              <span style={{ fontSize: 14, color: T.textTertiary, flexShrink: 0 }}>›</span>
+            </div>
+          </div>
+        ))}
 
-        {done.length > 0 && (
-          <>
-            <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: 18, marginBottom: 4 }}>Completed</div>
-            {done.map((item) => (
-              <div
-                key={item.id}
-                onClick={() => setDetailItem(item)}
-                style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 14px', marginTop: 10, opacity: 0.85, cursor: 'pointer' }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{item.type}</div>
-                    <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>{item.ref}</div>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ fontSize: 10, fontWeight: 700, color: item.status === 'approved' ? T.statusApproved : T.statusRejected, background: item.status === 'approved' ? T.statusApprovedBg : T.statusRejectedBg, padding: '2px 8px', borderRadius: T.radiusFull, fontFamily: T.fontBody, textTransform: 'capitalize' }}>{item.status}</span>
-                    <span style={{ fontSize: 14, color: T.textTertiary }}>›</span>
-                  </div>
+        {tab === 'log' && done.map((item) => (
+          <div
+            key={item.id}
+            onClick={() => setDetailItem(item)}
+            style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 14px', marginTop: 10, opacity: 0.9, cursor: 'pointer' }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
+                <div style={{ width: 32, height: 32, borderRadius: T.radiusMd, background: T.bgSubtle, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, flexShrink: 0 }}>{TYPE_ICONS[item.type] || '📄'}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{item.type}</div>
+                  <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>{item.ref} · {item.date}</div>
                 </div>
               </div>
-            ))}
-          </>
-        )}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                <span style={{ fontSize: 10, fontWeight: 700, color: item.status === 'approved' ? T.statusApproved : T.statusRejected, background: item.status === 'approved' ? T.statusApprovedBg : T.statusRejectedBg, padding: '2px 8px', borderRadius: T.radiusFull, fontFamily: T.fontBody, textTransform: 'capitalize' }}>{item.status}</span>
+                <span style={{ fontSize: 14, color: T.textTertiary }}>›</span>
+              </div>
+            </div>
+          </div>
+        ))}
 
-        {pending.length === 0 && done.length === 0 && (
-          <div style={{ textAlign: 'center', padding: 32, color: T.textTertiary, fontFamily: T.fontBody, fontSize: 13 }}>No approvals</div>
+        {tab === 'pending' && pending.length === 0 && (
+          <div style={{ textAlign: 'center', padding: 32, color: T.textTertiary, fontFamily: T.fontBody, fontSize: 13 }}>No pending approvals</div>
+        )}
+        {tab === 'log' && done.length === 0 && (
+          <div style={{ textAlign: 'center', padding: 32, color: T.textTertiary, fontFamily: T.fontBody, fontSize: 13 }}>No log entries</div>
         )}
       </div>
     </div>

@@ -24,7 +24,7 @@ const TABS = [
   },
   {
     key: 'production',
-    label: 'Produce',
+    label: 'Production',
     icon: (active) => (
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
         <path d="M12 2L2 7l10 5 10-5-10-5z" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>

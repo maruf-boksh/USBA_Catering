@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { T } from '../theme';
 import { MOCK_FLIGHTS, MOCK_DISPATCHES } from '../mockData';
 
@@ -7,6 +7,117 @@ const TODAY = '2026-06-11';
 function nowStr() {
   const n = new Date();
   return `${n.getHours().toString().padStart(2, '0')}:${n.getMinutes().toString().padStart(2, '0')}`;
+}
+
+// Container labels printed at the catering point for a dispatch — scanned to
+// verify the load. A handful of containers rather than one per meal.
+function labelsFor(flight, units) {
+  const n = Math.min(6, Math.max(3, Math.ceil((units || 120) / 40)));
+  return Array.from({ length: n }, (_, i) => `LBL-${flight}-${String(i + 1).padStart(2, '0')}`);
+}
+
+// Renders a scannable barcode (bars derived from the label code) — mirrors the
+// packaging label printed at the catering point in the web version.
+function Barcode({ code }) {
+  const bars = code.split('').flatMap((ch, i) => {
+    const n = ch.charCodeAt(0);
+    return [2, (n % 3) + 1, 1, (n % 2) + 2].map((w, j) => ({ key: `${i}-${j}`, w, h: 26 + (n % 16) }));
+  });
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-end', gap: 1, height: 44, justifyContent: 'center', padding: '0 4px' }}>
+      {bars.map(b => <div key={b.key} style={{ width: b.w, height: b.h, background: '#0f172a' }} />)}
+    </div>
+  );
+}
+
+// The printed catering-point label card revealed on scan (web "Meal Label").
+function LabelCard({ code, flight, onScan, onClose }) {
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: 20 }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 300, background: '#fff', borderRadius: T.radiusLg, overflow: 'hidden', boxShadow: T.shadowMd }}>
+        <div style={{ background: T.statusApprovedBg, padding: '10px 14px', borderBottom: `1px solid ${T.statusApproved}30`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ fontSize: 12, fontWeight: 800, color: T.statusApproved, fontFamily: T.fontBody }}>USBA Catering · Meal Label</div>
+          <span onClick={onClose} style={{ fontSize: 16, color: T.textTertiary, cursor: 'pointer', lineHeight: 1 }}>×</span>
+        </div>
+        <div style={{ padding: '16px 16px 14px' }}>
+          <Barcode code={code} />
+          <div style={{ textAlign: 'center', fontSize: 13, fontWeight: 800, letterSpacing: '0.08em', color: '#0f172a', fontFamily: T.fontBody, marginTop: 8 }}>{code}</div>
+          <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px dashed ${T.border}` }}>
+            {[['Flight', code.split('-').slice(1, -1).join('-') || flight], ['Batch', code.split('-').slice(-1)[0]], ['Cold Chain', '≤ +8°C']].map(([l, v]) => (
+              <div key={l} style={{ display: 'flex', justifyContent: 'space-between', paddingTop: 4, paddingBottom: 4 }}>
+                <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>{l}</span>
+                <span style={{ fontSize: 11, fontWeight: 700, color: '#0f172a', fontFamily: T.fontBody }}>{v}</span>
+              </div>
+            ))}
+          </div>
+          <button onClick={onScan}
+            style={{ width: '100%', marginTop: 14, padding: '12px', fontFamily: T.fontBody, fontSize: 14, fontWeight: 700, color: '#fff', background: T.statusInfo, border: 'none', borderRadius: T.radiusMd, cursor: 'pointer' }}>
+            Scan
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Label-scan panel with a live timer. Tapping a label reveals its printed label
+// card (barcode) — scanning it there marks it done. When `auto`, packaging is
+// completed automatically once every label is scanned (no manual step).
+function ScanPanel({ labels, flight, ctaLabel, doneLabel, onComplete, auto }) {
+  const [scanned, setScanned] = useState([]);
+  const [elapsed, setElapsed] = useState(0);
+  const [activeLabel, setActiveLabel] = useState(null);
+  const allDone = scanned.length === labels.length;
+
+  useEffect(() => {
+    if (allDone) return;
+    const t = setInterval(() => setElapsed(e => e + 1), 1000);
+    return () => clearInterval(t);
+  }, [allDone]);
+
+  // Auto-complete (e.g. "packaging done") the moment everything is scanned.
+  useEffect(() => {
+    if (auto && allDone) onComplete();
+  }, [auto, allDone, onComplete]);
+
+  const mmss = `${String(Math.floor(elapsed / 60)).padStart(2, '0')}:${String(elapsed % 60).padStart(2, '0')}`;
+  const scanActive = () => { setScanned(prev => prev.includes(activeLabel) ? prev : [...prev, activeLabel]); setActiveLabel(null); };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, background: T.bgSubtle, border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '8px 12px' }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>⏱ {mmss}</div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: allDone ? T.statusApproved : T.statusPending, fontFamily: T.fontBody }}>{scanned.length}/{labels.length} scanned</div>
+      </div>
+      {labels.map(code => {
+        const done = scanned.includes(code);
+        return (
+          <div key={code} onClick={() => !done && setActiveLabel(code)}
+            style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, background: T.bgSurface, border: `1px solid ${done ? T.statusApproved + '50' : T.border}`, borderRadius: T.radiusMd, padding: '10px 12px', marginBottom: 8, cursor: done ? 'default' : 'pointer' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 16 }}>{done ? '✅' : '🏷️'}</span>
+              <span style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{code}</span>
+            </div>
+            {done
+              ? <span style={{ fontSize: 10, fontWeight: 700, color: T.statusApproved, background: T.statusApprovedBg, padding: '3px 10px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>Scanned</span>
+              : <span style={{ fontSize: 11, fontWeight: 700, color: T.statusInfo, background: T.statusInfoBg, padding: '6px 14px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>View label</span>}
+          </div>
+        );
+      })}
+      {allDone && (
+        <div style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved}40`, borderRadius: T.radiusMd, padding: '10px 14px', margin: '4px 0 10px', textAlign: 'center' }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: T.statusApproved, fontFamily: T.fontBody }}>{doneLabel} · {mmss}</div>
+        </div>
+      )}
+      {!auto && (
+        <button onClick={onComplete} disabled={!allDone}
+          style={{ width: '100%', padding: '13px', fontFamily: T.fontBody, fontSize: 14, fontWeight: 700, color: '#fff', background: allDone ? T.statusApproved : T.textDisabled, border: 'none', borderRadius: T.radiusMd, cursor: allDone ? 'pointer' : 'not-allowed' }}>
+          {ctaLabel}
+        </button>
+      )}
+      {activeLabel && <LabelCard code={activeLabel} flight={flight} onScan={scanActive} onClose={() => setActiveLabel(null)} />}
+    </div>
+  );
 }
 
 const SEED_DISPATCHES = MOCK_DISPATCHES.map(d => ({
@@ -176,6 +287,7 @@ export function DispatchMonScreen({ nav }) {
   const [mVanEnd, setMVanEnd] = useState('');
   const [mResult, setMResult] = useState('');
   const [mDispatchedIds, setMDispatchedIds] = useState([]);
+  const [mPackagingDone, setMPackagingDone] = useState(false);
 
   // Receive tab
   const [rScreen, setRScreen] = useState(1);
@@ -227,16 +339,21 @@ export function DispatchMonScreen({ nav }) {
     const at = nowStr();
     setRAcceptedAt(at);
     setDispatches(prev => prev.map(d =>
-      d.id === rSelectedId ? { ...d, receivedAt: at, gateTemp: rGateTemp, unloadTime: rUnloadTime, approvalStage: 4 } : d
+      d.id === rSelectedId ? { ...d, receivedAt: at, gateTemp: rGateTemp, unloadTime: rUnloadTime, approvalStage: 4, sentToStore: true } : d
     ));
-    setRScreen(3);
+    setRScreen(4);
   };
 
   const resetDispatch = () => {
     setMScreen(1); setMFlights([]); setMVehicleNo(''); setMVehicleClean('');
     setMChilledTemp(''); setMFrozenTemp(''); setMVanStart(''); setMVanEnd('');
-    setMResult(''); setMDispatchedIds([]);
+    setMResult(''); setMDispatchedIds([]); setMPackagingDone(false);
   };
+
+  // Log filters — search + date range
+  const [logSearch, setLogSearch] = useState('');
+  const [logFrom, setLogFrom] = useState('');
+  const [logTo, setLogTo] = useState('');
 
   const resetReceive = () => {
     setRScreen(1); setRSelectedId(''); setRGateTemp(''); setRUnloadTime('');
@@ -423,7 +540,11 @@ export function DispatchMonScreen({ nav }) {
 
     // S3 — Result check
     if (mScreen === 3) {
-      const canConfirm = mResult !== '';
+      const scanLabels = mFlights.flatMap(fid => {
+        const f = MOCK_FLIGHTS.find(x => x.id === fid);
+        return labelsFor(f?.id ?? fid, f?.meals);
+      });
+      const canConfirm = mResult === 'Yes' ? mPackagingDone : mResult === 'No';
       return (
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 14px 16px' }}>
           <Card>
@@ -457,10 +578,22 @@ export function DispatchMonScreen({ nav }) {
           </Card>
 
           {mResult === 'Yes' && (
-            <Card style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved}40` }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: T.statusApproved, fontFamily: T.fontBody, marginBottom: 4 }}>QR Dispatch Ready</div>
-              <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>Dispatch QR ready — Airport exec scans this</div>
-              <div style={{ fontSize: 28, textAlign: 'center', marginTop: 8 }}>📱</div>
+            <Card>
+              <SectionLabel>Scan Container Labels — Packaging</SectionLabel>
+              <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginBottom: 10 }}>Scan every printed label to confirm the load. Packaging completes when all labels are scanned.</div>
+              {!mPackagingDone ? (
+                <ScanPanel
+                  labels={scanLabels}
+                  flight={mFlights[0] ?? '—'}
+                  auto
+                  doneLabel="All labels scanned — packaging done"
+                  onComplete={() => setMPackagingDone(true)}
+                />
+              ) : (
+                <div style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved}40`, borderRadius: T.radiusMd, padding: '10px 14px', textAlign: 'center' }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: T.statusApproved, fontFamily: T.fontBody }}>📦 Packaging Done — ready to dispatch</div>
+                </div>
+              )}
             </Card>
           )}
 
@@ -478,8 +611,30 @@ export function DispatchMonScreen({ nav }) {
   // ── RECEIVE TAB ──────────────────────────────────────────────────────────
   function renderReceive() {
 
-    // S3 — Accepted
+    // S3 — Scan items → send to store
     if (rScreen === 3) {
+      const entry = dispatches.find(d => d.id === rSelectedId);
+      const scanLabels = labelsFor(entry?.flight ?? 'APT', entry?.items);
+      return (
+        <div style={{ flex: 1, overflowY: 'auto', padding: '8px 14px 16px' }}>
+          <Card>
+            <SectionLabel>Scan Received Items — Gate 08</SectionLabel>
+            <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginBottom: 10 }}>Scan each container label received at the gate, then send the load to the airport store.</div>
+            <ScanPanel
+              labels={scanLabels}
+              flight={entry?.flight ?? '—'}
+              ctaLabel="Send to Store →"
+              doneLabel="All items scanned"
+              onComplete={acceptReceipt}
+            />
+          </Card>
+          <SecondaryBtn onClick={() => setRScreen(2)} style={{ width: '100%' }}>← Back</SecondaryBtn>
+        </div>
+      );
+    }
+
+    // S4 — Accepted / Sent to store
+    if (rScreen === 4) {
       const entry = dispatches.find(d => d.id === rSelectedId);
       const f = entry ? MOCK_FLIGHTS.find(f => f.id === entry.flight) : null;
       const kitchenTemp = entry?.chilledTemp ?? '—';
@@ -488,7 +643,7 @@ export function DispatchMonScreen({ nav }) {
       return (
         <div style={{ flex: 1, overflowY: 'auto', padding: '24px 14px 16px', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
           <div style={{ width: 64, height: 64, borderRadius: T.radiusFull, border: `2px solid ${T.statusInfo}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 28, marginBottom: 12 }}>✅</div>
-          <div style={{ fontFamily: T.fontBody, fontSize: 18, fontWeight: 700, color: T.textPrimary, marginBottom: 4 }}>Receipt Accepted</div>
+          <div style={{ fontFamily: T.fontBody, fontSize: 18, fontWeight: 700, color: T.textPrimary, marginBottom: 4 }}>Received &amp; Sent to Store</div>
           <div style={{ fontFamily: T.fontBody, fontSize: 12, color: T.textTertiary, marginBottom: 4 }}>
             {entry?.flight} · {entry?.items ?? '—'} units · Gate 08 · {rAcceptedAt}
           </div>
@@ -632,7 +787,7 @@ export function DispatchMonScreen({ nav }) {
 
           <div style={{ display: 'flex', gap: 8 }}>
             <SecondaryBtn onClick={() => setRScreen(1)} style={{ flex: 1 }}>← Back</SecondaryBtn>
-            <PrimaryBtn onClick={acceptReceipt} disabled={!canSave} style={{ flex: 2 }}>✓ Save & accept</PrimaryBtn>
+            <PrimaryBtn onClick={() => setRScreen(3)} disabled={!canSave} style={{ flex: 2 }}>Next — scan items →</PrimaryBtn>
           </div>
         </div>
       );
@@ -643,38 +798,61 @@ export function DispatchMonScreen({ nav }) {
 
   // ── LOG TAB ───────────────────────────────────────────────────────────────
   function renderLog() {
+    const lq = logSearch.trim().toLowerCase();
+    const visible = dispatches.filter(d => {
+      const dt = d.packagingDate ?? TODAY;
+      if (logFrom && dt < logFrom) return false;
+      if (logTo && dt > logTo) return false;
+      if (lq && ![d.flight, d.id, d.vehicleNo, d.route].some(v => (v || '').toLowerCase().includes(lq))) return false;
+      return true;
+    });
     return (
-      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 14px 16px' }}>
-        {dispatches.length === 0 && (
-          <div style={{ textAlign: 'center', padding: '32px 0', color: T.textTertiary, fontFamily: T.fontBody, fontSize: 13 }}>No dispatch records yet</div>
-        )}
-        {dispatches.map(d => (
-          <div key={d.id} onClick={() => setMLogEntryId(d.id)}
-            style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '10px 12px', marginBottom: 8, cursor: 'pointer', boxShadow: T.shadowSm }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{d.flight}</div>
-                <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 1 }}>
-                  {d.id.length > 14 ? `${d.id.slice(0, 14)}…` : d.id}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {/* Search + date range */}
+        <div style={{ padding: '10px 14px 6px', flexShrink: 0 }}>
+          <div style={{ position: 'relative', display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+            <span style={{ position: 'absolute', left: 12, fontSize: 13, color: T.textTertiary, pointerEvents: 'none' }}>🔍</span>
+            <input value={logSearch} onChange={e => setLogSearch(e.target.value)} placeholder="Search flight, dispatch, vehicle…"
+              style={{ ...INPUT_STYLE, padding: '9px 12px 9px 32px', borderRadius: T.radiusFull, fontSize: 12 }} />
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <input type="date" value={logFrom} onChange={e => setLogFrom(e.target.value)} style={{ ...INPUT_STYLE, flex: 1, minWidth: 0, padding: '7px 8px', fontSize: 11 }} />
+            <span style={{ fontSize: 12, color: T.textTertiary }}>–</span>
+            <input type="date" value={logTo} onChange={e => setLogTo(e.target.value)} style={{ ...INPUT_STYLE, flex: 1, minWidth: 0, padding: '7px 8px', fontSize: 11 }} />
+            {(logSearch || logFrom || logTo) && (
+              <span onClick={() => { setLogSearch(''); setLogFrom(''); setLogTo(''); }} style={{ fontSize: 11, fontWeight: 600, color: T.textTertiary, fontFamily: T.fontBody, cursor: 'pointer' }}>Clear</span>
+            )}
+          </div>
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '6px 14px 16px' }}>
+          {visible.length === 0 && (
+            <div style={{ textAlign: 'center', padding: '32px 0', color: T.textTertiary, fontFamily: T.fontBody, fontSize: 13 }}>No dispatch records match.</div>
+          )}
+          {visible.map(d => {
+            const received = !!d.receivedAt;
+            const stColor = received ? T.statusApproved : T.statusPending;
+            const stBg = received ? T.statusApprovedBg : T.statusPendingBg;
+            return (
+              <div key={d.id} onClick={() => setMLogEntryId(d.id)}
+                style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 14px', marginBottom: 10, cursor: 'pointer', boxShadow: T.shadowSm }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flex: 1, minWidth: 0 }}>
+                    <div style={{ width: 36, height: 36, borderRadius: T.radiusMd, background: stBg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>🚛</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{d.flight}{d.route ? ` · ${d.route}` : ''}</div>
+                      <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.id} · {d.packagingDate ?? TODAY}{d.vehicleNo ? ` · ${d.vehicleNo}` : ''}</div>
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: stColor, background: stBg, padding: '2px 8px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>{received ? 'Received' : 'Awaiting'}</span>
+                    <span style={{ fontSize: 14, color: T.textTertiary }}>›</span>
+                  </div>
                 </div>
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
-                <ResultBadge value={d.resultSatisfy} />
-                <span style={{
-                  fontSize: 10, fontWeight: 700, fontFamily: T.fontBody, padding: '2px 8px', borderRadius: T.radiusFull,
-                  color: d.receivedAt ? T.statusApproved : T.statusPending,
-                  background: d.receivedAt ? T.statusApprovedBg : T.statusPendingBg,
-                }}>
-                  {d.receivedAt ? 'Received' : 'Awaiting'}
-                </span>
-              </div>
-            </div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
-              {d.monitoredAt && <span style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody }}>⏰ {d.monitoredAt}</span>}
-              {d.vehicleNo && <span style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody }}>🚛 {d.vehicleNo}</span>}
-            </div>
-          </div>
-        ))}
+            );
+          })}
+        </div>
       </div>
     );
   }

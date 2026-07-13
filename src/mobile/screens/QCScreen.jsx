@@ -10,8 +10,9 @@ const RESULT_MAP = {
 };
 
 const HUB_MODULES = [
-  { screen: 'cooking-temp', icon: '🌡️', label: 'Cooking Temperature', sub: 'HACCP temp & sensory tests', color: T.statusInfo,    bg: T.statusInfoBg    },
-  { screen: 'hygiene',      icon: '🧹', label: 'Hygiene Monitoring',  sub: 'Daily safety checklists',   color: T.statusApproved, bg: T.statusApprovedBg },
+  { screen: 'cooking-temp',     icon: '🌡️', label: 'Cooking Temperature',                   sub: 'HACCP temp & sensory tests',   color: T.statusInfo,     bg: T.statusInfoBg     },
+  { screen: 'hygiene',          icon: '🧹', label: 'Daily Hygiene Monitoring',              sub: 'Daily safety checklists',      color: T.statusApproved, bg: T.statusApprovedBg },
+  { screen: 'personal-hygiene', icon: '🧼', label: 'Health & Personal Hygiene Monitoring',  sub: 'Staff hygiene checks by area', color: T.statusPending,  bg: T.statusPendingBg  },
 ];
 
 const SENSORY_FIELDS = [
@@ -44,6 +45,8 @@ export function QCScreen({ nav }) {
   const [sensoryPage,   setSensoryPage]   = useState(null);
   const [sForm,         setSForm]         = useState(initForm());
   const [checksFilter,  setChecksFilter]  = useState('all');
+  const [qcSearch,      setQcSearch]      = useState('');
+  const [qcDate,        setQcDate]        = useState('');
 
   useEffect(() => qcStore.subscribe(setPendingQC), []);
 
@@ -51,9 +54,15 @@ export function QCScreen({ nav }) {
   const openCount = checks.filter(c => c.result === 'open').length;
   const passRate  = checks.length > 0 ? Math.round((passCount / checks.length) * 100) : 0;
 
-  const filteredChecks = checksFilter === 'all' ? checks
-    : checksFilter === 'pass' ? checks.filter(c => c.result === 'pass')
-    : checks.filter(c => c.result === 'fail' || c.result === 'open');
+  const qcQuery  = qcSearch.trim().toLowerCase();
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const byResult = (c) => checksFilter === 'all' ? true
+    : checksFilter === 'pass' ? c.result === 'pass'
+    : (c.result === 'fail' || c.result === 'open');
+  const bySearch = (c) => !qcQuery || [c.item, c.flight, c.checkedBy, c.temp]
+    .some(v => (v || '').toString().toLowerCase().includes(qcQuery));
+  const byDate   = (c) => !qcDate || qcDate === todayStr; // today's checks
+  const filteredChecks = checks.filter(c => byResult(c) && bySearch(c) && byDate(c));
 
   const formComplete =
     sForm.overall !== '' &&
@@ -345,21 +354,43 @@ export function QCScreen({ nav }) {
         )}
 
         {/* Today's Checks */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8, marginBottom: 8 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.07em' }}>Today's Checks</div>
-          <div style={{ display: 'flex', gap: 6 }}>
-            {[['pass', 'Pass'], ['fail', 'Failed']].map(([key, label]) => {
-              const active = checksFilter === key;
-              const color  = key === 'pass' ? T.statusApproved : T.statusRejected;
-              const bg     = key === 'pass' ? T.statusApprovedBg : T.statusRejectedBg;
-              return (
-                <button key={key} onClick={() => setChecksFilter(active ? 'all' : key)}
-                  style={{ padding: '4px 12px', borderRadius: T.radiusFull, border: `1.5px solid ${active ? color : T.border}`, background: active ? bg : T.bgSurface, color: active ? color : T.textTertiary, fontSize: 11, fontWeight: 700, fontFamily: T.fontBody, cursor: 'pointer' }}>
-                  {label}
-                </button>
-              );
-            })}
+        <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.07em', marginTop: 8, marginBottom: 8 }}>Today's Checks</div>
+
+        {/* Search + date filter — before the Pass / Failed filters */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <div style={{ position: 'relative', flex: 1, display: 'flex', alignItems: 'center' }}>
+            <span style={{ position: 'absolute', left: 10, fontSize: 13, color: T.textTertiary, pointerEvents: 'none' }}>🔍</span>
+            <input
+              value={qcSearch}
+              onChange={e => setQcSearch(e.target.value)}
+              placeholder="Search item, flight…"
+              style={{ width: '100%', boxSizing: 'border-box', padding: '8px 10px 8px 30px', border: `1px solid ${T.border}`, borderRadius: T.radiusFull, background: T.bgSurface, color: T.textPrimary, fontSize: 12, fontFamily: T.fontBody, outline: 'none' }}
+            />
           </div>
+          <input
+            type="date"
+            value={qcDate}
+            onChange={e => setQcDate(e.target.value)}
+            style={{ boxSizing: 'border-box', padding: '8px 8px', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, background: T.bgSurface, color: T.textPrimary, fontSize: 11, fontFamily: T.fontBody, outline: 'none' }}
+          />
+          {(qcSearch || qcDate) && (
+            <span onClick={() => { setQcSearch(''); setQcDate(''); }} style={{ fontSize: 11, fontWeight: 600, color: T.textTertiary, fontFamily: T.fontBody, cursor: 'pointer' }}>Clear</span>
+          )}
+        </div>
+
+        {/* Pass / Failed result filters */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginBottom: 8 }}>
+          {[['pass', 'Pass'], ['fail', 'Failed']].map(([key, label]) => {
+            const active = checksFilter === key;
+            const color  = key === 'pass' ? T.statusApproved : T.statusRejected;
+            const bg     = key === 'pass' ? T.statusApprovedBg : T.statusRejectedBg;
+            return (
+              <button key={key} onClick={() => setChecksFilter(active ? 'all' : key)}
+                style={{ padding: '5px 16px', borderRadius: T.radiusFull, border: `1.5px solid ${active ? color : color + '55'}`, background: active ? color : bg, color: active ? '#fff' : color, fontSize: 11, fontWeight: 700, fontFamily: T.fontBody, cursor: 'pointer' }}>
+                {label}
+              </button>
+            );
+          })}
         </div>
 
         {filteredChecks.map(check => {
