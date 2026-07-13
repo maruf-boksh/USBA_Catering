@@ -2,44 +2,106 @@ import { useState } from 'react';
 import { T } from '../theme';
 import { KPICard } from '../components/KPICard';
 import { MOCK_PRODUCTION_ORDERS, MOCK_QC_CHECKS, MOCK_DISPATCHES, MOCK_APPROVALS, MOCK_INVENTORY_ALERTS } from '../mockData';
-import { loadMobileFlights } from '../../lib/flight-orders-store';
+import { loadMobileFlights, loadMobileActiveOrders } from '../../lib/flight-orders-store';
+import { getAuthUser } from '@/lib/auth';
+
+// Time-of-day greeting (matches the web dashboard's greeting logic).
+function greetingForNow() {
+  const h = new Date().getHours();
+  if (h < 12) return 'Good morning';
+  if (h < 17) return 'Good afternoon';
+  return 'Good evening';
+}
+
+// Two-letter initials from a name (e.g. "Ikramul Haque Khan" → "IK").
+function nameInitials(name) {
+  const parts = String(name || '').replace(/[.]/g, ' ').split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return 'U';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
 
 // Live flights from the web Order Management store (replaces the old MOCK_FLIGHTS).
 const FLIGHTS = loadMobileFlights();
+// Active Orders (Flight / Crew) — same live data + grouping the web dashboard's
+// "Active Orders" panel uses, projected into the mobile card shape.
+const ACTIVE_ORDERS = loadMobileActiveOrders();
 
-const STATUS_STYLE = {
-  boarding:  { color: T.statusBoarding,  bg: T.statusBoardingBg  },
-  scheduled: { color: T.statusScheduled, bg: T.statusScheduledBg },
-  delayed:   { color: T.statusDelayed,   bg: T.statusDelayedBg   },
-  departed:  { color: T.statusDeparted,  bg: T.statusDepartedBg  },
+// Order-lifecycle status → mobile pill palette (mirrors the web Active-Orders pill:
+// Production → amber, Dispatched → blue, Approved → green, Pending → neutral).
+const AO_STATUS_STYLE = {
+  Production: { color: T.statusDelayed,   bg: T.statusDelayedBg   },
+  Approved:   { color: T.statusApproved,  bg: T.statusApprovedBg  },
+  Dispatched: { color: T.statusScheduled, bg: T.statusScheduledBg },
+  Pending:    { color: T.statusDraft,     bg: T.statusDraftBg     },
+  Completed:  { color: T.statusDeparted,  bg: T.statusDepartedBg  },
 };
+const aoStatus = (s) => AO_STATUS_STYLE[s] || AO_STATUS_STYLE.Pending;
 
-function FlightRow({ flight }) {
-  const s = STATUS_STYLE[flight.status] || STATUS_STYLE.scheduled;
+const MAX_LEGS_PER_CARD = 3;
+
+function OrderGroupCard({ group, mode, onOpen }) {
+  const st = aoStatus(group.status);
+  const shown = group.legs.slice(0, MAX_LEGS_PER_CARD);
+  const hidden = group.legs.length - shown.length;
+  const total = mode === 'crew' ? group.totalCrew : group.totalPax;
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 10,
-      padding: '10px 0', borderBottom: `1px solid ${T.border}`,
-    }}>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{flight.id}</span>
-          <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{flight.route}</span>
-        </div>
-        <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
-          {flight.airline} · {flight.pax} pax · {flight.meals} meals
-        </div>
+    <div style={{ border: `1px solid ${T.border}`, borderRadius: T.radiusLg, overflow: 'hidden', marginTop: 10, background: T.bgSurface }}>
+      {/* group header */}
+      <div onClick={onOpen} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', background: T.bgSubtle, borderBottom: `1px solid ${T.border}`, cursor: 'pointer' }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.primary, fontFamily: T.fontBody }}>{group.orderNo}</span>
+        {group.legs.length > 1 && (
+          <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '0.04em', color: T.statusDelayed, background: T.statusDelayedBg, padding: '2px 6px', borderRadius: T.radiusSm, textTransform: 'uppercase', fontFamily: T.fontBody }}>
+            {group.legs.length} flights
+          </span>
+        )}
+        <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>· <span style={{ color: T.textPrimary, fontWeight: 600 }}>{total}</span> {mode === 'crew' ? 'crew' : 'pax'}</span>
+        <span style={{ marginLeft: 'auto', fontSize: 9, fontWeight: 700, color: st.color, background: st.bg, padding: '2px 8px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>{group.status}</span>
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
-        <span style={{ fontSize: 12, fontWeight: 600, color: T.textSecondary, fontFamily: T.fontBody }}>{flight.departure}</span>
-        <span style={{
-          fontSize: 10, fontWeight: 600, color: s.color, background: s.bg,
-          padding: '2px 6px', borderRadius: T.radiusFull,
-          textTransform: 'capitalize', fontFamily: T.fontBody,
-        }}>
-          {flight.status}
-        </span>
+      {/* legs */}
+      {shown.map((l, idx) => (
+        <div key={l.id} onClick={onOpen} style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '9px 12px', borderTop: idx > 0 ? `1px solid ${T.border}` : 'none', cursor: 'pointer' }}>
+          <span style={{ fontSize: 11, fontWeight: 700, color: '#fff', background: '#2a2528', borderRadius: T.radiusSm, padding: '3px 7px', fontFamily: T.fontBody, flexShrink: 0 }}>{l.flight.slice(-3)}</span>
+          <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: T.textPrimary, fontFamily: T.fontBody, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {l.flight} <span style={{ color: T.textTertiary }}>· {l.route}</span>
+          </span>
+          <span style={{ fontSize: 12, fontWeight: 600, color: T.textSecondary, fontFamily: T.fontBody, flexShrink: 0 }}>{l.etd}</span>
+          <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, width: 34, textAlign: 'right', flexShrink: 0 }}>{mode === 'crew' ? `${l.crew}c` : `${l.pax}p`}</span>
+        </div>
+      ))}
+      {hidden > 0 && (
+        <div onClick={onOpen} style={{ padding: '8px 12px', borderTop: `1px solid ${T.border}`, textAlign: 'center', fontSize: 11, fontWeight: 700, color: T.primary, background: T.bgSubtle, cursor: 'pointer', fontFamily: T.fontBody }}>
+          + {hidden} more flight{hidden === 1 ? '' : 's'} →
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActiveOrdersCard({ nav }) {
+  const [tab, setTab] = useState('flight');
+  const groups = ACTIVE_ORDERS[tab] || [];
+  return (
+    <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 14px', marginTop: 14, boxShadow: T.shadowSm, marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>Active Orders</span>
+        <button onClick={() => nav.navigate('orders')} style={{ background: 'none', border: 'none', color: T.primary, fontSize: 12, fontWeight: 600, fontFamily: T.fontBody, cursor: 'pointer', padding: 0 }}>View all →</button>
       </div>
+      {/* tabs */}
+      <div style={{ display: 'flex', gap: 18, borderBottom: `1px solid ${T.border}`, marginBottom: 2 }}>
+        {[['flight', 'Flight Orders'], ['crew', 'Crew Orders']].map(([key, label]) => (
+          <button key={key} onClick={() => setTab(key)}
+            style={{ position: 'relative', padding: '8px 0', fontSize: 12.5, fontWeight: 700, color: tab === key ? T.textPrimary : T.textTertiary, background: 'none', border: 'none', cursor: 'pointer', fontFamily: T.fontBody }}>
+            {label}
+            {tab === key && <span style={{ position: 'absolute', left: 0, right: 0, bottom: -1, height: 2.5, borderRadius: 99, background: T.primary }} />}
+          </button>
+        ))}
+      </div>
+      {groups.length === 0 ? (
+        <div style={{ padding: '24px 0', textAlign: 'center', fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>No active {tab} orders.</div>
+      ) : (
+        groups.map((g) => <OrderGroupCard key={`${tab}-${g.orderNo}`} group={g} mode={tab} onOpen={() => nav.navigate('orders')} />)
+      )}
     </div>
   );
 }
@@ -171,6 +233,8 @@ export function HomeScreen({ nav }) {
   const [expanded, setExpanded] = useState(false);
   const visibleKPIs = expanded ? KPI_ROWS : KPI_ROWS.slice(0, 4);
   const alertBadgeCount = pendingApprovals + inventoryAlerts;
+  const userName = getAuthUser()?.name ?? 'Guest User';
+  const userFirstName = userName.split(/\s+/)[0];
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
@@ -182,38 +246,68 @@ export function HomeScreen({ nav }) {
         flexShrink: 0,
       }}>
         <div>
-          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', lineHeight: 1 }}>Good morning</div>
+          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', lineHeight: 1 }}>{greetingForNow()}, {userFirstName}</div>
           <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff', marginTop: 2 }}>Operations Dashboard</div>
         </div>
-        <button
-          onClick={() => nav.navigate('alerts')}
-          aria-label="Alerts"
-          style={{
-            background: 'rgba(255,255,255,0.15)',
-            border: '1px solid rgba(255,255,255,0.2)',
-            borderRadius: T.radiusFull,
-            width: 36, height: 36,
-            cursor: 'pointer', color: '#fff', fontSize: 17,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            position: 'relative', flexShrink: 0,
-          }}
-        >
-          🔔
-          {alertBadgeCount > 0 && (
-            <div style={{
-              position: 'absolute', top: -3, right: -3,
-              background: T.highlight, color: '#fff',
-              fontSize: 9, fontWeight: 700,
-              minWidth: 14, height: 14,
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <button
+            onClick={() => nav.navigate('alerts')}
+            aria-label="Alerts"
+            style={{
+              background: 'rgba(255,255,255,0.15)',
+              border: '1px solid rgba(255,255,255,0.2)',
               borderRadius: T.radiusFull,
+              width: 36, height: 36,
+              cursor: 'pointer', color: '#fff', fontSize: 17,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              padding: '0 3px', fontFamily: T.fontBody,
-              border: `1.5px solid ${T.primary}`,
+              position: 'relative', flexShrink: 0,
+            }}
+          >
+            🔔
+            {alertBadgeCount > 0 && (
+              <div style={{
+                position: 'absolute', top: -3, right: -3,
+                background: T.highlight, color: '#fff',
+                fontSize: 9, fontWeight: 700,
+                minWidth: 14, height: 14,
+                borderRadius: T.radiusFull,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                padding: '0 3px', fontFamily: T.fontBody,
+                border: `1.5px solid ${T.primary}`,
+              }}>
+                {alertBadgeCount}
+              </div>
+            )}
+          </button>
+
+          {/* Profile — name + avatar, opens the Profile screen */}
+          <button
+            onClick={() => nav.navigate('profile')}
+            aria-label="Profile"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 7,
+              background: 'rgba(255,255,255,0.15)',
+              border: '1px solid rgba(255,255,255,0.25)',
+              borderRadius: T.radiusFull,
+              padding: '3px 10px 3px 3px', cursor: 'pointer', flexShrink: 0,
+            }}
+          >
+            <span style={{
+              width: 28, height: 28, borderRadius: T.radiusFull,
+              background: 'rgba(255,255,255,0.95)', color: T.primary,
+              fontSize: 11, fontWeight: 800, fontFamily: T.fontBody,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
             }}>
-              {alertBadgeCount}
-            </div>
-          )}
-        </button>
+              {nameInitials(userName)}
+            </span>
+            <span style={{
+              fontSize: 12, fontWeight: 700, color: '#fff', fontFamily: T.fontBody,
+              maxWidth: 84, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            }}>
+              {userFirstName}
+            </span>
+          </button>
+        </div>
       </div>
 
       {/* Scrollable content */}
@@ -297,32 +391,8 @@ export function HomeScreen({ nav }) {
           </div>
         </div>
 
-        {/* ── Next departures ── */}
-        <div style={{
-          background: T.bgSurface, border: `1px solid ${T.border}`,
-          borderRadius: T.radiusLg, padding: '12px 14px',
-          marginTop: 14, boxShadow: T.shadowSm, marginBottom: 16,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-            <span style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>Next Departures</span>
-            <button
-              onClick={() => nav.navigate('orders')}
-              style={{
-                background: 'none', border: 'none', color: T.primary,
-                fontSize: 12, fontWeight: 600, fontFamily: T.fontBody,
-                cursor: 'pointer', padding: 0,
-              }}
-            >
-              Orders →
-            </button>
-          </div>
-          {FLIGHTS.slice(0, 4).map(f => (
-            <FlightRow key={f.id} flight={f} />
-          ))}
-          <div style={{ paddingTop: 6, fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, textAlign: 'center' }}>
-            {totalFlights} flights total today
-          </div>
-        </div>
+        {/* ── Active Orders (Flight / Crew) — same data as the web dashboard ── */}
+        <ActiveOrdersCard nav={nav} />
 
       </div>
     </div>

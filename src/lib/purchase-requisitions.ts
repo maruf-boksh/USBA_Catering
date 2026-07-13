@@ -107,6 +107,37 @@ export function getPurchaseRequisitions(): PurchaseRequisition[] {
   return seedRequisitions;
 }
 
+/**
+ * Create and persist a new Purchase Requisition into the same localStorage-backed
+ * list the web PR screen reads on mount. Used by the mobile app to raise a PR
+ * that then shows up on the web (the web screen re-reads on its next mount, same
+ * as `applyReceiptToPR`). Assigns the next `PR-2026-###` id (max suffix + 1),
+ * derives `totalAmount` from the lines if not supplied, prepends it, and returns
+ * the created record. Best-effort — never throws.
+ */
+export function addPurchaseRequisition(
+  input: Omit<PurchaseRequisition, "id" | "totalAmount"> & { totalAmount?: number },
+): PurchaseRequisition {
+  const list = getPurchaseRequisitions();
+  const maxNum = list.reduce((m, r) => {
+    const n = Number(r.id.split("-").pop());
+    return Number.isFinite(n) ? Math.max(m, n) : m;
+  }, 0);
+  const totalAmount =
+    input.totalAmount ?? input.lines.reduce((s, l) => s + l.qty * l.rate, 0);
+  const pr: PurchaseRequisition = {
+    ...input,
+    id: `PR-2026-${String(maxNum + 1).padStart(3, "0")}`,
+    totalAmount,
+  };
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify([pr, ...list]));
+  } catch {
+    /* best-effort — localStorage may be unavailable */
+  }
+  return pr;
+}
+
 // ── Procurement stage ────────────────────────────────────────────────────────
 // A PR moves through: draft/pending (pre-approval) → approved → goods start
 // arriving. Once approved, the stage is DERIVED from how much has been received:

@@ -2861,6 +2861,23 @@ html[data-topbar="minimal"] .header-profile:hover {
   background: var(--color-bg-subtle) !important;
 }
 
+/* App launcher button — the inline styles paint it white-on-translucent for the
+   gradient header; on the flat/minimal (light) header that's invisible, so give
+   it the same subtle-surface treatment as the Pin / Recent buttons. */
+html[data-topbar="minimal"] .app-topbar-mobileview {
+  color: var(--color-text-secondary) !important;
+  background: var(--color-bg-subtle) !important;
+  border-color: var(--color-border) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+html[data-topbar="minimal"] .app-topbar-mobileview:hover {
+  color: var(--color-primary) !important;
+  background: var(--color-primary-light) !important;
+  border-color: var(--color-primary) !important;
+}
+
 /* Dark mode + minimal topbar */
 html[data-theme="dark"][data-topbar="minimal"] .app-topbar-inner {
   background: #1e2638 !important;
@@ -2875,6 +2892,12 @@ html[data-theme="dark"][data-topbar="minimal"] .app-recent-dropdown-button {
 }
 
 html[data-theme="dark"][data-topbar="minimal"] .app-time-chip {
+  background: #252f42 !important;
+  border-color: #3a4660 !important;
+}
+
+html[data-theme="dark"][data-topbar="minimal"] .app-topbar-mobileview {
+  color: #e2e8f0 !important;
   background: #252f42 !important;
   border-color: #3a4660 !important;
 }

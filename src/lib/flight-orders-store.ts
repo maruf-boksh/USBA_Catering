@@ -623,3 +623,81 @@ export function loadMobileFlights(
       sector: isDomesticSector(o.sector) ? "Domestic" : "International",
     }));
 }
+
+// ── Mobile "Active Orders" (mirrors the web dashboard's Active Orders panel) ───
+// Same source (live flight orders) and same shaping the web home uses: split
+// flight vs crew orders, sort active-first by lifecycle status, then group the
+// legs under their Order #. Keeps the real order numbers, flights, ETDs, pax,
+// crew and status the web shows — just projected into the mobile card shape.
+
+export type MobileOrderLeg = {
+  id: string;
+  flight: string;
+  sector: string;   // "Domestic" | "International" (like the web card's leg subtitle)
+  route: string;    // e.g. "DAC → CGP"
+  etd: string;
+  pax: number;
+  crew: number;
+  status: string;
+};
+
+export type MobileOrderGroup = {
+  orderNo: string;
+  status: string;     // the group's headline status (its first/most-active leg)
+  legs: MobileOrderLeg[];
+  totalPax: number;
+  totalCrew: number;
+};
+
+// Active-first ordering — identical priority table to the web dashboard.
+const ACTIVE_ORDER_PRIORITY: Record<string, number> = {
+  Production: 0, Approved: 1, Dispatched: 2, Pending: 3, Completed: 4,
+};
+
+/**
+ * Live orders grouped for the mobile Active-Orders card. Returns both tabs
+ * (`flight` and `crew`) so the Home screen can toggle between them, each already
+ * sorted active-first and grouped by Order #, capped at `maxOrders` groups.
+ */
+export function loadMobileActiveOrders(maxOrders = 6): {
+  flight: MobileOrderGroup[];
+  crew: MobileOrderGroup[];
+} {
+  const all = getFlightOrders();
+
+  const build = (mode: "flight" | "crew"): MobileOrderGroup[] => {
+    const rows = all.filter((o) =>
+      mode === "crew"
+        ? (o.orderType ?? "flight") === "crew"
+        : (o.orderType ?? "flight") !== "crew",
+    );
+    const sorted = [...rows].sort((a, b) => {
+      const pa = ACTIVE_ORDER_PRIORITY[a.status] ?? 99;
+      const pb = ACTIVE_ORDER_PRIORITY[b.status] ?? 99;
+      if (pa !== pb) return pa - pb;
+      return a.etd.localeCompare(b.etd);
+    });
+    const map = new Map<string, MobileOrderLeg[]>();
+    for (const o of sorted) {
+      const leg: MobileOrderLeg = {
+        id: o.id, flight: o.flight, route: o.sector,
+        sector: isDomesticSector(o.sector) ? "Domestic" : "International",
+        etd: o.etd, pax: o.pax, crew: o.crew ?? 0, status: o.status,
+      };
+      const list = map.get(o.orderNo);
+      if (list) list.push(leg);
+      else map.set(o.orderNo, [leg]);
+    }
+    return Array.from(map.entries())
+      .slice(0, maxOrders)
+      .map(([orderNo, legs]) => ({
+        orderNo,
+        status: legs[0]?.status ?? "",
+        legs,
+        totalPax: legs.reduce((s, l) => s + l.pax, 0),
+        totalCrew: legs.reduce((s, l) => s + l.crew, 0),
+      }));
+  };
+
+  return { flight: build("flight"), crew: build("crew") };
+}
