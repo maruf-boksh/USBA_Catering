@@ -12,6 +12,9 @@ import {
   prReceived,
 } from '@/lib/purchase-requisitions';
 import { activeItems } from '@/lib/sample-data';
+import { Combobox } from '../components/Combobox';
+
+const ITEM_NAMES = activeItems.map((it) => it.name);
 
 const BTN_BACK = { background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: T.radiusFull, width: 32, height: 32, cursor: 'pointer', color: '#fff', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
 const LABEL = { fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 };
@@ -120,9 +123,8 @@ export function PurchaseRequisitionScreen({ nav }) {
           {/* Requested by */}
           <div style={{ marginBottom: 14 }}>
             <div style={LABEL}>Requested By *</div>
-            <input value={requestedBy} onChange={(e) => setRequestedBy(e.target.value)} list="pr-requesters" placeholder="Name / role"
-              style={{ ...INPUT, border: `1px solid ${touched && !requestedBy.trim() ? T.statusRejected : T.border}` }} />
-            <datalist id="pr-requesters">{REQUESTERS.map((r) => <option key={r} value={r} />)}</datalist>
+            <Combobox value={requestedBy} onChange={setRequestedBy} options={REQUESTERS}
+              placeholder="Name / role" invalid={touched && !requestedBy.trim()} />
           </div>
 
           {/* Required by + priority */}
@@ -163,8 +165,8 @@ export function PurchaseRequisitionScreen({ nav }) {
                     <button onClick={() => removeLine(l.id)} style={{ background: 'none', border: 'none', color: T.statusRejected, fontSize: 16, cursor: 'pointer', lineHeight: 1, padding: 0 }}>×</button>
                   )}
                 </div>
-                <input value={l.itemName} onChange={(e) => onItemPick(l.id, e.target.value)} list="pr-items" placeholder="Search or type an item"
-                  style={{ ...INPUT, marginBottom: 8 }} />
+                <Combobox value={l.itemName} onChange={(v) => onItemPick(l.id, v)} options={ITEM_NAMES}
+                  placeholder="Search or type an item" containerStyle={{ marginBottom: 8 }} />
                 <div style={{ display: 'flex', gap: 8 }}>
                   <input type="number" inputMode="decimal" value={l.qty} onChange={(e) => setLine(l.id, { qty: e.target.value })} placeholder="Qty" style={{ ...INPUT, flex: 1, fontWeight: 700 }} />
                   <input value={l.uom} onChange={(e) => setLine(l.id, { uom: e.target.value })} placeholder="UoM" style={{ ...INPUT, flex: 1 }} />
@@ -176,7 +178,6 @@ export function PurchaseRequisitionScreen({ nav }) {
               </div>
             );
           })}
-          <datalist id="pr-items">{activeItems.map((it) => <option key={it.id} value={it.name} />)}</datalist>
 
           {/* Justification */}
           <div style={{ margin: '6px 0 14px' }}>

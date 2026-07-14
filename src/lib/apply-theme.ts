@@ -51,6 +51,22 @@ export function applyTheme(s: ThemeState): void {
   const el = document.documentElement;
   const set = (k: string, v: string) => el.style.setProperty(k, v);
 
+  // Resolve the effective light/dark once (handles "system"). This single value
+  // drives EVERY dark-mode surface so the layers can't disagree:
+  //   • data-theme="dark"      → custom --color-* vars (dashboard, KPI, chrome)
+  //   • the .dark class         → shadcn tokens (--background/--card/--foreground)
+  //   • the sidebar force below → dark sidebar surface
+  //   • AntThemeBridge (main)   → AntD dark algorithm (reads the same store)
+  // Before this, the .dark class was owned by a SEPARATE ThemeProvider (the "d"
+  // hotkey / OS pref) and could stay dark while this store toggled to light —
+  // producing a light sidebar over dark content. useThemeStore is now the one
+  // source of truth for mode.
+  const prefersDark =
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const isDark = s.mode === "dark" || (s.mode === "system" && prefersDark);
+
   // ── Primary colour family (drives buttons, header gradient, sidebar, tints) ──
   set("--color-primary", s.primaryColor);
   set("--color-primary-dark", s.primaryDark);
@@ -81,12 +97,20 @@ export function applyTheme(s: ThemeState): void {
   if (document.body) document.body.style.fontFamily = stack;
 
   // ── Sidebar colour ──
-  const sbBg =
+  let sbBg =
     s.sidebarColor === "primary" ? s.primaryLight :
     s.sidebarColor === "custom" ? s.sidebarCustomBg :
     SIDEBAR_BG[s.sidebarColor] ?? "#ffffff";
+  // In dark mode a light sidebar clashes with the dark shell — force a dark
+  // surface (unless the user has already picked a dark sidebar preset). This
+  // also flips data-sidebar-tone to "dark" below so the sidebar's dark styles
+  // (text, hover, active) engage.
+  if (isDark && !isDarkColor(sbBg)) sbBg = "#161b27";
   set("--app-sidebar-bg", sbBg);
   const darkSb = isDarkColor(sbBg);
+  // Border tone follows the sidebar surface so it can't be left as a light
+  // hairline over a dark sider (or vice-versa).
+  set("--app-sidebar-border", darkSb ? "#252f42" : "#E5E7EB");
   setAttr(el, "data-sidebar-tone", darkSb ? "dark" : "light");
   if (s.sidebarCustomFg) {
     set("--app-sidebar-fg", s.sidebarCustomFg);
@@ -101,5 +125,17 @@ export function applyTheme(s: ThemeState): void {
   setAttr(el, "data-motion", s.motionReduced ? "reduced" : null);
   setAttr(el, "data-sidebar-style", s.sidebarStyle);
   setAttr(el, "data-density", s.density);
-  setAttr(el, "data-theme", s.mode === "dark" ? "dark" : null);
+  setAttr(el, "data-theme", isDark ? "dark" : null);
+
+  // Own the shadcn light/dark CLASS too, so the single toggle governs shadcn
+  // tokens (bg-background, bg-card, text-foreground) — not the independent
+  // ThemeProvider. Keep its localStorage key ("theme") in sync so the provider
+  // agrees if it re-reads (mount, cross-tab storage event, "d" hotkey).
+  el.classList.toggle("dark", isDark);
+  el.classList.toggle("light", !isDark);
+  try {
+    localStorage.setItem("theme", s.mode);
+  } catch {
+    /* storage unavailable (private mode / quota) — class + attr already applied */
+  }
 }

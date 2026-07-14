@@ -1,5 +1,6 @@
-import { createContext, useContext, useState, type ReactNode } from "react";
-import { demandRequests as seedDemands, requisitions as seedReqs, purchaseOrders as seedPOs } from "@/lib/sample-data";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { getDemandRequests, saveDemandRequests } from "@/lib/demand-requests";
+import { requisitions as seedReqs, purchaseOrders as seedPOs } from "@/lib/sample-data";
 
 // ── Status enums ───────────────────────────────────────────────────────────────
 export type WfDemandStatus =
@@ -510,21 +511,13 @@ const WorkflowContext = createContext<WorkflowCtx>({
 
 // ── Provider ───────────────────────────────────────────────────────────────────
 export function WorkflowProvider({ children }: { children: ReactNode }) {
-  const [demands, setDemands] = useState<WfDemandRequest[]>(
-    seedDemands.map(d => ({
-      id: d.id,
-      reference: d.reference,
-      requestedBy: d.requestedBy,
-      role: d.role,
-      date: d.date,
-      status: d.status as WfDemandStatus,
-      items: d.items.map(i => ({ ...i })),
-      note: d.note,
-      source: "Kitchen",
-      officeId: "OFF-001",
-      warehouseId: "WH-003",
-    }))
-  );
+  // Hydrate from the shared localStorage-backed store (lib/demand-requests) so
+  // demands raised on the mobile app appear here — and vice-versa. Falls back to
+  // the seed when nothing is persisted yet. Persisted on every change below.
+  const [demands, setDemands] = useState<WfDemandRequest[]>(() => getDemandRequests());
+  useEffect(() => {
+    saveDemandRequests(demands);
+  }, [demands]);
 
   const [wfRequisitions, setWfRequisitions] = useState<WfRequisition[]>(
     seedReqs.map(r => {

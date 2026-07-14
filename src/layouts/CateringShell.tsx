@@ -21,12 +21,15 @@ export function CateringShell() {
     if (!isShellBypassed && !isAuthenticated()) navigate('/login');
   }, [isShellBypassed, navigate]);
 
-  // Make the Theme Center functional: apply the stored theme to the document on
-  // load, then re-apply on every change so presets/colours/layout take effect live.
+  // Make the Theme Center functional: apply the stored theme to the document.
+  // Driven REACTIVELY off the store (not a manual .subscribe) so React re-runs it
+  // on every change with fresh state — a manual subscription set up in a []-effect
+  // can capture a stale applyTheme/closure under HMR and silently stop updating
+  // data-theme, which desyncs the content (dark) from the chrome (light).
+  const themeState = useThemeStore();
   useEffect(() => {
-    applyTheme(useThemeStore.getState());
-    return useThemeStore.subscribe((state) => applyTheme(state));
-  }, []);
+    applyTheme(themeState);
+  }, [themeState]);
 
   if (isShellBypassed) {
     return (

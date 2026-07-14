@@ -1,21 +1,37 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { T } from '../theme';
 import { MOCK_RETURNS } from '../mockData';
-import { consumableItems } from '@/lib/sample-data';
+import { consumableItems, consumableUsage } from '@/lib/sample-data';
+import { getAuthUser } from '@/lib/auth';
+import { Combobox } from '../components/Combobox';
 
 const RETURNS_KEY = 'harvest-data-v1:consumable-returns';
 
 const BTN_BACK = { background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: T.radiusFull, width: 32, height: 32, cursor: 'pointer', color: '#fff', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
 
-// Flight → sector shortcuts (match the web returns flight schedule).
-const FLIGHTS = [
-  { flight: 'BG-401', sector: 'DAC→DXB' },
-  { flight: 'BS-141', sector: 'DAC→CGP' },
-  { flight: 'BS-105', sector: 'DAC→CXB' },
-  { flight: 'BG-522', sector: 'DAC→LHR' },
-  { flight: 'VQ-901', sector: 'DAC→KUL' },
+// Flight schedule — mirrors the web Consumable Returns screen so mobile returns
+// slot into the same scheduled-time → flight → issued-items flow.
+const FLIGHT_SCHEDULES = [
+  { time: '06:30', flight: 'BG-401', sector: 'DAC→DXB' },
+  { time: '06:30', flight: 'BS-141', sector: 'DAC→CGP' },
+  { time: '08:45', flight: 'BS-105', sector: 'DAC→CXB' },
+  { time: '10:15', flight: 'BG-522', sector: 'DAC→LHR' },
+  { time: '14:00', flight: 'VQ-901', sector: 'DAC→KUL' },
 ];
-const RETURNERS = ['T. Ahmed', 'S. Karim', 'M. Rahman', 'K. Sultana', 'Cabin Crew'];
+const SCHEDULE_TIMES = [...new Set(FLIGHT_SCHEDULES.map((f) => f.time))].sort();
+
+// Items ISSUED to a flight — the return-line options (you return against what
+// was issued). Same source as the web form (consumableUsage).
+function issuedForFlight(flight) {
+  if (!flight) return [];
+  return consumableUsage
+    .filter((u) => u.flight === flight)
+    .map((u) => {
+      const inv = consumableItems.find((it) => it.id === u.itemId);
+      return { itemId: u.itemId, name: inv?.name ?? u.itemName, issuedQty: u.qty, uom: inv?.uom ?? u.uom ?? 'Pcs' };
+    });
+}
+const issuedLabel = (o) => `${o.name} · issued ${o.issuedQty} ${o.uom}`;
 
 // Read / write the SAME localStorage list the web Consumable Returns screen uses.
 function loadWebReturns() {
@@ -28,78 +44,90 @@ function loadWebReturns() {
 function persistWebReturns(list) {
   try { localStorage.setItem(RETURNS_KEY, JSON.stringify(list)); } catch { /* ignore */ }
 }
-// Initial display: real web returns if any, else the demo seed so it's not empty.
 function initialReturns() {
   const web = loadWebReturns();
   return web.length > 0 ? web : MOCK_RETURNS;
 }
 
-const sum = (lines, key) => lines.reduce((s, l) => s + (Number(l[key]) || 0), 0);
+// Reusable qty per line — supports both the web boolean model (reusable=true →
+// whole qty is reusable) and the older mock model (numeric reusableQty).
+const reuseQtyOf = (l) => (l.reusable === true ? (Number(l.qty) || 0) : (Number(l.reusableQty) || 0));
+const sumQty   = (lines) => lines.reduce((s, l) => s + (Number(l.qty) || 0), 0);
+const sumReuse = (lines) => lines.reduce((s, l) => s + reuseQtyOf(l), 0);
+
 const todayStr = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
-const blankLine = () => ({ id: `L${Date.now()}${Math.round(performance.now())}`, itemName: '', qty: '', reusableQty: '', uom: '' });
+const blankLine = () => ({ id: `L${Date.now()}${Math.round(performance.now())}`, itemLabel: '', itemId: '', itemName: '', issuedQty: '', uom: 'Pcs', qty: '', reusable: false, justification: '' });
 
 export function ReturnLogScreen({ nav }) {
-  const [returns, setReturns] = useState(() => initialReturns());
-  const [view, setView]       = useState('list');   // 'list' | 'form' | 'detail'
+  const [returns, setReturns]   = useState(() => initialReturns());
+  const [view, setView]         = useState('list');   // 'list' | 'form' | 'detail'
   const [activeId, setActiveId] = useState(null);
   const [flashId, setFlashId]   = useState(null);
 
-  // Form state
-  const [flight, setFlight]         = useState('');
-  const [sector, setSector]         = useState('');
-  const [returnedBy, setReturnedBy] = useState('');
-  const [date, setDate]             = useState(todayStr());
-  const [lines, setLines]           = useState([blankLine()]);
-  const [touched, setTouched]       = useState(false);
+  // Form state — mirrors the web "Log Consumable Return" layout.
+  const [scheduledTime, setScheduledTime] = useState('');
+  const [flight, setFlight] = useState('');
+  const [lines, setLines]   = useState([blankLine()]);
+  const [touched, setTouched] = useState(false);
+
+  const returnId = useMemo(() => `CR-${String(7000 + returns.length + 1).padStart(4, '0')}`, [returns.length]);
+  const sector   = FLIGHT_SCHEDULES.find((f) => f.flight === flight)?.sector ?? '';
+  const flightsAtTime = FLIGHT_SCHEDULES.filter((f) => f.time === scheduledTime).map((f) => f.flight);
+  const issued        = useMemo(() => issuedForFlight(flight), [flight]);
+  const issuedLabels  = issued.map(issuedLabel);
 
   const validLines = lines.filter((l) => l.itemName.trim() && (parseFloat(l.qty) || 0) > 0);
-  const canSubmit  = flight.trim() && returnedBy.trim() && validLines.length > 0;
+  const justificationOk = validLines.every((l) => l.reusable || l.justification.trim());
+  const canSubmit  = scheduledTime && flight && validLines.length > 0 && justificationOk;
 
-  const resetForm = () => { setFlight(''); setSector(''); setReturnedBy(''); setDate(todayStr()); setLines([blankLine()]); setTouched(false); };
-  const setLine = (id, patch) => setLines((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)));
-  const addLine = () => setLines((prev) => [...prev, blankLine()]);
+  const resetForm = () => { setScheduledTime(''); setFlight(''); setLines([blankLine()]); setTouched(false); };
+  const setLine    = (id, patch) => setLines((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+  const addLine    = () => setLines((prev) => [...prev, blankLine()]);
   const removeLine = (id) => setLines((prev) => (prev.length > 1 ? prev.filter((l) => l.id !== id) : prev));
 
+  const onTimePick = (val) => { setScheduledTime(val); setFlight(''); setLines([blankLine()]); };
+
+  // Selecting a flight auto-populates one line per issued item (like the web).
   const onFlightPick = (val) => {
     setFlight(val);
-    const hit = FLIGHTS.find((f) => f.flight.toLowerCase() === val.trim().toLowerCase());
-    if (hit) setSector(hit.sector);
+    const opts = issuedForFlight(val);
+    setLines(
+      opts.length > 0
+        ? opts.map((o) => ({ ...blankLine(), id: `L${o.itemId}${Math.round(performance.now())}`, itemLabel: issuedLabel(o), itemId: o.itemId, itemName: o.name, issuedQty: o.issuedQty, uom: o.uom }))
+        : [blankLine()],
+    );
   };
-  const onItemPick = (id, val) => {
-    const hit = consumableItems.find((it) => it.name.toLowerCase() === val.trim().toLowerCase());
-    setLine(id, { itemName: val, ...(hit ? { uom: hit.uom } : {}) });
+
+  const onItemPick = (id, label) => {
+    const o = issued.find((x) => issuedLabel(x) === label);
+    if (o) setLine(id, { itemLabel: label, itemId: o.itemId, itemName: o.name, issuedQty: o.issuedQty, uom: o.uom });
+    else setLine(id, { itemLabel: label, itemName: label, itemId: '', issuedQty: '', uom: 'Pcs' });
   };
 
   const submit = () => {
     setTouched(true);
     if (!canSubmit) return;
-    const seq = String(7000 + returns.length + 1).padStart(4, '0');
-    const id  = `CR-${seq}`;
+    const returnedBy = getAuthUser()?.name ?? 'Cabin Crew';
     const rec = {
-      id, date, scheduledTime: '', flight: flight.trim(),
-      sector: sector.trim() || '—', returnedBy: returnedBy.trim(),
-      forwardToAirportStore: true,
-      lines: validLines.map((l) => {
-        const qty = parseFloat(l.qty) || 0;
-        const reusableQty = Math.min(parseFloat(l.reusableQty) || 0, qty);
-        const hit = consumableItems.find((it) => it.name.toLowerCase() === l.itemName.trim().toLowerCase());
-        return {
-          itemId: hit?.id ?? `MP-${l.itemName.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '-')}`,
-          itemName: l.itemName.trim(),
-          qty, reusableQty,
-          uom: l.uom.trim() || hit?.uom || 'Pcs',
-          reusable: reusableQty > 0,
-          lineType: 'item',
-        };
-      }),
+      id: returnId, date: todayStr(), scheduledTime, flight, sector: sector || '—',
+      returnedBy, savedAt: new Date().toISOString(), forwardToAirportStore: true,
+      lines: validLines.map((l) => ({
+        itemId: l.itemId || `MP-${l.itemName.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '-')}`,
+        itemName: l.itemName.trim(),
+        qty: parseFloat(l.qty) || 0,
+        issuedQty: l.issuedQty === '' ? undefined : Number(l.issuedQty),
+        uom: l.uom || 'Pcs',
+        reusable: !!l.reusable,
+        nonReusableReason: l.reusable ? undefined : l.justification.trim(),
+        lineType: 'item',
+      })),
     };
-    // Show it in-session (keeps any demo seed visible) and persist to the web list.
     setReturns((prev) => [rec, ...prev]);
     persistWebReturns([rec, ...loadWebReturns()]);
-    setFlashId(id);
+    setFlashId(rec.id);
     resetForm();
     setView('list');
     setTimeout(() => setFlashId(null), 2400);
@@ -107,79 +135,115 @@ export function ReturnLogScreen({ nav }) {
 
   // ── Form view ─────────────────────────────────────────────────────────────
   if (view === 'form') {
-    const LABEL = { fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 };
-    const INPUT = { width: '100%', boxSizing: 'border-box', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '10px 12px', fontSize: 13, fontFamily: T.fontBody, outline: 'none', background: T.bgSurface, color: T.textPrimary };
+    const LABEL    = { fontSize: 10.5, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 };
+    const INPUT    = { width: '100%', boxSizing: 'border-box', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '9px 11px', fontSize: 13, fontFamily: T.fontBody, outline: 'none', background: T.bgSurface, color: T.textPrimary };
+    const READONLY = { ...INPUT, background: T.bgSubtle, color: T.textSecondary };
+
+    const Pill = ({ active, onClick, children }) => (
+      <button type="button" onClick={onClick}
+        style={{ flex: 1, padding: '7px 0', borderRadius: T.radiusMd, border: `1px solid ${active ? T.primary : T.border}`, background: active ? 'rgba(225,1,1,0.10)' : T.bgSurface, color: active ? T.primary : T.textSecondary, fontSize: 12.5, fontWeight: 700, fontFamily: T.fontBody, cursor: 'pointer' }}>
+        {children}
+      </button>
+    );
+
     return (
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
         <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
           <button onClick={() => { resetForm(); setView('list'); }} style={BTN_BACK}>←</button>
           <div>
-            <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>New Return</div>
-            <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>Log a consumable return · syncs to web</div>
+            <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Log Consumable Return</div>
+            <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>Return against issued items · syncs to web</div>
           </div>
         </div>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
-          {/* Flight + sector */}
-          <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
+          {/* Return ID + Date (auto) */}
+          <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
             <div style={{ flex: 1 }}>
-              <div style={LABEL}>Flight *</div>
-              <input value={flight} onChange={(e) => onFlightPick(e.target.value)} list="ret-flights" placeholder="e.g. BS-105"
-                style={{ ...INPUT, border: `1px solid ${touched && !flight.trim() ? T.statusRejected : T.border}` }} />
-              <datalist id="ret-flights">{FLIGHTS.map((f) => <option key={f.flight} value={f.flight} />)}</datalist>
-            </div>
-            <div style={{ flex: 1 }}>
-              <div style={LABEL}>Sector</div>
-              <input value={sector} onChange={(e) => setSector(e.target.value)} placeholder="DAC→…" style={INPUT} />
-            </div>
-          </div>
-
-          {/* Returned by + date */}
-          <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
-            <div style={{ flex: 1 }}>
-              <div style={LABEL}>Returned By *</div>
-              <input value={returnedBy} onChange={(e) => setReturnedBy(e.target.value)} list="ret-returners" placeholder="Name"
-                style={{ ...INPUT, border: `1px solid ${touched && !returnedBy.trim() ? T.statusRejected : T.border}` }} />
-              <datalist id="ret-returners">{RETURNERS.map((r) => <option key={r} value={r} />)}</datalist>
+              <div style={LABEL}>Return ID</div>
+              <input value={returnId} readOnly style={READONLY} />
             </div>
             <div style={{ flex: 1 }}>
               <div style={LABEL}>Date</div>
-              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={INPUT} />
+              <input value={todayStr()} readOnly style={READONLY} />
             </div>
           </div>
 
-          {/* Items */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '4px 2px 8px' }}>
-            <div style={{ ...LABEL, marginBottom: 0 }}>Returned Items *</div>
-            <button onClick={addLine} style={{ background: 'none', border: `1px solid ${T.primary}`, color: T.primary, borderRadius: T.radiusMd, padding: '3px 10px', fontSize: 11, fontWeight: 700, fontFamily: T.fontBody, cursor: 'pointer' }}>+ Add</button>
+          {/* Scheduled time + Flight */}
+          <div style={{ display: 'flex', gap: 10, marginBottom: 4 }}>
+            <div style={{ flex: 1 }}>
+              <div style={LABEL}>Scheduled Time *</div>
+              <Combobox value={scheduledTime} onChange={onTimePick} options={SCHEDULE_TIMES}
+                placeholder="Select time" invalid={touched && !scheduledTime} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={LABEL}>Flight *</div>
+              <Combobox value={flight} onChange={onFlightPick} options={flightsAtTime}
+                placeholder={scheduledTime ? 'Select flight' : 'Pick time first'} disabled={!scheduledTime}
+                invalid={touched && !flight} />
+            </div>
+          </div>
+          {flight && <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, margin: '2px 2px 0' }}>Sector {sector} · {issued.length} item{issued.length === 1 ? '' : 's'} issued</div>}
+
+          {/* Items returned */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '16px 2px 8px' }}>
+            <div style={{ ...LABEL, marginBottom: 0 }}>Items Returned *</div>
+            <button onClick={addLine} style={{ background: 'none', border: `1px solid ${T.primary}`, color: T.primary, borderRadius: T.radiusMd, padding: '4px 11px', fontSize: 11, fontWeight: 700, fontFamily: T.fontBody, cursor: 'pointer' }}>+ Add new</button>
           </div>
 
           {lines.map((l, idx) => {
-            const missing = touched && !(l.itemName.trim() && (parseFloat(l.qty) || 0) > 0) && (l.itemName.trim() || l.qty);
+            const hasQty  = (parseFloat(l.qty) || 0) > 0;
+            const needJust = touched && hasQty && !l.reusable && !l.justification.trim();
+            const missing  = touched && (l.itemName.trim() || l.qty) && !(l.itemName.trim() && hasQty);
             return (
-              <div key={l.id} style={{ background: T.bgSurface, border: `1px solid ${missing ? T.statusRejected : T.border}`, borderRadius: T.radiusLg, padding: '10px 12px', marginBottom: 8 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody }}>Item {idx + 1}</span>
+              <div key={l.id} style={{ background: T.bgSurface, border: `1px solid ${missing || needJust ? T.statusRejected : T.border}`, borderRadius: T.radiusLg, padding: '11px 12px', marginBottom: 9, boxShadow: T.shadowSm }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 7 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.05em', background: T.bgSubtle, padding: '2px 7px', borderRadius: T.radiusSm }}>Item {idx + 1}</span>
                   {lines.length > 1 && (
-                    <button onClick={() => removeLine(l.id)} style={{ background: 'none', border: 'none', color: T.statusRejected, fontSize: 16, cursor: 'pointer', lineHeight: 1, padding: 0 }}>×</button>
+                    <button onClick={() => removeLine(l.id)} style={{ background: 'none', border: 'none', color: T.textTertiary, fontSize: 17, cursor: 'pointer', lineHeight: 1, padding: 0 }}>×</button>
                   )}
                 </div>
-                <input value={l.itemName} onChange={(e) => onItemPick(l.id, e.target.value)} list="ret-items" placeholder="Search or type an item"
-                  style={{ ...INPUT, marginBottom: 8 }} />
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <input type="number" inputMode="decimal" value={l.qty} onChange={(e) => setLine(l.id, { qty: e.target.value })} placeholder="Return qty" style={{ ...INPUT, flex: 1, fontWeight: 700 }} />
-                  <input type="number" inputMode="decimal" value={l.reusableQty} onChange={(e) => setLine(l.id, { reusableQty: e.target.value })} placeholder="Reusable" style={{ ...INPUT, flex: 1 }} />
-                  <input value={l.uom} onChange={(e) => setLine(l.id, { uom: e.target.value })} placeholder="UoM" style={{ ...INPUT, flex: 1 }} />
+
+                <div style={LABEL}>Item *</div>
+                <Combobox value={l.itemLabel} onChange={(v) => onItemPick(l.id, v)} options={issuedLabels}
+                  placeholder={flight ? 'Select issued item' : 'Pick a flight first'} disabled={!flight}
+                  containerStyle={{ marginBottom: 9 }} />
+
+                <div style={{ display: 'flex', gap: 8, marginBottom: 9 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={LABEL}>Issued Qty</div>
+                    <input value={l.issuedQty === '' ? '—' : `${l.issuedQty} ${l.uom}`} readOnly style={READONLY} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={LABEL}>Return Qty *</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <input type="number" inputMode="decimal" min="0" value={l.qty}
+                        onChange={(e) => setLine(l.id, { qty: e.target.value })}
+                        placeholder="0" style={{ ...INPUT, fontWeight: 700 }} />
+                      <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody, flexShrink: 0 }}>{l.uom}</span>
+                    </div>
+                  </div>
                 </div>
+
+                <div style={LABEL}>Reusable</div>
+                <div style={{ display: 'flex', gap: 8, marginBottom: l.reusable ? 0 : 8 }}>
+                  <Pill active={l.reusable === true}  onClick={() => setLine(l.id, { reusable: true, justification: '' })}>Yes</Pill>
+                  <Pill active={l.reusable === false} onClick={() => setLine(l.id, { reusable: false })}>No</Pill>
+                </div>
+                {!l.reusable && (
+                  <input value={l.justification} onChange={(e) => setLine(l.id, { justification: e.target.value })}
+                    placeholder="Justification (required)"
+                    style={{ ...INPUT, border: `1px solid ${needJust ? T.statusRejected : T.border}` }} />
+                )}
               </div>
             );
           })}
-          <datalist id="ret-items">{consumableItems.map((it) => <option key={it.id} value={it.name} />)}</datalist>
 
           <button onClick={submit} disabled={!canSubmit}
             style={{ width: '100%', marginTop: 8, padding: '13px 0', background: canSubmit ? T.buttonGradient : T.borderStrong, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: canSubmit ? 'pointer' : 'not-allowed', opacity: canSubmit ? 1 : 0.7 }}>
             Log Return
           </button>
+          <div style={{ height: 8 }} />
         </div>
       </div>
     );
@@ -189,8 +253,8 @@ export function ReturnLogScreen({ nav }) {
   if (view === 'detail' && activeId) {
     const r = returns.find((x) => x.id === activeId);
     if (r) {
-      const totalQty = sum(r.lines, 'qty');
-      const reuseQty = sum(r.lines, 'reusableQty');
+      const totalQty = sumQty(r.lines);
+      const reuseQty = sumReuse(r.lines);
       return (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
           <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
@@ -202,7 +266,7 @@ export function ReturnLogScreen({ nav }) {
           </div>
           <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
             <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 14px', marginBottom: 12, boxShadow: T.shadowSm }}>
-              {[['Flight', r.flight], ['Sector', r.sector], ['Date', r.date], ['Returned By', r.returnedBy]].map(([l, v], i) => (
+              {[['Flight', r.flight], ['Sector', r.sector], ['Scheduled', r.scheduledTime || '—'], ['Date', r.date], ['Returned By', r.returnedBy]].map(([l, v], i) => (
                 <div key={l} style={{ display: 'flex', justifyContent: 'space-between', paddingTop: 8, paddingBottom: 8, borderTop: i > 0 ? `1px solid ${T.border}` : 'none' }}>
                   <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{l}</span>
                   <span style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody }}>{v}</span>
@@ -222,17 +286,20 @@ export function ReturnLogScreen({ nav }) {
             </div>
 
             <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', margin: '4px 2px 8px' }}>Items ({r.lines.length})</div>
-            {r.lines.map((l, i) => (
-              <div key={i} style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '10px 12px', marginBottom: 8 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{l.itemName}</span>
-                  <span style={{ fontSize: 12, fontWeight: 600, color: T.textSecondary, fontFamily: T.fontBody }}>{l.qty} {l.uom || ''}</span>
+            {r.lines.map((l, i) => {
+              const isReusable = l.reusable === true || (Number(l.reusableQty) || 0) > 0;
+              return (
+                <div key={i} style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '10px 12px', marginBottom: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody, paddingRight: 8 }}>{l.itemName}</span>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: T.textSecondary, fontFamily: T.fontBody, flexShrink: 0 }}>{l.qty} {l.uom || ''}{l.issuedQty != null ? ` / ${l.issuedQty}` : ''}</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: isReusable ? T.statusApproved : T.textTertiary, fontFamily: T.fontBody, marginTop: 3 }}>
+                    {isReusable ? 'Reusable → credited to stock' : `Not reusable${l.nonReusableReason ? ` · ${l.nonReusableReason}` : ''}`}
+                  </div>
                 </div>
-                <div style={{ fontSize: 11, color: (Number(l.reusableQty) || 0) > 0 ? T.statusApproved : T.textTertiary, fontFamily: T.fontBody, marginTop: 3 }}>
-                  {(Number(l.reusableQty) || 0) > 0 ? `${l.reusableQty} reusable → credited to stock` : 'Not reusable'}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       );
@@ -261,8 +328,8 @@ export function ReturnLogScreen({ nav }) {
             <div style={{ fontSize: 13, color: T.textTertiary, fontFamily: T.fontBody }}>No returns logged yet. Tap “+ New” to add one.</div>
           </div>
         ) : returns.map((r) => {
-          const totalQty = sum(r.lines, 'qty');
-          const reuseQty = sum(r.lines, 'reusableQty');
+          const totalQty = sumQty(r.lines);
+          const reuseQty = sumReuse(r.lines);
           const isNew = r.id === flashId;
           return (
             <div key={r.id} onClick={() => { setActiveId(r.id); setView('detail'); }}

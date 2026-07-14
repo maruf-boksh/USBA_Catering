@@ -55,7 +55,16 @@ const CHART_PRIMARY  = "#E10101"; // brand red
 const CHART_AMBER    = "#d97316"; // warm amber target line
 const CHART_SUCCESS  = "#0f7a40"; // green status
 const CHART_INFO     = "#3c3a40"; // ink info
-const CHART_COLORS   = [CHART_PRIMARY, "#7e0206", CHART_AMBER, CHART_INFO];
+// Donut palette via CSS vars so it flips in dark mode — the light palette's
+// maroon (#7e0206) and ink (#3c3a40) are invisible on the dark shell, so the
+// dark block (globals.css) remaps them to lighter, legible hues. Fallbacks keep
+// SSR/no-var environments on the original light palette.
+const CHART_COLORS   = [
+  "var(--chart-1, #E10101)",
+  "var(--chart-2, #7e0206)",
+  "var(--chart-3, #d97316)",
+  "var(--chart-4, #3c3a40)",
+];
 
 // ── Live KPI helpers ────────────────────────────────────────────────────────
 function formatLakh(n: number): string {
@@ -433,7 +442,7 @@ function PanelCard({
   const cleanLabel = (linkLabel ?? 'Open').replace(/\s*→\s*$/, '');
   return (
     <div style={{
-      background: '#ffffff',
+      background: 'var(--color-bg-surface, #ffffff)',
       border: '1px solid var(--line, #e6e2e0)',
       borderRadius: 16,
       boxShadow: '0 1px 2px rgba(26,2,4,.04), 0 12px 30px -22px rgba(26,2,4,.18)',
@@ -444,7 +453,7 @@ function PanelCard({
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         gap: 12, padding: '18px 22px',
-        borderBottom: '1px solid #f5f0ec',
+        borderBottom: '1px solid var(--line, #f5f0ec)',
       }}>
         <h2 style={{
           fontFamily: "var(--serif, 'Newsreader', Georgia, serif)",
@@ -519,7 +528,7 @@ function ProductionMixDonut({ data }: { data: { name: string; v: number }[] }) {
       <div style={{ position: "relative", width: SIZE, height: SIZE }}>
         <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`}>
           {/* faint track shows through the gaps between segments */}
-          <circle cx={C} cy={C} r={R} fill="none" stroke="#f0ebe8" strokeWidth={SW} />
+          <circle cx={C} cy={C} r={R} fill="none" stroke="var(--chart-track, #f0ebe8)" strokeWidth={SW} />
           {single ? (
             <circle cx={C} cy={C} r={R} fill="none" stroke={segs[0].color} strokeWidth={SW} />
           ) : (
@@ -611,7 +620,7 @@ function DashboardGreeting({ actions }: { actions?: ReactNode }) {
       style={{
         display: "flex", alignItems: "center", justifyContent: "space-between",
         gap: 16, flexWrap: "wrap",
-        background: "#fff",
+        background: "var(--color-bg-surface, #fff)",
         border: "1px solid var(--line, #e6e2e0)",
         borderRadius: 14,
         padding: "12px 16px",
@@ -1038,7 +1047,7 @@ function ActiveOrdersTabs({ rows }: { rows: ReturnType<typeof pickActiveFlights>
   // card like the mockup, then re-apply the design's own paddings inside.
   return (
     <div style={{ margin: "-18px -22px" }}>
-      <div style={{ display: "flex", gap: 22, padding: "0 22px", borderBottom: "1px solid #f0ebe8" }}>
+      <div style={{ display: "flex", gap: 22, padding: "0 22px", borderBottom: "1px solid var(--line, #f0ebe8)" }}>
         {([["flight", "Flight Orders"], ["crew", "Crew Orders"]] as const).map(([key, label]) => {
           const on = tab === key;
           return (
@@ -1099,8 +1108,8 @@ function OrderGroupCard({
 
   return (
     <div style={{
-      border: "1px solid #e9e4e1", borderRadius: 13, marginTop: 12,
-      overflow: "hidden", background: "#fff",
+      border: "1px solid var(--line, #e9e4e1)", borderRadius: 13, marginTop: 12,
+      overflow: "hidden", background: "var(--color-bg-surface, #fff)",
     }}>
       {/* group header */}
       <Link
@@ -1108,7 +1117,7 @@ function OrderGroupCard({
         onClick={() => flagArrival({ target: "active-orders", ids: legIds })}
         style={{
           display: "flex", alignItems: "center", gap: 10, padding: "12px 15px",
-          background: "#fbf8f6", borderBottom: "1px solid #f0ebe8",
+          background: "var(--color-bg-subtle, #fbf8f6)", borderBottom: "1px solid var(--line, #f0ebe8)",
           textDecoration: "none", color: "inherit",
         }}
       >
@@ -1147,10 +1156,10 @@ function OrderGroupCard({
           onClick={() => flagArrival({ target: "active-orders", ids: [l.id] })}
           style={{
             display: "flex", alignItems: "center", gap: 12, padding: "11px 15px",
-            borderTop: idx > 0 ? "1px solid #f0ebe8" : "none",
+            borderTop: idx > 0 ? "1px solid var(--line, #f0ebe8)" : "none",
             textDecoration: "none", color: "inherit", transition: "background-color 150ms ease",
           }}
-          onMouseEnter={(e) => (e.currentTarget.style.background = "#fff5f5")}
+          onMouseEnter={(e) => (e.currentTarget.style.background = "var(--color-bg-subtle, #fff5f5)")}
           onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
         >
           <span style={{
@@ -1184,13 +1193,13 @@ function OrderGroupCard({
           onClick={() => flagArrival({ target: "active-orders", ids: legIds })}
           style={{
             display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-            padding: "10px 15px", borderTop: "1px solid #f0ebe8",
+            padding: "10px 15px", borderTop: "1px solid var(--line, #f0ebe8)",
             fontSize: 12.5, fontWeight: 600, color: "#E10101",
-            textDecoration: "none", background: "#fbf8f6",
+            textDecoration: "none", background: "var(--color-bg-subtle, #fbf8f6)",
             transition: "background-color 150ms ease",
           }}
-          onMouseEnter={(e) => (e.currentTarget.style.background = "#fff5f5")}
-          onMouseLeave={(e) => (e.currentTarget.style.background = "#fbf8f6")}
+          onMouseEnter={(e) => (e.currentTarget.style.background = "var(--color-bg-base, #fff5f5)")}
+          onMouseLeave={(e) => (e.currentTarget.style.background = "var(--color-bg-subtle, #fbf8f6)")}
         >
           + {hiddenCount} more flight{hiddenCount === 1 ? "" : "s"} →
         </Link>
