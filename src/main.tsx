@@ -2,7 +2,7 @@ import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 import { ConfigProvider, theme as antTheme } from "antd"
 
-import { ThemeProvider, useTheme } from "@/components/theme-provider.tsx"
+import { ThemeProvider } from "@/components/theme-provider.tsx"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { FONT_FAMILY_STACK, RADIUS_PX, readableForeground } from "@/lib/theme-settings"
 import { useThemeStore } from "@/stores/themeStore"
@@ -25,17 +25,19 @@ import "@/styles/sidebar.css"
  * the app without custom CSS overrides on every component.
  */
 function AntThemeBridge({ children }: { children: React.ReactNode }) {
-  const { theme } = useTheme()
-  // Read the SAME store the Theme Center writes, so changing a preset/colour/
-  // font/radius live re-themes every AntD surface (top-bar Buttons, Menu,
-  // modals, Tags, links, …) — not just the CSS-variable chrome.
+  // Read the SAME store the Theme Center + dark-mode toggle write, so changing a
+  // preset/colour/font/radius/MODE live re-themes every AntD surface (top-bar
+  // Buttons, Menu, Table, modals, Tags, links, …). Deriving `isDark` from this
+  // store (not the separate ThemeProvider) is what makes the dark-mode toggle
+  // actually switch AntD to its dark algorithm — otherwise Tables etc. keep
+  // light tokens (dark text on dark rows) even though the CSS chrome went dark.
   const s = useThemeStore()
   const resolved =
-    theme === "system"
+    s.mode === "system"
       ? window.matchMedia("(prefers-color-scheme: dark)").matches
         ? "dark"
         : "light"
-      : theme
+      : s.mode
 
   const isDark = resolved === "dark"
 
@@ -83,7 +85,12 @@ function AntThemeBridge({ children }: { children: React.ReactNode }) {
             headerBg: "transparent",
             headerHeight: 56,
             headerPadding: 0,
-            siderBg: isDark ? "#131826" : siderBgColor,
+            // Let the sidebar's OWN stylesheet paint its background from
+            // --app-sidebar-bg (set imperatively by applyTheme, in the SAME call
+            // that sets data-theme). If AntD painted it from this reactive token
+            // instead, the sidebar could update on a different tick than the
+            // content's data-theme → the light-sidebar-over-dark-content split.
+            siderBg: "transparent",
             bodyBg: "transparent",
           },
           Menu: {
@@ -111,6 +118,16 @@ function AntThemeBridge({ children }: { children: React.ReactNode }) {
       {children}
     </ConfigProvider>
   )
+}
+
+// Seed the ThemeProvider's localStorage key from the (already-rehydrated) theme
+// store BEFORE first render, so its `.dark`/`.light` class inits to the same
+// mode as the visible toggle. Without this, a stale "theme" value could paint a
+// dark shell under a light sidebar (or vice-versa) for the first frame.
+try {
+  localStorage.setItem("theme", useThemeStore.getState().mode)
+} catch {
+  /* storage unavailable — applyTheme still reconciles the class at runtime */
 }
 
 createRoot(document.getElementById("root")!).render(

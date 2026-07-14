@@ -3,8 +3,10 @@
    ============================================================ */
 
 .sb-sider.ant-layout-sider {
-  background: #ffffff;
-  border-right: 1px solid #E5E7EB;
+  /* Painted from the var applyTheme() sets in the SAME call as data-theme, so
+     the sidebar can never disagree with the content's light/dark state. */
+  background: var(--app-sidebar-bg, #ffffff);
+  border-right: 1px solid var(--app-sidebar-border, #E5E7EB);
   height: 100vh;
   position: sticky;
   top: 0;
@@ -929,10 +931,10 @@ html[data-theme="dark"] .sb-rail-flyout-title {
 }
 
 /* ── Dark theme ────────────────────────────────────────────── */
-html[data-theme="dark"] .sb-sider.ant-layout-sider {
-  background: #161b27;
-  border-right-color: #1e2638;
-}
+/* Background + border come from --app-sidebar-bg / --app-sidebar-border
+   (applyTheme), NOT a data-theme rule — that keeps the sider in lockstep with
+   the content and avoids a stale-attribute split. Only the interior styling
+   (text, hover, borders between sections) keys off data-theme below. */
 html[data-theme="dark"] .sb-brand:hover { background: rgba(255, 255, 255, 0.06); }
 html[data-theme="dark"] .sb-section-label,
 html[data-theme="dark"] .sb-foot-copy { color: #64748b; }

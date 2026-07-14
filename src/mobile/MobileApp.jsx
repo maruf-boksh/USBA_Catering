@@ -19,7 +19,14 @@ import { MoreScreen }            from './screens/MoreScreen';
 import { StockScreen }           from './screens/StockScreen';
 import { DemandsScreen }         from './screens/DemandsScreen';
 import { PurchaseOrdersScreen }  from './screens/PurchaseOrdersScreen';
+import { PurchaseRequisitionScreen } from './screens/PurchaseRequisitionScreen';
+import { ProfileScreen }         from './screens/ProfileScreen';
+import { GalleyOverviewScreen }  from './screens/GalleyOverviewScreen';
+import { ReturnLogScreen }       from './screens/ReturnLogScreen';
+import { applyMobileTheme, getMobileThemeMode } from './theme';
 import { MOCK_KPIS }             from './mockData';
+
+const THEME_KEY = 'mobile-theme';
 
 /*
  * ╔══════════════════════════════════════════════════════════════════════════╗
@@ -39,9 +46,11 @@ import { MOCK_KPIS }             from './mockData';
  * ║    approvals     · Cross-module Approvals inbox (M5 ✓)                  ║
  * ╠══════════════════════════════════════════════════════════════════════════╣
  * ║  TIER 2 — List + detail accessible via More screen (M6 ✓)               ║
- * ║    stock            · Stock Overview                                    ║
- * ║    demands          · Demand Requests                                   ║
- * ║    purchase-orders  · Purchase Orders                                   ║
+ * ║    stock                 · Stock Overview                               ║
+ * ║    demands               · Demand Requests (list + create)             ║
+ * ║    purchase-orders       · Purchase Orders                             ║
+ * ║    purchase-requisition  · Purchase Requisition (LIVE web data via      ║
+ * ║                            @/lib/purchase-requisitions)                 ║
  * ╠══════════════════════════════════════════════════════════════════════════╣
  * ║  TIER 3 — Web-only, disabled rows in More, toast on tap (M6 ✓)         ║
  * ║    Configuration (all sub-pages), User Management, Audit Logs,          ║
@@ -67,12 +76,13 @@ const TAB_ROOTS = {
 };
 
 function tabForScreen(screen) {
-  if (['home', 'alerts'].includes(screen))                                         return 'home';
+  if (['home', 'alerts', 'profile'].includes(screen))                              return 'home';
   if (['orders', 'meal-planning'].includes(screen))                                return 'orders';
   if (['production'].includes(screen))                                             return 'production';
   if (['qc', 'hygiene', 'personal-hygiene', 'cooking-temp'].includes(screen))      return 'qc';
   if (['more', 'dispatch', 'dispatch-mon', 'approvals',
-       'stock', 'demands', 'purchase-orders'].includes(screen))                    return 'more';
+       'stock', 'demands', 'purchase-orders', 'purchase-requisition',
+       'galley-overview', 'return-log'].includes(screen)) return 'more';
   return 'home';
 }
 
@@ -100,11 +110,24 @@ export function MobileApp({ onClose }) {
   const [stack, setStack] = useState(['splash']);
   const screen = stack[stack.length - 1];
 
+  // Light/dark mode — persisted, applied to the shared theme before first paint.
+  const [themeMode, setThemeModeState] = useState(() => {
+    let saved = 'light';
+    try { saved = localStorage.getItem(THEME_KEY) || 'light'; } catch { /* ignore */ }
+    applyMobileTheme(saved);
+    return getMobileThemeMode();
+  });
+  const setTheme = (mode) => {
+    applyMobileTheme(mode);
+    try { localStorage.setItem(THEME_KEY, getMobileThemeMode()); } catch { /* ignore */ }
+    setThemeModeState(getMobileThemeMode());
+  };
+
   const navigate = (s) => setStack((p) => [...p, s]);
   const goBack   = ()  => setStack((p) => (p.length > 1 ? p.slice(0, -1) : p));
   const resetTo  = (s) => setStack([s]);
 
-  const nav = { screen, navigate, goBack, resetTo };
+  const nav = { screen, navigate, goBack, resetTo, themeMode, setTheme };
   const isPreAuth = PRE_AUTH.has(screen);
 
   // Logout resets to login screen
@@ -130,6 +153,10 @@ export function MobileApp({ onClose }) {
       case 'stock':           return <StockScreen nav={nav} />;
       case 'demands':         return <DemandsScreen nav={nav} />;
       case 'purchase-orders': return <PurchaseOrdersScreen nav={nav} />;
+      case 'purchase-requisition': return <PurchaseRequisitionScreen nav={nav} />;
+      case 'profile':         return <ProfileScreen nav={nav} onLogout={handleLogout} />;
+      case 'galley-overview': return <GalleyOverviewScreen nav={nav} />;
+      case 'return-log':      return <ReturnLogScreen nav={nav} />;
       default:                return <HomeScreen nav={nav} />;
     }
   }

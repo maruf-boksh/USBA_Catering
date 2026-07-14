@@ -452,6 +452,25 @@ export const MOCK_POS = [
   { id: 'PO-2024-0154', vendor: 'City Agro Supplies', items: 6, total: '৳ 1,02,400', status: 'pending',  date: '2024-11-18' },
 ];
 
+// Consumable return log — demo seed used when the web app has no persisted
+// returns yet (the web `consumable-returns` list starts empty). If the user has
+// created returns on the web, the mobile Return Log reads those instead.
+export const MOCK_RETURNS = [
+  { id: 'CR-7003', date: '2026-06-28', flight: 'BS-105', sector: 'DAC→CXB', returnedBy: 'T. Ahmed',   lines: [
+    { itemName: 'Water 250ml',    qty: 22, reusableQty: 22, uom: 'Pcs' },
+    { itemName: 'Blanket',        qty: 6,  reusableQty: 5,  uom: 'Pcs' },
+    { itemName: 'Headrest Cover', qty: 40, reusableQty: 0,  uom: 'Pcs' },
+  ]},
+  { id: 'CR-7002', date: '2026-06-27', flight: 'BG-401', sector: 'DAC→DXB', returnedBy: 'S. Karim',   lines: [
+    { itemName: 'Juice 1L',       qty: 2,  reusableQty: 2,  uom: 'Pcs' },
+    { itemName: 'Napkin Paper',   qty: 8,  reusableQty: 0,  uom: 'Pcs' },
+  ]},
+  { id: 'CR-7001', date: '2026-06-26', flight: 'VQ-901', sector: 'DAC→KUL', returnedBy: 'M. Rahman',  lines: [
+    { itemName: 'Cutlery Set',    qty: 30, reusableQty: 28, uom: 'Pcs' },
+    { itemName: 'Tea Pot',        qty: 6,  reusableQty: 6,  uom: 'Pcs' },
+  ]},
+];
+
 export const MOCK_DEMANDS = [
   { id: 'DMD-2024-0234', item: 'Chicken (Fresh)',   qty: 50, unit: 'kg',    requestedBy: 'Kitchen Supervisor', date: '2024-11-19', status: 'pending'  },
   { id: 'DMD-2024-0233', item: 'Disposable Gloves', qty: 20, unit: 'boxes', requestedBy: 'Store Manager',      date: '2024-11-18', status: 'approved' },

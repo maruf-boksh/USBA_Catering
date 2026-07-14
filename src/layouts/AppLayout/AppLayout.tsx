@@ -5,7 +5,8 @@ import { ThemeCenter } from '@/components/ThemeCenter';
 import type { MenuProps } from 'antd';
 import { useRole } from '@/lib/roles';
 import { useAllRoles, useAccess, canViewPage } from '@/lib/access-control';
-import { Lock } from 'lucide-react';
+import { Lock, Sun, Moon } from 'lucide-react';
+import { useThemeStore } from '@/stores/themeStore';
 import { MobileApp } from '@/mobile/MobileApp';
 import {
   MenuFoldOutlined, MobileOutlined,
@@ -180,6 +181,12 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
   const { role, setRole } = useRole();
   const allRoles = useAllRoles();
   const access = useAccess();
+
+  // Dark-mode toggle — drives useThemeStore.mode, which applyTheme() maps to the
+  // <html data-theme="dark"> attribute the stylesheet's dark rules key off.
+  const themeMode = useThemeStore((s) => s.mode);
+  const setThemeMode = useThemeStore((s) => s.setMode);
+  const isDark = themeMode === 'dark';
 
   const selectedKey = useMemo(() => resolveSelectedNavKey(location.pathname), [location.pathname]);
 
@@ -357,6 +364,19 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
               <TopbarClock />
 
               <GlobalSearch />
+
+              <Tooltip title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}>
+                <Button
+                  type="text"
+                  size="small"
+                  aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+                  className="app-topbar-icon-button"
+                  onClick={() => setThemeMode(isDark ? 'light' : 'dark')}
+                  icon={isDark
+                    ? <Sun size={17} strokeWidth={1.9} />
+                    : <Moon size={17} strokeWidth={1.9} />}
+                />
+              </Tooltip>
 
               <Dropdown
                 dropdownRender={() => <ThemeCenter />}

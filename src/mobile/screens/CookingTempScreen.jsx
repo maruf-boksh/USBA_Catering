@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { T } from '../theme';
 import { MOCK_COOKING_TEMPS } from '../mockData';
+import { Combobox } from '../components/Combobox';
 
 // Mirrors CHEFS from the web's cooking-temp.tsx
 const CHEFS = ['Chef Ahmed R.', 'Chef Nusrat K.', 'Chef Karim S.', 'Chef Hossain T.', 'Chef Begum F.', 'Chef Mahmud S.'];
@@ -104,9 +105,7 @@ export function CookingTempScreen({ nav }) {
           {/* Cooked by */}
           <div style={{ marginBottom: 18 }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>Cooked By *</div>
-            <input value={cookedBy} onChange={e => setCookedBy(e.target.value)} placeholder="Chef / cook name" list="chef-list"
-              style={{ width: '100%', boxSizing: 'border-box', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '10px 12px', fontSize: 13, fontFamily: T.fontBody, outline: 'none', background: T.bgSurface, color: T.textPrimary }} />
-            <datalist id="chef-list">{CHEFS.map(c => <option key={c} value={c} />)}</datalist>
+            <Combobox value={cookedBy} onChange={setCookedBy} options={CHEFS} placeholder="Chef / cook name" />
           </div>
 
           {/* Buttons */}

@@ -6,8 +6,18 @@ const OPERATIONS = [
   { key: 'dispatch-mon', icon: '📡', label: 'Dispatch Monitoring', sub: 'Cold chain & live status'   },
 ];
 
-const SUPPLY_CHAIN = [
-  { key: 'stock', icon: '📦', label: 'Stock Overview', sub: 'Current inventory levels' },
+const INVENTORY = [
+  { key: 'stock',   icon: '📦', label: 'Stock Overview',  sub: 'Current inventory levels'   },
+  { key: 'demands', icon: '📝', label: 'Demand Requests', sub: 'Raise & track material demand' },
+];
+
+const LOCAL_PURCHASE = [
+  { key: 'purchase-requisition', icon: '📋', label: 'Purchase Requisition', sub: 'Requisitions synced from web' },
+];
+
+const GALLEY = [
+  { key: 'galley-overview', icon: '🍽️', label: 'Galley Planning',  sub: 'Plans, status & stock overview' },
+  { key: 'return-log',      icon: '↩️', label: 'Return Log',       sub: 'Consumable returns & reusables' },
 ];
 
 function SectionLabel({ children }) {
@@ -79,8 +89,18 @@ export function MoreScreen({ nav, onLogout }) {
           <MenuRow key={item.key} item={item} onPress={() => nav.navigate(item.key)} />
         ))}
 
-        <SectionLabel>Supply Chain</SectionLabel>
-        {SUPPLY_CHAIN.map(item => (
+        <SectionLabel>Inventory &amp; Store</SectionLabel>
+        {INVENTORY.map(item => (
+          <MenuRow key={item.key} item={item} onPress={() => nav.navigate(item.key)} />
+        ))}
+
+        <SectionLabel>Local Purchase</SectionLabel>
+        {LOCAL_PURCHASE.map(item => (
+          <MenuRow key={item.key} item={item} onPress={() => nav.navigate(item.key)} />
+        ))}
+
+        <SectionLabel>Galley Planning</SectionLabel>
+        {GALLEY.map(item => (
           <MenuRow key={item.key} item={item} onPress={() => nav.navigate(item.key)} />
         ))}
 

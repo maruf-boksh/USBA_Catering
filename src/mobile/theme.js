@@ -76,3 +76,31 @@ export const T = {
   statusBarHeight: 28,
   bottomNavHeight: 60,
 };
+
+// ── Light / dark mode ─────────────────────────────────────────────────────
+// Only the neutral surface / text / border tokens flip between modes; brand and
+// status colours stay constant. `applyMobileTheme` mutates the SAME exported `T`
+// object in place, so every screen that reads `T.bgBase` / `T.textPrimary` / … at
+// render time picks up the new values on the next render (MobileApp re-renders the
+// whole tree when the mode changes).
+const LIGHT_NEUTRALS = {
+  bgBase: '#F4F5F8', bgSurface: '#ffffff', bgSubtle: '#F8FAFC',
+  textPrimary: '#111827', textSecondary: '#374151', textTertiary: '#6b7280', textDisabled: '#9ca3af',
+  border: '#e5e7eb', borderStrong: '#d1d5db',
+};
+const DARK_NEUTRALS = {
+  bgBase: '#0f1420', bgSurface: '#1a2130', bgSubtle: '#232c3d',
+  textPrimary: '#f1f5f9', textSecondary: '#cbd5e1', textTertiary: '#94a3b8', textDisabled: '#64748b',
+  border: '#2d3a52', borderStrong: '#3a4660',
+};
+
+let __mobileThemeMode = 'light';
+
+export function getMobileThemeMode() {
+  return __mobileThemeMode;
+}
+
+export function applyMobileTheme(mode) {
+  __mobileThemeMode = mode === 'dark' ? 'dark' : 'light';
+  Object.assign(T, __mobileThemeMode === 'dark' ? DARK_NEUTRALS : LIGHT_NEUTRALS);
+}

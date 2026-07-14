@@ -167,7 +167,8 @@
     --sidebar-ring: oklch(0.485 0.093 178);
 }
 
-.dark {
+.dark,
+html[data-theme="dark"] {
     /* Deep slate #0f1117 */
     --background: oklch(0.120 0.018 243);
     --foreground: oklch(0.94 0.008 200);

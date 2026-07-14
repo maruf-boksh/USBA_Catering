@@ -3,12 +3,12 @@ import React from 'react';
 // Harvest Catering KPI accents — brand red leads, with status + ink variants.
 // Tinted tones fade a soft status wash into white, matching the dashboard mockup.
 const TONE: Record<string, { accent: string; bg: string }> = {
-  navy:    { accent: '#E10101', bg: '#ffffff' },                              // brand red
-  red:     { accent: '#E10101', bg: 'linear-gradient(180deg,#fdecea,#fff 70%)' },
-  success: { accent: '#0f7a40', bg: '#ffffff' },
-  warning: { accent: '#b45309', bg: 'linear-gradient(180deg,#fbf1e6,#fff 70%)' },
-  info:    { accent: '#3c3a40', bg: '#ffffff' },
-  ink:     { accent: '#1a0204', bg: '#ffffff' },
+  navy:    { accent: '#E10101', bg: 'var(--color-bg-surface, #ffffff)' },     // brand red
+  red:     { accent: '#E10101', bg: 'var(--color-bg-surface, #ffffff)' },
+  success: { accent: '#0f7a40', bg: 'var(--color-bg-surface, #ffffff)' },
+  warning: { accent: '#b45309', bg: 'var(--color-bg-surface, #ffffff)' },
+  info:    { accent: '#3c3a40', bg: 'var(--color-bg-surface, #ffffff)' },
+  ink:     { accent: '#1a0204', bg: 'var(--color-bg-surface, #ffffff)' },
 };
 
 // A leading delta token in the sub-line (e.g. "+1", "−14", "9%") gets colored:
@@ -64,8 +64,8 @@ export function KpiCard({
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
         style={{
-          background: '#fff',
-          border: '1px solid #eef0f4',
+          background: 'var(--color-bg-surface, #fff)',
+          border: '1px solid var(--color-border, #eef0f4)',
           borderRadius: 18,
           padding: '17px 19px 16px',
           boxShadow: hover
@@ -101,7 +101,7 @@ export function KpiCard({
         {/* label */}
         <div style={{
           fontSize: 11, fontWeight: 600, letterSpacing: '0.08em',
-          textTransform: 'uppercase', color: '#8a8f98', marginTop: 15,
+          textTransform: 'uppercase', color: 'var(--color-text-tertiary, #8a8f98)', marginTop: 15,
         }}>
           {label}
         </div>
@@ -109,11 +109,11 @@ export function KpiCard({
         {/* number */}
         <div style={{
           fontWeight: 700, fontSize: 29, lineHeight: 1.05,
-          letterSpacing: '-0.02em', marginTop: 5, color: '#101828',
+          letterSpacing: '-0.02em', marginTop: 5, color: 'var(--color-text-primary, #101828)',
         }}>
           {curMatch ? (
             <>
-              <span style={{ fontSize: 18, fontWeight: 600, color: '#8a8f98', marginRight: 1 }}>
+              <span style={{ fontSize: 18, fontWeight: 600, color: 'var(--color-text-tertiary, #8a8f98)', marginRight: 1 }}>
                 {curMatch[1].trim()}
               </span>
               {curMatch[2]}
@@ -123,7 +123,7 @@ export function KpiCard({
 
         {/* sub line (delta stripped — it's shown in the pill above) */}
         {footer && (footer.delta ? footer.rest : footer.rest) && (
-          <div style={{ fontSize: 12, color: '#8a8f98', marginTop: 6 }}>
+          <div style={{ fontSize: 12, color: 'var(--color-text-tertiary, #8a8f98)', marginTop: 6 }}>
             {footer.delta ? footer.rest : footer.rest}
           </div>
         )}

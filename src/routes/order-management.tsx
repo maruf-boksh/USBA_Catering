@@ -1787,7 +1787,10 @@ function OrdersList({
                   )}
                 >
                   {/* Header band — collapse toggle + order-level actions. */}
-                  <div className="flex items-stretch gap-2 py-2.5 pl-4 pr-3" style={{ background: "#f6f2ef" }}>
+                  <div
+                    className="flex items-stretch gap-2 py-2.5 pl-4 pr-3"
+                    style={{ background: "var(--color-bg-subtle, #f6f2ef)" }}
+                  >
                     <button
                       type="button"
                       onClick={() => toggleSection(orderNo)}
@@ -1796,33 +1799,33 @@ function OrdersList({
                     >
                       <ChevronDown
                         className={cn(
-                          "h-4 w-4 shrink-0 text-[#6b6b72] transition-transform duration-200",
+                          "h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200",
                           !open && "-rotate-90",
                         )}
                       />
                       <span className="text-sm font-bold tracking-[0.01em] text-[#E10101]">{orderNo}</span>
                       {legs.length > 1 && (
-                        <span className="rounded-md border border-[#e9e4e1] bg-white px-2 py-[3px] text-[10px] font-bold uppercase tracking-[0.05em] text-[#6b6b72]">
+                        <span className="rounded-md border border-border bg-background px-2 py-[3px] text-[10px] font-bold uppercase tracking-[0.05em] text-muted-foreground">
                           {legs.length} flights
                         </span>
                       )}
                       <OrderStatusBadges legs={legs} />
-                      <span className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 pr-1 text-[11px] text-[#6b6b72]">
+                      <span className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 pr-1 text-[11px] text-muted-foreground">
                         <span className="inline-flex items-center gap-1 tabular-nums">
                           <CalendarRange className="h-3.5 w-3.5 opacity-70" />
                           {groupDateLabel}
                         </span>
                         <span className="tabular-nums">
-                          <strong className="font-bold text-[#2a2528]">{groupPax}</strong> pax
+                          <strong className="font-bold text-foreground">{groupPax}</strong> pax
                         </span>
                         {showSpecMeals && groupSpec > 0 && (
                           <span className="tabular-nums">
-                            <strong className="font-bold text-[#2a2528]">{groupSpec}</strong> spec
+                            <strong className="font-bold text-foreground">{groupSpec}</strong> spec
                           </span>
                         )}
                       </span>
                     </button>
-                    <div className="flex shrink-0 items-center gap-1.5 self-center border-l border-[#e4ddd8] pl-2.5">
+                    <div className="flex shrink-0 items-center gap-1.5 self-center border-l border-border pl-2.5">
                       <Button
                         size="sm"
                         variant="outline"
