@@ -228,6 +228,10 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
       navigate('/account-settings');
       return;
     }
+    if (key === 'mobile-app') {
+      setMobileAppOpen(true);
+      return;
+    }
     if (key.startsWith('role:')) {
       setRole(key.slice('role:'.length));
     }
@@ -253,6 +257,7 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
         ),
       })),
     },
+    { key: 'mobile-app', label: 'AeroGalley Catering App', icon: <MobileOutlined /> },
     { type: 'divider' },
     { key: 'logout', label: 'Sign Out', icon: <LogoutOutlined />, danger: true },
   ];
@@ -330,34 +335,6 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
               >
                 {isCurrentPagePinned ? 'Pinned' : 'Pin'}
               </Button>
-
-              <button
-                onClick={() => setMobileAppOpen(true)}
-                className="app-topbar-mobileview"
-                title="AeroGalley Catering App"
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  padding: '0 14px',
-                  height: 28,
-                  background: 'rgba(255,255,255,0.18)',
-                  border: '1px solid rgba(255,255,255,0.55)',
-                  borderRadius: 6,
-                  color: '#fff',
-                  fontSize: 13,
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  boxShadow: '0 1px 4px rgba(0,0,0,0.12)',
-                  backdropFilter: 'blur(4px)',
-                  letterSpacing: '0.01em',
-                  whiteSpace: 'nowrap',
-                  flexShrink: 0,
-                }}
-              >
-                <MobileOutlined style={{ fontSize: 14 }} />
-                <span className="app-topbar-mobileview-label">AeroGalley Catering App</span>
-              </button>
             </div>
 
             <div className="app-topbar-right">

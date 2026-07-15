@@ -12,9 +12,10 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  Plus, Pencil, Trash2, Clock, RotateCcw, Save,
+  Plus, Pencil, Trash2, Clock, RotateCcw, Save, Utensils,
 } from "lucide-react";
 import { toast } from "sonner";
+import { cn } from "@/lib/utils";
 import {
   useMealSlots,
   setMealSlots,
@@ -22,8 +23,19 @@ import {
   DEFAULT_MEAL_SLOTS,
   type MealSlotConfig,
 } from "@/lib/meal-slot-settings";
+import {
+  useSpecialMealCountConfig,
+  setSpecialMealCountConfig,
+  applySpecialMealMode,
+  type SpecialMealMode,
+} from "@/lib/special-meal-count-settings";
 
 type Draft = { name: string; from: string; to: string };
+
+const SPECIAL_MEAL_MODES: { value: SpecialMealMode; label: string }[] = [
+  { value: "additional", label: "Addition" },
+  { value: "deducted", label: "Deduction" },
+];
 
 const EMPTY_DRAFT: Draft = { name: "", from: "", to: "" };
 
@@ -35,6 +47,7 @@ function isValidHour(s: string): boolean {
 
 export default function ConfigMealSlotsPage() {
   const slots = useMealSlots();
+  const specialMealCfg = useSpecialMealCountConfig();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingName, setEditingName] = useState<string | null>(null); // null = adding
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
@@ -178,6 +191,128 @@ export default function ConfigMealSlotsPage() {
               ))}
             </TableBody>
           </Table>
+        </CardContent>
+      </Card>
+
+      {/* ── Special Meal Count Configuration ─────────────────────────────────
+          Special meals are alternative meals. On meal-order upload the total
+          order number is auto-calculated using these rules — independently for
+          passengers and crew — so specials can be treated as an alternative
+          (deducted, total unchanged) or as extra covers (additional). */}
+      <Card className="mt-4">
+        <CardContent className="pt-5">
+          <div className="flex items-start gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+              <Utensils className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-foreground">Special Meal Count Configuration</h3>
+              <p className="mt-1 max-w-3xl text-xs text-muted-foreground">
+                Special meals are <span className="font-medium text-foreground">alternative meals</span>. When meal orders are uploaded, the
+                system auto-calculates the <span className="font-medium text-foreground">regular meal count</span> (Regular = Base − Special)
+                and the total order for passengers and crew, based on the option enabled for each below. There are{" "}
+                <span className="font-medium text-foreground">four conditions</span> in total — Passenger and Crew each choose one:
+              </p>
+              <ul className="mt-2 max-w-3xl space-y-1 text-xs text-muted-foreground">
+                <li>
+                  <span className="font-medium text-foreground">Addition</span> — the special meals are added back to the regular count, so the
+                  order total stays equal to the uploaded head-count. <span className="tabular-nums">e.g. 180 → 172 regular + 8 special = 180</span>.
+                </li>
+                <li>
+                  <span className="font-medium text-foreground">Deduction</span> — the special meals are deducted from the base count and excluded
+                  from the order total. <span className="tabular-nums">e.g. 180 → 172 regular, 8 special deducted = 172</span>.
+                </li>
+              </ul>
+            </div>
+          </div>
+
+          {/* Passenger + Crew mode selectors */}
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            {([
+              { key: "passenger" as const, label: "Passenger · Regular & Special Meal Count" },
+              { key: "crew" as const, label: "Crew · Regular & Special Meal Count" },
+            ]).map(({ key, label }) => {
+              const mode = specialMealCfg[key];
+              return (
+                <div key={key} className="rounded-md border px-3 py-3">
+                  <div className="mb-2 text-[11px] uppercase tracking-wider text-muted-foreground">{label}</div>
+                  <div className="inline-flex overflow-hidden rounded-md border">
+                    {SPECIAL_MEAL_MODES.map((m) => {
+                      const active = mode === m.value;
+                      return (
+                        <button
+                          key={m.value}
+                          type="button"
+                          onClick={() => {
+                            if (active) return;
+                            setSpecialMealCountConfig({ ...specialMealCfg, [key]: m.value });
+                            toast.success(`${label}: counted as ${m.label.toLowerCase()}.`);
+                          }}
+                          className={cn(
+                            "px-4 py-1.5 text-xs font-semibold transition-colors",
+                            active
+                              ? "bg-primary text-primary-foreground"
+                              : "bg-transparent text-muted-foreground hover:bg-muted",
+                          )}
+                        >
+                          {m.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="mt-2 text-[11px] text-muted-foreground">
+                    {mode === "additional"
+                      ? "Addition — specials added back to the regular count; the order total stays the same (Regular + Special = Base)."
+                      : "Deduction — specials deducted from the base and excluded from the order total (Base − Special)."}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Live example — reflects the current configuration */}
+          {(() => {
+            const paxBase = 180, paxSpecial = 8, crewBase = 10, crewSpecial = 2;
+            const paxRegular = Math.max(0, paxBase - paxSpecial);
+            const crewRegular = Math.max(0, crewBase - crewSpecial);
+            const paxTotal = applySpecialMealMode(paxBase, paxSpecial, specialMealCfg.passenger);
+            const crewTotal = applySpecialMealMode(crewBase, crewSpecial, specialMealCfg.crew);
+            return (
+              <div className="mt-4 rounded-md border bg-muted/20 px-3 py-3">
+                <div className="mb-2 text-[11px] uppercase tracking-wider text-muted-foreground">
+                  Auto-calculated total on upload · example (Total Special Meal: {paxSpecial + crewSpecial})
+                </div>
+                <div className="space-y-2 text-xs">
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Passengers: {paxBase}</span>
+                      <span className="font-medium tabular-nums text-foreground">{paxTotal.toLocaleString()}</span>
+                    </div>
+                    <div className="pl-3 mt-0.5 text-[11px] text-muted-foreground tabular-nums">
+                      {specialMealCfg.passenger === "additional"
+                        ? `${paxRegular} regular meal + ${paxSpecial} special meal = ${paxTotal}`
+                        : `${paxBase} − ${paxSpecial} special meal deducted = ${paxTotal}`}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Crew: {crewBase}</span>
+                      <span className="font-medium tabular-nums text-foreground">{crewTotal.toLocaleString()}</span>
+                    </div>
+                    <div className="pl-3 mt-0.5 text-[11px] text-muted-foreground tabular-nums">
+                      {specialMealCfg.crew === "additional"
+                        ? `${crewRegular} regular crew meal + ${crewSpecial} special crew meal = ${crewTotal}`
+                        : `${crewBase} − ${crewSpecial} special crew meal deducted = ${crewTotal}`}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between border-t pt-1.5">
+                    <span className="text-muted-foreground">Total Meals (PAX + Crew)</span>
+                    <span className="font-semibold tabular-nums text-foreground">{(paxTotal + crewTotal).toLocaleString()}</span>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </CardContent>
       </Card>
 

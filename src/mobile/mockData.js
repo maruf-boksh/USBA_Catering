@@ -42,17 +42,17 @@ export const MOCK_MEAL_PLANS = [
 ];
 
 export const MOCK_PRODUCTION_ORDERS = [
-  { id: 'PO-0234', item: 'Economy Breakfast Box', qty: 198, produced: 198, section: 'Cold Kitchen', status: 'completed',    flight: 'BS401', dueBy: '05:45' },
-  { id: 'PO-0235', item: 'Economy Lunch Tray',    qty: 176, produced: 140, section: 'Hot Kitchen',  status: 'in-progress', flight: 'BS202', dueBy: '07:30' },
-  { id: 'PO-0236', item: 'Business Dinner Set',   qty: 191, produced: 0,   section: 'Hot Kitchen',  status: 'pending',     flight: 'BS105', dueBy: '09:00' },
-  { id: 'PO-0237', item: 'Economy Snack Pack',    qty: 79,  produced: 0,   section: 'Bakery',       status: 'pending',     flight: 'BS310', dueBy: '10:00' },
+  { id: 'PRO-2026-000234', item: 'Economy Breakfast Box', qty: 198, produced: 198, section: 'Cold Kitchen', status: 'completed',    flight: 'BS401', dueBy: '05:45' },
+  { id: 'PRO-2026-000235', item: 'Economy Lunch Tray',    qty: 176, produced: 140, section: 'Hot Kitchen',  status: 'in-progress', flight: 'BS202', dueBy: '07:30' },
+  { id: 'PRO-2026-000236', item: 'Business Dinner Set',   qty: 191, produced: 0,   section: 'Hot Kitchen',  status: 'approved',    flight: 'BS105', dueBy: '09:00' },
+  { id: 'PRO-2026-000237', item: 'Economy Snack Pack',    qty: 79,  produced: 0,   section: 'Bakery',       status: 'pending',     flight: 'BS310', dueBy: '10:00' },
 ];
 
 // Full "View" detail per production order — mirrors the web production-entry
 // View (Production Information, Output, Material Requirements, Cost/COGS).
 // Keyed by order id. Material qty is the total requirement for the order.
 export const MOCK_PRODUCTION_DETAILS = {
-  'PO-0234': {
+  'PRO-2026-000234': {
     date: '2026-07-13', office: 'Head Office Dhaka', warehouse: 'Cold Kitchen',
     bom: 'Economy Breakfast Box', outputCode: 'FG-BFB-01',
     raw: [
@@ -66,7 +66,7 @@ export const MOCK_PRODUCTION_DETAILS = {
       { code: 'PK-1011', name: 'Cutlery Set',        uom: 'set', qty: 198, rate: 5 },
     ],
   },
-  'PO-0235': {
+  'PRO-2026-000235': {
     date: '2026-07-13', office: 'Head Office Dhaka', warehouse: 'Hot Kitchen',
     bom: 'Economy Lunch Tray', outputCode: 'FG-LNT-01',
     raw: [
@@ -80,7 +80,7 @@ export const MOCK_PRODUCTION_DETAILS = {
       { code: 'PK-1021', name: 'Foil Lid',  uom: 'pcs', qty: 176, rate: 4 },
     ],
   },
-  'PO-0236': {
+  'PRO-2026-000236': {
     date: '2026-07-13', office: 'Head Office Dhaka', warehouse: 'Hot Kitchen',
     bom: 'Business Dinner Set', outputCode: 'FG-BDS-01',
     raw: [
@@ -94,7 +94,7 @@ export const MOCK_PRODUCTION_DETAILS = {
       { code: 'PK-1031', name: 'Cutlery Kit',        uom: 'kit', qty: 191, rate: 10 },
     ],
   },
-  'PO-0237': {
+  'PRO-2026-000237': {
     date: '2026-07-13', office: 'Head Office Dhaka', warehouse: 'Bakery',
     bom: 'Economy Snack Pack', outputCode: 'FG-SNK-01',
     raw: [
