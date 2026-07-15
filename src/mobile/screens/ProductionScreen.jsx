@@ -3,13 +3,22 @@ import { T } from '../theme';
 import { MOCK_PRODUCTION_ORDERS, MOCK_PRODUCTION_DETAILS } from '../mockData';
 import { qcStore } from '../qcStore';
 
+// Production Order status — mirrors the web production-entry flow, which is fully
+// event-driven (no free-form transitions):
+//   pending      → created, awaiting approval (Approval Management / mobile)
+//   approved     → approved; ready to log Production Entries
+//   in-progress  → "In Preparation" — a partial Production Entry has been logged
+//   ready-qc     → cumulative entries reached order qty → auto-forwarded to QC
+//   completed    → QC sign-off in Cooking Temp & Sensory
+//   rejected     → approval declined
 const STATUS_MAP = {
-  completed:    { color: T.statusApproved,  bg: T.statusApprovedBg,  label: 'Completed'    },
-  'in-progress':{ color: T.statusInfo,      bg: T.statusInfoBg,      label: 'In Progress'  },
-  pending:      { color: T.statusPending,   bg: T.statusPendingBg,   label: 'Pending'      },
+  pending:      { color: T.statusPending,  bg: T.statusPendingBg,  label: 'Pending Approval' },
+  approved:     { color: T.statusInfo,     bg: T.statusInfoBg,     label: 'Approved'         },
+  'in-progress':{ color: T.statusInfo,     bg: T.statusInfoBg,     label: 'In Preparation'   },
+  'ready-qc':   { color: T.primary,        bg: T.primaryLight,     label: 'Ready for QC'     },
+  completed:    { color: T.statusApproved, bg: T.statusApprovedBg, label: 'Completed'        },
+  rejected:     { color: T.statusRejected, bg: T.statusRejectedBg, label: 'Rejected'         },
 };
-
-const money = (n) => n.toLocaleString('en-IN');
 
 function ProgressBar({ produced, qty }) {
   const pct = qty > 0 ? Math.round((produced / qty) * 100) : 0;
@@ -42,14 +51,9 @@ function MaterialTable({ title, rows }) {
       <div style={{ fontSize: 10, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>{title}</div>
       <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusMd, overflow: 'hidden' }}>
         {rows.map((m, i) => (
-          <div key={m.code} style={{ padding: '8px 12px', borderTop: i === 0 ? 'none' : `1px solid ${T.border}` }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody }}>{m.name}</span>
-              <span style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>৳ {money(m.qty * m.rate)}</span>
-            </div>
-            <div style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
-              {m.code} · {m.qty} {m.uom} × ৳{m.rate}
-            </div>
+          <div key={m.code} style={{ padding: '8px 12px', borderTop: i === 0 ? 'none' : `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody }}>{m.name}</span>
+            <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, whiteSpace: 'nowrap' }}>{m.code} · {m.qty} {m.uom}</span>
           </div>
         ))}
       </div>
@@ -57,21 +61,35 @@ function MaterialTable({ title, rows }) {
   );
 }
 
-function OrderDetail({ order, onBack, onUpdate }) {
-  const [forwardedToQC, setForwardedToQC] = useState(false);
-  const [recordQty, setRecordQty] = useState(String(order.qty));
+function OrderDetail({ order, onBack, onUpdate, nav }) {
   const s = STATUS_MAP[order.status] || STATUS_MAP.pending;
   const detail = MOCK_PRODUCTION_DETAILS[order.id];
   const remaining = Math.max(0, order.qty - order.produced);
+  const [entryQty, setEntryQty] = useState('');
 
-  const allMats = detail ? [...detail.raw, ...detail.pkg] : [];
-  const cogs = allMats.reduce((sum, m) => sum + m.qty * m.rate, 0);
-  const costPerUnit = order.qty > 0 ? Math.round(cogs / order.qty) : 0;
-
+  // "Save Production" === a web Production Entry: logs a produced quantity that
+  // accumulates. The order auto-advances to Ready for QC (and is forwarded to
+  // the QC / Cooking Temp & Sensory queue) the moment the target is reached —
+  // no manual "Forward to QC" step.
   const saveProduction = () => {
-    const val = Math.max(0, Math.min(order.qty, parseInt(recordQty, 10) || 0));
-    onUpdate(order.id, { produced: val, status: val >= order.qty ? 'completed' : 'in-progress' });
+    const add = Math.max(0, parseInt(entryQty, 10) || 0);
+    if (add <= 0) return;
+    const newProduced = Math.min(order.qty, order.produced + add);
+    const complete = newProduced >= order.qty;
+    onUpdate(order.id, { produced: newProduced, status: complete ? 'ready-qc' : 'in-progress' });
+    if (complete) {
+      qcStore.add({
+        id: `QC-PROD-${order.id}`,
+        item: order.item,
+        flight: order.flight,
+        section: order.section,
+        qty: `${order.qty} units`,
+      });
+    }
+    setEntryQty('');
   };
+
+  const canEnter = order.status === 'approved' || order.status === 'in-progress';
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
@@ -128,71 +146,69 @@ function OrderDetail({ order, onBack, onUpdate }) {
           </div>
         )}
 
-        {/* Material Cost (COGS) */}
-        {detail && (
-          <div style={{ marginBottom: 14 }}>
-            <SectionLabel>Material Cost (COGS)</SectionLabel>
-            <div style={{ display: 'flex', gap: 10 }}>
-              <div style={{ flex: 1, background: T.primaryLight, border: `1px solid ${T.primary}30`, borderRadius: T.radiusMd, padding: '10px 12px' }}>
-                <div style={{ fontSize: 9, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Total COGS · {order.qty} units</div>
-                <div style={{ fontSize: 16, fontWeight: 700, color: T.primary, fontFamily: T.fontBody, marginTop: 3 }}>৳ {money(cogs)}</div>
-              </div>
-              <div style={{ flex: 1, background: T.bgSubtle, border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '10px 12px' }}>
-                <div style={{ fontSize: 9, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Cost per Unit</div>
-                <div style={{ fontSize: 16, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody, marginTop: 3 }}>৳ {money(costPerUnit)}</div>
-              </div>
-            </div>
+        {/* ── Flow ────────────────────────────────────────────────────────── */}
+
+        {/* Step 1 · Awaiting approval — approval is handled only in the Approvals
+            section (and on web), never inline on the production order. */}
+        {order.status === 'pending' && (
+          <div style={{ background: T.statusPendingBg, border: `1px solid ${T.statusPending}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: T.statusPending, fontFamily: T.fontBody }}>Awaiting Approval</div>
+            <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 3 }}>Approval is handled in the Approvals section.</div>
           </div>
         )}
 
-        {/* ── Flow ────────────────────────────────────────────────────────── */}
-        {order.status === 'pending' && (
-          <button
-            onClick={() => onUpdate(order.id, { status: 'in-progress' })}
-            style={{ width: '100%', padding: '13px 0', background: T.buttonGradient, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}
-          >
-            Start Production
-          </button>
-        )}
-
-        {order.status === 'in-progress' && (
+        {/* Step 2 · Production Entry — "Save Production" logs a web Production Entry */}
+        {canEnter && (
           <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '14px 16px', boxShadow: T.shadowSm }}>
-            <SectionLabel>Record Production</SectionLabel>
-            <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginBottom: 8 }}>Enter total produced quantity (target {order.qty}). The order completes when fully produced.</div>
+            <SectionLabel>Production Entry</SectionLabel>
+            <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginBottom: 8 }}>
+              Enter the quantity produced in this entry ({remaining} remaining of {order.qty}). The order is forwarded to QC automatically once fully produced.
+            </div>
             <input
-              type="number" min={0} max={order.qty} value={recordQty}
-              onChange={e => setRecordQty(e.target.value)}
+              type="number" min={0} max={remaining} value={entryQty}
+              onChange={e => setEntryQty(e.target.value)}
+              placeholder={`e.g. ${remaining}`}
               style={{ width: '100%', boxSizing: 'border-box', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '10px 12px', fontSize: 14, fontFamily: T.fontBody, background: T.bgBase, color: T.textPrimary, outline: 'none', marginBottom: 10 }}
             />
             <button
               onClick={saveProduction}
-              style={{ width: '100%', padding: '12px 0', background: T.statusInfo, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}
+              disabled={!entryQty || parseInt(entryQty, 10) <= 0}
+              style={{ width: '100%', padding: '12px 0', background: (!entryQty || parseInt(entryQty, 10) <= 0) ? T.textDisabled : T.statusInfo, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: (!entryQty || parseInt(entryQty, 10) <= 0) ? 'not-allowed' : 'pointer' }}
             >
               Save Production
             </button>
           </div>
         )}
 
-        {order.status === 'completed' && (
+        {/* Step 3 · Ready for QC — auto-forwarded, no manual step */}
+        {order.status === 'ready-qc' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: T.statusApproved, fontFamily: T.fontBody }}>Production Complete ✓</div>
             </div>
-            {!forwardedToQC ? (
-              <button
-                onClick={() => {
-                  qcStore.add({ id: `QC-PROD-${order.id}`, item: order.item, flight: order.flight, section: order.section, qty: `${order.qty} units` });
-                  setForwardedToQC(true);
-                }}
-                style={{ width: '100%', padding: '13px 0', background: T.statusInfo, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}
-              >
-                Forward to QC
-              </button>
-            ) : (
-              <div style={{ background: T.statusInfoBg, border: `1px solid ${T.statusInfo}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: T.statusInfo, fontFamily: T.fontBody }}>Forwarded to QC ✓</div>
-              </div>
-            )}
+            <div style={{ background: T.primaryLight, border: `1px solid ${T.primary}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.primary, fontFamily: T.fontBody }}>Forwarded to QC — Cooking Temp &amp; Sensory ✓</div>
+            </div>
+            <button
+              onClick={() => nav.navigate('qc')}
+              style={{ width: '100%', padding: '13px 0', background: T.buttonGradient, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}
+            >
+              Open QC →
+            </button>
+          </div>
+        )}
+
+        {/* Completed — QC signed off */}
+        {order.status === 'completed' && (
+          <div style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: T.statusApproved, fontFamily: T.fontBody }}>Completed — QC signed off ✓</div>
+          </div>
+        )}
+
+        {/* Rejected */}
+        {order.status === 'rejected' && (
+          <div style={{ background: T.statusRejectedBg, border: `1px solid ${T.statusRejected}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: T.statusRejected, fontFamily: T.fontBody }}>Order Rejected ✗</div>
           </div>
         )}
       </div>
@@ -212,11 +228,11 @@ export function ProductionScreen({ nav }) {
   const updateOrder = (id, patch) => setOrders(prev => prev.map(o => o.id === id ? { ...o, ...patch } : o));
 
   const selected = orders.find(o => o.id === selectedId);
-  if (selected) return <OrderDetail order={selected} onBack={() => setSelectedId(null)} onUpdate={updateOrder} />;
+  if (selected) return <OrderDetail order={selected} onBack={() => setSelectedId(null)} onUpdate={updateOrder} nav={nav} />;
 
-  const completed  = orders.filter(o => o.status === 'completed').length;
-  const inProgress = orders.filter(o => o.status === 'in-progress').length;
-  const pending    = orders.filter(o => o.status === 'pending').length;
+  const completed = orders.filter(o => o.status === 'completed').length;
+  const active    = orders.filter(o => ['approved', 'in-progress', 'ready-qc'].includes(o.status)).length;
+  const pending   = orders.filter(o => o.status === 'pending').length;
 
   const q = search.trim().toLowerCase();
   const todayStr = new Date().toISOString().slice(0, 10);
@@ -238,7 +254,7 @@ export function ProductionScreen({ nav }) {
       </div>
       <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px 16px' }}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 14 }}>
-          {[['Done', completed, T.statusApproved, T.statusApprovedBg], ['Active', inProgress, T.statusInfo, T.statusInfoBg], ['Pending', pending, T.statusPending, T.statusPendingBg]].map(([label, val, color, bg]) => (
+          {[['Done', completed, T.statusApproved, T.statusApprovedBg], ['Active', active, T.statusInfo, T.statusInfoBg], ['Pending', pending, T.statusPending, T.statusPendingBg]].map(([label, val, color, bg]) => (
             <div key={label} style={{ background: bg, border: `1px solid ${color}20`, borderRadius: T.radiusMd, padding: '10px 8px', textAlign: 'center' }}>
               <div style={{ fontSize: 22, fontWeight: 800, color, fontFamily: T.fontBody }}>{val}</div>
               <div style={{ fontSize: 11, color, fontFamily: T.fontBody, marginTop: 2 }}>{label}</div>
@@ -266,9 +282,11 @@ export function ProductionScreen({ nav }) {
           <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
             style={{ ...inputStyle, flex: 1, padding: '8px 10px', fontSize: 12 }}>
             <option value="all">All statuses</option>
+            <option value="pending">Pending Approval</option>
+            <option value="approved">Approved</option>
+            <option value="in-progress">In Preparation</option>
+            <option value="ready-qc">Ready for QC</option>
             <option value="completed">Completed</option>
-            <option value="in-progress">In Progress</option>
-            <option value="pending">Pending</option>
           </select>
           {(search || todayOnly || dateFrom || dateTo || statusFilter !== 'all') && (
             <span onClick={() => { setSearch(''); setTodayOnly(false); setDateFrom(''); setDateTo(''); setStatusFilter('all'); }}

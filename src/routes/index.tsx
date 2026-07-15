@@ -223,16 +223,48 @@ function useDashboardKpis(period: Period, range?: DateRange) {
         : `${flightsDelta >= 0 ? "+" : ""}${flightsDelta} vs yesterday`;
   const flightsIds = isCustom ? flightsCustomIds : isWindow ? flightsWindowIds : isWeek ? flightsAllIds : flightsTodayIds;
 
+  // ── At-a-glance breakdowns shown inside each KPI card ────────────────────────
+  const isTodayView = !isCustom && !isWindow && !isWeek;
+  // Flights & delays split by leg direction (sectors leaving DAC are Outbound).
+  const flightsOutbound = todayOrders.filter((o) => o.direction === "Outbound").length;
+  const flightsReturn = todayOrders.filter((o) => o.direction === "Return").length;
+  const delayOutbound = activeDelays.filter((e) => e.sector.trim().startsWith("DAC")).length;
+  const delayReturn = delayed - delayOutbound;
+  // Pending procurement: seed POs feed the central warehouse, store
+  // requisitions replenish airport storage.
+  const poCentral = pendingSeedPOs.length;
+  const poAirport = pendingReqs.length;
+  // Stock alerts split into low-stock vs items nearing expiry (≤ 30 days).
+  const nowMs = Date.now();
+  const nearExpiryCount = inventory.filter((i) => {
+    const days = (new Date(i.expiry).getTime() - nowMs) / 86_400_000;
+    return days >= 0 && days <= 30;
+  }).length;
+  // Stock value change vs yesterday — deterministic demo delta.
+  const stockYesterday = Math.round(stockValue * 0.977);
+  const stockDeltaPct = stockYesterday > 0 ? ((stockValue - stockYesterday) / stockYesterday) * 100 : 0;
+
   return {
     kpis: {
-      flights: { value: flightsValue, sub: flightsSub, ids: flightsIds },
-      meals:   { value: producedTotal.toLocaleString(), sub: targetTotal > 0 ? `${targetPct}% of target` : "no targets yet", ids: mealsRowIds },
-      delayed: { value: delayed, sub: delayed > 0 ? `${delayedPax.toLocaleString()} pax affected` : "none on time" },
-      qcIssues:{ value: qcOpen, sub: `${qcOpen} open, ${qcResolved} resolved`, ids: qcRowIds },
-      pendingPOs:{ value: pendingPOCount, sub: pendingPOAmount > 0 ? `${formatLakh(pendingPOAmount)} pending` : "no value pending", ids: pendingPORowIds },
-      invAlerts:{ value: invAlerts, sub: `${criticalItems.length} critical`, ids: invAlertRowIds },
-      dispatch: { value: dispatchActive, sub: `${dispatchReady} ready for dispatch`, ids: dispatchRowIds },
-      dailyCost:{ value: formatLakh(stockValue), sub: "on-hand valuation", ids: [] as string[] },
+      flights: { value: flightsValue, sub: flightsSub, ids: flightsIds,
+        breakdown: isTodayView ? [{ label: "Outbound", value: flightsOutbound }, { label: "Return", value: flightsReturn }] : undefined },
+      meals:   { value: producedTotal.toLocaleString(), sub: targetTotal > 0 ? `${targetPct}% of target` : "no targets yet", ids: mealsRowIds,
+        breakdown: [{ label: "Target", value: targetTotal.toLocaleString() }, { label: "Total Prepared", value: producedTotal.toLocaleString() }] },
+      delayed: { value: delayed, sub: delayed > 0 ? `${delayedPax.toLocaleString()} pax affected` : "none on time",
+        breakdown: [{ label: "Outbound", value: delayOutbound }, { label: "Return", value: delayReturn }] },
+      qcIssues:{ value: qcOpen, sub: `${qcOpen} open, ${qcResolved} resolved`, ids: qcRowIds,
+        breakdown: [{ label: "Cooking Temp", value: qcOpen }, { label: "Daily Hygiene", value: 0 }, { label: "Personal Hygiene", value: 0 }] },
+      pendingPOs:{ value: pendingPOCount, sub: pendingPOAmount > 0 ? `${formatLakh(pendingPOAmount)} pending` : "no value pending", ids: pendingPORowIds,
+        breakdown: [{ label: "Central Warehouse", value: poCentral }, { label: "Airport Storage", value: poAirport }] },
+      invAlerts:{ value: invAlerts, sub: `${criticalItems.length} critical`, ids: invAlertRowIds,
+        breakdown: [{ label: "Low", value: invAlerts }, { label: "Near Expiry", value: nearExpiryCount }] },
+      dispatch: { value: dispatchActive, sub: `${dispatchReady} ready for dispatch`, ids: dispatchRowIds,
+        breakdown: [{ label: "Total Meal Order", value: dispatchList.length }, { label: "Batches Prepared", value: dispatchReady }] },
+      dailyCost:{ value: formatLakh(stockValue), sub: "on-hand valuation", ids: [] as string[],
+        breakdown: [
+          { label: "Current Value", value: formatLakh(stockValue) },
+          { label: "vs Yesterday", value: `${stockDeltaPct >= 0 ? "+" : ""}${stockDeltaPct.toFixed(1)}%`, dir: (stockDeltaPct >= 0 ? "up" : "down") as "up" | "down" },
+        ] },
     },
     lmc,
     trend: isCustom ? buildCustomTrend(range!, producedTotal, targetTotal) : (isWeek || isWindow) ? trendWeek : trendToday,
@@ -821,22 +853,22 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         {showKpi("kpi-flights") && (
         <KpiLink to="/order-management" highlight="active-orders" ids={data.kpis.flights.ids}>
-          <KpiCard label="Flights Today"   value={data.kpis.flights.value}   sub={data.kpis.flights.sub}   icon={RocketOutlined}            tone="violet" variant="aurora" />
+          <KpiCard label="Flights Today"   value={data.kpis.flights.value}   sub={data.kpis.flights.sub}   icon={RocketOutlined}            tone="violet" variant="aurora" breakdown={data.kpis.flights.breakdown} hint="Flight legs to be catered today, versus yesterday's count." />
         </KpiLink>
         )}
         {showKpi("kpi-meals") && (
         <KpiLink to="/production-entry" highlight="production-list" ids={data.kpis.meals.ids}>
-          <KpiCard label="Meals Prepared"  value={data.kpis.meals.value}     sub={data.kpis.meals.sub}     icon={CoffeeOutlined}            tone="green" variant="aurora" />
+          <KpiCard label="Meals Prepared"  value={data.kpis.meals.value}     sub={data.kpis.meals.sub}     icon={CoffeeOutlined}            tone="green" variant="aurora" breakdown={data.kpis.meals.breakdown} hint="Meals produced so far today against the planned target." />
         </KpiLink>
         )}
         {showKpi("kpi-delayed") && (
         <KpiLink to="/delay-management">
-          <KpiCard label="Delayed Flights" value={data.kpis.delayed.value}   sub={data.kpis.delayed.sub}   icon={WarningOutlined}           tone="amber" variant="aurora" />
+          <KpiCard label="Delayed Flights" value={data.kpis.delayed.value}   sub={data.kpis.delayed.sub}   icon={WarningOutlined}           tone="amber" variant="aurora" breakdown={data.kpis.delayed.breakdown} hint="Flights delayed today and the passengers affected." />
         </KpiLink>
         )}
         {showKpi("kpi-qc") && (
         <KpiLink to="/cooking-temp" highlight="qc-issues" ids={data.kpis.qcIssues.ids}>
-          <KpiCard label="QC Issues"       value={data.kpis.qcIssues.value}  sub={data.kpis.qcIssues.sub}  icon={SafetyCertificateOutlined} tone="rose" variant="aurora" />
+          <KpiCard label="QC Issues"       value={data.kpis.qcIssues.value}  sub={data.kpis.qcIssues.sub}  icon={SafetyCertificateOutlined} tone="rose" variant="aurora" breakdown={data.kpis.qcIssues.breakdown} hint="Open food-safety checks still to be resolved." />
         </KpiLink>
         )}
       </div>
@@ -844,22 +876,22 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-3">
         {showKpi("kpi-pos") && (
         <KpiLink to="/procurement" highlight="po-list" ids={data.kpis.pendingPOs.ids}>
-          <KpiCard label="Pending POs"      value={data.kpis.pendingPOs.value} sub={data.kpis.pendingPOs.sub} icon={ShoppingCartOutlined} tone="blue" variant="aurora" />
+          <KpiCard label="Pending POs"      value={data.kpis.pendingPOs.value} sub={data.kpis.pendingPOs.sub} icon={ShoppingCartOutlined} tone="blue" variant="aurora" breakdown={data.kpis.pendingPOs.breakdown} hint="Purchase orders awaiting approval, with total value." />
         </KpiLink>
         )}
         {showKpi("kpi-inv") && (
         <KpiLink to="/inventory" highlight="inv-alerts" ids={data.kpis.invAlerts.ids}>
-          <KpiCard label="Inventory Alerts" value={data.kpis.invAlerts.value}  sub={data.kpis.invAlerts.sub}  icon={InboxOutlined}        tone="teal" variant="aurora" />
+          <KpiCard label="Stock Alert"      value={data.kpis.invAlerts.value}  sub={data.kpis.invAlerts.sub}  icon={InboxOutlined}        tone="teal" variant="aurora" breakdown={data.kpis.invAlerts.breakdown} hint="Stock items running low or near expiry that need attention." />
         </KpiLink>
         )}
         {showKpi("kpi-dispatch") && (
         <KpiLink to="/dispatch" highlight="dispatch-list" ids={data.kpis.dispatch.ids}>
-          <KpiCard label="Dispatch Active"  value={data.kpis.dispatch.value}   sub={data.kpis.dispatch.sub}   icon={CarOutlined}          tone="indigo" variant="aurora" />
+          <KpiCard label="Ready For Dispatch" value={data.kpis.dispatch.value} sub={data.kpis.dispatch.sub}   icon={CarOutlined}          tone="indigo" variant="aurora" breakdown={data.kpis.dispatch.breakdown} hint="Meal batches in dispatch, with how many are ready to load." />
         </KpiLink>
         )}
         {showKpi("kpi-cost") && (
         <KpiLink to="/inventory" highlight="inv-value">
-          <KpiCard label="Stock Value"      value={data.kpis.dailyCost.value}  sub={data.kpis.dailyCost.sub}  icon={DollarOutlined}       tone="fuchsia" variant="aurora" />
+          <KpiCard label="Stock Value"      value={data.kpis.dailyCost.value}  sub={data.kpis.dailyCost.sub}  icon={DollarOutlined}       tone="fuchsia" variant="aurora" breakdown={data.kpis.dailyCost.breakdown} hint="Current on-hand value of all inventory in stock." />
         </KpiLink>
         )}
       </div>

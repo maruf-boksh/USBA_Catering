@@ -41,7 +41,7 @@ const AURORA: Record<string, { chipBg: string; fg: string }> = {
 };
 
 export function KpiCard({
-  label, value, sub, icon, tone = 'navy', variant = 'default',
+  label, value, sub, icon, tone = 'navy', variant = 'default', hint, breakdown,
 }: {
   label: string;
   value: string | number;
@@ -49,6 +49,12 @@ export function KpiCard({
   icon: React.ElementType;
   tone?: string;
   variant?: 'default' | 'aurora';
+  /** Optional plain-language explanation of what the metric means — shown as a
+   *  subtle footnote so newcomers can read the card at a glance. Aurora only. */
+  hint?: string;
+  /** Optional compact split shown as a tinted mini-stat strip inside the card
+   *  (e.g. Outbound / Return). `dir` colours a value green/red. Aurora only. */
+  breakdown?: { label: string; value: string | number; dir?: 'up' | 'down' }[];
 }) {
   const [hover, setHover] = React.useState(false);
 
@@ -76,7 +82,7 @@ export function KpiCard({
           height: '100%',
         }}
       >
-        {/* top row: pastel icon chip + delta pill */}
+        {/* top row: pastel icon chip + delta pill (or status badge) */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
           <div style={{
             width: 38, height: 38, borderRadius: 12,
@@ -85,17 +91,31 @@ export function KpiCard({
           }}>
             {React.createElement(icon, { style: { width: 18, height: 18 } })}
           </div>
-          {footer?.delta && (
+          {footer?.delta ? (
+            // Delta pill — arrow + value + the descriptive context (e.g.
+            // "↓ 1 vs yesterday", "↑ 6% of target") so the comparison is clear.
             <span style={{
-              display: 'inline-flex', alignItems: 'center', gap: 3,
-              padding: '3px 9px', borderRadius: 999, fontSize: 11.5, fontWeight: 600,
+              display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap',
+              padding: '3px 10px', borderRadius: 999, fontSize: 11.5, fontWeight: 600,
               color: up ? '#15803d' : '#b91c1c',
               background: up ? '#dcfce7' : '#fee2e2',
             }}>
               <span style={{ fontSize: 12, lineHeight: 1 }}>{up ? '↑' : '↓'}</span>
               {footer.delta.replace(/^[-−+]/, '')}
+              {footer.rest && <span style={{ fontWeight: 500 }}>{footer.rest}</span>}
             </span>
-          )}
+          ) : footer?.rest ? (
+            // Stat pill — the card's secondary stat, tinted with the card's own
+            // accent (matching the icon chip) so the key figures read at a glance
+            // (e.g. "174 pax affected", "0 critical").
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap',
+              padding: '3px 10px', borderRadius: 999, fontSize: 11.5, fontWeight: 600,
+              color: a.fg, background: a.chipBg,
+            }}>
+              {footer.rest}
+            </span>
+          ) : null}
         </div>
 
         {/* label */}
@@ -121,10 +141,39 @@ export function KpiCard({
           ) : valueStr}
         </div>
 
-        {/* sub line (delta stripped — it's shown in the pill above) */}
-        {footer && (footer.delta ? footer.rest : footer.rest) && (
-          <div style={{ fontSize: 12, color: 'var(--color-text-tertiary, #8a8f98)', marginTop: 6 }}>
-            {footer.delta ? footer.rest : footer.rest}
+        {/* breakdown — a compact at-a-glance split, tinted with the card accent */}
+        {breakdown && breakdown.length > 0 && (
+          <div style={{
+            display: 'flex', marginTop: 13, borderRadius: 12, overflow: 'hidden',
+            border: `1px solid ${a.chipBg}`, background: `${a.chipBg}66`,
+          }}>
+            {breakdown.map((b, i) => (
+              <div key={b.label} style={{
+                flex: 1, minWidth: 0, padding: '8px 11px',
+                borderLeft: i === 0 ? 'none' : `1px solid ${a.chipBg}`,
+              }}>
+                <div style={{
+                  fontSize: 15, fontWeight: 700, lineHeight: 1.1, whiteSpace: 'nowrap',
+                  overflow: 'hidden', textOverflow: 'ellipsis',
+                  color: b.dir === 'up' ? '#15803d' : b.dir === 'down' ? '#b91c1c' : a.fg,
+                }}>{b.value}</div>
+                <div style={{
+                  fontSize: 10, fontWeight: 600, letterSpacing: '0.01em', marginTop: 3,
+                  lineHeight: 1.25, color: 'var(--color-text-tertiary, #98a2b3)',
+                }}>{b.label}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* hint — a plain-language footnote so newcomers understand the metric */}
+        {hint && (
+          <div style={{
+            fontSize: 11, lineHeight: 1.4, marginTop: 11, paddingTop: 10,
+            borderTop: '1px dashed var(--color-border, #eef0f4)',
+            color: 'var(--color-text-tertiary, #98a2b3)',
+          }}>
+            {hint}
           </div>
         )}
       </div>

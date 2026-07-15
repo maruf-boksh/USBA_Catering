@@ -48,6 +48,7 @@ import {
   type SpecialMealEntry, type SpecialMealCategory,
 } from "@/lib/sample-data";
 import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-settings";
+import { useSpecialMealCountConfig, applySpecialMealMode } from "@/lib/special-meal-count-settings";
 import {
   useFlightOrders, addFlightOrders, updateFlightOrder,
   amendOrder, getOrderAmendments, revertAmendment, canRevertAmendment,
@@ -6611,11 +6612,29 @@ function FlightOrderDetailsDialog({
   const hasRoster = legs.some((l) => (l.specialMealRoster ?? []).length > 0);
   const totalPax = legs.reduce((s, l) => s + l.pax, 0);
   const totalSpec = legs.reduce((s, l) => s + l.specialMeals, 0);
+  // Special-meal count rules (Configuration → Meal Config) decide whether
+  // specials are deducted (alternative — total unchanged) or additional.
+  const specialCfg = useSpecialMealCountConfig();
 
   // ── Individual flight detail (clicking View on a single row) ──────────────
   if (order && !isMulti) {
     const leg = legs[0] ?? order;
+    const crewBase = leg.crew ?? 0;
     const rosterCount = leg.specialMealRoster?.length ?? 0;
+    // Special meals are ALTERNATIVE meals — a subset of PAX & Crew. Split the
+    // total into passenger vs crew specials: from the roster's audience tags
+    // when the manifest is imported, otherwise a derived estimate (crew take
+    // ~20% of the planned specials, capped at the crew size).
+    const crewSpecial = rosterCount > 0
+      ? (leg.specialMealRoster ?? []).filter((r) => r.audience === "Crew").length
+      : Math.min(crewBase, Math.round(leg.specialMeals * 0.2));
+    const paxSpecial = Math.max(0, leg.specialMeals - crewSpecial);
+    // regular = base − special; the configured mode decides whether the specials
+    // are added back to the total (additional) or deducted from it.
+    const paxRegular = Math.max(0, leg.pax - paxSpecial);
+    const crewRegular = Math.max(0, crewBase - crewSpecial);
+    const paxTotal = applySpecialMealMode(leg.pax, paxSpecial, specialCfg.passenger);
+    const crewTotal = applySpecialMealMode(crewBase, crewSpecial, specialCfg.crew);
     return (
       <Dialog open={!!order} onOpenChange={(open) => !open && onClose()}>
         <DialogContent className={cn(rosterCount > 0 ? "max-w-2xl" : "max-w-lg", "max-h-[85vh] overflow-y-auto")}>
@@ -6680,10 +6699,47 @@ function FlightOrderDetailsDialog({
             </div>
 
             <div className="rounded-md bg-muted/40 px-3 py-2 flex items-center justify-between">
-              <span className="text-xs text-muted-foreground">Total Meals (PAX + Crew + Special)</span>
+              <span className="text-xs text-muted-foreground">Total Meals (PAX + Crew)</span>
               <span className="text-sm font-semibold text-foreground tabular-nums">
-                {(leg.pax + (leg.crew ?? 0) + leg.specialMeals).toLocaleString()}
+                {(paxTotal + crewTotal).toLocaleString()}
               </span>
+            </div>
+
+            {/* Meal breakdown — special meals are alternative meals; regular +
+                special reconciles to each group total per the configured count
+                mode (Configuration → Meal Config). */}
+            <div className="rounded-md border bg-muted/20 px-3 py-2.5 space-y-2">
+              <div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-muted-foreground">Passengers</span>
+                  <span className="font-medium tabular-nums text-foreground">{paxTotal.toLocaleString()}</span>
+                </div>
+                <div className="pl-3 mt-0.5 text-[11px] text-muted-foreground tabular-nums">
+                  {specialCfg.passenger === "additional"
+                    ? `${paxRegular.toLocaleString()} regular meal + ${paxSpecial.toLocaleString()} special meal = ${paxTotal.toLocaleString()}`
+                    : `${leg.pax.toLocaleString()} − ${paxSpecial.toLocaleString()} special meal = ${paxTotal.toLocaleString()}`}
+                </div>
+              </div>
+              <div>
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-muted-foreground">Crew</span>
+                  <span className="font-medium tabular-nums text-foreground">{crewTotal.toLocaleString()}</span>
+                </div>
+                <div className="pl-3 mt-0.5 text-[11px] text-muted-foreground tabular-nums">
+                  {specialCfg.crew === "additional"
+                    ? `${crewRegular.toLocaleString()} regular crew meal + ${crewSpecial.toLocaleString()} special crew meal = ${crewTotal.toLocaleString()}`
+                    : `${crewBase.toLocaleString()} − ${crewSpecial.toLocaleString()} special crew meal = ${crewTotal.toLocaleString()}`}
+                </div>
+              </div>
+              <div className="flex items-center justify-between text-xs pt-1.5 border-t">
+                <span className="text-muted-foreground">Special Meals</span>
+                <span className="font-semibold tabular-nums text-foreground">
+                  {leg.specialMeals.toLocaleString()}
+                  <span className="ml-1 font-normal text-muted-foreground">
+                    (Passenger: {paxSpecial}, Crew: {crewSpecial})
+                  </span>
+                </span>
+              </div>
             </div>
           </div>
           <DialogFooter className="mt-4">
