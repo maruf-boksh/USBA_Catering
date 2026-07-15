@@ -8,16 +8,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X, Zap, BarChart2, Send, Check, Paperclip, FileText } from "lucide-react";
+import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X, Zap, BarChart2, Send, Check, Paperclip, FileText, Eye, Ban, ClipboardList } from "lucide-react";
 import { receiveItems, vendors, activeItems, inventory } from "@/lib/sample-data";
-import { applyReceiptToPR } from "@/lib/purchase-requisitions";
+import { applyReceiptToPR, getPurchaseRequisitions, prReceived } from "@/lib/purchase-requisitions";
 import { roundQty } from "@/lib/num";
 import { KpiCard } from "@/components/common/KpiCard";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import { useWorkflow, type WfGRN, type WfGRNLine } from "@/lib/workflow-store";
+import { useWorkflow, type WfGRN, type WfGRNLine, type WfPurchaseOrder, type WfPOLineItem, type WfPOStatus } from "@/lib/workflow-store";
 import { addDirectReceiptApproval } from "@/lib/direct-receipt-approvals";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 
@@ -60,6 +61,20 @@ type FormLine = {
 // Store/receiving personnel who can sign for an inbound delivery.
 const RECEIVERS = ["M. Karim", "S. Ahmed", "F. Begum", "K. Rahman", "N. Islam"];
 
+// Statuses shown on the Purchase Orders tab: still-receivable POs plus the
+// close-approval states so a requested/closed PO stays visible with its status.
+const PO_TAB_STATUSES: WfPOStatus[] = ["Approved", "Partially Received", "Close Requested", "Closed"];
+
+// Colour scheme for a PO's status pill on the Receive Items PO tab.
+function poStatusClass(status: WfPOStatus): string {
+  switch (status) {
+    case "Partially Received": return "bg-amber-500 text-white";
+    case "Close Requested":    return "bg-orange-500 text-white";
+    case "Closed":             return "bg-slate-500 text-white";
+    default:                   return "bg-blue-600 text-white";
+  }
+}
+
 function seedToRow(s: SeedGRN): GRNRow {
   return {
     id: s.id, po: s.po, vendor: s.vendor, item: s.item,
@@ -101,12 +116,46 @@ function resolveInventoryId(r: GRNRow): string {
   return byName?.id ?? r.inventoryId ?? r.item;
 }
 
+type PoReceiptLine = WfPOLineItem & { received: number; remaining: number };
+
+/**
+ * How much of a PO has been received so far, derived from the GRNs raised against
+ * it (matched by item name — GRN lines inherit their name from the PO line).
+ * Drives the PO tab's Ordered/Received figures and the Approved → Partially
+ * Received → Received status transitions.
+ */
+function poReceipt(po: WfPurchaseOrder, grns: WfGRN[]): {
+  lines: PoReceiptLine[]; ordered: number; received: number; fully: boolean; anyReceived: boolean;
+} {
+  const recByName = new Map<string, number>();
+  for (const g of grns) {
+    if (g.poRef !== po.id) continue;
+    for (const l of g.lines) {
+      const k = l.name.trim().toLowerCase();
+      recByName.set(k, (recByName.get(k) ?? 0) + (Number(l.qty) || 0));
+    }
+  }
+  const lines: PoReceiptLine[] = (po.lineItems ?? []).map((li) => {
+    const received = roundQty(recByName.get(li.name.trim().toLowerCase()) ?? 0);
+    return { ...li, received, remaining: Math.max(roundQty(li.qty - received), 0) };
+  });
+  const ordered = roundQty(lines.reduce((s, l) => s + l.qty, 0));
+  const received = roundQty(lines.reduce((s, l) => s + Math.min(l.received, l.qty), 0));
+  const fully = lines.length > 0 && lines.every((l) => l.received >= l.qty);
+  const anyReceived = lines.some((l) => l.received > 0);
+  return { lines, ordered, received, fully, anyReceived };
+}
+
 export default function ReceiveItem() {
   useArrivalFlash();
   const navigate = useNavigate();
   const wf = useWorkflow();
-  const { wfPurchaseOrders, wfRequisitions, demands, addGRN, updateDemandStatus, grns } = wf;
+  const { wfPurchaseOrders, wfRequisitions, demands, addGRN, updateDemandStatus, updatePOStatus, grns } = wf;
 
+  // Receive Items has two tabs: approved POs awaiting receipt, and the recorded
+  // GRN receipts. Receiving is launched per-PO from the first tab.
+  const [activeTab, setActiveTab] = useState<"po" | "received">("po");
+  const [viewPO, setViewPO] = useState<WfPurchaseOrder | null>(null);
   const [grnOpen, setGrnOpen] = useState(false);
   const [selectedPORef, setSelectedPORef] = useState("");
   const [receivedBy, setReceivedBy] = useState("");
@@ -133,12 +182,61 @@ export default function ReceiveItem() {
   const [dpDate, setDpDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [dpChallanNo, setDpChallanNo] = useState("");
   const [dpVehicleNo, setDpVehicleNo] = useState("");
-  // Set when the Direct Receive was launched from a Purchase Requisition shortfall
-  // — used to write received quantities back to that PR on save.
+  // Set when the Direct Receive is against a Purchase Requisition — used to write
+  // received quantities back to that PR on save (its detail page then reflects them).
   const [dpSourcePrId, setDpSourcePrId] = useState<string | undefined>(undefined);
+  // "Receive from PR" toggle + the picked PR id.
+  const [dpFromPr, setDpFromPr] = useState(false);
+  const [dpPrId, setDpPrId] = useState("");
   const [dpLines, setDpLines] = useState<FormLine[]>([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
   // Direct-receive attachments (approving authority is decided in Approval Management).
   const [dpAttachments, setDpAttachments] = useState<{ name: string; url: string; isImage: boolean }[]>([]);
+
+  // Purchase Requisitions that still have outstanding (unreceived) lines — the
+  // pickable set for "Receive from PR". Refreshed each time the dialog opens.
+  const receivablePRs = useMemo(() => {
+    if (!directOpen) return [];
+    return getPurchaseRequisitions().filter((pr) => {
+      const s = pr.status.toLowerCase();
+      if (s === "rejected" || s === "cancelled" || s === "closed") return false;
+      return prReceived(pr).remaining > 0;
+    });
+  }, [directOpen]);
+
+  // Load a PR's outstanding lines into the Direct Receive form (qty defaults to
+  // each line's remaining balance; prLineId ties the row back to the PR line).
+  const dpSelectPr = (prId: string) => {
+    setDpPrId(prId);
+    if (!prId) { setDpSourcePrId(undefined); return; }
+    const pr = getPurchaseRequisitions().find((p) => p.id === prId);
+    if (!pr) return;
+    setDpSourcePrId(pr.id);
+    setDpOfficeId(pr.officeId || "OFF-001");
+    setDpWarehouseId(pr.warehouseId || "WH-001");
+    setDpJustification(`Direct receive against Purchase Requisition ${pr.id}.`);
+    const outstanding = pr.lines
+      .map((l) => ({ l, remaining: Math.max(l.qty - (l.receivedQty ?? 0), 0) }))
+      .filter((x) => x.remaining > 0);
+    setDpLines(
+      outstanding.length > 0
+        ? outstanding.map(({ l, remaining }, i) => ({
+            id: `d${i + 1}`, name: l.itemName, qty: remaining, uom: l.uom,
+            expiry: "", rate: l.rate || 0, prLineId: l.id,
+          }))
+        : [{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }],
+    );
+  };
+
+  // Toggle the "Receive from PR" mode; clears the PR link and lines when turned off.
+  const dpToggleFromPr = (on: boolean) => {
+    setDpFromPr(on);
+    if (!on) {
+      setDpPrId("");
+      setDpSourcePrId(undefined);
+      setDpJustification("");
+      setDpLines([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
+    }
+  };
 
   // Purchase totals for the direct-receive lines.
   const dpLineTotal = (l: FormLine) => roundQty((Number(l.qty) || 0) * (Number(l.rate) || 0), 2);
@@ -160,6 +258,7 @@ export default function ReceiveItem() {
   const resetDirect = () => {
     setDpVendor(""); setDpReceivedBy(""); setDpOfficeId("OFF-001"); setDpWarehouseId("WH-001");
     setDpJustification(""); setDpInvoiceNo(""); setDpSourcePrId(undefined);
+    setDpFromPr(false); setDpPrId("");
     setDpDate(new Date().toISOString().slice(0, 10)); setDpChallanNo(""); setDpVehicleNo("");
     setDpLines([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
     dpAttachments.forEach((a) => { try { URL.revokeObjectURL(a.url); } catch { /* ignore */ } });
@@ -277,9 +376,10 @@ export default function ReceiveItem() {
     resetDirect();
   };
 
-  // Only APPROVED POs can be received against.
+  // Approved POs — plus partially-received ones still awaiting their balance —
+  // are the receivable set.
   const selectablePOs = useMemo(
-    () => wfPurchaseOrders.filter(p => p.status === "Approved"),
+    () => wfPurchaseOrders.filter(p => p.status === "Approved" || p.status === "Partially Received"),
     [wfPurchaseOrders]
   );
 
@@ -288,7 +388,9 @@ export default function ReceiveItem() {
     [wfPurchaseOrders, selectedPORef]
   );
 
-  // When PO is selected, pre-fill lines from its line items.
+  // When a PO is selected, pre-fill lines from its items. Received qty defaults to
+  // the OUTSTANDING balance (ordered − already received) so a fresh PO fills to its
+  // full order and a partial one fills to just its remainder.
   const handleSelectPO = (poId: string) => {
     setSelectedPORef(poId);
     if (!poId) {
@@ -296,28 +398,47 @@ export default function ReceiveItem() {
       return;
     }
     const po = wfPurchaseOrders.find(p => p.id === poId);
-    if (po) {
-      // Inherit Office + Warehouse from PO if set
-      if (po.officeId) setGrnOfficeId(po.officeId);
-      if (po.warehouseId) setGrnWarehouseId(po.warehouseId);
-    }
-    if (po?.lineItems && po.lineItems.length > 0) {
-      setFormLines(po.lineItems.map((l, i) => ({
+    if (!po) return;
+    // Inherit Office + Warehouse from PO if set
+    if (po.officeId) setGrnOfficeId(po.officeId);
+    if (po.warehouseId) setGrnWarehouseId(po.warehouseId);
+    const r = poReceipt(po, grns);
+    if (r.lines.length > 0) {
+      setFormLines(r.lines.map((l, i) => ({
         id: `l${i}`,
         name: l.name,
-        qty: l.qty,
+        qty: l.remaining,
         orderedQty: l.qty,
         uom: l.uom,
         expiry: "",
         rate: l.unitPrice ?? 0,
         batchNo: "",
       })));
-      toast.success(`${po.lineItems.length} item${po.lineItems.length === 1 ? "" : "s"} loaded from ${po.id}.`);
+      toast.success(`${r.lines.length} item${r.lines.length === 1 ? "" : "s"} loaded from ${po.id}.`);
     } else {
       // PO without line items — start a clean single empty row.
       setFormLines([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
-      toast.info(`${po?.id ?? poId} has no item details. Add rows manually.`);
+      toast.info(`${po.id} has no item details. Add rows manually.`);
     }
+  };
+
+  // Launch the GRN form for a PO row (Receive action on the PO tab).
+  const handleReceivePO = (po: WfPurchaseOrder) => {
+    setReceivedBy("");
+    setGrnDate(new Date().toISOString().slice(0, 10));
+    setGrnChallanNo(""); setGrnInvoiceNo(""); setGrnVehicleNo(""); setGrnRemarks("");
+    handleSelectPO(po.id);
+    setGrnOpen(true);
+  };
+
+  // Request to close a PO without receiving the balance (e.g. vendor can't supply
+  // the rest). This does NOT close it immediately — it goes to the approval layer;
+  // an approver in Approval Management finalises it to Closed.
+  const handleRequestClose = (po: WfPurchaseOrder) => {
+    if (po.status !== "Approved" && po.status !== "Partially Received") return;
+    updatePOStatus(po.id, "Close Requested", { closeRequestedFrom: po.status });
+    setViewPO(null);
+    toast.success(`${po.id} close requested — sent to Approval Management for sign-off.`);
   };
 
   const removeLine = (id: string) => setFormLines(prev => prev.filter(l => l.id !== id));
@@ -333,11 +454,14 @@ export default function ReceiveItem() {
     if (!grnOfficeId) { toast.error("Office is required."); return; }
     if (!grnWarehouseId) { toast.error("Warehouse is required."); return; }
     if (formLines.some(l => !l.name.trim())) { toast.error("All item rows must have an item name."); return; }
+    // Only lines with a received qty are recorded (a partial receipt leaves some at 0).
+    const receivedLines = formLines.filter(l => (Number(l.qty) || 0) > 0);
+    if (receivedLines.length === 0) { toast.error("Enter a received quantity for at least one item."); return; }
 
     const grnId = `GRN-${Date.now().toString().slice(-5)}`;
     // Received lines start "Pending" — the Quality Control module inspects and
     // accepts/holds/rejects them; only accepted lines post to Stock Overview.
-    const lines: WfGRNLine[] = formLines.map(l => ({
+    const lines: WfGRNLine[] = receivedLines.map(l => ({
       itemId: l.id,
       name: l.name,
       qty: l.qty,
@@ -372,6 +496,21 @@ export default function ReceiveItem() {
     };
 
     addGRN(grn);
+
+    // Advance the PO's receipt status: fully covered → Received, otherwise
+    // Partially Received (stays on the PO tab so its balance can be received
+    // later). Received qtys already booked (grns) plus this GRN's lines.
+    if (selectedPO && (selectedPO.status === "Approved" || selectedPO.status === "Partially Received")) {
+      const recByName = new Map<string, number>();
+      poReceipt(selectedPO, grns).lines.forEach(l => recByName.set(l.name.trim().toLowerCase(), l.received));
+      lines.forEach(l => {
+        const k = l.name.trim().toLowerCase();
+        recByName.set(k, (recByName.get(k) ?? 0) + (Number(l.qty) || 0));
+      });
+      const poLines = selectedPO.lineItems ?? [];
+      const fully = poLines.length > 0 && poLines.every(li => (recByName.get(li.name.trim().toLowerCase()) ?? 0) >= li.qty);
+      updatePOStatus(selectedPO.id, fully ? "Received" : "Partially Received");
+    }
 
     // Stock is NOT posted here — the Stock Overview ledger reads only ACCEPTED
     // GRN lines (see lib/stock-ledger.ts), and acceptance now happens in the
@@ -432,6 +571,44 @@ export default function ReceiveItem() {
     },
   ];
 
+  // ── Purchase Orders tab — approved / partially-received POs awaiting receipt ──
+  type PORow = {
+    id: string; vendor: string; officeId?: string; warehouseId?: string;
+    items: number; ordered: number; received: number; status: WfPOStatus; _po: WfPurchaseOrder;
+  };
+  const poRows: PORow[] = useMemo(() =>
+    wfPurchaseOrders
+      .filter(p => PO_TAB_STATUSES.includes(p.status))
+      .filter(p => (!filterOffice || p.officeId === filterOffice) && (!filterWarehouse || p.warehouseId === filterWarehouse))
+      .map(p => {
+        const r = poReceipt(p, grns);
+        return {
+          id: p.id, vendor: p.vendor, officeId: p.officeId, warehouseId: p.warehouseId,
+          items: p.lineItems?.length ?? p.items, ordered: r.ordered, received: r.received,
+          status: p.status, _po: p,
+        };
+      }),
+    [wfPurchaseOrders, grns, filterOffice, filterWarehouse]);
+
+  const poCols: Column<PORow>[] = [
+    { key: "id", header: "PO #" },
+    { key: "vendor", header: "Vendor" },
+    {
+      key: "officeId" as keyof PORow, header: "Office / Warehouse",
+      render: (r) => <LocationCell officeId={r.officeId} warehouseId={r.warehouseId} />,
+    },
+    { key: "items", header: "Items" },
+    { key: "ordered", header: "Ordered", render: (r) => <span className="tabular-nums">{r.ordered}</span> },
+    { key: "received", header: "Received", render: (r) => <span className="tabular-nums text-green-700">{r.received || 0}</span> },
+    {
+      key: "status", header: "Status", render: (r) => (
+        <span className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${poStatusClass(r.status)}`}>
+          {r.status === "Close Requested" ? "Close Pending" : r.status}
+        </span>
+      ),
+    },
+  ];
+
   const pendingQc = allRows.filter(r => r.status === "Pending").length;
   const accepted = allRows.filter(r => r.status === "Accepted").length;
   const rejected = allRows.filter(r => r.status === "Rejected").length;
@@ -446,7 +623,6 @@ export default function ReceiveItem() {
             <Button variant="outline" onClick={() => setDirectOpen(true)}>
               <Zap className="h-4 w-4 mr-1" /> Direct Receive
             </Button>
-            <Button onClick={() => setGrnOpen(true)}><Plus className="h-4 w-4 mr-1" /> New GRN</Button>
           </div>
         }
       />
@@ -463,34 +639,99 @@ export default function ReceiveItem() {
           onChange={(n) => { setFilterOffice(n.officeId); setFilterWarehouse(n.warehouseId); }}
         />
       </div>
-      <DataTable
-        title="receive-item"
-        data={filteredRows}
-        columns={cols}
-        searchKeys={["id", "po", "vendor", "item", "status"]}
-        selectable={false}
-        actions={(r) => (
-          <div className="flex items-center gap-1">
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground gap-1"
-              onClick={() => {
-                flagArrival({ target: "inv-alerts", ids: [resolveInventoryId(r)] });
-                navigate("/inventory");
-              }}
-              title="Check Stock"
-            >
-              <BarChart2 className="h-3.5 w-3.5" /> Check Stock
-            </Button>
-            <RowActions row={r} actions={["view", "print"]} />
-          </div>
-        )}
-      />
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "po" | "received")}>
+        <TabsList className="mb-4">
+          <TabsTrigger value="po" className="gap-1.5">
+            <ClipboardList className="h-4 w-4" /> Purchase Orders ({poRows.length})
+          </TabsTrigger>
+          <TabsTrigger value="received" className="gap-1.5">
+            <PackageCheck className="h-4 w-4" /> Received GRNs ({filteredRows.length})
+          </TabsTrigger>
+        </TabsList>
+
+        {/* Tab 1 — Approved / partially-received POs, loaded straight from PO data */}
+        <TabsContent value="po">
+          <DataTable
+            title="receive-po"
+            data={poRows}
+            columns={poCols}
+            searchKeys={["id", "vendor", "status"]}
+            selectable={false}
+            actions={(r) => {
+              const receivable = r.status === "Approved" || r.status === "Partially Received";
+              return (
+                <div className="flex items-center gap-1">
+                  {receivable && (
+                    <Button
+                      size="sm"
+                      className="h-7 px-2 text-xs gap-1"
+                      onClick={() => handleReceivePO(r._po)}
+                      title="Receive against this PO"
+                    >
+                      <PackageCheck className="h-3.5 w-3.5" /> Receive
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground gap-1"
+                    onClick={() => setViewPO(r._po)}
+                    title="View PO"
+                  >
+                    <Eye className="h-3.5 w-3.5" /> View
+                  </Button>
+                  {receivable && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 px-2 text-xs text-muted-foreground hover:text-destructive gap-1"
+                      onClick={() => handleRequestClose(r._po)}
+                      title="Request to close this PO — needs approval"
+                    >
+                      <Ban className="h-3.5 w-3.5" /> Close
+                    </Button>
+                  )}
+                  {r.status === "Close Requested" && (
+                    <span className="text-xs text-orange-600 font-medium px-2">Awaiting close approval</span>
+                  )}
+                </div>
+              );
+            }}
+          />
+        </TabsContent>
+
+        {/* Tab 2 — recorded GRN receipts */}
+        <TabsContent value="received">
+          <DataTable
+            title="receive-item"
+            data={filteredRows}
+            columns={cols}
+            searchKeys={["id", "po", "vendor", "item", "status"]}
+            selectable={false}
+            actions={(r) => (
+              <div className="flex items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2 text-xs text-muted-foreground hover:text-foreground gap-1"
+                  onClick={() => {
+                    flagArrival({ target: "inv-alerts", ids: [resolveInventoryId(r)] });
+                    navigate("/inventory");
+                  }}
+                  title="Check Stock"
+                >
+                  <BarChart2 className="h-3.5 w-3.5" /> Check Stock
+                </Button>
+                <RowActions row={r} actions={["view", "print"]} />
+              </div>
+            )}
+          />
+        </TabsContent>
+      </Tabs>
 
       {/* New GRN Dialog */}
       <Dialog open={grnOpen} onOpenChange={setGrnOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>New Goods Receipt Note (GRN)</DialogTitle>
           </DialogHeader>
@@ -678,12 +919,50 @@ export default function ReceiveItem() {
 
       {/* Direct Purchase Dialog — spot buy with no prior PO */}
       <Dialog open={directOpen} onOpenChange={(v) => { if (!v) { setDirectOpen(false); resetDirect(); } }}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Zap className="h-4 w-4 text-amber-500" /> Direct Receive — Spot Buy
             </DialogTitle>
           </DialogHeader>
+
+          {/* Receive from PR — load a requisition's outstanding lines instead of keying them in */}
+          <div className="rounded-md border border-border bg-muted/30 p-3 mb-1">
+            <label className="flex items-center gap-2 cursor-pointer text-sm font-medium">
+              <input
+                type="checkbox"
+                checked={dpFromPr}
+                onChange={(e) => dpToggleFromPr(e.target.checked)}
+                className="h-4 w-4 accent-primary"
+              />
+              Receive from PR
+            </label>
+            {dpFromPr && (
+              <div className="mt-2">
+                <Label>Purchase Requisition</Label>
+                <select
+                  value={dpPrId}
+                  onChange={(e) => dpSelectPr(e.target.value)}
+                  className="w-full mt-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
+                >
+                  <option value="">Select a PR…</option>
+                  {receivablePRs.map((pr) => (
+                    <option key={pr.id} value={pr.id}>
+                      {pr.id} — {pr.requestedBy} ({prReceived(pr).remaining} pending)
+                    </option>
+                  ))}
+                </select>
+                {dpPrId && (
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    Items loaded from {dpPrId} — adjust quantities below. Received amounts post back to the PR's detail page.
+                  </p>
+                )}
+                {receivablePRs.length === 0 && (
+                  <p className="mt-1 text-[11px] text-muted-foreground">No requisitions with outstanding items.</p>
+                )}
+              </div>
+            )}
+          </div>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -908,6 +1187,90 @@ export default function ReceiveItem() {
           <DialogFooter>
             <Button variant="outline" onClick={() => { setDirectOpen(false); resetDirect(); }}>Cancel</Button>
             <Button onClick={submitForApproval}><Send className="h-4 w-4 mr-1.5" /> Submit for Approval</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* View PO — read-only, with receipt progress per line */}
+      <Dialog open={!!viewPO} onOpenChange={(v) => !v && setViewPO(null)}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>
+              Purchase Order
+              {viewPO && <span className="font-mono text-sm text-muted-foreground ml-2">— {viewPO.id}</span>}
+            </DialogTitle>
+          </DialogHeader>
+          {viewPO && (() => {
+            const r = poReceipt(viewPO, grns);
+            return (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-6 gap-y-3 text-sm">
+                  <div>
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Vendor</div>
+                    <div className="mt-1 font-medium">{viewPO.vendor}</div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Date</div>
+                    <div className="mt-1">{viewPO.date}</div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Office / Warehouse</div>
+                    <div className="mt-1"><LocationCell officeId={viewPO.officeId} warehouseId={viewPO.warehouseId} /></div>
+                  </div>
+                  <div>
+                    <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Status</div>
+                    <div className="mt-1">
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${poStatusClass(viewPO.status)}`}>
+                        {viewPO.status === "Close Requested" ? "Close Pending" : viewPO.status}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-md border border-border overflow-x-auto">
+                  <table className="w-full text-sm min-w-[520px]">
+                    <thead className="bg-muted/50">
+                      <tr className="text-left">
+                        <th className="p-2 font-semibold">Item</th>
+                        <th className="p-2 font-semibold w-16">UOM</th>
+                        <th className="p-2 font-semibold w-24 text-right">Ordered</th>
+                        <th className="p-2 font-semibold w-24 text-right">Received</th>
+                        <th className="p-2 font-semibold w-24 text-right">Remaining</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {r.lines.length === 0 ? (
+                        <tr><td colSpan={5} className="p-3 text-center text-muted-foreground">No line items on this PO.</td></tr>
+                      ) : r.lines.map((l) => (
+                        <tr key={l.itemId + l.name} className="border-t border-border/50">
+                          <td className="p-2 font-medium">{l.name}</td>
+                          <td className="p-2 text-muted-foreground">{l.uom}</td>
+                          <td className="p-2 text-right tabular-nums">{l.qty}</td>
+                          <td className="p-2 text-right tabular-nums text-green-700">{l.received}</td>
+                          <td className={`p-2 text-right tabular-nums ${l.remaining > 0 ? "text-amber-700 font-medium" : "text-muted-foreground"}`}>{l.remaining}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })()}
+          <DialogFooter>
+            {viewPO && (viewPO.status === "Approved" || viewPO.status === "Partially Received") && (
+              <Button variant="outline" className="text-destructive hover:text-destructive" onClick={() => handleRequestClose(viewPO)}>
+                <Ban className="h-4 w-4 mr-1.5" /> Close
+              </Button>
+            )}
+            {viewPO?.status === "Close Requested" && (
+              <span className="mr-auto self-center text-xs text-orange-600 font-medium">Awaiting close approval</span>
+            )}
+            {viewPO && (viewPO.status === "Approved" || viewPO.status === "Partially Received") && (
+              <Button onClick={() => { const po = viewPO; setViewPO(null); handleReceivePO(po); }}>
+                <PackageCheck className="h-4 w-4 mr-1.5" /> Receive
+              </Button>
+            )}
+            <Button variant="outline" onClick={() => setViewPO(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

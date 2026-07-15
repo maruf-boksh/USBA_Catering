@@ -40,6 +40,7 @@ import { useApprovalReviews, setReview, reviewKey } from "@/lib/approval-reviews
 import { useDirectReceiptApprovals, setDirectReceiptApprovalStatus } from "@/lib/direct-receipt-approvals";
 import { applyReceiptToPR } from "@/lib/purchase-requisitions";
 import { getRfqs, setRfqStatus } from "@/lib/rfqs";
+import { getPurchaseRequisitions, setPurchaseRequisitionStatus } from "@/lib/purchase-requisitions";
 import { getQuotations, setQuotationStatus } from "@/lib/quotations";
 import { getStockAdjustments, setStockAdjustmentStatus, addAdjustment, reduceInventoryStock, applyInventoryStock } from "@/lib/stock-adjustments";
 import { logAudit } from "@/lib/audit-log";
@@ -228,29 +229,8 @@ type ApprovalItem = {
 };
 
 const SEED: ApprovalItem[] = [
-  // Purchase Requisition
-  { id: "AP-1001", category: "Purchase Requisition", refId: "PR-2026-007", title: "Grains & rice for next week",            requestedBy: "S. Ahmed",   requestedAt: "2026-05-19 09:12", summary: "Basmati Rice 800 Kg, Cooking Oil 200 L",                 amount: 245000, itemsCount: 4, status: "Pending",
-    lines: [
-      { name: "Basmati Rice", qty: 800, uom: "Kg" },
-      { name: "Cooking Oil", qty: 200, uom: "L" },
-      { name: "Lentils (Masoor)", qty: 150, uom: "Kg" },
-      { name: "Sugar", qty: 100, uom: "Kg" },
-    ] },
-  { id: "AP-1002", category: "Purchase Requisition", refId: "PR-2026-008", title: "Packaging restock",                       requestedBy: "F. Begum",   requestedAt: "2026-05-19 11:30", summary: "Meal Box 5000 pcs, Aluminum Tray 3000 pcs",              amount: 168000, itemsCount: 2, status: "Pending",
-    lines: [
-      { name: "Meal Box", qty: 5000, uom: "pcs" },
-      { name: "Aluminum Tray", qty: 3000, uom: "pcs" },
-    ] },
-  { id: "AP-1004", category: "Purchase Requisition", refId: "PR-ASSET-001", title: "Catering equipment — trolleys & oven racks", requestedBy: "M. Karim",   requestedAt: "2026-06-10 09:30", summary: "Full Size Meal Trolley 4 Pcs, Half Size Bar Trolley 2 Pcs, Standard Oven Rack 6 Pcs", amount: 662000, itemsCount: 3, status: "Pending",
-    lines: [
-      { name: "Full Size Meal Trolley", qty: 4, uom: "Pcs", note: "৳ 85,000/Pcs" },
-      { name: "Half Size Bar Trolley",  qty: 2, uom: "Pcs", note: "৳ 55,000/Pcs" },
-      { name: "Standard Oven Rack",     qty: 6, uom: "Pcs", note: "৳ 32,000/Pcs" },
-    ] },
-  { id: "AP-1003", category: "Purchase Requisition", refId: "PR-2026-005", title: "Beverage & water",                        requestedBy: "T. Islam",   requestedAt: "2026-05-18 14:45", summary: "Mineral Water 250ml — 12000 bottles",                    amount:  98000, itemsCount: 1, status: "Approved",  processedBy: "R. Hossain", processedAt: "2026-05-18 16:00",
-    lines: [
-      { name: "Mineral Water 250ml", qty: 12000, uom: "Bottle" },
-    ] },
+  // Purchase Requisitions are projected live from the PR module (see prItems),
+  // so no seed entries here.
 
   // Purchase Order
   { id: "AP-1101", category: "Purchase Order",       refId: "PO-2026-0451", title: "Agro Fresh — vegetables",                requestedBy: "Md. Karim",  requestedAt: "2026-05-19 10:50", summary: "Tomato 500 Kg, Onion 300 Kg, Spice Mix 50 Kg",           amount: 132000, itemsCount: 3, status: "Pending",
@@ -392,6 +372,11 @@ export default function ApprovalManagementPage() {
   // Quotation approve/reject decisions made here. Approve also flips the
   // quotation's status to "Approved" in the persisted Quotation table.
   const [quotationDecisions, setQuotationDecisions] = useState<
+    Record<string, { status: ApprovalStatus; by: string; at: string; reason?: string }>
+  >({});
+  // Purchase Requisition approve/reject decisions. Approve/Reject flips the PR's
+  // status in the persisted PR table (reflected on the Purchase Requisition screen).
+  const [prDecisions, setPrDecisions] = useState<
     Record<string, { status: ApprovalStatus; by: string; at: string; reason?: string }>
   >({});
   // Stock Adjustment approve/reject decisions made here. Approve also flips the
@@ -701,6 +686,37 @@ export default function ApprovalManagementPage() {
       });
   }, [rfqDecisions]);
 
+  // Project Purchase Requisitions into ApprovalItem shape. Only PRs submitted for
+  // approval ("Pending Approval") — or ones decided here this session — surface.
+  // Approve/Reject flips the PR's status in the persisted PR table.
+  const prItems: ApprovalItem[] = useMemo(() => {
+    return getPurchaseRequisitions()
+      .filter((pr) => pr.status === "Pending Approval" || prDecisions[pr.id])
+      .map((pr) => {
+        const decision = prDecisions[pr.id];
+        return {
+          id: `PR-AP-${pr.id}`,
+          category: "Purchase Requisition" as Category,
+          refId: pr.id,
+          title: `Requisition — ${pr.requestedBy}`,
+          requestedBy: pr.requestedBy,
+          requestedAt: pr.date,
+          summary: pr.lines.map((l) => `${l.itemName} ${l.qty} ${l.uom}`).join(", ")
+            || `${pr.lines.length} item${pr.lines.length === 1 ? "" : "s"}`,
+          amount: pr.totalAmount > 0 ? pr.totalAmount : undefined,
+          itemsCount: pr.lines.length,
+          status: decision ? decision.status : "Pending",
+          processedBy: decision?.by,
+          processedAt: decision?.at,
+          rejectionReason: decision?.reason,
+          lines: pr.lines.map((l) => ({
+            name: l.itemName, qty: l.qty, uom: l.uom,
+            note: l.rate > 0 ? `৳ ${l.rate.toLocaleString()}/${l.uom}` : l.description || undefined,
+          })),
+        };
+      });
+  }, [prDecisions]);
+
   // Project Quotations into ApprovalItem shape. Only Pending quotations — or
   // ones decided here this session — surface. Approving flips the quotation to
   // "Approved" in the persisted table; the decision drives the projection.
@@ -776,6 +792,27 @@ export default function ApprovalManagementPage() {
           name: l.name, qty: l.qty, uom: l.uom,
           note: l.unitPrice > 0 ? `৳ ${l.unitPrice.toLocaleString()}/${l.uom}` : undefined,
         })),
+      }));
+  }, [wfPurchaseOrders]);
+
+  // Project POs whose receiving was stopped early — a close was requested on the
+  // Receive Items page. Approving here finalises the PO to "Closed"; rejecting
+  // reverts it to the status it held before the request (Approved / Partially Received).
+  const wfPoCloseItems: ApprovalItem[] = useMemo(() => {
+    return wfPurchaseOrders
+      .filter(po => po.status === "Close Requested")
+      .map(po => ({
+        id: `WFPO-CLOSE-${po.id}`,
+        category: "Purchase Order" as Category,
+        refId: po.id,
+        title: `Close request — ${po.vendor}`,
+        requestedBy: "Store / Receiving",
+        requestedAt: po.date,
+        summary: `Request to close ${po.id} early — no further receipts expected (${po.items} item${po.items === 1 ? "" : "s"}).`,
+        amount: po.amount > 0 ? po.amount : undefined,
+        itemsCount: po.items,
+        status: "Pending" as ApprovalStatus,
+        lines: po.lineItems?.map(l => ({ name: l.name, qty: l.qty, uom: l.uom })),
       }));
   }, [wfPurchaseOrders]);
 
@@ -1060,7 +1097,7 @@ export default function ApprovalManagementPage() {
   })), [directReceipts]);
 
   const allItems = useMemo(() => {
-    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...hygieneAppealItems, ...hygieneDailyItems, ...wastageItems, ...delayApprovalItems, ...directReceiptItems, ...items];
+    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...prItems, ...stockAdjItems, ...wfPoItems, ...wfPoCloseItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...hygieneAppealItems, ...hygieneDailyItems, ...wastageItems, ...delayApprovalItems, ...directReceiptItems, ...items];
     // Overlay "Reviewed" (returned for correction) onto still-pending requests.
     return base.map((it) => {
       const rv = reviews[reviewKey(it.category, it.refId)];
@@ -1069,7 +1106,7 @@ export default function ApprovalManagementPage() {
       }
       return it;
     });
-  }, [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, hygieneAppealItems, hygieneDailyItems, wastageItems, delayApprovalItems, directReceiptItems, items, reviews]);
+  }, [flightOrderItems, demandItems, rfqItems, quotationItems, prItems, stockAdjItems, wfPoItems, wfPoCloseItems, productionItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, hygieneAppealItems, hygieneDailyItems, wastageItems, delayApprovalItems, directReceiptItems, items, reviews]);
 
   const counts = useMemo(() => {
     const pendingByCat = new Map<Category, number>();
@@ -1325,6 +1362,15 @@ export default function ApprovalManagementPage() {
       if (!silent) toast.success(`${it.refId} approved.`);
       return;
     }
+    if (it.category === "Purchase Requisition" && it.id.startsWith("PR-AP-")) {
+      setPurchaseRequisitionStatus(it.refId, "Approved");
+      setPrDecisions((p) => ({
+        ...p,
+        [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
+      }));
+      if (!silent) toast.success(`${it.refId} approved — ready for procurement.`);
+      return;
+    }
     if (it.category === "Stock Adjustment") {
       // Approving an adjustment commits it to the Stock Overview balance:
       // Increase adds, Decrease removes. Guard against a double-apply if this
@@ -1348,6 +1394,11 @@ export default function ApprovalManagementPage() {
         [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
       }));
       if (!silent) toast.success(`${it.refId} approved — released to production.`);
+      return;
+    }
+    if (it.id.startsWith("WFPO-CLOSE-")) {
+      updatePurchaseOrder(it.refId, { status: "Closed", closeRequestedFrom: undefined });
+      if (!silent) toast.success(`${it.refId} close approved — PO closed, no further receipts.`);
       return;
     }
     if (it.id.startsWith("WFPO-AP-")) {
@@ -1621,6 +1672,12 @@ export default function ApprovalManagementPage() {
         ...p,
         [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
+    } else if (it.category === "Purchase Requisition" && it.id.startsWith("PR-AP-")) {
+      setPurchaseRequisitionStatus(it.refId, "Rejected");
+      setPrDecisions((p) => ({
+        ...p,
+        [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+      }));
     } else if (it.category === "Stock Adjustment") {
       setStockAdjustmentStatus(it.refId, "Rejected");
       setStockAdjDecisions((p) => ({
@@ -1632,6 +1689,10 @@ export default function ApprovalManagementPage() {
         ...p,
         [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
+    } else if (it.id.startsWith("WFPO-CLOSE-")) {
+      // Close request declined — revert the PO to its pre-request status.
+      const prior = wfPurchaseOrders.find(p => p.id === it.refId)?.closeRequestedFrom ?? "Approved";
+      updatePurchaseOrder(it.refId, { status: prior, closeRequestedFrom: undefined });
     } else if (it.id.startsWith("WFPO-AP-")) {
       updatePurchaseOrder(it.refId, { status: "Rejected", rejectionReason: reason });
     } else if (it.category === "Maintenance") {
@@ -1905,6 +1966,12 @@ export default function ApprovalManagementPage() {
         ...p,
         [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
+    } else if (detailItem.category === "Purchase Requisition" && detailItem.id.startsWith("PR-AP-")) {
+      setPurchaseRequisitionStatus(detailItem.refId, "Rejected");
+      setPrDecisions((p) => ({
+        ...p,
+        [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+      }));
     } else if (detailItem.category === "Stock Adjustment") {
       setStockAdjustmentStatus(detailItem.refId, "Rejected");
       setStockAdjDecisions((p) => ({
@@ -1916,6 +1983,9 @@ export default function ApprovalManagementPage() {
         ...p,
         [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
+    } else if (detailItem.id.startsWith("WFPO-CLOSE-")) {
+      const prior = wfPurchaseOrders.find(p => p.id === detailItem.refId)?.closeRequestedFrom ?? "Approved";
+      updatePurchaseOrder(detailItem.refId, { status: prior, closeRequestedFrom: undefined });
     } else if (detailItem.id.startsWith("WFPO-AP-")) {
       updatePurchaseOrder(detailItem.refId, { status: "Rejected", rejectionReason: reason });
     } else if (detailItem.category === "Maintenance") {

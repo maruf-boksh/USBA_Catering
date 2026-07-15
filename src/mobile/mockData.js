@@ -455,6 +455,8 @@ export const MOCK_POS = [
 // Consumable return log — demo seed used when the web app has no persisted
 // returns yet (the web `consumable-returns` list starts empty). If the user has
 // created returns on the web, the mobile Return Log reads those instead.
+// Distinct from MOCK_RETURNS above (Stock screen): this uses the web return
+// shape (itemName / reusableQty) the Return Log screen renders.
 export const MOCK_RETURN_LOG = [
   { id: 'CR-7003', date: '2026-06-28', flight: 'BS-105', sector: 'DAC→CXB', returnedBy: 'T. Ahmed',   lines: [
     { itemName: 'Water 250ml',    qty: 22, reusableQty: 22, uom: 'Pcs' },
