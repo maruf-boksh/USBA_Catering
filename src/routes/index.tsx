@@ -726,7 +726,7 @@ export default function Dashboard() {
       ["Delayed Flights", k.delayed.value, k.delayed.sub],
       ["QC Issues", k.qcIssues.value, k.qcIssues.sub],
       ["Pending POs", k.pendingPOs.value, k.pendingPOs.sub],
-      ["Inventory Alerts", k.invAlerts.value, k.invAlerts.sub],
+      ["Stock Alert", k.invAlerts.value, k.invAlerts.sub],
       ["Dispatch Active", k.dispatch.value, k.dispatch.sub],
       ["Stock Value", k.dailyCost.value, k.dailyCost.sub],
     ];
@@ -849,7 +849,7 @@ export default function Dashboard() {
         )}
         {showKpi("kpi-inv") && (
         <KpiLink to="/inventory" highlight="inv-alerts" ids={data.kpis.invAlerts.ids}>
-          <KpiCard label="Inventory Alerts" value={data.kpis.invAlerts.value}  sub={data.kpis.invAlerts.sub}  icon={InboxOutlined}        tone="teal" variant="aurora" />
+          <KpiCard label="Stock Alert" value={data.kpis.invAlerts.value}  sub={data.kpis.invAlerts.sub}  icon={InboxOutlined}        tone="teal" variant="aurora" />
         </KpiLink>
         )}
         {showKpi("kpi-dispatch") && (

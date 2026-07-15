@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
@@ -775,15 +776,38 @@ function RequisitionDetailsDialog({
   // Direct (local) purchase is offered whenever the requisitioned amount hasn't
   // been fully received — i.e. received < requisition — except on terminal PRs.
   const isTerminal = stage === "Closed" || stage === "Cancelled" || stage === "Rejected";
+
+  // Line selection — only still-outstanding lines can be picked for Direct Purchase.
+  const outstandingIds = requisition
+    ? requisition.lines.filter((l) => Math.max(l.qty - (l.receivedQty ?? 0), 0) > 0).map((l) => l.id)
+    : [];
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Reset to "all outstanding selected" whenever a different requisition is opened.
+  useEffect(() => {
+    setSelected(new Set(outstandingIds));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requisition?.id]);
+
+  const selectedCount = outstandingIds.filter((id) => selected.has(id)).length;
+  const allSelected = outstandingIds.length > 0 && selectedCount === outstandingIds.length;
   const canDirectReceive = !!totals && totals.remaining > 0 && !isTerminal;
 
-  // Hand the still-outstanding lines to Receive Items → Direct Receive (prefilled).
+  const toggleLine = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  const toggleAll = () =>
+    setSelected(allSelected ? new Set() : new Set(outstandingIds));
+
+  // Hand the selected outstanding lines to Receive Items → Direct Receive (prefilled).
   // On save there, applyReceiptToPR writes the received qty back to this PR.
   const handleDirectReceive = () => {
     if (!requisition) return;
     const short = requisition.lines
       .map((l) => ({ l, remaining: Math.max(l.qty - (l.receivedQty ?? 0), 0) }))
-      .filter((x) => x.remaining > 0);
+      .filter((x) => x.remaining > 0 && selected.has(x.l.id));
     if (short.length === 0) return;
     sessionStorage.setItem(
       "direct-receive-prefill",
@@ -804,7 +828,7 @@ function RequisitionDetailsDialog({
 
   return (
     <Dialog open={!!requisition} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-3xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
+      <DialogContent className="max-w-5xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
         <DialogHeader className="px-6 pt-6 pb-4 border-b border-border">
           <DialogTitle>
             Requisition Details
@@ -866,9 +890,9 @@ function RequisitionDetailsDialog({
                 <div className="mt-1 flex items-center justify-between">
                   <span className="text-[11px] text-muted-foreground">{totals.pct}% received</span>
                   {canDirectReceive && (
-                    <Button size="sm" className="h-8" onClick={handleDirectReceive}>
+                    <Button size="sm" className="h-8" onClick={handleDirectReceive} disabled={selectedCount === 0}>
                       <ShoppingCart className="h-3.5 w-3.5 mr-1.5" />
-                      Direct Purchase ({totals.remaining})
+                      Direct Purchase ({selectedCount})
                     </Button>
                   )}
                 </div>
@@ -894,6 +918,14 @@ function RequisitionDetailsDialog({
                 <Table>
                   <TableHeader className="bg-muted/40">
                     <TableRow>
+                      <TableHead className="w-10">
+                        <Checkbox
+                          checked={allSelected}
+                          onCheckedChange={toggleAll}
+                          disabled={outstandingIds.length === 0}
+                          aria-label="Select all outstanding line items"
+                        />
+                      </TableHead>
                       <TableHead className="w-14 text-xs uppercase tracking-wider">SL</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider">Description</TableHead>
@@ -901,14 +933,26 @@ function RequisitionDetailsDialog({
                       <TableHead className="text-xs uppercase tracking-wider text-right">Ordered</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider text-right">Received</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider text-right">Pending</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider">Status</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider">UoM</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider text-right">Rate</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider text-right">Amount</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {requisition.lines.map((l, i) => (
-                      <TableRow key={l.id}>
+                    {requisition.lines.map((l, i) => {
+                      const remaining = Math.max(l.qty - (l.receivedQty ?? 0), 0);
+                      const isSelected = selected.has(l.id);
+                      return (
+                      <TableRow key={l.id} data-state={isSelected ? "selected" : undefined}>
+                        <TableCell>
+                          <Checkbox
+                            checked={isSelected}
+                            onCheckedChange={() => toggleLine(l.id)}
+                            disabled={remaining === 0}
+                            aria-label={`Select ${l.itemName}`}
+                          />
+                        </TableCell>
                         <TableCell>{i + 1}</TableCell>
                         <TableCell className="font-medium">{l.itemName}</TableCell>
                         <TableCell className="text-muted-foreground text-xs">
@@ -924,15 +968,22 @@ function RequisitionDetailsDialog({
                         <TableCell className={"text-right tabular-nums " + (Math.max(l.qty - (l.receivedQty ?? 0), 0) > 0 ? "text-amber-700 font-medium" : "text-muted-foreground")}>
                           {Math.max(l.qty - (l.receivedQty ?? 0), 0)}
                         </TableCell>
+                        <TableCell>
+                          {(() => {
+                            const s = lineReceiptStatus(l.qty, l.receivedQty ?? 0);
+                            return <span className={"inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium " + s.cls}>{s.label}</span>;
+                          })()}
+                        </TableCell>
                         <TableCell>{l.uom}</TableCell>
                         <TableCell className="text-right tabular-nums">{l.rate.toLocaleString()}</TableCell>
                         <TableCell className="text-right tabular-nums">
                           {(l.qty * l.rate).toLocaleString()}
                         </TableCell>
                       </TableRow>
-                    ))}
+                      );
+                    })}
                     <TableRow className="bg-muted/30 font-semibold">
-                      <TableCell colSpan={9} className="text-right uppercase text-xs tracking-wider">
+                      <TableCell colSpan={11} className="text-right uppercase text-xs tracking-wider">
                         Total
                       </TableCell>
                       <TableCell className="text-right tabular-nums">
@@ -952,6 +1003,14 @@ function RequisitionDetailsDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+// Per-line receipt status, derived from how much of the requisitioned qty has
+// been received: none → Not Received, some → Partially Received, all → Fulfilled.
+function lineReceiptStatus(qty: number, received: number): { label: string; cls: string } {
+  if (received <= 0) return { label: "Not Received", cls: "bg-muted text-muted-foreground" };
+  if (received < qty) return { label: "Partially Received", cls: "bg-amber-100 text-amber-800" };
+  return { label: "Fulfilled", cls: "bg-green-100 text-green-800" };
 }
 
 function Field({ label, value, bold }: { label: string; value: string; bold?: boolean }) {

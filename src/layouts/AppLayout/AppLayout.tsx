@@ -449,7 +449,7 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
                   />
                   <div className="header-profile-copy">
                     <div className="header-profile-name">{currentUser?.displayName ?? currentUser?.userId ?? 'Admin User'}</div>
-                    <div style={{ fontSize: 11, fontWeight: 500, lineHeight: 1.1, color: 'var(--color-muted-foreground)' }}>{role}</div>
+                    <div className="header-profile-role" style={{ fontWeight: 500, lineHeight: 1.1 }}>{role}</div>
                   </div>
                   <DownOutlined className="header-profile-chevron" />
                 </div>

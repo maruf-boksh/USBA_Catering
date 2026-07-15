@@ -110,7 +110,7 @@ export type WfTransferNote = {
   warehouseId?: string;
 };
 
-export type WfGRNQcStatus = "Pending" | "Accepted" | "On Hold" | "Rejected";
+export type WfGRNQcStatus = "Pending" | "Accepted" | "On Hold" | "Rejected" | "Partially Accepted";
 
 export type WfGRNLine = {
   itemId: string;
@@ -134,12 +134,18 @@ export type WfGRNLine = {
   /** Inspection details captured in Quality Control. */
   qcCompliedQty?: "Yes" | "No";
   qcRemarks?: string;
-  /** Rejection reason (on Rejected) — mirrors the Purchase Return reasons. */
+  /** Rejection reason (on Rejected / on the failed qty of a partial). */
   qcReason?: string;
+  /** Item-wise inspection split captured in Quality Control. qcQty is how many
+   *  units were inspected (defaults to the received qty); qcPassQty posts to
+   *  Stock Overview; qcFailQty initiates a Purchase Return for the vendor. */
+  qcQty?: number;
+  qcPassQty?: number;
+  qcFailQty?: number;
 };
 
 /** Inspection fields recorded alongside a QC decision. */
-export type WfGRNQcDetails = Partial<Pick<WfGRNLine, "temp" | "qcCompliedQty" | "qcRemarks" | "qcReason">>;
+export type WfGRNQcDetails = Partial<Pick<WfGRNLine, "temp" | "qcCompliedQty" | "qcRemarks" | "qcReason" | "qcQty" | "qcPassQty" | "qcFailQty">>;
 
 export type WfGRN = {
   id: string;
@@ -246,10 +252,18 @@ export function accountBalance(
 
 /** Payable value of a GRN — Σ(qty × rate) over lines not QC-rejected.
  *  Rejected lines are returned to the vendor, so they are never payable. */
-export function grnPayableAmount(lines: { qty: number; rate?: number; qcStatus?: WfGRNQcStatus }[]): number {
+export function grnPayableAmount(lines: { qty: number; rate?: number; qcStatus?: WfGRNQcStatus; qcPassQty?: number }[]): number {
   return lines
     .filter((l) => l.qcStatus !== "Rejected")
-    .reduce((sum, l) => sum + (Number(l.qty) || 0) * (Number(l.rate) || 0), 0);
+    .reduce((sum, l) => {
+      // A partially-accepted line is payable only for the passed qty — the
+      // failed qty is returned to the vendor. Everything else pays full qty.
+      const payableQty =
+        l.qcStatus === "Partially Accepted" && l.qcPassQty != null
+          ? l.qcPassQty
+          : (Number(l.qty) || 0);
+      return sum + payableQty * (Number(l.rate) || 0);
+    }, 0);
 }
 
 export type StockDelta = {

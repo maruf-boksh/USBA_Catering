@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { T } from '../theme';
-import { MOCK_RETURNS } from '../mockData';
+import { MOCK_RETURN_LOG } from '../mockData';
 import { consumableItems, consumableUsage } from '@/lib/sample-data';
 import { getAuthUser } from '@/lib/auth';
 import { Combobox } from '../components/Combobox';
@@ -46,7 +46,7 @@ function persistWebReturns(list) {
 }
 function initialReturns() {
   const web = loadWebReturns();
-  return web.length > 0 ? web : MOCK_RETURNS;
+  return web.length > 0 ? web : MOCK_RETURN_LOG;
 }
 
 // Reusable qty per line — supports both the web boolean model (reusable=true →

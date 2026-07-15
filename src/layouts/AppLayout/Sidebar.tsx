@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState, startTransition } from 'react';
 import { Layout, Menu, Button, Tooltip, Popover } from 'antd';
 import type { MenuProps } from 'antd';
 import { LogoTile } from '@/components/AviationLogo';
@@ -241,6 +241,15 @@ export const AppSidebar = memo(function AppSidebar({
   const { role } = useRole();
   const access = useAccess();
 
+  // Route to a page as a non-urgent transition. Navigating synchronously inside
+  // a click handler renders the (often heavy) destination page within the
+  // interaction, blocking the next paint → high INP. startTransition lets React
+  // paint the click feedback first and render the new route without janking.
+  const go = useCallback(
+    (key: string) => { startTransition(() => navigate(key)); },
+    [navigate],
+  );
+
   // Access-filtered nav — drives both the expanded menu and the collapsed rail.
   const visibleModules = useMemo(() => visibleNavModules(role, access), [role, access]);
   const menuItems = useMemo(() => buildMenuItems(visibleModules), [visibleModules]);
@@ -265,7 +274,7 @@ export const AppSidebar = memo(function AppSidebar({
     setOpenKeys(allExpanded ? [] : [...NAV_EXPANDABLE_KEYS]);
 
   const handleMenuClick: MenuProps['onClick'] = ({ key }) => {
-    if (typeof key === 'string' && key.startsWith('/')) navigate(key);
+    if (typeof key === 'string' && key.startsWith('/')) go(key);
   };
 
   return (
@@ -283,7 +292,7 @@ export const AppSidebar = memo(function AppSidebar({
         <button
           type="button"
           className={`sb-brand${collapsed ? ' is-collapsed' : ''}`}
-          onClick={() => navigate('/')}
+          onClick={() => go('/')}
           aria-label="Go to home"
         >
           <span className="sb-brand-mark">
@@ -313,13 +322,13 @@ export const AppSidebar = memo(function AppSidebar({
                 <li
                   key={item.key}
                   className={`sb-pinned-item${selectedKey === item.key ? ' is-active' : ''}`}
-                  onClick={() => navigate(item.key)}
+                  onClick={() => go(item.key)}
                   role="button"
                   tabIndex={0}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
                       e.preventDefault();
-                      navigate(item.key);
+                      go(item.key);
                     }
                   }}
                 >
@@ -358,7 +367,7 @@ export const AppSidebar = memo(function AppSidebar({
 
         {collapsed ? (
           <div className="sb-rail-wrap">
-            <CollapsedRail selectedKey={selectedKey} onNavigate={navigate} modules={visibleModules} />
+            <CollapsedRail selectedKey={selectedKey} onNavigate={go} modules={visibleModules} />
           </div>
         ) : (
           <div className="sb-menu-wrap">

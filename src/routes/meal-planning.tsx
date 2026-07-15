@@ -8,7 +8,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, Info, ChevronRight, ArrowLeft } from "lucide-react";
+import { Plus, Info, ChevronRight, ArrowLeft, ChevronDown, Check } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { toast } from "sonner";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useMealSlots } from "@/lib/meal-slot-settings";
@@ -85,6 +86,29 @@ interface GMOrder {
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const MEAL_TYPES = ["Breakfast", "Lunch", "Snacks", "Heavy Snacks", "Dinner"];
+
+// A meal type can carry any number of choices (CHOICE 01, 02, 03 …). These
+// helpers keep the per-choice label + colour scheme consistent everywhere and
+// cycle the palette once the fixed colours run out.
+const CHOICE_PALETTE = [
+  { badge: "bg-blue-100 text-blue-800", border: "border-blue-200", chip: "border-blue-200 bg-blue-50/40", text: "text-blue-700" },
+  { badge: "bg-teal-100 text-teal-800", border: "border-teal-200", chip: "border-teal-200 bg-teal-50/40", text: "text-teal-700" },
+  { badge: "bg-amber-100 text-amber-800", border: "border-amber-200", chip: "border-amber-200 bg-amber-50/40", text: "text-amber-700" },
+  { badge: "bg-purple-100 text-purple-800", border: "border-purple-200", chip: "border-purple-200 bg-purple-50/40", text: "text-purple-700" },
+  { badge: "bg-rose-100 text-rose-800", border: "border-rose-200", chip: "border-rose-200 bg-rose-50/40", text: "text-rose-700" },
+];
+const choiceStyle = (i: number) => CHOICE_PALETTE[i % CHOICE_PALETTE.length];
+const choiceLabel = (i: number) => `CHOICE ${String(i + 1).padStart(2, "0")}`;
+// Sensible default split for n choices: 60/40 for the classic two, otherwise
+// an even spread with any remainder landing on the last choice.
+const defaultChoicePercs = (n: number): number[] => {
+  if (n <= 1) return [100];
+  if (n === 2) return [60, 40];
+  const base = Math.floor(100 / n);
+  const arr = Array.from({ length: n }, () => base);
+  arr[n - 1] = 100 - base * (n - 1);
+  return arr;
+};
 // Compact "DD MMM" for effective-range chips/labels (ISO "YYYY-MM-DD" in).
 const shortDate = (iso: string) => {
   const d = new Date(iso);
@@ -484,12 +508,14 @@ export default function MealPlanning() {
   const [removeConfirmCard, setRemoveConfirmCard] = useState<{ mealId: string; kind: "choice" | "specialMeal" | "dessert"; choiceIdx?: number; smType?: string } | null>(null);
 
   const getInitialCreateData = (day: string) => ({
-    day,
+    // Days this config applies to — multi-select (one config can be saved to
+    // several weekdays at once, creating a copy per day).
+    days: [day] as string[],
     // New configs default to no effective range (apply on every date).
     effectiveFrom: "",
     effectiveTo: "",
     flightType: [] as string[],
-    route: "",
+    routes: [] as string[],
     forType: "",
     mealTypes: [] as string[],
     choices: [
@@ -497,10 +523,11 @@ export default function MealPlanning() {
       { label: "CHOICE 2", percentage: 40, items: [] as MealItem[] },
     ] as MealChoice[],
     specialMealsByType: {} as Record<string, Array<{ code: string; portions: number | string; items: MealItem[] }>>,
+    // One entry per choice (CHOICE 01, 02, …). Starts with two; users can add more.
     choiceItems: [
       MEAL_TYPES.reduce((acc, t) => { acc[t] = [] as MealItem[]; return acc; }, {} as Record<string, MealItem[]>),
       MEAL_TYPES.reduce((acc, t) => { acc[t] = [] as MealItem[]; return acc; }, {} as Record<string, MealItem[]>),
-    ] as [Record<string, MealItem[]>, Record<string, MealItem[]>],
+    ] as Record<string, MealItem[]>[],
     dessertByType: {} as Record<string, MealItem[]>,
     dessertAllocationByType: {} as Record<string, number[]>,
     saladsByType: {} as Record<string, MealItem[]>,
@@ -510,7 +537,8 @@ export default function MealPlanning() {
     customMealTypeNames: [] as string[],
     customAddonNames: [] as string[],
     customAddonsByType: {} as Record<string, Record<string, MealItem[]>>,
-    choicePercentagesByType: {} as Record<string, { c1: number; c2: number }>,
+    // Per meal type: the % split across choices, indexed the same as choiceItems.
+    choicePercentagesByType: {} as Record<string, number[]>,
     servingTimes: {} as Record<string, { start: string; end: string }>,
   });
 
@@ -533,7 +561,7 @@ export default function MealPlanning() {
 
   const [pendingSpecialMeal, setPendingSpecialMeal] = useState<{ code: string; portions: number | string; items: MealItem[] } | null>(null);
   const [pendingSpecialMealForType, setPendingSpecialMealForType] = useState<string | null>(null);
-  const [activeChoiceForItems, setActiveChoiceForItems] = useState<0 | 1>(0);
+  const [activeChoiceForItems, setActiveChoiceForItems] = useState<number>(0);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [activeChoicePercentType, setActiveChoicePercentType] = useState<string>("");
   const [activeItemsTab, setActiveItemsTab] = useState<string>("");
@@ -555,17 +583,16 @@ export default function MealPlanning() {
     ? activeChoicePercentType
     : (createData.mealTypes[0] ?? "");
   const totalChoicePercent = effectiveChoicePercentType
-    ? ((createData.choicePercentagesByType[effectiveChoicePercentType]?.c1 ?? 60) + (createData.choicePercentagesByType[effectiveChoicePercentType]?.c2 ?? 40))
+    ? (createData.choicePercentagesByType[effectiveChoicePercentType] ?? defaultChoicePercs(createData.choiceItems.length)).reduce((a, b) => a + b, 0)
     : 100;
   const stepValid: Record<number, boolean> = {
     1: createData.flightType.length > 0 && createData.forType !== "",
     2: createData.mealTypes.length > 0 && createData.mealTypes.every((t) =>
-      (createData.choiceItems[0][t] || []).some((it) => it.name.trim() !== "") &&
-      (createData.choiceItems[1][t] || []).some((it) => it.name.trim() !== "")
+      createData.choiceItems.every((rec) => (rec[t] || []).some((it) => it.name.trim() !== ""))
     ),
     3: createData.mealTypes.length > 0 && createData.mealTypes.every((t) => {
       const p = createData.choicePercentagesByType[t];
-      return p && (p.c1 + p.c2) === 100;
+      return !!p && p.reduce((a, b) => a + b, 0) === 100;
     }),
     4: createData.mealTypes.every((t) => Boolean(createData.servingTimes[t]?.start) && Boolean(createData.servingTimes[t]?.end)),
     5: true,
@@ -595,16 +622,17 @@ export default function MealPlanning() {
 
   const handleCreateSave = () => {
     const errors: string[] = [];
+    if (createData.days.length === 0) errors.push("Select at least one Day.");
     if (createData.flightType.length === 0) errors.push("Flight Type is required.");
     if (!createData.forType) errors.push("'For' (Passengers/Crew) is required.");
     if (createData.mealTypes.length === 0) errors.push("At least one Meal Type must be selected.");
     createData.mealTypes.forEach((t) => {
-      const percs = createData.choicePercentagesByType[t];
-      if (!percs || (percs.c1 + percs.c2) !== 100) errors.push(`${t}: Choice percentages must total 100%.`);
-      const items1 = (createData.choiceItems[0][t] || []).filter((it) => it.name.trim() !== "");
-      const items2 = (createData.choiceItems[1][t] || []).filter((it) => it.name.trim() !== "");
-      if (items1.length === 0) errors.push(`CHOICE 1: At least one item required for ${t}.`);
-      if (items2.length === 0) errors.push(`CHOICE 2: At least one item required for ${t}.`);
+      const percs = createData.choicePercentagesByType[t] ?? defaultChoicePercs(createData.choiceItems.length);
+      if (percs.reduce((a, b) => a + b, 0) !== 100) errors.push(`${t}: Choice percentages must total 100%.`);
+      createData.choiceItems.forEach((rec, idx) => {
+        const items = (rec[t] || []).filter((it) => it.name.trim() !== "");
+        if (items.length === 0) errors.push(`${choiceLabel(idx)}: At least one item required for ${t}.`);
+      });
       if (!createData.servingTimes[t]?.start || !createData.servingTimes[t]?.end) errors.push(`Serving time required for ${t}.`);
     });
 
@@ -613,13 +641,16 @@ export default function MealPlanning() {
       return;
     }
 
-    const newMeals: MealCard[] = createData.mealTypes.map((mealType) => {
+    // One config copy per selected day × route × meal type.
+    // No routes picked → a single shared "All routes" copy (route: undefined).
+    const routeList: (string | undefined)[] = createData.routes.length > 0 ? createData.routes : [undefined];
+    const newMeals: MealCard[] = createData.days.flatMap((day) => routeList.flatMap((route) => createData.mealTypes.map((mealType) => {
       const servingTime = createData.servingTimes[mealType] ?? { start: "11:00", end: "14:00" };
-      const typePercs = createData.choicePercentagesByType[mealType];
-      const choices = createData.choices.map((choice, choiceIdx) => ({
-        ...choice,
-        percentage: choiceIdx === 0 ? (typePercs?.c1 ?? 60) : (typePercs?.c2 ?? 40),
-        items: (createData.choiceItems[choiceIdx as 0 | 1]?.[mealType] || []).filter((it) => it.name.trim() !== ""),
+      const typePercs = createData.choicePercentagesByType[mealType] ?? defaultChoicePercs(createData.choiceItems.length);
+      const choices = createData.choiceItems.map((rec, choiceIdx) => ({
+        label: choiceLabel(choiceIdx),
+        percentage: typePercs[choiceIdx] ?? 0,
+        items: (rec[mealType] || []).filter((it) => it.name.trim() !== ""),
       }));
       const specialMeals: SpecialMeal[] = (createData.specialMealsByType[mealType] || []).map((sel) => ({
         type: sel.code,
@@ -640,14 +671,14 @@ export default function MealPlanning() {
       const totalKcal = choices.reduce((sum, c) => sum + c.items.reduce((inner, it) => inner + (it.calories || 0), 0), 0) || 500;
 
       return {
-        id: `meal-${Date.now()}-${mealType}`,
-        day: createData.day,
+        id: `meal-${Date.now()}-${day}-${route ?? "all"}-${mealType}`,
+        day,
         // Empty bound → undefined (unbounded / applies on every date).
         effectiveFrom: createData.effectiveFrom || undefined,
         effectiveTo: createData.effectiveTo || undefined,
         mealType,
         flightType: createData.flightType,
-        route: createData.route || undefined,
+        route: route || undefined,
         forType: createData.forType || "Passengers",
         choices,
         specialMeals,
@@ -659,10 +690,14 @@ export default function MealPlanning() {
         totalKcal,
         createdDate: new Date().toISOString().split('T')[0],
       };
-    });
+    })));
 
     setMeals((prev) => [...prev, ...newMeals]);
-    toast.success("Meal configured successfully");
+    toast.success(
+      createData.days.length > 1
+        ? `Meal configured for ${createData.days.length} days`
+        : "Meal configured successfully",
+    );
     setCreateModalOpen(false);
     setCreateErrors([]);
     resetCreateData(selectedDay);
@@ -683,19 +718,19 @@ export default function MealPlanning() {
   const openEditModal = (meal: MealCard) => {
     setSelectedMeal(meal);
     setCreateData({
-      day: meal.day,
+      days: [meal.day],
       effectiveFrom: meal.effectiveFrom ?? "",
       effectiveTo: meal.effectiveTo ?? "",
       flightType: meal.flightType,
-      route: meal.route ?? "",
+      routes: meal.route ? [meal.route] : [],
       forType: meal.forType,
       mealTypes: [meal.mealType],
       choices: meal.choices,
       specialMealsByType: { [meal.mealType]: meal.specialMeals.filter((sm) => sm.enabled).map((sm) => ({ code: sm.type, portions: sm.portions, items: sm.items || [] })) },
-      choiceItems: [
-        { ...MEAL_TYPES.reduce((acc, t) => { acc[t] = [] as MealItem[]; return acc; }, {} as Record<string, MealItem[]>), [meal.mealType]: meal.choices[0]?.items ?? [] },
-        { ...MEAL_TYPES.reduce((acc, t) => { acc[t] = [] as MealItem[]; return acc; }, {} as Record<string, MealItem[]>), [meal.mealType]: meal.choices[1]?.items ?? [] },
-      ],
+      choiceItems: (meal.choices.length ? meal.choices : [{ items: [] }, { items: [] }]).map((ch) => ({
+        ...MEAL_TYPES.reduce((acc, t) => { acc[t] = [] as MealItem[]; return acc; }, {} as Record<string, MealItem[]>),
+        [meal.mealType]: ch.items ?? [],
+      })),
       dessertByType: { [meal.mealType]: meal.dessert.name ? [meal.dessert] : [] },
       dessertAllocationByType: { [meal.mealType]: meal.dessert.name ? [100] : [] },
       saladsByType: { [meal.mealType]: meal.salads ?? [] },
@@ -705,10 +740,59 @@ export default function MealPlanning() {
       customMealTypeNames: mealSlots.some(s => s.name === meal.mealType) ? [] : [meal.mealType],
       customAddonNames: Object.keys(meal.customAddons ?? {}),
       customAddonsByType: Object.fromEntries(Object.entries(meal.customAddons ?? {}).map(([k, v]) => [k, { [meal.mealType]: v }])),
-      choicePercentagesByType: { [meal.mealType]: { c1: meal.choices[0]?.percentage ?? 60, c2: meal.choices[1]?.percentage ?? 40 } },
+      choicePercentagesByType: { [meal.mealType]: (meal.choices.length ? meal.choices.map((ch) => ch.percentage) : [60, 40]) },
       servingTimes: { [meal.mealType]: meal.servingTime },
     });
     setEditModalOpen(true);
+  };
+
+  // ── Choice helpers (support any number of CHOICE 01, 02, 03 …) ──
+  const percsForType = (type: string): number[] =>
+    createData.choicePercentagesByType[type] ?? defaultChoicePercs(createData.choiceItems.length);
+
+  // Immutably update one choice's item list for a given meal type.
+  const updateChoiceItems = (choiceIdx: number, type: string, updater: (items: MealItem[]) => MealItem[]) =>
+    setCreateData((prev) => ({
+      ...prev,
+      choiceItems: prev.choiceItems.map((rec, i) => (i === choiceIdx ? { ...rec, [type]: updater(rec[type] || []) } : rec)),
+    }));
+
+  // Edit a choice's %; the last choice auto-balances so the split always totals 100.
+  const setChoicePercent = (type: string, idx: number, value: number) =>
+    setCreateData((prev) => {
+      const arr = [...(prev.choicePercentagesByType[type] ?? defaultChoicePercs(prev.choiceItems.length))];
+      arr[idx] = Math.max(0, Math.min(100, value));
+      const last = arr.length - 1;
+      if (idx !== last) arr[last] = Math.max(0, 100 - arr.slice(0, last).reduce((a, b) => a + b, 0));
+      return { ...prev, choicePercentagesByType: { ...prev.choicePercentagesByType, [type]: arr } };
+    });
+
+  const addChoice = () =>
+    setCreateData((prev) => {
+      // Seed the new choice with a blank row for every active meal type.
+      const rec: Record<string, MealItem[]> = MEAL_TYPES.reduce((acc, t) => { acc[t] = [] as MealItem[]; return acc; }, {} as Record<string, MealItem[]>);
+      prev.mealTypes.forEach((t) => { rec[t] = [{ name: "", weight: 0, calories: 0 }]; });
+      const percs = { ...prev.choicePercentagesByType };
+      new Set<string>([...Object.keys(percs), ...prev.mealTypes]).forEach((t) => {
+        const grown = [...(percs[t] ?? defaultChoicePercs(prev.choiceItems.length)), 0];
+        grown[grown.length - 1] = Math.max(0, 100 - grown.slice(0, -1).reduce((a, b) => a + b, 0));
+        percs[t] = grown;
+      });
+      return { ...prev, choiceItems: [...prev.choiceItems, rec], choicePercentagesByType: percs };
+    });
+
+  const removeChoice = (idx: number) => {
+    setCreateData((prev) => {
+      if (prev.choiceItems.length <= 2) return prev; // keep at least two choices
+      const percs = { ...prev.choicePercentagesByType };
+      Object.keys(percs).forEach((t) => {
+        const arr = (percs[t] ?? []).filter((_, i) => i !== idx);
+        if (arr.length) arr[arr.length - 1] = Math.max(0, 100 - arr.slice(0, -1).reduce((a, b) => a + b, 0));
+        percs[t] = arr;
+      });
+      return { ...prev, choiceItems: prev.choiceItems.filter((_, i) => i !== idx), choicePercentagesByType: percs };
+    });
+    setActiveChoiceForItems((a) => Math.max(0, Math.min(a, createData.choiceItems.length - 2)));
   };
 
   const openViewMenu = (meal: MealCard) => {
@@ -798,15 +882,62 @@ export default function MealPlanning() {
                 <div className="grid grid-cols-5 gap-4">
                   <div>
                     <Label>Day</Label>
-                    <select
-                      value={createData.day}
-                      onChange={(e) => setCreateData({ ...createData, day: e.target.value })}
-                      className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                    >
-                      {DAYS.map((day) => (
-                        <option key={day} value={day}>{day}</option>
-                      ))}
-                    </select>
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <button
+                          type="button"
+                          className="mt-1 flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                        >
+                          <span className={createData.days.length === 0 ? "text-muted-foreground" : "truncate"}>
+                            {createData.days.length === 0
+                              ? "Select days"
+                              : createData.days.length === DAYS.length
+                                ? "All days"
+                                : DAYS.filter((d) => createData.days.includes(d)).map((d) => d.slice(0, 3)).join(", ")}
+                          </span>
+                          <ChevronDown className="h-4 w-4 shrink-0 opacity-60" />
+                        </button>
+                      </PopoverTrigger>
+                      <PopoverContent align="start" className="w-56 p-1">
+                        <button
+                          type="button"
+                          onClick={() => setCreateData({
+                            ...createData,
+                            days: createData.days.length === DAYS.length ? [] : [...DAYS],
+                          })}
+                          className="flex w-full items-center justify-between rounded-sm px-2 py-1.5 text-xs font-semibold text-primary hover:bg-accent"
+                        >
+                          {createData.days.length === DAYS.length ? "Clear all" : "Select all"}
+                        </button>
+                        <div className="my-1 h-px bg-border" />
+                        {DAYS.map((day) => {
+                          const active = createData.days.includes(day);
+                          return (
+                            <button
+                              key={day}
+                              type="button"
+                              role="menuitemcheckbox"
+                              aria-checked={active}
+                              onClick={() => setCreateData({
+                                ...createData,
+                                days: active ? createData.days.filter((d) => d !== day) : [...createData.days, day],
+                              })}
+                              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
+                            >
+                              <span className={`grid h-4 w-4 shrink-0 place-content-center rounded-sm border ${active ? "bg-primary border-primary text-primary-foreground" : "border-input"}`}>
+                                {active && <Check className="h-3 w-3" />}
+                              </span>
+                              {day}
+                            </button>
+                          );
+                        })}
+                      </PopoverContent>
+                    </Popover>
+                    <p className="mt-1 text-[11px] text-muted-foreground leading-tight">
+                      {createData.days.length > 0
+                        ? `Applies to ${createData.days.length} day${createData.days.length === 1 ? "" : "s"}.`
+                        : "Select one or more days."}
+                    </p>
                   </div>
                   <div>
                     <Label>Effective Dates</Label>
@@ -848,7 +979,7 @@ export default function MealPlanning() {
                             checked={createData.flightType.join(",") === (type === "Both" ? "Domestic,International" : type)}
                             onChange={(e) => {
                               const val = e.target.value;
-                              setCreateData({ ...createData, flightType: val === "Both" ? ["Domestic", "International"] : [val], route: "" });
+                              setCreateData({ ...createData, flightType: val === "Both" ? ["Domestic", "International"] : [val], routes: [] });
                             }}
                             className="h-4 w-4"
                           />
@@ -861,23 +992,75 @@ export default function MealPlanning() {
                     <Label>Route</Label>
                     {createData.flightType.length === 0 ? (
                       <p className="mt-2 text-xs text-muted-foreground italic">Select flight type first</p>
-                    ) : (
-                      <select
-                        value={createData.route}
-                        onChange={(e) => setCreateData({ ...createData, route: e.target.value })}
-                        className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-                      >
-                        <option value="">All routes</option>
-                        {(createData.flightType.includes("Domestic") && createData.flightType.includes("International")
-                          ? [...DOMESTIC_ROUTES, ...INTERNATIONAL_ROUTES]
-                          : createData.flightType.includes("Domestic")
-                          ? DOMESTIC_ROUTES
-                          : INTERNATIONAL_ROUTES
-                        ).map((r) => (
-                          <option key={r} value={r}>{r}</option>
-                        ))}
-                      </select>
-                    )}
+                    ) : (() => {
+                      const availableRoutes = createData.flightType.includes("Domestic") && createData.flightType.includes("International")
+                        ? [...DOMESTIC_ROUTES, ...INTERNATIONAL_ROUTES]
+                        : createData.flightType.includes("Domestic")
+                        ? DOMESTIC_ROUTES
+                        : INTERNATIONAL_ROUTES;
+                      return (
+                        <>
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <button
+                                type="button"
+                                className="mt-1 flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 text-sm ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                              >
+                                <span className={createData.routes.length === 0 ? "text-muted-foreground" : "truncate"}>
+                                  {createData.routes.length === 0
+                                    ? "All routes"
+                                    : createData.routes.length === 1
+                                      ? createData.routes[0]
+                                      : `${createData.routes.length} routes`}
+                                </span>
+                                <ChevronDown className="h-4 w-4 shrink-0 opacity-60" />
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent align="start" className="w-64 p-1">
+                              <button
+                                type="button"
+                                onClick={() => setCreateData({ ...createData, routes: [] })}
+                                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
+                              >
+                                <span className={`grid h-4 w-4 shrink-0 place-content-center rounded-sm border ${createData.routes.length === 0 ? "bg-primary border-primary text-primary-foreground" : "border-input"}`}>
+                                  {createData.routes.length === 0 && <Check className="h-3 w-3" />}
+                                </span>
+                                All routes <span className="text-[10px] text-muted-foreground">(shared)</span>
+                              </button>
+                              <div className="my-1 h-px bg-border" />
+                              <div className="max-h-60 overflow-y-auto">
+                                {availableRoutes.map((r) => {
+                                  const active = createData.routes.includes(r);
+                                  return (
+                                    <button
+                                      key={r}
+                                      type="button"
+                                      role="menuitemcheckbox"
+                                      aria-checked={active}
+                                      onClick={() => setCreateData({
+                                        ...createData,
+                                        routes: active ? createData.routes.filter((x) => x !== r) : [...createData.routes, r],
+                                      })}
+                                      className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm hover:bg-accent"
+                                    >
+                                      <span className={`grid h-4 w-4 shrink-0 place-content-center rounded-sm border ${active ? "bg-primary border-primary text-primary-foreground" : "border-input"}`}>
+                                        {active && <Check className="h-3 w-3" />}
+                                      </span>
+                                      {r}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </PopoverContent>
+                          </Popover>
+                          <p className="mt-1 text-[11px] text-muted-foreground leading-tight">
+                            {createData.routes.length > 0
+                              ? `Applies to ${createData.routes.length} route${createData.routes.length === 1 ? "" : "s"}.`
+                              : "Shared menu — applies to every route."}
+                          </p>
+                        </>
+                      );
+                    })()}
                   </div>
                   <div>
                     <Label>For</Label>
@@ -923,18 +1106,17 @@ export default function MealPlanning() {
                             if (removeMealTypeMode) return;
                             if (!isSelected) {
                               const copy = { ...createData };
-                              const seedRow = [{ name: "", weight: 0, calories: 0 }];
-                              copy.choiceItems = [
-                                { ...copy.choiceItems[0], [t]: copy.choiceItems[0][t]?.length ? copy.choiceItems[0][t] : seedRow },
-                                { ...copy.choiceItems[1], [t]: copy.choiceItems[1][t]?.length ? copy.choiceItems[1][t] : seedRow },
-                              ];
+                              copy.choiceItems = copy.choiceItems.map((rec) => ({
+                                ...rec,
+                                [t]: rec[t]?.length ? rec[t] : [{ name: "", weight: 0, calories: 0 }],
+                              }));
                               copy.dessertByType = { ...copy.dessertByType, [t]: copy.dessertByType[t] ?? [] };
                               copy.dessertAllocationByType = { ...copy.dessertAllocationByType, [t]: copy.dessertAllocationByType[t] ?? [] };
                               copy.saladsByType = { ...copy.saladsByType, [t]: copy.saladsByType[t] ?? [] };
                               copy.saladAllocationByType = { ...copy.saladAllocationByType, [t]: copy.saladAllocationByType[t] ?? [] };
                               copy.freshFruitsByType = { ...copy.freshFruitsByType, [t]: copy.freshFruitsByType[t] ?? [] };
                               copy.freshFruitAllocationByType = { ...copy.freshFruitAllocationByType, [t]: copy.freshFruitAllocationByType[t] ?? [] };
-                              copy.choicePercentagesByType = { ...copy.choicePercentagesByType, [t]: copy.choicePercentagesByType[t] ?? { c1: 60, c2: 40 } };
+                              copy.choicePercentagesByType = { ...copy.choicePercentagesByType, [t]: copy.choicePercentagesByType[t] ?? defaultChoicePercs(copy.choiceItems.length) };
                               copy.specialMealsByType = { ...copy.specialMealsByType, [t]: copy.specialMealsByType[t] ?? [] };
                               copy.servingTimes = { ...copy.servingTimes, [t]: copy.servingTimes[t] ?? defaultServingFor(t) };
                               copy.mealTypes = [...copy.mealTypes, t];
@@ -1181,31 +1363,51 @@ export default function MealPlanning() {
                         </div>
                       );
                     }
-                    const activeItems = createData.choiceItems[activeChoiceForItems][type] || [];
-                    const percs = createData.choicePercentagesByType[type] ?? { c1: 60, c2: 40 };
-                    const totalPct = percs.c1 + percs.c2;
+                    const activeIdx = Math.min(activeChoiceForItems, createData.choiceItems.length - 1);
+                    const activeItems = createData.choiceItems[activeIdx]?.[type] || [];
+                    const percs = percsForType(type);
+                    const totalPct = percs.reduce((a, b) => a + b, 0);
                     return (
                       <div key={type} className="space-y-4">
-                        {/* CHOICE 01 / 02 Radio */}
-                        <div className="flex gap-6">
-                          {([0, 1] as const).map((cIdx) => (
-                            <label key={cIdx} className="flex items-center gap-2 cursor-pointer">
-                              <input
-                                type="radio"
-                                name={`activeChoice-${type}`}
-                                checked={activeChoiceForItems === cIdx}
-                                onChange={() => setActiveChoiceForItems(cIdx)}
-                                className="h-4 w-4"
-                              />
-                              <span className="text-sm font-semibold">CHOICE {cIdx === 0 ? "01" : "02"}</span>
-                            </label>
+                        {/* Choice selector — one radio per choice, add/remove supported */}
+                        <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+                          {createData.choiceItems.map((_, cIdx) => (
+                            <div key={cIdx} className="flex items-center gap-1.5">
+                              <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="radio"
+                                  name={`activeChoice-${type}`}
+                                  checked={activeIdx === cIdx}
+                                  onChange={() => setActiveChoiceForItems(cIdx)}
+                                  className="h-4 w-4"
+                                />
+                                <span className="text-sm font-semibold">{choiceLabel(cIdx)}</span>
+                              </label>
+                              {createData.choiceItems.length > 2 && (
+                                <button
+                                  type="button"
+                                  title={`Remove ${choiceLabel(cIdx)}`}
+                                  onClick={() => removeChoice(cIdx)}
+                                  className="text-muted-foreground hover:text-red-600 text-sm leading-none"
+                                >
+                                  ×
+                                </button>
+                              )}
+                            </div>
                           ))}
+                          <button
+                            type="button"
+                            onClick={() => { addChoice(); setActiveChoiceForItems(createData.choiceItems.length); }}
+                            className="text-xs font-semibold text-primary hover:underline"
+                          >
+                            + Add Choice
+                          </button>
                         </div>
 
                         {/* Items for active choice */}
                         <div className="rounded-lg border p-3">
                           <div className="font-semibold text-sm mb-2">
-                            {type} — CHOICE {activeChoiceForItems === 0 ? "01" : "02"}
+                            {type} — {choiceLabel(activeIdx)}
                           </div>
                           <div className="flex gap-2 items-center text-xs font-semibold text-muted-foreground border-b pb-1 mb-2">
                             <div className="flex-1">Item</div>
@@ -1220,15 +1422,7 @@ export default function MealPlanning() {
                                   value={item.name}
                                   onChange={(e) => {
                                     const found = (FOOD_ITEMS[type] || []).find((fi) => fi.name === e.target.value);
-                                    const copy = { ...createData };
-                                    const updated = copy.choiceItems[activeChoiceForItems][type].map((it, i) =>
-                                      i === itemIdx ? (withProfile(found)) : it
-                                    );
-                                    copy.choiceItems = [
-                                      activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
-                                      activeChoiceForItems === 1 ? { ...copy.choiceItems[1], [type]: updated } : copy.choiceItems[1],
-                                    ];
-                                    setCreateData(copy);
+                                    updateChoiceItems(activeIdx, type, (items) => items.map((it, i) => (i === itemIdx ? withProfile(found) : it)));
                                   }}
                                   className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
                                 >
@@ -1242,15 +1436,8 @@ export default function MealPlanning() {
                                   type="text"
                                   value={item.name}
                                   onChange={(e) => {
-                                    const copy = { ...createData };
-                                    const updated = copy.choiceItems[activeChoiceForItems][type].map((it, i) =>
-                                      i === itemIdx ? { ...it, name: e.target.value } : it
-                                    );
-                                    copy.choiceItems = [
-                                      activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
-                                      activeChoiceForItems === 1 ? { ...copy.choiceItems[1], [type]: updated } : copy.choiceItems[1],
-                                    ];
-                                    setCreateData(copy);
+                                    const value = e.target.value;
+                                    updateChoiceItems(activeIdx, type, (items) => items.map((it, i) => (i === itemIdx ? { ...it, name: value } : it)));
                                   }}
                                   placeholder="Item name…"
                                   className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-sm"
@@ -1271,15 +1458,8 @@ export default function MealPlanning() {
                                     type="number"
                                     value={item.weight || ""}
                                     onChange={(e) => {
-                                      const copy = { ...createData };
-                                      const updated = copy.choiceItems[activeChoiceForItems][type].map((it, i) =>
-                                        i === itemIdx ? { ...it, weight: Number(e.target.value) } : it
-                                      );
-                                      copy.choiceItems = [
-                                        activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
-                                        activeChoiceForItems === 1 ? { ...copy.choiceItems[1], [type]: updated } : copy.choiceItems[1],
-                                      ];
-                                      setCreateData(copy);
+                                      const value = Number(e.target.value);
+                                      updateChoiceItems(activeIdx, type, (items) => items.map((it, i) => (i === itemIdx ? { ...it, weight: value } : it)));
                                     }}
                                     placeholder="g"
                                     className="w-20 rounded border border-border bg-background px-2 py-1.5 text-sm text-center"
@@ -1288,15 +1468,8 @@ export default function MealPlanning() {
                                     type="number"
                                     value={item.calories || ""}
                                     onChange={(e) => {
-                                      const copy = { ...createData };
-                                      const updated = copy.choiceItems[activeChoiceForItems][type].map((it, i) =>
-                                        i === itemIdx ? { ...it, calories: Number(e.target.value) } : it
-                                      );
-                                      copy.choiceItems = [
-                                        activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
-                                        activeChoiceForItems === 1 ? { ...copy.choiceItems[1], [type]: updated } : copy.choiceItems[1],
-                                      ];
-                                      setCreateData(copy);
+                                      const value = Number(e.target.value);
+                                      updateChoiceItems(activeIdx, type, (items) => items.map((it, i) => (i === itemIdx ? { ...it, calories: value } : it)));
                                     }}
                                     placeholder="kcal"
                                     className="w-16 rounded border border-border bg-background px-2 py-1.5 text-sm text-center"
@@ -1306,15 +1479,7 @@ export default function MealPlanning() {
                               <button
                                 type="button"
                                 className="w-16 text-right text-red-600 text-sm shrink-0"
-                                onClick={() => {
-                                  const copy = { ...createData };
-                                  const updated = copy.choiceItems[activeChoiceForItems][type].filter((_, i) => i !== itemIdx);
-                                  copy.choiceItems = [
-                                    activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
-                                    activeChoiceForItems === 1 ? { ...copy.choiceItems[1], [type]: updated } : copy.choiceItems[1],
-                                  ];
-                                  setCreateData(copy);
-                                }}
+                                onClick={() => updateChoiceItems(activeIdx, type, (items) => items.filter((_, i) => i !== itemIdx))}
                               >
                                 × Remove
                               </button>
@@ -1323,29 +1488,21 @@ export default function MealPlanning() {
                           <button
                             type="button"
                             className="text-blue-600 text-sm mt-1"
-                            onClick={() => {
-                              const copy = { ...createData };
-                              const existing = copy.choiceItems[activeChoiceForItems][type] || [];
-                              const updated = [...existing, { name: "", weight: 0, calories: 0 }];
-                              copy.choiceItems = [
-                                activeChoiceForItems === 0 ? { ...copy.choiceItems[0], [type]: updated } : copy.choiceItems[0],
-                                activeChoiceForItems === 1 ? { ...copy.choiceItems[1], [type]: updated } : copy.choiceItems[1],
-                              ];
-                              setCreateData(copy);
-                            }}
+                            onClick={() => updateChoiceItems(activeIdx, type, (items) => [...items, { name: "", weight: 0, calories: 0 }])}
                           >
                             + Add Item
                           </button>
                         </div>
 
-                        {/* Both choices summary */}
+                        {/* All choices summary */}
                         <div className="grid grid-cols-2 gap-3">
-                          {([0, 1] as const).map((cIdx) => {
-                            const summaryItems = (createData.choiceItems[cIdx][type] || []).filter((it) => it.name.trim());
+                          {createData.choiceItems.map((rec, cIdx) => {
+                            const summaryItems = (rec[type] || []).filter((it) => it.name.trim());
+                            const st = choiceStyle(cIdx);
                             return (
-                              <div key={cIdx} className={`rounded-md border p-2.5 text-xs ${cIdx === 0 ? "border-blue-200 bg-blue-50/40" : "border-teal-200 bg-teal-50/40"}`}>
-                                <div className={`font-semibold mb-1.5 ${cIdx === 0 ? "text-blue-700" : "text-teal-700"}`}>
-                                  CHOICE {cIdx === 0 ? "01" : "02"}
+                              <div key={cIdx} className={`rounded-md border p-2.5 text-xs ${st.chip}`}>
+                                <div className={`font-semibold mb-1.5 ${st.text}`}>
+                                  {choiceLabel(cIdx)}
                                 </div>
                                 {summaryItems.length === 0 ? (
                                   <div className="text-muted-foreground italic">No items yet</div>
@@ -1363,23 +1520,22 @@ export default function MealPlanning() {
                         {/* Meal Percentage */}
                         <div className="rounded-lg border p-3 space-y-2">
                           <div className="font-semibold text-sm">Meal Percentage</div>
-                          <div className="grid grid-cols-2 gap-4">
-                            <div>
-                              <Label className="text-xs">Choice 01 %</Label>
-                              <Input
-                                type="number" min={0} max={100}
-                                value={percs.c1}
-                                onChange={(e) => {
-                                  const v = Math.max(0, Math.min(100, Number(e.target.value) || 0));
-                                  setCreateData({ ...createData, choicePercentagesByType: { ...createData.choicePercentagesByType, [type]: { c1: v, c2: 100 - v } } });
-                                }}
-                                className="mt-1 h-8"
-                              />
-                            </div>
-                            <div>
-                              <Label className="text-xs">Choice 02 % (auto)</Label>
-                              <Input type="number" value={percs.c2} readOnly className="mt-1 h-8 bg-muted/40" />
-                            </div>
+                          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+                            {createData.choiceItems.map((_, cIdx) => {
+                              const isLast = cIdx === createData.choiceItems.length - 1;
+                              return (
+                                <div key={cIdx}>
+                                  <Label className="text-xs">{choiceLabel(cIdx)} %{isLast ? " (auto)" : ""}</Label>
+                                  <Input
+                                    type="number" min={0} max={100}
+                                    value={percs[cIdx] ?? 0}
+                                    readOnly={isLast}
+                                    onChange={isLast ? undefined : (e) => setChoicePercent(type, cIdx, Number(e.target.value) || 0)}
+                                    className={`mt-1 h-8${isLast ? " bg-muted/40" : ""}`}
+                                  />
+                                </div>
+                              );
+                            })}
                           </div>
                           {totalPct !== 100 && (
                             <div className="text-xs text-destructive">Must total 100%. Currently: {totalPct}%</div>
@@ -1572,29 +1728,6 @@ export default function MealPlanning() {
                                             <li key={itm} className="text-red-600">• {itm}</li>
                                           ))}
                                         </ul>
-                                      </div>
-                                    </div>
-                                    <div>
-                                      <Label className="text-xs">Number of Portions</Label>
-                                      <div className="flex items-center gap-3 mt-1">
-                                        <Input
-                                          type="number"
-                                          min={1}
-                                          value={pendingSpecialMeal.portions === "As per demand" ? "" : pendingSpecialMeal.portions as number}
-                                          onChange={(e) => setPendingSpecialMeal({ ...pendingSpecialMeal, portions: Number(e.target.value) })}
-                                          className="h-8 text-sm w-28"
-                                          disabled={pendingSpecialMeal.portions === "As per demand"}
-                                          placeholder="Qty"
-                                        />
-                                        <label className="flex items-center gap-1.5 cursor-pointer text-xs">
-                                          <input
-                                            type="checkbox"
-                                            checked={pendingSpecialMeal.portions === "As per demand"}
-                                            onChange={(e) => setPendingSpecialMeal({ ...pendingSpecialMeal, portions: e.target.checked ? "As per demand" : 1 })}
-                                            className="h-3.5 w-3.5"
-                                          />
-                                          As Per Demand
-                                        </label>
                                       </div>
                                     </div>
                                     <div>
@@ -2062,63 +2195,35 @@ export default function MealPlanning() {
                 <div key={mealType} className="space-y-3">
                   <div className="text-base font-semibold border-b pb-2">{mealType}</div>
                   <div className="flex gap-3 flex-wrap">
-                    {/* CHOICE 1 */}
-                    {(() => {
-                      const items1 = (createData.choiceItems[0][mealType] || []).filter((it) => it.name.trim());
-                      const c1pct = createData.choicePercentagesByType[mealType]?.c1 ?? 60;
+                    {/* One card per choice */}
+                    {createData.choiceItems.map((rec, cIdx) => {
+                      const items = (rec[mealType] || []).filter((it) => it.name.trim());
+                      const pct = (createData.choicePercentagesByType[mealType] ?? defaultChoicePercs(createData.choiceItems.length))[cIdx] ?? 0;
+                      const st = choiceStyle(cIdx);
                       return (
-                        <div className="rounded-lg border border-blue-200 w-52 shrink-0">
-                          <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-blue-100 text-blue-800">
-                            CHOICE 1 — {c1pct}%
+                        <div key={cIdx} className={`rounded-lg border ${st.border} w-52 shrink-0`}>
+                          <div className={`px-3 py-2 rounded-t-lg font-semibold text-xs ${st.badge}`}>
+                            {choiceLabel(cIdx)} — {pct}%
                           </div>
                           <div className="p-3 space-y-1">
-                            {items1.length === 0 ? (
+                            {items.length === 0 ? (
                               <div className="text-xs text-muted-foreground italic">No items configured</div>
-                            ) : items1.map((it, i) => (
+                            ) : items.map((it, i) => (
                               <div key={i} className="text-xs">
                                 <span className="font-medium">{it.name}</span>
                                 {it.weight > 0 && <span className="text-muted-foreground"> – {it.weight}g</span>}
                                 {it.calories > 0 && <span className="text-muted-foreground"> · {it.calories} kcal</span>}
                               </div>
                             ))}
-                            {items1.length > 0 && (
+                            {items.length > 0 && (
                               <div className="text-xs font-semibold border-t pt-1 mt-1">
-                                Total: {items1.reduce((s, it) => s + (it.calories || 0), 0)} kcal
+                                Total: {items.reduce((s, it) => s + (it.calories || 0), 0)} kcal
                               </div>
                             )}
                           </div>
                         </div>
                       );
-                    })()}
-
-                    {/* CHOICE 2 */}
-                    {(() => {
-                      const items2 = (createData.choiceItems[1][mealType] || []).filter((it) => it.name.trim());
-                      const c2pct = createData.choicePercentagesByType[mealType]?.c2 ?? 40;
-                      return (
-                        <div className="rounded-lg border border-teal-200 w-52 shrink-0">
-                          <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-teal-100 text-teal-800">
-                            CHOICE 2 — {c2pct}%
-                          </div>
-                          <div className="p-3 space-y-1">
-                            {items2.length === 0 ? (
-                              <div className="text-xs text-muted-foreground italic">No items configured</div>
-                            ) : items2.map((it, i) => (
-                              <div key={i} className="text-xs">
-                                <span className="font-medium">{it.name}</span>
-                                {it.weight > 0 && <span className="text-muted-foreground"> – {it.weight}g</span>}
-                                {it.calories > 0 && <span className="text-muted-foreground"> · {it.calories} kcal</span>}
-                              </div>
-                            ))}
-                            {items2.length > 0 && (
-                              <div className="text-xs font-semibold border-t pt-1 mt-1">
-                                Total: {items2.reduce((s, it) => s + (it.calories || 0), 0)} kcal
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })()}
+                    })}
 
                     {/* Special meal cards */}
                     {(createData.specialMealsByType[mealType] || []).map((sel) => (
