@@ -138,6 +138,20 @@ export function addPurchaseRequisition(
   return pr;
 }
 
+/**
+ * Set a requisition's approval status in the persisted list. Called from Approval
+ * Management (which runs while the PR route is unmounted), so it writes to
+ * localStorage directly; the PR screen re-reads the fresh value on its next mount.
+ */
+export function setPurchaseRequisitionStatus(id: string, status: string): void {
+  try {
+    const next = getPurchaseRequisitions().map((pr) => (pr.id === id ? { ...pr, status } : pr));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    /* storage unavailable — non-fatal */
+  }
+}
+
 // ── Procurement stage ────────────────────────────────────────────────────────
 // A PR moves through: draft/pending (pre-approval) → approved → goods start
 // arriving. Once approved, the stage is DERIVED from how much has been received:
@@ -148,7 +162,7 @@ export function addPurchaseRequisition(
 
 export type ProcurementStage =
   | "Draft" | "Pending" | "Rejected" | "Cancelled" | "Closed"
-  | "Processing" | "Partial Order" | "Full Order";
+  | "Approved" | "Processing" | "Partial Order" | "Full Order";
 
 /** All filter labels shown in the PR Status dropdown (in display order). */
 export const PR_STATUS_FILTERS = [
@@ -175,8 +189,12 @@ export function procurementStage(pr: PurchaseRequisition): ProcurementStage {
   if (s === "rejected") return "Rejected";
   if (s === "cancelled") return "Cancelled";
   if (s === "closed") return "Closed";
-  // Approved (or any other post-approval state) — derive from receipts.
+  // Post-approval — derive from procurement activity. A freshly approved PR with
+  // nothing yet ordered on a PO or received stays at "Approved"; it only advances
+  // to "Processing" once a next action is taken (PO raised / goods start arriving).
   const { ordered, received } = prReceived(pr);
+  const placedOnPO = pr.lines.reduce((sum, l) => sum + (l.orderedQty ?? 0), 0);
+  if (received <= 0 && placedOnPO <= 0) return "Approved";
   if (received <= 0) return "Processing";
   if (received < ordered) return "Partial Order";
   return "Full Order";

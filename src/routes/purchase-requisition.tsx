@@ -10,7 +10,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
@@ -18,7 +17,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  FileText, ClipboardList, CheckCircle, Plus, Save, Send, Trash2, Pencil, Eye, ArrowLeft, ShoppingCart,
+  FileText, ClipboardList, CheckCircle, Plus, Save, Send, Trash2, Pencil, Eye, ArrowLeft,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
@@ -380,7 +379,8 @@ function PurchaseRequisitionCreate({
   const today = new Date().toISOString().slice(0, 10);
 
   // Header state
-  const [prDate, setPrDate] = useState(today);
+  // PR date is locked to today — created "now", not back/forward dated.
+  const [prDate] = useState(today);
   const [officeId, setOfficeId] = useState(prefill?.officeId ?? "OFF-001");
   const [warehouseId, setWarehouseId] = useState(prefill?.warehouseId ?? "WH-001");
   const [requestedBy, setRequestedBy] = useState(prefill?.requestedBy ?? "");
@@ -504,8 +504,10 @@ function PurchaseRequisitionCreate({
               <Input
                 type="date"
                 value={prDate}
-                onChange={(e) => setPrDate(e.target.value)}
-                className="mt-1"
+                readOnly
+                tabIndex={-1}
+                title="PR date is set to today and cannot be changed"
+                className="mt-1 bg-muted/50 text-muted-foreground cursor-default"
               />
             </div>
 
@@ -775,56 +777,8 @@ function RequisitionDetailsDialog({
   const totals = requisition ? prReceived(requisition) : null;
   // Direct (local) purchase is offered whenever the requisitioned amount hasn't
   // been fully received — i.e. received < requisition — except on terminal PRs.
-  const isTerminal = stage === "Closed" || stage === "Cancelled" || stage === "Rejected";
-
-  // Line selection — only still-outstanding lines can be picked for Direct Purchase.
-  const outstandingIds = requisition
-    ? requisition.lines.filter((l) => Math.max(l.qty - (l.receivedQty ?? 0), 0) > 0).map((l) => l.id)
-    : [];
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  // Reset to "all outstanding selected" whenever a different requisition is opened.
-  useEffect(() => {
-    setSelected(new Set(outstandingIds));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [requisition?.id]);
-
-  const selectedCount = outstandingIds.filter((id) => selected.has(id)).length;
-  const allSelected = outstandingIds.length > 0 && selectedCount === outstandingIds.length;
-  const canDirectReceive = !!totals && totals.remaining > 0 && !isTerminal;
-
-  const toggleLine = (id: string) =>
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  const toggleAll = () =>
-    setSelected(allSelected ? new Set() : new Set(outstandingIds));
-
-  // Hand the selected outstanding lines to Receive Items → Direct Receive (prefilled).
-  // On save there, applyReceiptToPR writes the received qty back to this PR.
-  const handleDirectReceive = () => {
-    if (!requisition) return;
-    const short = requisition.lines
-      .map((l) => ({ l, remaining: Math.max(l.qty - (l.receivedQty ?? 0), 0) }))
-      .filter((x) => x.remaining > 0 && selected.has(x.l.id));
-    if (short.length === 0) return;
-    sessionStorage.setItem(
-      "direct-receive-prefill",
-      JSON.stringify({
-        source: requisition.id,
-        prId: requisition.id,
-        justification: `Direct (local) purchase against Purchase Requisition ${requisition.id} — ${short.length} short line${short.length === 1 ? "" : "s"}.`,
-        officeId: requisition.officeId,
-        warehouseId: requisition.warehouseId,
-        lines: short.map(({ l, remaining }) => ({
-          name: l.itemName, qty: remaining, uom: l.uom, prLineId: l.id,
-        })),
-      }),
-    );
-    onClose();
-    navigate("/receive-item");
-  };
+  // Receiving against a PR is initiated from Receive Items → Direct Receive
+  // ("Receive from PR"); this dialog is read-only detail.
 
   return (
     <Dialog open={!!requisition} onOpenChange={(open) => !open && onClose()}>
@@ -887,14 +841,8 @@ function RequisitionDetailsDialog({
                     style={{ width: `${totals.pct}%` }}
                   />
                 </div>
-                <div className="mt-1 flex items-center justify-between">
+                <div className="mt-1">
                   <span className="text-[11px] text-muted-foreground">{totals.pct}% received</span>
-                  {canDirectReceive && (
-                    <Button size="sm" className="h-8" onClick={handleDirectReceive} disabled={selectedCount === 0}>
-                      <ShoppingCart className="h-3.5 w-3.5 mr-1.5" />
-                      Direct Purchase ({selectedCount})
-                    </Button>
-                  )}
                 </div>
               </div>
             )}
@@ -918,14 +866,6 @@ function RequisitionDetailsDialog({
                 <Table>
                   <TableHeader className="bg-muted/40">
                     <TableRow>
-                      <TableHead className="w-10">
-                        <Checkbox
-                          checked={allSelected}
-                          onCheckedChange={toggleAll}
-                          disabled={outstandingIds.length === 0}
-                          aria-label="Select all outstanding line items"
-                        />
-                      </TableHead>
                       <TableHead className="w-14 text-xs uppercase tracking-wider">SL</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider">Description</TableHead>
@@ -940,19 +880,8 @@ function RequisitionDetailsDialog({
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {requisition.lines.map((l, i) => {
-                      const remaining = Math.max(l.qty - (l.receivedQty ?? 0), 0);
-                      const isSelected = selected.has(l.id);
-                      return (
-                      <TableRow key={l.id} data-state={isSelected ? "selected" : undefined}>
-                        <TableCell>
-                          <Checkbox
-                            checked={isSelected}
-                            onCheckedChange={() => toggleLine(l.id)}
-                            disabled={remaining === 0}
-                            aria-label={`Select ${l.itemName}`}
-                          />
-                        </TableCell>
+                    {requisition.lines.map((l, i) => (
+                      <TableRow key={l.id}>
                         <TableCell>{i + 1}</TableCell>
                         <TableCell className="font-medium">{l.itemName}</TableCell>
                         <TableCell className="text-muted-foreground text-xs">
@@ -980,10 +909,9 @@ function RequisitionDetailsDialog({
                           {(l.qty * l.rate).toLocaleString()}
                         </TableCell>
                       </TableRow>
-                      );
-                    })}
+                    ))}
                     <TableRow className="bg-muted/30 font-semibold">
-                      <TableCell colSpan={11} className="text-right uppercase text-xs tracking-wider">
+                      <TableCell colSpan={10} className="text-right uppercase text-xs tracking-wider">
                         Total
                       </TableCell>
                       <TableCell className="text-right tabular-nums">

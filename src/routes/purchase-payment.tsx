@@ -311,7 +311,7 @@ export default function PurchasePayment() {
 
       {/* Record Payment Dialog */}
       <Dialog open={payOpen} onOpenChange={setPayOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <HandCoins className="h-4 w-4 text-primary" /> Record Supplier Payment

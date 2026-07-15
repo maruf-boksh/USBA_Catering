@@ -1,5 +1,6 @@
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, type Dispatch, type SetStateAction } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { StatusBadge } from "@/components/common/StatusBadge";
@@ -8,13 +9,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import {
-  Plus, PackageCheck, Clock, CheckCircle2, Send, Search, Trash2, ChevronDown, Eye, AlertTriangle,
+  Plus, PackageCheck, Clock, CheckCircle2, Send, Search, Trash2, ChevronDown, Eye, AlertTriangle, Save,
 } from "lucide-react";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { toast } from "sonner";
@@ -54,6 +56,9 @@ export default function ItemIssuePage() {
   const [preselectedDemand, setPreselectedDemand] = useState("");
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
+  // Saved fulfilment methods (persisted) — assigned on the Fulfillment Method tab,
+  // acted on from the Issued Items tab.
+  const [plan, setPlan] = usePersistedState<FulfillmentPlan>(FULFILL_PLAN_KEY, {});
 
   // Auto-open the create dialog when arriving with ?demand=<id>
   const consumedParam = useRef(false);
@@ -201,6 +206,12 @@ export default function ItemIssuePage() {
     );
   };
 
+  // Pending demands that actually have a shortfall — worked on the Fulfillment tab.
+  const demandsWithShortfall = useMemo(
+    () => pendingDemands.filter((d) => demandShortfalls(d).length > 0),
+    [pendingDemands],
+  );
+
   return (
     <>
       <PageHeader
@@ -232,6 +243,20 @@ export default function ItemIssuePage() {
                 className="h-5 px-1.5 text-[10px] tabular-nums border-warning/40 bg-warning/10 text-warning"
               >
                 {pendingDemands.length}
+              </Badge>
+            )}
+          </TabsTrigger>
+          <TabsTrigger
+            value="fulfillment"
+            className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-4 pb-3 gap-2"
+          >
+            Fulfillment Method
+            {demandsWithShortfall.length > 0 && (
+              <Badge
+                variant="outline"
+                className="h-5 px-1.5 text-[10px] tabular-nums border-destructive/40 bg-destructive/10 text-destructive"
+              >
+                {demandsWithShortfall.length}
               </Badge>
             )}
           </TabsTrigger>
@@ -329,6 +354,10 @@ export default function ItemIssuePage() {
           )}
         </TabsContent>
 
+        <TabsContent value="fulfillment" className="mt-0">
+          <FulfillmentMethodTab demands={demandsWithShortfall} plan={plan} setPlan={setPlan} />
+        </TabsContent>
+
         <TabsContent value="issued" className="mt-0">
           <div className="mb-4">
             <LocationFilter
@@ -373,25 +402,50 @@ export default function ItemIssuePage() {
         onCreate={handleIssue}
       />
 
-      <DemandViewDialog demand={viewDemand} onClose={() => setViewDemand(null)} onIssue={openIssueForDemand} />
+      <DemandViewDialog demand={viewDemand} onClose={() => setViewDemand(null)} onIssue={openIssueForDemand} plan={plan} />
     </>
   );
 }
 
-// Read-only stock-vs-required breakdown for a pending demand: which items are
-// in stock (sufficient) and which fall short (must be procured).
+// How a shortfall item will be fulfilled: unset, a direct spot-buy receipt, a
+// purchase requisition, or both. Drives the per-item status + the two actions.
+type FulfillMethod = "" | "direct" | "requisition" | "both";
+const METHOD_META: Record<FulfillMethod, { label: string; cls: string }> = {
+  "":          { label: "Pending",        cls: "bg-muted text-muted-foreground" },
+  direct:      { label: "Direct Receive", cls: "bg-blue-100 text-blue-700" },
+  requisition: { label: "Requisition",    cls: "bg-amber-100 text-amber-700" },
+  both:        { label: "Both",           cls: "bg-purple-100 text-purple-700" },
+};
+
+// Saved fulfilment plan: per demand, per shortfall item, the chosen method + qty.
+// Persisted so the Fulfillment Method tab (assign + save) and the demand View
+// dialog (which shows the saved plan + runs the actions) share one source of truth.
+type PlanLine = { method: FulfillMethod; qty: number };
+type FulfillmentPlan = Record<string, Record<string, PlanLine>>;
+const FULFILL_PLAN_KEY = "item-issue-fulfillment-plan";
+
+// Shortfall (required − on-hand) for a demand's items, > 0 only.
+function demandShortfalls(demand: WfDemandRequest) {
+  return demand.items
+    .map((it) => ({ ...it, shortfall: roundQty(it.qty - getItemStock(it.id || it.name)) }))
+    .filter((it) => it.shortfall > 0);
+}
+
+// Read-only view of a demand: sufficient / shortfall breakdown plus the SAVED
+// fulfilment plan, from where Direct Receive / Create Requisition are run. Methods
+// themselves are assigned + saved on the Fulfillment Method tab.
 function DemandViewDialog({
-  demand, onClose, onIssue,
+  demand, onClose, onIssue, plan,
 }: {
   demand: WfDemandRequest | null;
   onClose: () => void;
   onIssue: (id: string) => void;
+  plan: FulfillmentPlan;
 }) {
   const navigate = useNavigate();
   const { role } = useRole();
-  // Shortfall procurement builder: which rows are checked + the (editable) qty.
-  const [prSel, setPrSel] = useState<Record<string, boolean>>({});
-  const [prQty, setPrQty] = useState<Record<string, string>>({});
+  // Which shortfall rows are checked for procurement actions (defaults to all planned).
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   const tagged = useMemo(() => {
     if (!demand) return [];
@@ -402,80 +456,116 @@ function DemandViewDialog({
     });
   }, [demand]);
 
-  // Seed the builder when a demand opens: rows start unchecked, qty = shortfall.
+  // Planned = shortfall rows that have a saved method + qty (only these are actionable).
+  const plannedIds = useMemo(() => {
+    if (!demand) return [] as string[];
+    const s = plan[demand.id] ?? {};
+    return tagged
+      .filter((it) => it.insufficient && s[it.id]?.method && (s[it.id]?.qty ?? 0) > 0)
+      .map((it) => it.id);
+  }, [demand, tagged, plan]);
+
+  // Start with nothing checked whenever the demand (or its saved plan) changes.
   useEffect(() => {
-    if (!demand) { setPrSel({}); setPrQty({}); return; }
-    const qty: Record<string, string> = {};
-    for (const it of demand.items) {
-      const short = roundQty(it.qty - getItemStock(it.id || it.name));
-      if (short > 0) qty[it.id] = String(short);
-    }
-    setPrSel({});
-    setPrQty(qty);
-  }, [demand]);
+    setSelectedIds(new Set());
+  }, [demand?.id, plannedIds]);
 
   if (!demand) return null;
 
+  const demandId = demand.id;
+  const saved = plan[demandId] ?? {};
   const sufficientItems = tagged.filter((it) => !it.insufficient);
-  const shortfallItems = tagged.filter((it) => it.insufficient);
-  // Procurement is locked until the demand is approved.
+  // Shortfall rows carry their SAVED method + planned qty from the Fulfillment tab.
+  const shortfallItems = tagged
+    .filter((it) => it.insufficient)
+    .map((it) => ({ ...it, method: saved[it.id]?.method ?? ("" as FulfillMethod), planQty: saved[it.id]?.qty ?? 0 }));
   const canProcure = demand.status !== "Pending Approval" && demand.status !== "Rejected";
 
-  const pickedLines = () =>
-    tagged
-      .filter((it) => it.insufficient && prSel[it.id])
-      .map((it) => ({ ...it, procureQty: roundQty(Number(prQty[it.id]) || 0) }))
-      .filter((l) => l.procureQty > 0);
+  // Actions run only on rows the user has checked (and only where a method applies).
+  const linesFor = (methods: FulfillMethod[]) =>
+    shortfallItems.filter((it) => methods.includes(it.method) && it.planQty > 0 && selectedIds.has(it.id));
+  const drCount = linesFor(["direct", "both"]).length;
+  const reqCount = linesFor(["requisition", "both"]).length;
+  const plannedCount = shortfallItems.filter((it) => it.method && it.planQty > 0).length;
+  const selectedCount = shortfallItems.filter((it) => it.method && it.planQty > 0 && selectedIds.has(it.id)).length;
+  const allPlannedSelected = plannedCount > 0 && selectedCount === plannedCount;
 
-  // Hand the checked shortfall rows to the Purchase Requisition page (prefilled).
-  const createPrFromShortfall = () => {
-    const picks = pickedLines();
-    if (picks.length === 0) {
-      toast.warning("Select at least one shortfall item with a quantity greater than zero.");
-      return;
-    }
-    sessionStorage.setItem(
-      "pr-prefill-from-inventory",
-      JSON.stringify({
-        source: demand.id,
-        requestedBy: role,
-        justification: `Raised from Demand Request ${demand.id} to cover ${picks.length} shortfall material${picks.length === 1 ? "" : "s"}.`,
-        officeId: demand.officeId,
-        warehouseId: demand.warehouseId,
-        lines: picks.map((it, i) => ({
-          id: `LN-${demand.id}-${i + 1}`, itemName: it.name, description: it.id,
-          qty: it.procureQty, uom: it.uom, rate: 0,
-        })),
-      }),
-    );
+  const toggleRow = (id: string, on: boolean) =>
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id); else next.delete(id);
+      return next;
+    });
+  const toggleAll = (on: boolean) => setSelectedIds(on ? new Set(plannedIds) : new Set());
+
+  // Hand the saved lines for the matching methods to the prefilled screen.
+  const runRequisition = () => {
+    const picks = linesFor(["requisition", "both"]);
+    if (picks.length === 0) return;
+    sessionStorage.setItem("pr-prefill-from-inventory", JSON.stringify({
+      source: demandId,
+      requestedBy: role,
+      justification: `Raised from Demand Request ${demandId} to cover ${picks.length} shortfall material${picks.length === 1 ? "" : "s"}.`,
+      officeId: demand.officeId, warehouseId: demand.warehouseId,
+      lines: picks.map((it, i) => ({ id: `LN-${demandId}-${i + 1}`, itemName: it.name, description: it.id, qty: it.planQty, uom: it.uom, rate: 0 })),
+    }));
     onClose();
     navigate("/purchase-requisition");
   };
-
-  // Hand the checked shortfall rows to the Receive Item Direct Receive flow.
-  const directReceiveFromShortfall = () => {
-    const picks = pickedLines();
-    if (picks.length === 0) {
-      toast.warning("Select at least one shortfall item with a quantity greater than zero.");
-      return;
-    }
-    sessionStorage.setItem(
-      "direct-receive-prefill",
-      JSON.stringify({
-        source: demand.id,
-        justification: `Direct receive against Demand Request ${demand.id} — ${picks.length} shortfall material${picks.length === 1 ? "" : "s"}.`,
-        officeId: demand.officeId,
-        warehouseId: demand.warehouseId,
-        lines: picks.map((it) => ({ name: it.name, qty: it.procureQty, uom: it.uom })),
-      }),
-    );
+  const runDirect = () => {
+    const picks = linesFor(["direct", "both"]);
+    if (picks.length === 0) return;
+    sessionStorage.setItem("direct-receive-prefill", JSON.stringify({
+      source: demandId,
+      justification: `Direct receive against Demand Request ${demandId} — ${picks.length} shortfall material${picks.length === 1 ? "" : "s"}.`,
+      officeId: demand.officeId, warehouseId: demand.warehouseId,
+      lines: picks.map((it) => ({ name: it.name, qty: it.planQty, uom: it.uom })),
+    }));
     onClose();
     navigate("/receive-item");
   };
 
+  const sufficientTable = sufficientItems.length > 0 ? (
+    <div>
+      <div className="flex items-center gap-1.5 mb-2">
+        <CheckCircle2 className="h-3 w-3 text-green-600" />
+        <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+          Sufficient Items ({sufficientItems.length})
+        </span>
+      </div>
+      <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 px-3 mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+        <div>Item</div>
+        <div className="text-center">In Stock</div>
+        <div className="text-center">Required</div>
+        <div className="text-center">Status</div>
+      </div>
+      <div className="space-y-2">
+        {sufficientItems.map((item) => (
+          <div key={item.id} className="rounded-lg border border-green-200 bg-green-50/50 p-3">
+            <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 items-center">
+              <div className="font-semibold text-sm">{item.name}</div>
+              <div className="text-center">
+                <span className="text-sm font-semibold text-green-700">{item.currentStock}</span>
+                <div className="text-[10px] text-muted-foreground">{item.uom}</div>
+              </div>
+              <div className="text-center">
+                <span className="text-sm font-semibold">{item.qty}</span>
+                <div className="text-[10px] text-muted-foreground">{item.uom}</div>
+              </div>
+              <div className="text-center">
+                <span className="text-sm font-bold text-green-600">OK</span>
+                <div className="text-[10px] text-green-600">sufficient</div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  ) : null;
+
   return (
     <Dialog open={!!demand} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-3xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
+      <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
         <DialogHeader className="px-5 py-4 border-b border-border">
           <DialogTitle className="flex items-center justify-between gap-3">
             <span>Demand Request — {demand.id}</span>
@@ -494,144 +584,82 @@ function DemandViewDialog({
             <p className="text-sm text-muted-foreground py-3">No items attached to this request.</p>
           ) : (
             <>
-              {sufficientItems.length > 0 && (
-                <div>
-                  <div className="flex items-center gap-1.5 mb-2">
-                    <CheckCircle2 className="h-3 w-3 text-green-600" />
+              {sufficientTable}
+              {shortfallItems.length > 0 && (
+                <div className="space-y-2.5">
+                  <div className="flex items-center gap-1.5">
+                    <AlertTriangle className="h-3 w-3 text-destructive" />
                     <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
-                      Sufficient Items ({sufficientItems.length})
+                      Shortfall Items ({shortfallItems.length}) — Fulfilment Plan
                     </span>
                   </div>
-                  <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 px-3 mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
-                    <div>Item</div>
-                    <div className="text-center">In Stock</div>
-                    <div className="text-center">Required</div>
-                    <div className="text-center">Status</div>
-                  </div>
-                  <div className="space-y-2">
-                    {sufficientItems.map((item) => (
-                      <div key={item.id} className="rounded-lg border border-green-200 bg-green-50/50 p-3">
-                        <div className="grid grid-cols-[1fr_80px_80px_80px] gap-2 items-center">
-                          <div className="font-semibold text-sm">{item.name}</div>
-                          <div className="text-center">
-                            <span className="text-sm font-semibold text-green-700">{item.currentStock}</span>
-                            <div className="text-[10px] text-muted-foreground">{item.uom}</div>
-                          </div>
-                          <div className="text-center">
-                            <span className="text-sm font-semibold">{item.qty}</span>
-                            <div className="text-[10px] text-muted-foreground">{item.uom}</div>
-                          </div>
-                          <div className="text-center">
-                            <span className="text-sm font-bold text-green-600">OK</span>
-                            <div className="text-[10px] text-green-600">sufficient</div>
-                          </div>
+
+                  {/* Read-only view of the saved plan (methods are set on the Fulfillment Method tab) */}
+                  <div className="rounded-lg border border-border overflow-x-auto">
+                    <div className="min-w-[652px]">
+                      <div className="grid grid-cols-[32px_84px_minmax(120px,1fr)_44px_80px_96px_140px] gap-2 px-3 py-2 bg-muted/50 border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground font-medium items-center">
+                        <div className="flex items-center justify-center">
+                          <Checkbox
+                            checked={allPlannedSelected}
+                            disabled={plannedCount === 0}
+                            onCheckedChange={(v) => toggleAll(v === true)}
+                            aria-label="Select all planned items"
+                          />
                         </div>
+                        <div>Code</div><div>Item</div><div>UoM</div>
+                        <div className="text-right">Shortage</div>
+                        <div className="text-right">Planned Qty</div>
+                        <div>Method</div>
                       </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {shortfallItems.length > 0 && (() => {
-                const selCount = shortfallItems.filter((it) => prSel[it.id]).length;
-                const allChecked = selCount === shortfallItems.length && selCount > 0;
-                const toggleAll = () => {
-                  const target = !allChecked;
-                  setPrSel((p) => {
-                    const next = { ...p };
-                    shortfallItems.forEach((it) => { next[it.id] = target; });
-                    return next;
-                  });
-                };
-                const cols = "grid grid-cols-[32px_88px_minmax(96px,1fr)_46px_80px_88px_80px_120px] gap-2 px-3 items-center";
-                return (
-                  <div>
-                    <div className="flex items-center justify-between gap-2 mb-2">
-                      <div className="flex items-center gap-1.5">
-                        <AlertTriangle className="h-3 w-3 text-destructive" />
-                        <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
-                          Shortfall Items ({shortfallItems.length})
-                        </span>
-                        {!canProcure && (
-                          <span className="text-[10px] normal-case tracking-normal text-amber-700 font-medium">
-                            · available after approval
-                          </span>
-                        )}
-                      </div>
-                      {canProcure && selCount > 0 && (
-                        <div className="flex items-center gap-2">
-                          <Button size="sm" variant="outline" className="h-8" onClick={directReceiveFromShortfall}>
-                            <PackageCheck className="h-3.5 w-3.5 mr-1.5" />
-                            Direct Receive ({selCount})
-                          </Button>
-                          <Button size="sm" className="h-8" onClick={createPrFromShortfall}>
-                            <Plus className="h-3.5 w-3.5 mr-1.5" />
-                            Create Purchase Requisition ({selCount})
-                          </Button>
-                        </div>
-                      )}
-                    </div>
-                    <div className="rounded-lg border border-red-200 overflow-x-auto">
-                      <div className="min-w-[700px]">
-                        <div className={`${cols} py-2 bg-red-50 border-b border-red-200 text-[10px] uppercase tracking-wider text-red-700/80 font-medium`}>
-                          <div className="flex items-center justify-center">
-                            <input
-                              type="checkbox"
-                              aria-label="Select all shortfall items"
-                              checked={allChecked}
-                              onChange={toggleAll}
-                              disabled={!canProcure}
-                              className="h-4 w-4 accent-red-600 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
-                            />
-                          </div>
-                          <div>Code</div>
-                          <div>Item</div>
-                          <div>UoM</div>
-                          <div className="text-right">Required</div>
-                          <div className="text-right">Current Stock</div>
-                          <div className="text-right">Shortage</div>
-                          <div className="text-right">Requested Qty</div>
-                        </div>
-                        {shortfallItems.map((item) => (
-                          <div key={item.id} className={`${cols} py-2 border-b border-red-100 last:border-b-0 bg-red-50/30`}>
+                      {shortfallItems.map((item) => {
+                        const meta = METHOD_META[item.method];
+                        const planned = !!item.method && item.planQty > 0;
+                        const checked = planned && selectedIds.has(item.id);
+                        return (
+                          <div key={item.id} className={`grid grid-cols-[32px_84px_minmax(120px,1fr)_44px_80px_96px_140px] gap-2 px-3 py-2 border-b border-border last:border-b-0 items-center ${planned && !checked ? "opacity-60" : ""}`}>
                             <div className="flex items-center justify-center">
-                              <input
-                                type="checkbox"
+                              <Checkbox
+                                checked={checked}
+                                disabled={!planned}
+                                onCheckedChange={(v) => toggleRow(item.id, v === true)}
                                 aria-label={`Select ${item.name}`}
-                                checked={!!prSel[item.id]}
-                                onChange={(e) => setPrSel((p) => ({ ...p, [item.id]: e.target.checked }))}
-                                disabled={!canProcure}
-                                className="h-4 w-4 accent-red-600 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
                               />
                             </div>
                             <div className="text-xs font-mono text-muted-foreground truncate" title={item.id}>{item.id}</div>
                             <div className="text-sm font-medium truncate" title={item.name}>{item.name}</div>
                             <div className="text-xs text-muted-foreground">{item.uom}</div>
-                            <div className="text-right text-sm font-semibold tabular-nums">{item.qty}</div>
-                            <div className="text-right text-sm tabular-nums text-muted-foreground">{item.currentStock}</div>
                             <div className="text-right text-sm font-semibold tabular-nums text-red-600">{item.shortfall}</div>
-                            <div className="flex justify-end">
-                              <Input
-                                type="number"
-                                min={0}
-                                step="any"
-                                value={prQty[item.id] ?? ""}
-                                onChange={(e) => setPrQty((p) => ({ ...p, [item.id]: e.target.value }))}
-                                disabled={!canProcure || !prSel[item.id]}
-                                className="h-8 w-28 text-right tabular-nums"
-                              />
+                            <div className="text-right text-sm tabular-nums">{item.planQty > 0 ? item.planQty : <span className="text-muted-foreground">—</span>}</div>
+                            <div>
+                              <span className={`inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${meta.cls}`}>{meta.label}</span>
                             </div>
                           </div>
-                        ))}
-                      </div>
+                        );
+                      })}
                     </div>
-                    <p className="mt-1.5 text-[11px] text-muted-foreground">
-                      {canProcure
-                        ? "Checked rows raise a Purchase Requisition or go to Direct Receive. Requested quantity defaults to the shortfall — edit as needed."
-                        : "This demand must be approved before shortfall items can be procured."}
-                    </p>
                   </div>
-                );
-              })()}
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                    <span className="text-[11px] text-muted-foreground">
+                      {!canProcure
+                        ? "Available after approval."
+                        : plannedCount === 0
+                          ? "No methods set yet — assign them on the Fulfillment Method tab."
+                          : `${selectedCount} of ${plannedCount} planned item${plannedCount === 1 ? "" : "s"} selected.`}
+                    </span>
+                    {canProcure && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button size="sm" variant="outline" className="h-8" onClick={runDirect} disabled={drCount === 0}>
+                          <PackageCheck className="h-3.5 w-3.5 mr-1.5" /> Direct Receive ({drCount})
+                        </Button>
+                        <Button size="sm" className="h-8" onClick={runRequisition} disabled={reqCount === 0}>
+                          <Plus className="h-3.5 w-3.5 mr-1.5" /> Create Requisition ({reqCount})
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -644,6 +672,180 @@ function DemandViewDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+
+// Page-level tab: assign a fulfilment method (Direct Receive / Requisition / Both)
+// to each shortfall item of a demand and SAVE it — no navigation. The saved plan
+// is shown and acted on from the demand's View dialog.
+function FulfillmentMethodTab({
+  demands, plan, setPlan,
+}: {
+  demands: WfDemandRequest[];
+  plan: FulfillmentPlan;
+  setPlan: Dispatch<SetStateAction<FulfillmentPlan>>;
+}) {
+  const [demandId, setDemandId] = useState("");
+  const [methodDraft, setMethodDraft] = useState<Record<string, FulfillMethod>>({});
+  const [qtyDraft, setQtyDraft] = useState<Record<string, string>>({});
+
+  // Keep the selection valid as the demand list changes.
+  useEffect(() => {
+    if (demands.length === 0) { setDemandId(""); return; }
+    setDemandId((cur) => (demands.some((d) => d.id === cur) ? cur : demands[0].id));
+  }, [demands]);
+
+  const demand = demands.find((d) => d.id === demandId) ?? null;
+  const shortfalls = useMemo(() => (demand ? demandShortfalls(demand) : []), [demand]);
+
+  // Seed drafts from the saved plan (or defaults) when the selected demand changes.
+  useEffect(() => {
+    if (!demand) { setMethodDraft({}); setQtyDraft({}); return; }
+    const saved = plan[demand.id] ?? {};
+    const m: Record<string, FulfillMethod> = {};
+    const q: Record<string, string> = {};
+    for (const it of demandShortfalls(demand)) {
+      m[it.id] = saved[it.id]?.method ?? "";
+      q[it.id] = String(saved[it.id]?.qty ?? it.shortfall);
+    }
+    setMethodDraft(m);
+    setQtyDraft(q);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demandId]);
+
+  const setAll = (mth: FulfillMethod) =>
+    setMethodDraft((prev) => {
+      const next = { ...prev };
+      shortfalls.forEach((it) => { next[it.id] = mth; });
+      return next;
+    });
+
+  const unsetCount = shortfalls.filter((it) => !methodDraft[it.id]).length;
+
+  const save = () => {
+    if (!demand) return;
+    const map: Record<string, PlanLine> = {};
+    shortfalls.forEach((it) => {
+      const mth = methodDraft[it.id] ?? "";
+      const qty = roundQty(Number(qtyDraft[it.id]) || 0);
+      if (mth && qty > 0) map[it.id] = { method: mth, qty };
+    });
+    setPlan((p) => ({ ...p, [demand.id]: map }));
+    const n = Object.keys(map).length;
+    toast.success(
+      n > 0
+        ? `Methods saved for ${demand.id} (${n} item${n === 1 ? "" : "s"}) — run the actions from the demand's View button.`
+        : `Cleared fulfilment methods for ${demand.id}.`,
+    );
+  };
+
+  if (demands.length === 0) {
+    return (
+      <Card>
+        <CardContent className="py-12 text-center">
+          <PackageCheck className="h-10 w-10 mx-auto text-muted-foreground/40 mb-3" />
+          <div className="text-sm font-medium text-foreground">No shortfalls to fulfil</div>
+          <div className="text-xs text-muted-foreground mt-1">Every pending demand is fully covered by stock.</div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const pillCls = "text-xs font-medium px-2.5 py-1 rounded-full border transition-colors";
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base">Fulfillment Method</CardTitle>
+      </CardHeader>
+      <CardContent className="pt-0 space-y-3">
+        <div className="min-w-[260px] max-w-sm">
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Demand</Label>
+          <select
+            value={demandId}
+            onChange={(e) => setDemandId(e.target.value)}
+            className="w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm"
+          >
+            {demands.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.id} — {d.requestedBy} ({demandShortfalls(d).length} shortfall)
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <p className="text-[11px] text-muted-foreground">
+          Assign a method to each shortfall item and <span className="font-medium">Save</span> — nothing leaves this page.
+          Run Direct Receive / Create Requisition from the demand's <span className="font-medium">View</span> button.
+        </p>
+
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mr-0.5">Set all:</span>
+          <button type="button" onClick={() => setAll("direct")} className={`${pillCls} border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100`}>Direct Receive</button>
+          <button type="button" onClick={() => setAll("requisition")} className={`${pillCls} border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100`}>Requisition</button>
+          <button type="button" onClick={() => setAll("both")} className={`${pillCls} border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100`}>Both</button>
+          <button type="button" onClick={() => setAll("")} className={`${pillCls} border-border bg-muted/40 text-muted-foreground hover:bg-muted`}>Clear</button>
+        </div>
+
+        <div className="rounded-lg border border-border overflow-x-auto">
+          <div className="min-w-[720px]">
+            <div className="grid grid-cols-[84px_minmax(110px,1fr)_44px_72px_96px_150px_120px] gap-2 px-3 py-2 bg-muted/50 border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground font-medium items-center">
+              <div>Code</div><div>Item</div><div>UoM</div>
+              <div className="text-right">Shortage</div>
+              <div className="text-right">Procure Qty</div>
+              <div>Method</div>
+              <div>Status</div>
+            </div>
+            {shortfalls.map((item) => {
+              const m = methodDraft[item.id] ?? "";
+              const meta = METHOD_META[m];
+              return (
+                <div key={item.id} className="grid grid-cols-[84px_minmax(110px,1fr)_44px_72px_96px_150px_120px] gap-2 px-3 py-2 border-b border-border last:border-b-0 items-center">
+                  <div className="text-xs font-mono text-muted-foreground truncate" title={item.id}>{item.id}</div>
+                  <div className="text-sm font-medium truncate" title={item.name}>{item.name}</div>
+                  <div className="text-xs text-muted-foreground">{item.uom}</div>
+                  <div className="text-right text-sm font-semibold tabular-nums text-red-600">{item.shortfall}</div>
+                  <div className="flex justify-end">
+                    <Input
+                      type="number" min={0} step="any"
+                      value={qtyDraft[item.id] ?? ""}
+                      onChange={(e) => setQtyDraft((p) => ({ ...p, [item.id]: e.target.value }))}
+                      className="h-8 w-24 text-right tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <select
+                      value={m}
+                      onChange={(e) => setMethodDraft((p) => ({ ...p, [item.id]: e.target.value as FulfillMethod }))}
+                      className="w-full h-8 rounded-md border border-input bg-background px-2 text-xs"
+                    >
+                      <option value="">Select method…</option>
+                      <option value="direct">Direct Receive</option>
+                      <option value="requisition">Requisition</option>
+                      <option value="both">Both</option>
+                    </select>
+                  </div>
+                  <div>
+                    <span className={`inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${meta.cls}`}>{meta.label}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+          <span className="text-[11px] text-muted-foreground">
+            {unsetCount > 0
+              ? `${unsetCount} item${unsetCount === 1 ? "" : "s"} still need a method.`
+              : "All items have a method assigned."}
+          </span>
+          <Button size="sm" className="h-8" onClick={save}>
+            <Save className="h-3.5 w-3.5 mr-1.5" /> Save Methods
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

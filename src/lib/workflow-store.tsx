@@ -22,7 +22,9 @@ export type WfPOStatus =
   | "Approved"
   | "Rejected"
   | "Ordered"
+  | "Partially Received"
   | "Received"
+  | "Close Requested"
   | "Closed"
   | "Issued to Vendor";
 
@@ -94,6 +96,9 @@ export type WfPurchaseOrder = {
   rejectionReason?: string;
   officeId?: string;
   warehouseId?: string;
+  /** While a close is pending approval, the status it should revert to if the
+   *  close request is rejected (Approved or Partially Received). */
+  closeRequestedFrom?: WfPOStatus;
 };
 
 export type WfTransferNote = {

@@ -294,7 +294,7 @@ export default function QualityControl() {
 
       {/* GRN-level, item-wise inspection — every item split into Pass / Fail */}
       <Dialog open={!!inspectGrn} onOpenChange={(v) => { if (!v) setInspectGrnId(null); }}>
-        <DialogContent className="max-w-3xl">
+        <DialogContent className="max-w-5xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <ClipboardCheck className="h-4 w-4 text-primary" /> QC Inspection
