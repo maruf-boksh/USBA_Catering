@@ -35,6 +35,22 @@ export type PurchaseRequisition = {
   totalAmount: number;
 };
 
+// ── Approval SLA ─────────────────────────────────────────────────────────────
+// A requisition must be approved within this many hours of its PR date. Past
+// that window the approver and requester are notified, and the requester may
+// re-send the requisition for approval.
+export const PR_APPROVAL_SLA_HOURS = 72;
+
+/** True when a still-pending requisition has passed its 72-hour approval window. */
+export function isPrApprovalOverdue(pr: PurchaseRequisition, now: Date = new Date()): boolean {
+  const s = pr.status.toLowerCase();
+  if (s !== "pending approval" && s !== "pending") return false;
+  const created = new Date(`${pr.date}T00:00:00`);
+  if (Number.isNaN(created.getTime())) return false;
+  const deadline = created.getTime() + PR_APPROVAL_SLA_HOURS * 3600 * 1000;
+  return now.getTime() > deadline;
+}
+
 export const seedRequisitions: PurchaseRequisition[] = [
   {
     id: "PR-2026-005", date: "2026-05-18", officeId: "OFF-001", warehouseId: "WH-003",

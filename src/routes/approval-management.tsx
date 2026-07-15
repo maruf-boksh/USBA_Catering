@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
@@ -37,6 +37,8 @@ import { getItemStock } from "@/lib/inventory-stock";
 import { roundQty } from "@/lib/num";
 import { useFlightOrders, updateFlightOrdersWhere, type FlightOrder } from "@/lib/flight-orders-store";
 import { useApprovalReviews, setReview, reviewKey } from "@/lib/approval-reviews";
+import { useDirectReceiptApprovals, setDirectReceiptApprovalStatus } from "@/lib/direct-receipt-approvals";
+import { applyReceiptToPR } from "@/lib/purchase-requisitions";
 import { getRfqs, setRfqStatus } from "@/lib/rfqs";
 import { getQuotations, setQuotationStatus } from "@/lib/quotations";
 import { getStockAdjustments, setStockAdjustmentStatus, addAdjustment, reduceInventoryStock, applyInventoryStock } from "@/lib/stock-adjustments";
@@ -329,6 +331,18 @@ function categoryIcon(cat: Category) {
   return CATEGORIES.find((c) => c.key === cat)?.icon ?? FileText;
 }
 
+// Purchase Requisitions must be approved within this window; past it the
+// approver and requester are notified (mirrors the PR module's SLA).
+const PR_APPROVAL_SLA_HOURS = 72;
+
+/** Purchase Requisition still awaiting approval past its 72-hour SLA window. */
+function isPrApprovalItemOverdue(it: ApprovalItem, now: number = Date.now()): boolean {
+  if (it.category !== "Purchase Requisition" || it.status !== "Pending") return false;
+  const created = new Date(it.requestedAt.replace(" ", "T"));
+  if (Number.isNaN(created.getTime())) return false;
+  return now > created.getTime() + PR_APPROVAL_SLA_HOURS * 3600 * 1000;
+}
+
 export default function ApprovalManagementPage() {
   const { role } = useRole();
   const navigate = useNavigate();
@@ -341,8 +355,9 @@ export default function ApprovalManagementPage() {
     wfPurchaseOrders, updatePurchaseOrder,
     productionEntries, updateProductionEntryStatus,
     maintenanceApprovals, updateMaintenanceApproval,
-    applyStockDeltas,
+    applyStockDeltas, addGRN,
   } = useWorkflow();
+  const directReceipts = useDirectReceiptApprovals();
   const flightOrders = useFlightOrders();
 
   const [items, setItems] = useState<ApprovalItem[]>(SEED);
@@ -403,6 +418,11 @@ export default function ApprovalManagementPage() {
   const [rejectOpen, setRejectOpen] = useState(false);
   const [rejectTarget, setRejectTarget] = useState<ApprovalItem | null>(null);
   const [rejectReason, setRejectReason] = useState("");
+  // Review-from-list (send back for correction) — compact dialog launched from
+  // the pending-list actions, mirroring the Reject dialog.
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewTarget, setReviewTarget] = useState<ApprovalItem | null>(null);
+  const [reviewComment, setReviewComment] = useState("");
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailItem, setDetailItem] = useState<ApprovalItem | null>(null);
   const [fulfillStoreDone, setFulfillStoreDone] = useState(false);
@@ -1020,8 +1040,27 @@ export default function ApprovalManagementPage() {
     })) as ApprovalItem[];
   }, [delayApprovals]);
 
+  // Direct receives (spot buys) submitted from Receive Items → routed here as
+  // Goods Receipt approvals. Approving records the GRN (→ Quality Control).
+  const directReceiptItems: ApprovalItem[] = useMemo(() => directReceipts.map((d) => ({
+    id: `DRC-AP-${d.id}`,
+    category: "Goods Receipt" as Category,
+    refId: d.dpRef,
+    title: `Direct Receive — ${d.vendor}`,
+    requestedBy: d.requestedBy,
+    requestedAt: d.requestedAt,
+    summary: `Spot buy · ${d.itemsCount} item${d.itemsCount === 1 ? "" : "s"} · ${d.justification}${d.attachments.length ? ` · ${d.attachments.length} attachment(s): ${d.attachments.join(", ")}` : ""}`,
+    amount: d.amount,
+    itemsCount: d.itemsCount,
+    status: d.status === "Approved" ? "Approved" : d.status === "Rejected" ? "Rejected" : "Pending",
+    processedBy: d.processedBy,
+    processedAt: d.processedAt,
+    rejectionReason: d.rejectionReason,
+    lines: d.grn.lines.map((l) => ({ name: l.name, qty: l.qty, uom: l.uom })),
+  })), [directReceipts]);
+
   const allItems = useMemo(() => {
-    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...hygieneAppealItems, ...hygieneDailyItems, ...wastageItems, ...delayApprovalItems, ...items];
+    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...stockAdjItems, ...wfPoItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...hygieneAppealItems, ...hygieneDailyItems, ...wastageItems, ...delayApprovalItems, ...directReceiptItems, ...items];
     // Overlay "Reviewed" (returned for correction) onto still-pending requests.
     return base.map((it) => {
       const rv = reviews[reviewKey(it.category, it.refId)];
@@ -1030,7 +1069,7 @@ export default function ApprovalManagementPage() {
       }
       return it;
     });
-  }, [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, hygieneAppealItems, hygieneDailyItems, wastageItems, delayApprovalItems, items, reviews]);
+  }, [flightOrderItems, demandItems, rfqItems, quotationItems, stockAdjItems, wfPoItems, productionItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, hygieneAppealItems, hygieneDailyItems, wastageItems, delayApprovalItems, directReceiptItems, items, reviews]);
 
   const counts = useMemo(() => {
     const pendingByCat = new Map<Category, number>();
@@ -1063,6 +1102,20 @@ export default function ApprovalManagementPage() {
   }, [allItems, activeTab, search, dateFrom, dateTo]);
 
   const pendingItems = filtered.filter((it) => it.status === "Pending");
+
+  // 72-hour approval SLA for Purchase Requisitions — flag overdue pending PRs and
+  // notify (once) that the approver and requester were alerted.
+  const overduePrItems = pendingItems.filter((it) => isPrApprovalItemOverdue(it));
+  const prSlaNotifiedRef = useRef(false);
+  useEffect(() => {
+    if (overduePrItems.length > 0 && !prSlaNotifiedRef.current) {
+      prSlaNotifiedRef.current = true;
+      toast.warning(
+        `${overduePrItems.length} purchase requisition${overduePrItems.length === 1 ? "" : "s"} pending approval beyond ${PR_APPROVAL_SLA_HOURS}h — approver and requester notified.`,
+      );
+    }
+  }, [overduePrItems.length]);
+
   const recentItems  = filtered
     .filter((it) => it.status !== "Pending")
     .sort((a, b) => (b.processedAt ?? "").localeCompare(a.processedAt ?? ""))
@@ -1478,6 +1531,16 @@ export default function ApprovalManagementPage() {
       }
       return;
     }
+    if (it.category === "Goods Receipt" && it.id.startsWith("DRC-AP-")) {
+      const dr = directReceipts.find((d) => `DRC-AP-${d.id}` === it.id);
+      if (!dr) { if (!silent) toast.error(`${it.refId} not found.`); return; }
+      // Record the GRN (→ Quality Control) and write back any PR receipts.
+      addGRN(dr.grn);
+      if (dr.sourcePrId && dr.prReceipts?.length) applyReceiptToPR(dr.sourcePrId, dr.prReceipts);
+      setDirectReceiptApprovalStatus(dr.id, "Approved", { processedBy: `${role} (GM/Admin)`, processedAt: stamp() });
+      if (!silent) toast.success(`${it.refId} approved & recorded — sent to Quality Control.`);
+      return;
+    }
     setItems((p) =>
       p.map((x) =>
         x.id === it.id
@@ -1493,6 +1556,35 @@ export default function ApprovalManagementPage() {
     setRejectTarget(it);
     setRejectReason("");
     setRejectOpen(true);
+  };
+
+  const openReview = (it: ApprovalItem) => {
+    setReviewTarget(it);
+    setReviewComment("");
+    setReviewOpen(true);
+  };
+
+  // Send a pending request back to its requester for correction (not a reject).
+  // Mirrors confirmDetailReview but is driven by the list-level review dialog.
+  const confirmListReview = () => {
+    if (!reviewTarget) return;
+    if (!reviewComment.trim()) { toast.error("Provide a review comment for the requester."); return; }
+    const comment = reviewComment.trim();
+    const by = `${role} (GM/Admin)`;
+    const at = stamp();
+    if (reviewTarget.category === "Flight Orders" || reviewTarget.category === "Crew Orders") {
+      const t = reviewTarget.category === "Crew Orders" ? "crew" : "flight";
+      updateFlightOrdersWhere(
+        (o) => o.orderNo === reviewTarget.refId && (o.orderType === "crew" ? "crew" : "flight") === t && o.status === "Pending",
+        { reviewComment: comment, reviewedBy: by, reviewedAt: at },
+      );
+    } else {
+      setReview(reviewTarget.category, reviewTarget.refId, { by, at, comment });
+    }
+    toast.success(`${reviewTarget.refId} sent back to the requester for correction.`);
+    setReviewOpen(false);
+    setReviewComment("");
+    setReviewTarget(null);
   };
 
   // Core reject for a single item (category-aware). `silent` suppresses the
@@ -1621,6 +1713,9 @@ export default function ApprovalManagementPage() {
             : e,
         ),
       );
+    } else if (it.category === "Goods Receipt" && it.id.startsWith("DRC-AP-")) {
+      const dr = directReceipts.find((d) => `DRC-AP-${d.id}` === it.id);
+      if (dr) setDirectReceiptApprovalStatus(dr.id, "Rejected", { rejectionReason: reason, processedBy: `${role} (GM/Admin)`, processedAt: stamp() });
     } else {
       setItems((p) =>
         p.map((x) =>
@@ -2843,7 +2938,14 @@ export default function ApprovalManagementPage() {
                                 className="text-left hover:underline focus:outline-none focus:underline"
                                 onClick={() => openDetail(it)}
                               >
-                                <div className="font-mono text-xs text-foreground">{it.refId}</div>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-mono text-xs text-foreground">{it.refId}</span>
+                                  {isPrApprovalItemOverdue(it) && (
+                                    <span className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                                      <AlertTriangle className="h-2.5 w-2.5" /> 72h overdue · notified
+                                    </span>
+                                  )}
+                                </div>
                                 <div className="text-sm font-medium text-foreground">{it.title}</div>
                                 <div className="text-[11px] text-muted-foreground mt-0.5 line-clamp-1">{it.summary}</div>
                               </button>
@@ -2869,6 +2971,14 @@ export default function ApprovalManagementPage() {
                                   title="View details"
                                 >
                                   <Eye className="h-3.5 w-3.5" />
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-7 px-2 text-[11px] border-amber-400 text-amber-700 hover:bg-amber-50"
+                                  onClick={() => openReview(it)}
+                                >
+                                  <CornerUpLeft className="h-3 w-3 mr-1" /> Review
                                 </Button>
                                 <Button
                                   size="sm"
@@ -3112,6 +3222,41 @@ export default function ApprovalManagementPage() {
             <Button variant="outline" onClick={() => setRejectOpen(false)}>Cancel</Button>
             <Button variant="destructive" onClick={confirmReject}>
               <XIcon className="h-4 w-4 mr-1.5" /> Confirm Reject
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Review dialog — send a pending request back for correction */}
+      <Dialog open={reviewOpen} onOpenChange={setReviewOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{reviewTarget ? `Review ${reviewTarget.refId}` : "Review request"}</DialogTitle>
+            <DialogDescription>
+              Sent back to the requester for correction — not rejected. They can amend and resubmit.
+            </DialogDescription>
+          </DialogHeader>
+          {reviewTarget && (
+            <div className="rounded-md border border-border bg-muted/30 p-3 text-xs">
+              <div className="text-foreground font-medium">{reviewTarget.title}</div>
+              <div className="text-muted-foreground mt-0.5">{reviewTarget.summary}</div>
+            </div>
+          )}
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+              Review Comment <span className="text-destructive">*</span>
+            </Label>
+            <Textarea
+              value={reviewComment}
+              onChange={(e) => setReviewComment(e.target.value)}
+              placeholder="Tell the requester what needs to change..."
+              className="mt-1 min-h-24"
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReviewOpen(false)}>Cancel</Button>
+            <Button className="bg-amber-500 text-white hover:bg-amber-600" onClick={confirmListReview}>
+              <CornerUpLeft className="h-4 w-4 mr-1.5" /> Send for Correction
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3671,13 +3816,6 @@ export default function ApprovalManagementPage() {
                       onClick={() => setDetailRejectOpen(true)}
                     >
                       <XIcon className="h-4 w-4 mr-1.5" /> Reject
-                    </Button>
-                    <Button
-                      variant="outline"
-                      className="border-amber-400 text-amber-700 hover:bg-amber-50"
-                      onClick={() => setDetailReviewOpen(true)}
-                    >
-                      <CornerUpLeft className="h-4 w-4 mr-1.5" /> Review
                     </Button>
                     <Button
                       className="bg-success text-success-foreground hover:bg-success/90"

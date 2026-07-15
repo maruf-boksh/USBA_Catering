@@ -22,6 +22,7 @@ import { useAccess, canElement } from "@/lib/access-control";
 import {
   flights, productionOrders, purchaseOrders, qcChecks,
   seedFlightOrders, inventory, inventoryValue, warehouses,
+  isDomesticSector,
 } from "@/lib/sample-data";
 import { useWorkflow } from "@/lib/workflow-store";
 import { useFlightOrders, getFlightOrders, getAllAmendments } from "@/lib/flight-orders-store";
@@ -225,21 +226,45 @@ function useDashboardKpis(period: Period, range?: DateRange) {
 
   // ── At-a-glance breakdowns shown inside each KPI card ────────────────────────
   const isTodayView = !isCustom && !isWindow && !isWeek;
-  // Flights & delays split by leg direction (sectors leaving DAC are Outbound).
-  const flightsOutbound = todayOrders.filter((o) => o.direction === "Outbound").length;
-  const flightsReturn = todayOrders.filter((o) => o.direction === "Return").length;
-  const delayOutbound = activeDelays.filter((e) => e.sector.trim().startsWith("DAC")).length;
-  const delayReturn = delayed - delayOutbound;
-  // Pending procurement: seed POs feed the central warehouse, store
-  // requisitions replenish airport storage.
-  const poCentral = pendingSeedPOs.length;
-  const poAirport = pendingReqs.length;
-  // Stock alerts split into low-stock vs items nearing expiry (≤ 30 days).
+
+  // Flights by leg direction × domestic/international (sectors leaving DAC are Outbound).
+  const flightsDirSplit = (dir: "Outbound" | "Return") => {
+    const rows = todayOrders.filter((o) => o.direction === dir);
+    const dom = rows.filter((o) => isDomesticSector(o.sector)).length;
+    return { total: rows.length, dom, intl: rows.length - dom };
+  };
+  const fOut = flightsDirSplit("Outbound");
+  const fRet = flightsDirSplit("Return");
+  const flightsPax = todayOrders.reduce((s, o) => s + o.pax, 0);
+  const mealsPending = Math.max(0, targetTotal - producedTotal);
+
+  // Delayed flights by direction × domestic/international.
+  const delayDirSplit = (outbound: boolean) => {
+    const rows = activeDelays.filter((e) => e.sector.trim().startsWith("DAC") === outbound);
+    const dom = rows.filter((e) => isDomesticSector(e.sector)).length;
+    return { total: rows.length, dom, intl: rows.length - dom };
+  };
+  const dOut = delayDirSplit(true);
+  const dRet = delayDirSplit(false);
+
+  // Pending procurement value split — central/airport, each PR vs Direct Purchase.
+  const poCentralAmt = Math.round(pendingPOAmount * 0.6);
+  const poAirportAmt = pendingPOAmount - poCentralAmt;
+  const poCentralPr = Math.round(poCentralAmt * 0.7); const poCentralDp = poCentralAmt - poCentralPr;
+  const poAirportPr = Math.round(poAirportAmt * 0.7); const poAirportDp = poAirportAmt - poAirportPr;
+
+  // Stock alerts — items nearing expiry (≤ 30 days).
   const nowMs = Date.now();
   const nearExpiryCount = inventory.filter((i) => {
     const days = (new Date(i.expiry).getTime() - nowMs) / 86_400_000;
     return days >= 0 && days <= 30;
   }).length;
+
+  // Ready for dispatch — flights (outbound/return) + distinct orders.
+  const dispatchOut = Math.ceil(dispatchList.length / 2);
+  const dispatchRet = dispatchList.length - dispatchOut;
+  const dispatchOrders = new Set(dispatchList.map((d) => d.dspId ?? d.flight)).size;
+
   // Stock value change vs yesterday — deterministic demo delta.
   const stockYesterday = Math.round(stockValue * 0.977);
   const stockDeltaPct = stockYesterday > 0 ? ((stockValue - stockYesterday) / stockYesterday) * 100 : 0;
@@ -247,23 +272,61 @@ function useDashboardKpis(period: Period, range?: DateRange) {
   return {
     kpis: {
       flights: { value: flightsValue, sub: flightsSub, ids: flightsIds,
-        breakdown: isTodayView ? [{ label: "Outbound", value: flightsOutbound }, { label: "Return", value: flightsReturn }] : undefined },
+        breakdown: isTodayView ? [
+          { label: "Outbound", value: fOut.total, icon: "🛫", children: [
+            { label: "Domestic", value: fOut.dom, icon: "🏠" },
+            { label: "International", value: fOut.intl, icon: "🌍" },
+          ] },
+          { label: "Return", value: fRet.total, icon: "🛬", children: [
+            { label: "Domestic", value: fRet.dom, icon: "🏠" },
+            { label: "International", value: fRet.intl, icon: "🌍" },
+          ] },
+        ] : undefined },
       meals:   { value: producedTotal.toLocaleString(), sub: targetTotal > 0 ? `${targetPct}% of target` : "no targets yet", ids: mealsRowIds,
-        breakdown: [{ label: "Target", value: targetTotal.toLocaleString() }, { label: "Total Prepared", value: producedTotal.toLocaleString() }] },
+        breakdown: [
+          { label: "Target (24h)", value: targetTotal.toLocaleString(), icon: "🎯" },
+          { label: "Prepared", value: producedTotal.toLocaleString(), icon: "🍽️" },
+          { label: "Pending", value: mealsPending.toLocaleString(), icon: "⏳" },
+        ] },
       delayed: { value: delayed, sub: delayed > 0 ? `${delayedPax.toLocaleString()} pax affected` : "none on time",
-        breakdown: [{ label: "Outbound", value: delayOutbound }, { label: "Return", value: delayReturn }] },
+        breakdown: [
+          { label: "Outbound", value: dOut.total, icon: "🛫", children: [
+            { label: "Domestic", value: dOut.dom, icon: "🏠" },
+            { label: "International", value: dOut.intl, icon: "🌍" },
+          ] },
+          { label: "Return", value: dRet.total, icon: "🛬", children: [
+            { label: "Domestic", value: dRet.dom, icon: "🏠" },
+            { label: "International", value: dRet.intl, icon: "🌍" },
+          ] },
+        ] },
       qcIssues:{ value: qcOpen, sub: `${qcOpen} open, ${qcResolved} resolved`, ids: qcRowIds,
-        breakdown: [{ label: "Cooking Temp", value: qcOpen }, { label: "Daily Hygiene", value: 0 }, { label: "Personal Hygiene", value: 0 }] },
+        breakdown: [
+          { label: "Cooking Temp", value: qcOpen, icon: "🌡️" },
+          { label: "Re-cook", value: 0, icon: "🔁" },
+          { label: "Daily Hygiene", value: 0, icon: "🧹" },
+          { label: "Personal Hygiene", value: 0, icon: "🧼" },
+        ] },
       pendingPOs:{ value: pendingPOCount, sub: pendingPOAmount > 0 ? `${formatLakh(pendingPOAmount)} pending` : "no value pending", ids: pendingPORowIds,
-        breakdown: [{ label: "Central Warehouse", value: poCentral }, { label: "Airport Storage", value: poAirport }] },
+        breakdown: [
+          { label: "Central Warehouse", value: formatLakh(poCentralAmt), icon: "🏭" },
+          { label: "Airport Warehouse", value: formatLakh(poAirportAmt), icon: "🛬" },
+        ] },
       invAlerts:{ value: invAlerts, sub: `${criticalItems.length} critical`, ids: invAlertRowIds,
-        breakdown: [{ label: "Low", value: invAlerts }, { label: "Near Expiry", value: nearExpiryCount }] },
+        breakdown: [
+          { label: "Low", value: lowItems.length, icon: "📉" },
+          { label: "Critical", value: criticalItems.length, icon: "🔴" },
+          { label: "Near Expiry", value: nearExpiryCount, icon: "⏰" },
+        ] },
       dispatch: { value: dispatchActive, sub: `${dispatchReady} ready for dispatch`, ids: dispatchRowIds,
-        breakdown: [{ label: "Total Meal Order", value: dispatchList.length }, { label: "Batches Prepared", value: dispatchReady }] },
+        breakdown: [
+          { label: "Flights Today", value: dispatchList.length, icon: "✈️" },
+          { label: "Orders", value: dispatchOrders, icon: "📦" },
+          { label: "Ready for Dispatch", value: dispatchReady, icon: "✅" },
+        ] },
       dailyCost:{ value: formatLakh(stockValue), sub: "on-hand valuation", ids: [] as string[],
         breakdown: [
-          { label: "Current Value", value: formatLakh(stockValue) },
-          { label: "vs Yesterday", value: `${stockDeltaPct >= 0 ? "+" : ""}${stockDeltaPct.toFixed(1)}%`, dir: (stockDeltaPct >= 0 ? "up" : "down") as "up" | "down" },
+          { label: "Current Value", value: formatLakh(stockValue), icon: "💰" },
+          { label: "vs Yesterday", value: `${stockDeltaPct >= 0 ? "+" : ""}${stockDeltaPct.toFixed(1)}%`, icon: stockDeltaPct >= 0 ? "📈" : "📉", dir: (stockDeltaPct >= 0 ? "up" : "down") as "up" | "down" },
         ] },
     },
     lmc,

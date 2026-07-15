@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -17,7 +17,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  FileText, ClipboardList, CheckCircle, Plus, Save, Send, Trash2, Pencil, Eye, ArrowLeft, ShoppingCart,
+  FileText, ClipboardList, CheckCircle, Plus, Save, Send, Trash2, Pencil, Eye, ArrowLeft, ShoppingCart, AlertTriangle,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
@@ -30,6 +30,8 @@ import {
   procurementStage,
   prReceived,
   matchesStatusFilter,
+  isPrApprovalOverdue,
+  PR_APPROVAL_SLA_HOURS,
   PR_STATUS_FILTERS,
   type PRLineItem,
   type Priority,
@@ -128,6 +130,9 @@ export default function PurchaseRequisitionPage() {
   const [filterWarehouse, setFilterWarehouse] = useState("");
   const [filterStatus, setFilterStatus] = useState("All");
   const [prefill, setPrefill] = useState<PRPrefill | null>(null);
+  // Re-send (for overdue PRs) — collects a fresh justification in a popup.
+  const [resendTarget, setResendTarget] = useState<PurchaseRequisition | null>(null);
+  const [resendReason, setResendReason] = useState("");
 
   // Status values where a requisition is still mutable. Once approved /
   // rejected / closed the form is read-only.
@@ -223,6 +228,50 @@ export default function PurchaseRequisitionPage() {
   const pendingCount = filtered.filter((r) => r.status === "Pending Approval").length;
   const approvedCount = filtered.filter((r) => r.status === "Approved").length;
 
+  // ── 72-hour approval SLA ────────────────────────────────────────────────────
+  const today = new Date().toISOString().slice(0, 10);
+  const overduePending = combined.filter((r) => isPrApprovalOverdue(r));
+
+  // Notify (once per mount) that the approver and requester were alerted about
+  // requisitions still pending beyond the 72-hour window.
+  const slaNotifiedRef = useRef(false);
+  useEffect(() => {
+    if (overduePending.length > 0 && !slaNotifiedRef.current) {
+      slaNotifiedRef.current = true;
+      toast.warning(
+        `${overduePending.length} requisition${overduePending.length === 1 ? "" : "s"} pending approval beyond ${PR_APPROVAL_SLA_HOURS}h — approver and requester notified.`,
+      );
+    }
+  }, [overduePending.length]);
+
+  // Requester re-sends an overdue requisition — opens a justification popup first.
+  const openResend = (r: PurchaseRequisition) => {
+    setResendTarget(r);
+    setResendReason("");
+  };
+
+  // Confirm re-send: resets the 72h clock (new PR date) and records the
+  // requester's justification (mentioning the earlier delay).
+  const confirmResend = () => {
+    if (!resendTarget) return;
+    if (!resendReason.trim()) { toast.error("Add a justification mentioning the earlier delay."); return; }
+    const note = `[Re-sent ${today} after earlier ${PR_APPROVAL_SLA_HOURS}h approval delay] `;
+    const updated: PurchaseRequisition = {
+      ...resendTarget,
+      date: today,
+      status: "Pending Approval",
+      justification: note + resendReason.trim(),
+    };
+    if (requisitions.some((x) => x.id === resendTarget.id)) {
+      setRequisitions((prev) => prev.map((x) => (x.id === resendTarget.id ? updated : x)));
+    } else {
+      updateRequisition(resendTarget.id, { note: updated.justification });
+    }
+    toast.success(`${resendTarget.id} re-sent for approval — 72h window reset; approver notified.`);
+    setResendTarget(null);
+    setResendReason("");
+  };
+
   const cols: Column<PurchaseRequisition>[] = [
     { key: "id",          header: "PR No" },
     { key: "date",        header: "Date" },
@@ -311,6 +360,19 @@ export default function PurchaseRequisitionPage() {
             </span>
           </div>
 
+          {overduePending.length > 0 && (
+            <div className="mb-3 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50/70 px-3 py-2 text-xs text-amber-900">
+              <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-amber-600" />
+              <div>
+                <span className="font-semibold">
+                  {overduePending.length} requisition{overduePending.length === 1 ? "" : "s"} pending approval beyond {PR_APPROVAL_SLA_HOURS} hours.
+                </span>{" "}
+                The approver and requester have been notified. The requester can re-send an overdue requisition for approval — the earlier delay is recorded in its justification.
+                <span className="ml-1 font-mono text-[11px]">{overduePending.map((r) => r.id).join(", ")}</span>
+              </div>
+            </div>
+          )}
+
           <div data-arrival-id="pr-list">
             <DataTable
               title="purchase-requisitions"
@@ -320,6 +382,17 @@ export default function PurchaseRequisitionPage() {
               selectable={false}
               actions={(r) => (
                 <div className="flex items-center gap-1.5">
+                  {isPrApprovalOverdue(r) && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2 text-[11px] border-amber-400 text-amber-700 hover:bg-amber-50"
+                      onClick={() => openResend(r)}
+                      title={`Re-send ${r.id} for approval`}
+                    >
+                      <Send className="h-3 w-3 mr-1" /> Re-send
+                    </Button>
+                  )}
                   {isEditable(r) && (
                     <Button
                       size="icon"
@@ -365,6 +438,35 @@ export default function PurchaseRequisitionPage() {
         onClose={() => setEditing(null)}
         onSave={saveEditedRequisition}
       />
+
+      {/* Re-send for approval — justification popup for overdue requisitions */}
+      <Dialog open={!!resendTarget} onOpenChange={(o) => { if (!o) setResendTarget(null); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{resendTarget ? `Re-send ${resendTarget.id} for approval` : "Re-send for approval"}</DialogTitle>
+          </DialogHeader>
+          <div className="rounded-md border border-amber-300 bg-amber-50/60 px-3 py-2 text-xs text-amber-900">
+            This requisition was pending approval beyond {PR_APPROVAL_SLA_HOURS} hours. Re-sending resets the 72-hour window and notifies the approver — mention the earlier delay below.
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+              Justification <span className="text-destructive">*</span>
+            </Label>
+            <Textarea
+              value={resendReason}
+              onChange={(e) => setResendReason(e.target.value)}
+              placeholder="Explain the re-send, noting the earlier 72-hour approval delay…"
+              className="mt-1 min-h-24"
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setResendTarget(null)}>Cancel</Button>
+            <Button onClick={confirmResend}>
+              <Send className="h-4 w-4 mr-1.5" /> Re-send
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
@@ -377,9 +479,11 @@ function PurchaseRequisitionCreate({
   prefill?: PRPrefill | null;
 }) {
   const today = new Date().toISOString().slice(0, 10);
+  // Required By must not exceed 72 hours (3 days) from the PR date.
+  const maxRequiredBy = new Date(Date.now() + 72 * 3600 * 1000).toISOString().slice(0, 10);
 
-  // Header state
-  const [prDate, setPrDate] = useState(today);
+  // Header state — PR Date is auto-set by the system (not user-editable).
+  const [prDate] = useState(today);
   const [officeId, setOfficeId] = useState(prefill?.officeId ?? "OFF-001");
   const [warehouseId, setWarehouseId] = useState(prefill?.warehouseId ?? "WH-001");
   const [requestedBy, setRequestedBy] = useState(prefill?.requestedBy ?? "");
@@ -459,6 +563,10 @@ function PurchaseRequisitionCreate({
     if (!officeId) { toast.error("Office is required."); return; }
     if (!warehouseId) { toast.error("Warehouse is required."); return; }
     if (!requestedBy.trim()) { toast.error("Requested By is required."); return; }
+    if (requiredBy && requiredBy > maxRequiredBy) {
+      toast.error("Required By must be within 72 hours of the PR date.");
+      return;
+    }
     if (lines.length === 0) { toast.error("Add at least one line item."); return; }
 
     const newPR: PurchaseRequisition = {
@@ -503,9 +611,11 @@ function PurchaseRequisitionCreate({
               <Input
                 type="date"
                 value={prDate}
-                onChange={(e) => setPrDate(e.target.value)}
+                readOnly
+                disabled
                 className="mt-1"
               />
+              <p className="text-[10px] text-muted-foreground mt-1">Auto-set by the system to today.</p>
             </div>
 
             <div>
@@ -515,9 +625,12 @@ function PurchaseRequisitionCreate({
               <Input
                 type="date"
                 value={requiredBy}
+                min={today}
+                max={maxRequiredBy}
                 onChange={(e) => setRequiredBy(e.target.value)}
                 className="mt-1"
               />
+              <p className="text-[10px] text-muted-foreground mt-1">Must be within 72 hours of the PR date.</p>
             </div>
 
             <LocationPicker

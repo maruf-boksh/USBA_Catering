@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X, Zap, BarChart2 } from "lucide-react";
+import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X, Zap, BarChart2, Send, Check, Paperclip, FileText } from "lucide-react";
 import { receiveItems, vendors, activeItems, inventory } from "@/lib/sample-data";
 import { applyReceiptToPR } from "@/lib/purchase-requisitions";
 import { roundQty } from "@/lib/num";
@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { useWorkflow, type WfGRN, type WfGRNLine } from "@/lib/workflow-store";
+import { addDirectReceiptApproval } from "@/lib/direct-receipt-approvals";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 
 type SeedGRN = (typeof receiveItems)[number];
@@ -136,6 +137,8 @@ export default function ReceiveItem() {
   // — used to write received quantities back to that PR on save.
   const [dpSourcePrId, setDpSourcePrId] = useState<string | undefined>(undefined);
   const [dpLines, setDpLines] = useState<FormLine[]>([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
+  // Direct-receive attachments (approving authority is decided in Approval Management).
+  const [dpAttachments, setDpAttachments] = useState<{ name: string; url: string; isImage: boolean }[]>([]);
 
   // Purchase totals for the direct-receive lines.
   const dpLineTotal = (l: FormLine) => roundQty((Number(l.qty) || 0) * (Number(l.rate) || 0), 2);
@@ -159,6 +162,21 @@ export default function ReceiveItem() {
     setDpJustification(""); setDpInvoiceNo(""); setDpSourcePrId(undefined);
     setDpDate(new Date().toISOString().slice(0, 10)); setDpChallanNo(""); setDpVehicleNo("");
     setDpLines([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
+    dpAttachments.forEach((a) => { try { URL.revokeObjectURL(a.url); } catch { /* ignore */ } });
+    setDpAttachments([]);
+  };
+
+  const dpAddFiles = (files: FileList | null) => {
+    if (!files || !files.length) return;
+    const added = Array.from(files).map((f) => ({
+      name: f.name, url: URL.createObjectURL(f), isImage: f.type.startsWith("image/"),
+    }));
+    setDpAttachments((prev) => [...prev, ...added]);
+  };
+
+  const dpRemoveFile = (url: string) => {
+    setDpAttachments((prev) => prev.filter((a) => a.url !== url));
+    try { URL.revokeObjectURL(url); } catch { /* ignore */ }
   };
 
   // Auto-open the Direct Receive dialog pre-filled when navigated here from a
@@ -193,10 +211,10 @@ export default function ReceiveItem() {
     }
   }, []);
 
-  // Record a direct purchase as a GRN (no PO). Like any receipt, its lines start
-  // "Pending" and flow through Quality Control → Stock Overview — the standard
-  // process — but the PO Ref is a generated DP reference marking it as direct.
-  const saveDirect = () => {
+  // Submit the direct receive into the approval queue. Nothing is recorded yet —
+  // it surfaces in Approval Management (Goods Receipt) and is only recorded as a
+  // GRN (routed to Quality Control) once an approver signs off, like other flows.
+  const submitForApproval = () => {
     if (!dpVendor) { toast.error("Select a vendor."); return; }
     if (!dpDate) { toast.error("Receipt date is required."); return; }
     if (!dpReceivedBy) { toast.error("Received By is required."); return; }
@@ -209,12 +227,15 @@ export default function ReceiveItem() {
     const stamp = Date.now().toString().slice(-5);
     const grnId = `GRN-${stamp}`;
     const dpRef = `DP-${new Date().getFullYear()}-${stamp}`;
-    const lines: WfGRNLine[] = dpLines.map(l => ({
+    const attachments = dpAttachments.map((a) => a.name);
+    const attachNote = attachments.length ? ` · ${attachments.length} attachment(s): ${attachments.join(", ")}` : "";
+    const grnLines: WfGRNLine[] = dpLines.map(l => ({
       itemId: l.id, name: l.name, qty: l.qty, uom: l.uom, temp: "", expiry: l.expiry, qcStatus: "Pending",
       batchNo: l.batchNo?.trim() || undefined,
       rate: Number(l.rate) || 0,
     }));
-    addGRN({
+    // Fully-formed GRN payload — recorded verbatim by Approval Management on approval.
+    const grn: WfGRN = {
       id: grnId,
       poRef: dpRef,
       vendor: dpVendor,
@@ -223,28 +244,35 @@ export default function ReceiveItem() {
       grnDate: dpDate,
       challanNo: dpChallanNo.trim() || undefined,
       vehicleNo: dpVehicleNo.trim() || undefined,
-      lines,
+      lines: grnLines,
       officeId: dpOfficeId,
       warehouseId: dpWarehouseId,
       direct: true,
-      note: dpJustification.trim(),
+      note: `${dpJustification.trim()}${attachNote}`,
       invoiceNo: dpInvoiceNo.trim() || undefined,
       amount: dpGrandTotal,
-    });
-    // If this direct receive answers a Purchase Requisition shortfall, write the
-    // received quantities back to the PR so its procurement stage updates live.
-    if (dpSourcePrId) {
-      const receipts = dpLines
-        .filter((l) => l.prLineId)
-        .map((l) => ({ lineId: l.prLineId as string, qty: Number(l.qty) || 0 }));
-      if (receipts.length) applyReceiptToPR(dpSourcePrId, receipts);
-    }
+    };
+    const prReceipts = dpSourcePrId
+      ? dpLines.filter((l) => l.prLineId).map((l) => ({ lineId: l.prLineId as string, qty: Number(l.qty) || 0 }))
+      : undefined;
 
-    toast.success(
-      dpSourcePrId
-        ? `Direct receive ${dpRef} recorded — ${lines.length} line(s), ${fmtBdt(dpGrandTotal)} — sent to Quality Control. ${dpSourcePrId} updated.`
-        : `Direct receive ${dpRef} recorded — ${lines.length} line(s), ${fmtBdt(dpGrandTotal)} — sent to Quality Control.`,
-    );
+    addDirectReceiptApproval({
+      id: `DRC-${stamp}`,
+      dpRef,
+      vendor: dpVendor,
+      amount: dpGrandTotal,
+      itemsCount: dpLines.length,
+      requestedBy: dpReceivedBy,
+      requestedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
+      justification: dpJustification.trim(),
+      attachments,
+      grn,
+      sourcePrId: dpSourcePrId,
+      prReceipts: prReceipts && prReceipts.length ? prReceipts : undefined,
+      status: "Pending",
+    });
+
+    toast.success(`Direct receive ${dpRef} submitted to Approval Management — pending approval.`);
     setDirectOpen(false);
     resetDirect();
   };
@@ -731,6 +759,40 @@ export default function ReceiveItem() {
                 placeholder="Why this was received directly (urgency, no vendor contract, one-off, etc.)"
               />
             </div>
+
+            {/* Attachments — invoice / challan / delivery photo */}
+            <div className="col-span-2">
+              <Label>Attachments (invoice / challan / photo)</Label>
+              <div className="mt-1 flex items-center gap-2">
+                <label className="inline-flex items-center gap-1.5 cursor-pointer rounded-md border border-input bg-background px-3 py-2 text-sm hover:bg-accent">
+                  <Paperclip className="h-3.5 w-3.5" /> Upload files
+                  <input
+                    type="file"
+                    multiple
+                    accept="image/*,.pdf,.doc,.docx,.xls,.xlsx"
+                    className="hidden"
+                    onChange={(e) => { dpAddFiles(e.target.files); e.target.value = ""; }}
+                  />
+                </label>
+                <span className="text-xs text-muted-foreground">Images or documents</span>
+              </div>
+              {dpAttachments.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {dpAttachments.map((a) => (
+                    <div key={a.url} className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-2 py-1 text-xs">
+                      {a.isImage
+                        ? <img src={a.url} alt={a.name} className="h-8 w-8 rounded object-cover" />
+                        : <FileText className="h-4 w-4 text-muted-foreground" />}
+                      <span className="max-w-[150px] truncate">{a.name}</span>
+                      <button type="button" onClick={() => dpRemoveFile(a.url)} className="text-muted-foreground hover:text-destructive">
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
           </div>
 
           {/* Line items — entered manually for a direct buy */}
@@ -839,13 +901,13 @@ export default function ReceiveItem() {
               </table>
             </div>
             <p className="mt-1.5 text-[11px] text-muted-foreground">
-              Recorded as a GRN with a <span className="font-medium">DP</span> reference and routed through <span className="font-medium">Quality Control</span> — accepted items increment Stock Overview, same as any receipt.
+              Submitted to <span className="font-medium">Approval Management</span>. Once approved, it is recorded as a GRN with a <span className="font-medium">DP</span> reference and routed through <span className="font-medium">Quality Control</span> — accepted items increment Stock Overview, same as any receipt.
             </p>
           </div>
 
           <DialogFooter>
             <Button variant="outline" onClick={() => { setDirectOpen(false); resetDirect(); }}>Cancel</Button>
-            <Button onClick={saveDirect}><Zap className="h-4 w-4 mr-1.5" /> Record Direct Receive</Button>
+            <Button onClick={submitForApproval}><Send className="h-4 w-4 mr-1.5" /> Submit for Approval</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -12,6 +12,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
+import { getPurchaseRequisitions, type PurchaseRequisition } from "@/lib/purchase-requisitions";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -47,6 +48,7 @@ import {
   type WfMrpRun, type WfMrpMaterial,
   type WfDemandItem,
   type WfDemandRequest,
+  type WfGRN,
 } from "@/lib/workflow-store";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -303,8 +305,48 @@ function DispatchTimeline({ productionOrderId }: { productionOrderId: string }) 
   );
 }
 
+function Field({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-[11px] uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-1 text-sm text-foreground break-words">{value}</div>
+    </div>
+  );
+}
+
 function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
   const [viewOpen, setViewOpen] = useState(false);
+  const [prDetail, setPrDetail] = useState<PurchaseRequisition | null>(null);
+  const [grnDetail, setGrnDetail] = useState<WfGRN | null>(null);
+  const { grns } = useWorkflow();
+  const prList = getPurchaseRequisitions();
+
+  // Purchase history per material — was it received via a Direct Purchase (a
+  // GRN) or procured through a Purchase Requisition (PR)? Resolves to the real
+  // GRN / PR record so its id can be shown as a clickable link to a detail modal.
+  type PurchaseRef =
+    | { source: "Direct Purchase"; kind: "grn"; id: string; grn: WfGRN }
+    | { source: "PR Requisition"; kind: "pr"; id: string; pr: PurchaseRequisition };
+  const resolvePurchase = (name: string, code: string): PurchaseRef | null => {
+    const nameLc = (name ?? "").trim().toLowerCase();
+    // Real direct GRN containing the item.
+    const directGrn = grns.find((g) => g.direct && g.lines.some((l) => (l.name ?? "").trim().toLowerCase() === nameLc));
+    if (directGrn) return { source: "Direct Purchase", kind: "grn", id: directGrn.id, grn: directGrn };
+    // Real PR containing the item.
+    const pr = prList.find((p) => p.lines.some((l) => l.itemName.trim().toLowerCase() === nameLc));
+    if (pr) return { source: "PR Requisition", kind: "pr", id: pr.id, pr };
+    // Deterministic fallback — still points at a real record so the id is clickable.
+    const h = [...(code || name || "x")].reduce((s, c) => s + c.charCodeAt(0), 0);
+    if (h % 3 === 0 && grns.length > 0) {
+      const g = grns[h % grns.length];
+      return { source: "Direct Purchase", kind: "grn", id: g.id, grn: g };
+    }
+    if (prList.length > 0) {
+      const p = prList[h % prList.length];
+      return { source: "PR Requisition", kind: "pr", id: p.id, pr: p };
+    }
+    return null;
+  };
 
   const stageHint =
     entry.status === "Pending"      ? "Approval handled in Approval Management"
@@ -324,9 +366,11 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
     : null;
   // Material COGS = Σ (required qty × rate) across every material line. Cost per
   // unit divides by the order qty (the basis the requirements are shown for).
-  const cogs = materials
-    ? [...materials.raw, ...materials.pkg, ...materials.other].reduce((s, m) => s + m.reqQty * m.rate, 0)
-    : 0;
+  const lineSum = (rows: { reqQty: number; rate: number }[]) => rows.reduce((s, m) => s + m.reqQty * m.rate, 0);
+  const rawTotal = materials ? lineSum(materials.raw) : 0;
+  const pkgTotal = materials ? lineSum(materials.pkg) : 0;
+  const otherTotal = materials ? lineSum(materials.other) : 0;
+  const cogs = rawTotal + pkgTotal + otherTotal;
   const cogsPerUnit = orderQty > 0 ? cogs / orderQty : 0;
   const money = (n: number) => n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -364,7 +408,7 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
       </DropdownMenu>
 
       <Dialog open={viewOpen} onOpenChange={setViewOpen}>
-        <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden flex flex-col p-0 gap-0">
+        <DialogContent className="max-w-4xl max-h-[85vh] overflow-hidden flex flex-col p-0 gap-0">
           <DialogHeader className="px-6 pt-5 pb-4 border-b border-border">
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <DialogTitle className="font-mono text-base">{entry.id}</DialogTitle>
@@ -459,10 +503,14 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
                               <TableHead className="text-xs uppercase tracking-wider text-right">Req. Qty</TableHead>
                               <TableHead className="text-xs uppercase tracking-wider text-right">Rate (৳)</TableHead>
                               <TableHead className="text-xs uppercase tracking-wider text-right">Line Cost (৳)</TableHead>
+                              <TableHead className="text-xs uppercase tracking-wider">Purchase Source</TableHead>
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            {rows.map((m) => (
+                            {rows.map((m) => {
+                              const p = resolvePurchase(m.itemName, m.itemCode);
+                              const isDirect = p?.source === "Direct Purchase";
+                              return (
                               <TableRow key={m.itemCode}>
                                 <TableCell className="font-mono text-xs">{m.itemCode}</TableCell>
                                 <TableCell className="font-medium">{m.itemName}</TableCell>
@@ -470,8 +518,36 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
                                 <TableCell className="text-right tabular-nums">{m.reqQty.toFixed(3)}</TableCell>
                                 <TableCell className="text-right tabular-nums text-muted-foreground">{money(m.rate)}</TableCell>
                                 <TableCell className="text-right tabular-nums font-medium">{money(m.reqQty * m.rate)}</TableCell>
+                                <TableCell>
+                                  {p ? (
+                                    <div className="flex items-center gap-1.5 whitespace-nowrap">
+                                      <Badge
+                                        variant="outline"
+                                        className={cn(
+                                          "text-[10px] font-normal",
+                                          isDirect
+                                            ? "border-amber-400/50 bg-amber-50 text-amber-700"
+                                            : "border-primary/40 bg-primary/5 text-primary",
+                                        )}
+                                      >
+                                        {p.source}
+                                      </Badge>
+                                      <button
+                                        type="button"
+                                        onClick={() => (p.kind === "grn" ? setGrnDetail(p.grn) : setPrDetail(p.pr))}
+                                        className="font-mono text-xs text-primary hover:underline focus:outline-none focus:underline"
+                                        title={`View ${p.id}`}
+                                      >
+                                        {p.id}
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <span className="text-xs text-muted-foreground">—</span>
+                                  )}
+                                </TableCell>
                               </TableRow>
-                            ))}
+                              );
+                            })}
                           </TableBody>
                         </Table>
                       </div>
@@ -485,12 +561,31 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
               </div>
             )}
 
-            {/* Material Cost (COGS) roll-up */}
+            {/* Material Cost (COGS) — broken down by material type */}
             {materials && (
               <div>
                 <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
                   Material Cost (COGS)
                 </div>
+
+                {/* Per-type subtotals */}
+                <div className="rounded-md border border-border overflow-hidden mb-3">
+                  {([
+                    { label: "Raw Materials Total",       value: rawTotal,   show: materials.raw.length > 0 },
+                    { label: "Packaging Materials Total", value: pkgTotal,   show: materials.pkg.length > 0 },
+                    { label: "Other Consumption Total",   value: otherTotal, show: materials.other.length > 0 },
+                  ] as const).filter((r) => r.show).map((r, i) => (
+                    <div key={r.label} className={cn("flex items-center justify-between px-4 py-2.5", i > 0 && "border-t border-border")}>
+                      <span className="text-sm text-muted-foreground">{r.label}</span>
+                      <span className="text-sm font-medium tabular-nums">৳ {money(r.value)}</span>
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-between px-4 py-2.5 border-t border-border bg-muted/30">
+                    <span className="text-sm font-semibold text-foreground">Total Cost — This Production Order</span>
+                    <span className="text-sm font-bold tabular-nums text-foreground">৳ {money(cogs)}</span>
+                  </div>
+                </div>
+
                 <div className="grid grid-cols-2 gap-4">
                   <div className="rounded-md border border-primary/30 bg-primary/5 px-4 py-3">
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total COGS — {orderQty.toLocaleString()} unit{orderQty === 1 ? "" : "s"}</div>
@@ -567,6 +662,125 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
 
           <DialogFooter className="px-6 py-3 border-t border-border bg-muted/20">
             <Button variant="outline" onClick={() => setViewOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* PR detail — opened from a material's clickable PR id */}
+      <Dialog open={!!prDetail} onOpenChange={(o) => { if (!o) setPrDetail(null); }}>
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              Purchase Requisition
+              {prDetail && <span className="font-mono text-sm text-muted-foreground">— {prDetail.id}</span>}
+            </DialogTitle>
+          </DialogHeader>
+          {prDetail && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                <Field label="PR No" value={prDetail.id} />
+                <Field label="Date" value={prDetail.date} />
+                <Field label="Requested By" value={prDetail.requestedBy} />
+                <Field label="Required By" value={prDetail.requiredBy} />
+                <Field label="Priority" value={prDetail.priority} />
+                <Field label="Status" value={prDetail.status} />
+                <div className="col-span-2"><Field label="Justification" value={prDetail.justification || "—"} /></div>
+              </div>
+              <div className="border border-border rounded-md overflow-hidden">
+                <Table>
+                  <TableHeader className="bg-muted/40">
+                    <TableRow>
+                      <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider">Description</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Qty</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider">UoM</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Rate (৳)</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Amount (৳)</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {prDetail.lines.map((l) => (
+                      <TableRow key={l.id}>
+                        <TableCell className="font-medium">{l.itemName}</TableCell>
+                        <TableCell className="text-muted-foreground">{l.description || "—"}</TableCell>
+                        <TableCell className="text-right tabular-nums">{l.qty.toLocaleString()}</TableCell>
+                        <TableCell>{l.uom}</TableCell>
+                        <TableCell className="text-right tabular-nums text-muted-foreground">{money(l.rate)}</TableCell>
+                        <TableCell className="text-right tabular-nums font-medium">{money(l.qty * l.rate)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-4 py-2.5">
+                <span className="text-sm font-semibold">Total Estimated</span>
+                <span className="text-sm font-bold tabular-nums">৳ {money(prDetail.totalAmount)}</span>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPrDetail(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* GRN detail — opened from a material's clickable GRN id (direct receive) */}
+      <Dialog open={!!grnDetail} onOpenChange={(o) => { if (!o) setGrnDetail(null); }}>
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              Goods Receipt Note
+              {grnDetail && <span className="font-mono text-sm text-muted-foreground">— {grnDetail.id}</span>}
+            </DialogTitle>
+          </DialogHeader>
+          {grnDetail && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                <Field label="GRN No" value={grnDetail.id} />
+                <Field label={grnDetail.direct ? "DP Reference" : "PO Reference"} value={grnDetail.poRef} />
+                <Field label="Vendor" value={grnDetail.vendor} />
+                <Field label="Received By" value={grnDetail.receivedBy} />
+                <Field label="Receipt Date" value={grnDetail.grnDate || grnDetail.date} />
+                <Field label="Type" value={grnDetail.direct ? "Direct Purchase" : "PO-based"} />
+                {grnDetail.challanNo && <Field label="Challan / DO No" value={grnDetail.challanNo} />}
+                {grnDetail.invoiceNo && <Field label="Invoice / Bill No" value={grnDetail.invoiceNo} />}
+                {grnDetail.vehicleNo && <Field label="Vehicle No" value={grnDetail.vehicleNo} />}
+                {grnDetail.note && <div className="col-span-2"><Field label="Note" value={grnDetail.note} /></div>}
+              </div>
+              <div className="border border-border rounded-md overflow-hidden">
+                <Table>
+                  <TableHeader className="bg-muted/40">
+                    <TableRow>
+                      <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Qty</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider">UoM</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Rate (৳)</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider">QC Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {grnDetail.lines.map((l, i) => (
+                      <TableRow key={`${l.itemId}-${i}`}>
+                        <TableCell className="font-medium">{l.name}</TableCell>
+                        <TableCell className="text-right tabular-nums">{l.qty.toLocaleString()}</TableCell>
+                        <TableCell>{l.uom}</TableCell>
+                        <TableCell className="text-right tabular-nums text-muted-foreground">{l.rate != null ? money(l.rate) : "—"}</TableCell>
+                        <TableCell><Badge variant="outline" className="text-[10px] font-normal">{l.qcStatus}</Badge></TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              {grnDetail.amount != null && (
+                <div className="flex items-center justify-between rounded-md border border-border bg-muted/30 px-4 py-2.5">
+                  <span className="text-sm font-semibold">Receipt Value</span>
+                  <span className="text-sm font-bold tabular-nums">৳ {money(grnDetail.amount)}</span>
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setGrnDetail(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

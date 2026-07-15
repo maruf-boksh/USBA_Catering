@@ -41,7 +41,7 @@ const AURORA: Record<string, { chipBg: string; fg: string }> = {
 };
 
 export function KpiCard({
-  label, value, sub, icon, tone = 'navy', variant = 'default', hint, breakdown,
+  label, value, sub, icon, tone = 'navy', variant = 'default', breakdown,
 }: {
   label: string;
   value: string | number;
@@ -52,9 +52,16 @@ export function KpiCard({
   /** Optional plain-language explanation of what the metric means — shown as a
    *  subtle footnote so newcomers can read the card at a glance. Aurora only. */
   hint?: string;
-  /** Optional compact split shown as a tinted mini-stat strip inside the card
-   *  (e.g. Outbound / Return). `dir` colours a value green/red. Aurora only. */
-  breakdown?: { label: string; value: string | number; dir?: 'up' | 'down' }[];
+  /** Optional at-a-glance breakdown, rendered as a clean vertical list with a
+   *  small icon per row. Items may nest one level (`children`) for grouped
+   *  detail. `dir` colours a value green/red. Aurora only. */
+  breakdown?: {
+    label: string;
+    value: string | number;
+    icon?: string;
+    dir?: 'up' | 'down';
+    children?: { label: string; value: string | number; icon?: string }[];
+  }[];
 }) {
   const [hover, setHover] = React.useState(false);
 
@@ -141,41 +148,45 @@ export function KpiCard({
           ) : valueStr}
         </div>
 
-        {/* breakdown — a compact at-a-glance split, tinted with the card accent */}
-        {breakdown && breakdown.length > 0 && (
-          <div style={{
-            display: 'flex', marginTop: 13, borderRadius: 12, overflow: 'hidden',
-            border: `1px solid ${a.chipBg}`, background: `${a.chipBg}66`,
-          }}>
-            {breakdown.map((b, i) => (
-              <div key={b.label} style={{
-                flex: 1, minWidth: 0, padding: '8px 11px',
-                borderLeft: i === 0 ? 'none' : `1px solid ${a.chipBg}`,
-              }}>
-                <div style={{
-                  fontSize: 15, fontWeight: 700, lineHeight: 1.1, whiteSpace: 'nowrap',
-                  overflow: 'hidden', textOverflow: 'ellipsis',
-                  color: b.dir === 'up' ? '#15803d' : b.dir === 'down' ? '#b91c1c' : a.fg,
-                }}>{b.value}</div>
-                <div style={{
-                  fontSize: 10, fontWeight: 600, letterSpacing: '0.01em', marginTop: 3,
-                  lineHeight: 1.25, color: 'var(--color-text-tertiary, #98a2b3)',
-                }}>{b.label}</div>
+        {/* breakdown — split into two side-by-side blocks (top-level items
+            distributed across two columns) with a small icon per row. Nested
+            items indent one level. No coloured background. */}
+        {breakdown && breakdown.length > 0 && (() => {
+          const mid = Math.ceil(breakdown.length / 2);
+          const columns = [breakdown.slice(0, mid), breakdown.slice(mid)];
+          const renderItem = (b: NonNullable<typeof breakdown>[number], bi: number) => (
+            <div key={b.label} style={{ marginTop: bi === 0 ? 0 : (b.children ? 7 : 4) }}>
+              {/* parent row */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ width: 13, textAlign: 'center', fontSize: 10.5, flexShrink: 0, opacity: 0.9 }}>{b.icon ?? '•'}</span>
+                <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-text-secondary, #475467)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{b.label}</span>
+                <span style={{ flex: 1, minWidth: 6 }} />
+                <span style={{
+                  fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap',
+                  color: b.dir === 'up' ? '#15803d' : b.dir === 'down' ? '#b91c1c' : 'var(--color-text-primary, #101828)',
+                }}>{b.value}</span>
               </div>
-            ))}
-          </div>
-        )}
+              {/* nested child rows */}
+              {b.children?.map((c) => (
+                <div key={c.label} style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3, paddingLeft: 19 }}>
+                  <span style={{ width: 11, textAlign: 'center', fontSize: 9, opacity: 0.75, flexShrink: 0 }}>{c.icon ?? '·'}</span>
+                  <span style={{ fontSize: 10, color: 'var(--color-text-tertiary, #98a2b3)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.label}</span>
+                  <span style={{ flex: 1, minWidth: 4 }} />
+                  <span style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--color-text-tertiary, #98a2b3)', whiteSpace: 'nowrap' }}>{c.value}</span>
+                </div>
+              ))}
+            </div>
+          );
+          return (
+            <div style={{ marginTop: 11, paddingTop: 10, borderTop: '1px solid var(--color-border, #eef0f4)', display: 'grid', gridTemplateColumns: '1fr 1fr' }}>
+              <div style={{ paddingRight: 14, minWidth: 0 }}>{columns[0].map(renderItem)}</div>
+              <div style={{ paddingLeft: 14, minWidth: 0, borderLeft: '1px solid var(--color-border, #eef0f4)' }}>{columns[1].map(renderItem)}</div>
+            </div>
+          );
+        })()}
 
-        {/* hint — a plain-language footnote so newcomers understand the metric */}
-        {hint && (
-          <div style={{
-            fontSize: 11, lineHeight: 1.4, marginTop: 11, paddingTop: 10,
-            borderTop: '1px dashed var(--color-border, #eef0f4)',
-            color: 'var(--color-text-tertiary, #98a2b3)',
-          }}>
-            {hint}
-          </div>
-        )}
+        {/* `hint` is intentionally not rendered in the breakdown layout — the
+            vertical list carries the detail, keeping the card uncluttered. */}
       </div>
     );
   }
