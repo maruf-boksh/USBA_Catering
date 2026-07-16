@@ -64,10 +64,12 @@ export default function ProfilePage() {
         <Card className="lg:col-span-1">
           <CardContent className="pt-6 flex flex-col items-center text-center">
             <div
-              className="h-20 w-20 rounded-full grid place-items-center text-2xl font-bold text-white shadow-sm"
+              className="h-20 w-20 rounded-full overflow-hidden grid place-items-center text-2xl font-bold text-white shadow-sm"
               style={{ background: "linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%)" }}
             >
-              {initials(name)}
+              {user?.photoUrl
+                ? <img src={user.photoUrl} alt={name} className="h-full w-full object-cover" />
+                : initials(name)}
             </div>
             <div className="mt-3 text-lg font-semibold">{name}</div>
             <div className="text-sm text-muted-foreground">{primaryRole}</div>

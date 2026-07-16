@@ -355,7 +355,7 @@ export const AppSidebar = memo(function AppSidebar({
             <span>Menu</span>
             <button
               type="button"
-              className={`sb-expand-all${allExpanded ? ' is-active' : ''}`}
+              className="sb-expand-all"
               onClick={toggleExpandAll}
               aria-pressed={allExpanded}
             >

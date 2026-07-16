@@ -323,6 +323,145 @@ function isPrApprovalItemOverdue(it: ApprovalItem, now: number = Date.now()): bo
   return now > created.getTime() + PR_APPROVAL_SLA_HOURS * 3600 * 1000;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Approval workflow chains — the ordered approver stages each category routes
+// through. The requester is prepended as the first ("Submitted") stage from the
+// item itself; the remaining stages come from the chain below. Each stage's
+// state is DERIVED from the item's status so the chain reads, e.g.
+// "Operations submitted → A. Chowdhury approved → R. Hossain pending".
+// ─────────────────────────────────────────────────────────────────────────────
+type WfStepState = "done" | "current" | "upcoming" | "rejected" | "returned";
+type WfStep = { name: string; role: string; state: WfStepState; at?: string };
+
+const DEFAULT_APPROVAL_CHAIN: { role: string; name: string }[] = [
+  { role: "Department Head", name: "S. Ahmed" },
+  { role: "GM / Admin",      name: "R. Hossain" },
+];
+
+// Per-category approver stages (after the requester). Anything not listed falls
+// back to DEFAULT_APPROVAL_CHAIN.
+const APPROVAL_CHAINS: Partial<Record<Category, { role: string; name: string }[]>> = {
+  "Flight Orders":         [{ role: "Catering Supervisor", name: "A. Chowdhury" }, { role: "GM / Admin", name: "R. Hossain" }],
+  "Crew Orders":           [{ role: "Catering Supervisor", name: "A. Chowdhury" }, { role: "GM / Admin", name: "R. Hossain" }],
+  "Demand Request":        [{ role: "Store In-Charge", name: "S. Ahmed" }, { role: "Inventory Manager", name: "T. Islam" }],
+  "Request for Quotation": [{ role: "Procurement Lead", name: "Md. Karim" }, { role: "Procurement Head", name: "R. Hossain" }],
+  "Quotation":             [{ role: "Procurement Lead", name: "Md. Karim" }, { role: "Procurement Head", name: "R. Hossain" }],
+  "Purchase Requisition":  [{ role: "Store In-Charge", name: "S. Ahmed" }, { role: "Procurement Head", name: "R. Hossain" }],
+  "Purchase Order":        [{ role: "Procurement Head", name: "Md. Karim" }, { role: "Finance", name: "N. Rahman" }, { role: "GM / Admin", name: "R. Hossain" }],
+  "Goods Receipt":         [{ role: "Store In-Charge", name: "S. Ahmed" }, { role: "Quality Control", name: "F. Haque" }],
+  "Transfer Request":      [{ role: "Store In-Charge", name: "S. Ahmed" }, { role: "Inventory Manager", name: "T. Islam" }],
+  "Stock Adjustment":      [{ role: "Store In-Charge", name: "S. Ahmed" }, { role: "Inventory Manager", name: "T. Islam" }],
+  "Production Order":      [{ role: "Production In-Charge", name: "M. Alam" }, { role: "GM / Admin", name: "R. Hossain" }],
+  "Bill of Materials":     [{ role: "Head Chef", name: "M. Alam" }, { role: "Production Head", name: "R. Hossain" }],
+  "User Account":          [{ role: "HR", name: "HR Team" }, { role: "Admin", name: "R. Hossain" }],
+  "Maintenance":           [{ role: "Asset In-Charge", name: "K. Uddin" }, { role: "GM / Admin", name: "R. Hossain" }],
+  "Purchase Return":       [{ role: "Store In-Charge", name: "S. Ahmed" }, { role: "Procurement Head", name: "R. Hossain" }],
+  "Wastage Entry":         [{ role: "Production In-Charge", name: "M. Alam" }, { role: "GM Catering", name: "R. Hossain" }, { role: "Final Authorization", name: "GM / Admin" }],
+  "Delay Refreshment Fulfillment": [{ role: "Duty Manager", name: "S. Ahmed" }, { role: "GM / Admin", name: "R. Hossain" }],
+  "Personal Hygiene":      [{ role: "Senior Executive", name: "F. Haque" }, { role: "GM Catering", name: "R. Hossain" }],
+  "Daily Hygiene Monitoring": [{ role: "QA Lead", name: "F. Haque" }, { role: "GM Catering", name: "R. Hossain" }],
+};
+
+/** Build the derived approval step chain shown in the detail dialog. */
+function buildApprovalWorkflow(item: ApprovalItem): WfStep[] {
+  const approvers = APPROVAL_CHAINS[item.category] ?? DEFAULT_APPROVAL_CHAIN;
+  const steps: WfStep[] = [
+    { name: item.requestedBy, role: "Requested by", state: "done", at: item.requestedAt },
+  ];
+  approvers.forEach((a, i) => {
+    const isLast = i === approvers.length - 1;
+    let state: WfStepState;
+    if (item.status === "Approved") {
+      state = "done";
+    } else if (item.status === "Rejected") {
+      state = isLast ? "rejected" : "done";
+    } else if (item.status === "Reviewed") {
+      state = isLast ? "returned" : "done";
+    } else {
+      // Pending — earlier approvers have signed off, the final approver is active.
+      state = isLast ? "current" : "done";
+    }
+    steps.push({
+      name: isLast && item.processedBy ? item.processedBy : a.name,
+      role: a.role,
+      state,
+      at: isLast ? item.processedAt : undefined,
+    });
+  });
+  return steps;
+}
+
+const WF_STEP_LABEL: Record<WfStepState, string> = {
+  done: "Approved",
+  current: "Pending",
+  upcoming: "Waiting",
+  rejected: "Rejected",
+  returned: "Returned",
+};
+
+/** Horizontal, wrapping approver chain for the approval detail dialog. */
+function ApprovalWorkflow({ item }: { item: ApprovalItem }) {
+  const steps = buildApprovalWorkflow(item);
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">
+        Approval Workflow
+      </div>
+      <div className="rounded-md border border-border bg-muted/20 px-3 py-3">
+        <ol className="flex flex-wrap items-center gap-y-3">
+          {steps.map((s, i) => {
+            const first = i === 0;
+            const label = first ? "Submitted" : WF_STEP_LABEL[s.state];
+            const StepIcon =
+              s.state === "rejected" ? XIcon
+              : s.state === "returned" ? CornerUpLeft
+              : s.state === "current" ? Clock
+              : s.state === "done" ? Check
+              : Clock;
+            const tone =
+              s.state === "rejected" ? "text-destructive border-destructive/40 bg-destructive/10"
+              : s.state === "returned" ? "text-amber-600 border-amber-300 bg-amber-100"
+              : s.state === "current" ? "text-warning-foreground border-warning/50 bg-warning/15 ring-2 ring-warning/30"
+              : s.state === "done" ? "text-success border-success/40 bg-success/10"
+              : "text-muted-foreground border-border bg-muted/40";
+            const labelTone =
+              s.state === "rejected" ? "text-destructive"
+              : s.state === "returned" ? "text-amber-600"
+              : s.state === "current" ? "text-warning-foreground"
+              : s.state === "done" ? "text-success"
+              : "text-muted-foreground";
+            return (
+              <li key={i} className="flex items-center">
+                <div className="flex items-center gap-2">
+                  <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full border", tone)}>
+                    <StepIcon className="h-3.5 w-3.5" />
+                  </span>
+                  <div className="leading-tight">
+                    <div className="text-xs font-medium text-foreground">{s.name}</div>
+                    <div className="text-[10px] text-muted-foreground">{s.role}</div>
+                    <div className={cn("text-[10px] font-medium", labelTone)}>
+                      {label}
+                      {s.at && <span className="text-muted-foreground font-normal"> · {s.at}</span>}
+                    </div>
+                  </div>
+                </div>
+                {i < steps.length - 1 && (
+                  <span
+                    className={cn(
+                      "mx-2.5 h-px w-6 shrink-0",
+                      s.state === "done" ? "bg-success/50" : "bg-border",
+                    )}
+                  />
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      </div>
+    </div>
+  );
+}
+
 export default function ApprovalManagementPage() {
   const { role } = useRole();
   const navigate = useNavigate();
@@ -3418,6 +3557,9 @@ export default function ApprovalManagementPage() {
                   <div className="text-sm leading-relaxed">{detailItem.summary}</div>
                 </div>
               )}
+
+              {/* Approval workflow — the approver chain & where it currently sits */}
+              <ApprovalWorkflow item={detailItem} />
 
               {/* Flight / Crew orders — flight legs in this order */}
               {(detailItem.category === "Flight Orders" || detailItem.category === "Crew Orders") && (() => {

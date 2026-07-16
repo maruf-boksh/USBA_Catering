@@ -6,13 +6,50 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { UserRound, ShieldCheck, SlidersHorizontal, Moon, Save } from "lucide-react";
+import { UserRound, ShieldCheck, SlidersHorizontal, Moon, Save, Camera, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { getAuthUser, setAuthUser, validateCredentials, type AuthUser } from "@/lib/auth";
 import { logAudit } from "@/lib/audit-log";
 import { useThemeStore } from "@/stores/themeStore";
 
 const PREFS_KEY = "harvest-user-prefs-v1";
+
+/** Two-letter initials from a display name (e.g. "R. Hossain" → "RH"). */
+function initials(name: string): string {
+  const parts = name.replace(/[.]/g, " ").split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "U";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+/**
+ * Read an image File and return a downscaled square-ish JPEG data URL. Resizing
+ * to ≤ maxPx keeps the avatar well under the ~5 MB localStorage quota (a 256px
+ * JPEG is ~10–30 KB) while staying crisp on the profile/topbar circles.
+ */
+function resizeImageToDataUrl(file: File, maxPx: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("read failed"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("decode failed"));
+      img.onload = () => {
+        const scale = Math.min(1, maxPx / Math.max(img.width, img.height));
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { reject(new Error("no canvas context")); return; }
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", 0.85));
+      };
+      img.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 type UserPrefs = {
   emailAlerts: boolean;
@@ -41,13 +78,31 @@ export default function AccountSettingsPage() {
   // ── Profile form ───────────────────────────────────────────────────────────
   const [name, setName] = useState(user?.name ?? "");
   const [email, setEmail] = useState(user?.email ?? "");
+  const [photoUrl, setPhotoUrl] = useState<string | undefined>(user?.photoUrl);
+
+  const onPickPhoto = async (file: File | null) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { toast.error("Please choose an image file."); return; }
+    try {
+      const dataUrl = await resizeImageToDataUrl(file, 256);
+      setPhotoUrl(dataUrl);
+      toast.success("Photo selected — click Save Changes to apply.");
+    } catch {
+      toast.error("Couldn't read that image. Try a different file.");
+    }
+  };
 
   const saveProfile = () => {
     if (!name.trim()) { toast.error("Name can't be empty."); return; }
     if (!/^\S+@\S+\.\S+$/.test(email.trim())) { toast.error("Enter a valid email address."); return; }
     if (!user) { toast.error("No signed-in user."); return; }
-    const next: AuthUser = { ...user, name: name.trim(), email: email.trim() };
-    setAuthUser(next);
+    const next: AuthUser = { ...user, name: name.trim(), email: email.trim(), photoUrl };
+    try {
+      setAuthUser(next);
+    } catch {
+      toast.error("Couldn't save — the image may be too large. Try a smaller photo.");
+      return;
+    }
     logAudit({ action: "Updated", module: "Account", entity: next.userId, detail: "Profile details changed" });
     toast.success("Profile updated. The change appears across the app as you navigate.");
   };
@@ -103,6 +158,44 @@ export default function AccountSettingsPage() {
               <CardTitle className="text-sm uppercase tracking-wider">Profile Information</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* Profile picture — resized + stored as a data URL with the profile */}
+              <div className="flex items-center gap-4">
+                <div
+                  className="h-20 w-20 rounded-full overflow-hidden grid place-items-center text-2xl font-bold text-white shadow-sm shrink-0"
+                  style={{ background: "linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%)" }}
+                >
+                  {photoUrl
+                    ? <img src={photoUrl} alt="Profile" className="h-full w-full object-cover" />
+                    : initials(name)}
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <label className="inline-flex items-center gap-1.5 cursor-pointer rounded-md border border-input bg-background px-3 py-2 text-sm hover:bg-accent">
+                      <Camera className="h-3.5 w-3.5" /> {photoUrl ? "Change photo" : "Upload photo"}
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => { onPickPhoto(e.target.files?.[0] ?? null); e.target.value = ""; }}
+                      />
+                    </label>
+                    {photoUrl && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-destructive hover:text-destructive"
+                        onClick={() => setPhotoUrl(undefined)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5 mr-1" /> Remove
+                      </Button>
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    PNG or JPG · square works best. Click <strong>Save Changes</strong> to apply.
+                  </p>
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                   <Label htmlFor="name">Full Name</Label>
