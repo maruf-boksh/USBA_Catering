@@ -1948,10 +1948,18 @@ export default function WastageManagementPage() {
                             <TableCell className="text-xs text-muted-foreground font-mono">{sl}</TableCell>
                             <TableCell className="text-xs font-medium">{name}</TableCell>
                             <TableCell className="text-xs text-center">
-                              {linkedProd ? (
+                              {sl === "03" && value && value !== "N/A" ? (
                                 <button
                                   className="font-mono font-semibold text-primary hover:underline"
-                                  onClick={() => { setProdDetailEntry(linkedProd); setProdDetailOpen(true); }}
+                                  title={linkedProd ? `View production order ${value}` : `Open ${value} in the Production Order table`}
+                                  onClick={() => {
+                                    if (linkedProd) { setProdDetailEntry(linkedProd); setProdDetailOpen(true); return; }
+                                    // Not in the current list → jump to the Production Order
+                                    // table and flash (blink) that order's row.
+                                    flagArrival({ target: "production-list", ids: [value] });
+                                    setViewOpen(false);
+                                    navigate(`/production-entry?pro=${encodeURIComponent(value)}`);
+                                  }}
                                 >
                                   {value}
                                 </button>
@@ -1964,6 +1972,62 @@ export default function WastageManagementPage() {
                   </Table>
                 </div>
               </div>
+
+              {/* Wastage Cost — full BOM amount calculation + % loss (Production) */}
+              {viewEntry.wastageType === "Production" && (() => {
+                const recipe = resolveProductionItem({ name: viewEntry.itemName });
+                const disposedQty = viewEntry.disposalQty || 0;
+                const matSections = [
+                  { label: "Raw Materials",       rows: recipe.rawMaterials       },
+                  { label: "Packaging Materials", rows: recipe.packagingMaterials },
+                  { label: "Other Consumption",   rows: recipe.otherConsumption   },
+                ];
+                const hasMat = recipe.rawMaterials.length + recipe.packagingMaterials.length + recipe.otherConsumption.length > 0;
+                if (!hasMat) return null;
+                const unitCost = (m: { qtyPerUnit: number; rate: number }) => m.qtyPerUnit * m.rate;    // BOM money per FG unit
+                const lineCost = (m: { qtyPerUnit: number; rate: number }) => unitCost(m) * disposedQty; // per-item wastage value
+                const matCost = matSections.reduce((s, sec) => s + sec.rows.reduce((t, m) => t + lineCost(m), 0), 0);
+                // % loss vs the TOTAL production-order cost value (BOM cost/unit × order qty).
+                const fullUnitCost = matSections.reduce((s, sec) => s + sec.rows.reduce((t, m) => t + unitCost(m), 0), 0);
+                const productionOrderQty = (viewEntry.previousStock && viewEntry.previousStock > 0) ? viewEntry.previousStock : disposedQty;
+                const totalProductionCost = fullUnitCost * productionOrderQty;
+                const lossPct = totalProductionCost > 0 ? (matCost / totalProductionCost) * 100 : 0;
+                return (
+                  <div>
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2">Wastage Cost — BOM Calculation</h4>
+                    <div className="border border-orange-200 rounded-md overflow-hidden">
+                      {matSections.map(({ label, rows }) => rows.length === 0 ? null : (
+                        <div key={label}>
+                          <div className="flex items-center justify-between px-3 py-1 bg-orange-50 border-b border-orange-100">
+                            <p className="text-[9px] font-bold uppercase tracking-wider text-orange-500">{label}</p>
+                            <p className="text-[9px] font-bold tabular-nums text-orange-500">Tk. {rows.reduce((t, m) => t + lineCost(m), 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</p>
+                          </div>
+                          {rows.map((m) => (
+                            <div key={m.itemCode} className="flex items-center justify-between px-3 py-1.5 text-xs border-b border-orange-100 last:border-0">
+                              <span className="font-medium">{m.itemName}</span>
+                              <span className="flex items-center gap-3 tabular-nums">
+                                <span className="text-muted-foreground">{(m.qtyPerUnit * disposedQty).toFixed(3)} {m.uom}</span>
+                                <span className="text-[11px] text-muted-foreground">{disposedQty.toLocaleString()} × {unitCost(m).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                <span className="w-24 text-right font-semibold text-foreground">= Tk. {lineCost(m).toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                      <div className="px-3 py-2 bg-orange-100 border-t border-orange-200 space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-bold uppercase tracking-wider text-orange-700">Est. Wastage Value (BOM) · {disposedQty.toLocaleString()} Units</span>
+                          <span className="text-sm font-bold tabular-nums text-orange-700">Tk. {matCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] text-orange-600">Loss vs total production cost ({productionOrderQty.toLocaleString()} Units · Tk. {totalProductionCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})</span>
+                          <span className="text-xs font-bold tabular-nums text-red-600">{lossPct.toFixed(1)}% loss · Tk. {matCost.toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Root Cause */}
               <div>
