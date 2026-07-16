@@ -9,9 +9,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X, Zap, BarChart2, Send, Check, Paperclip, FileText, Eye, Ban, ClipboardList } from "lucide-react";
-import { receiveItems, vendors, activeItems, inventory } from "@/lib/sample-data";
+import { receiveItems, activeItems, inventory } from "@/lib/sample-data";
 import { applyReceiptToPR, getPurchaseRequisitions, prReceived } from "@/lib/purchase-requisitions";
 import { roundQty } from "@/lib/num";
+import { usePersistedState } from "@/lib/use-persisted-state";
+import { resolveItemPrice, PRICE_STORE_KEY, PRICE_SEED, type ItemPrice } from "@/lib/item-prices";
+import { AddSupplierDialog, SUPPLIER_SEED, SUPPLIER_STORE_KEY, type Supplier } from "@/routes/config-supplier";
 import { KpiCard } from "@/components/common/KpiCard";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
@@ -171,6 +174,12 @@ export default function ReceiveItem() {
   const [filterWarehouse, setFilterWarehouse] = useState("");
   const [formLines, setFormLines] = useState<FormLine[]>([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
 
+  // Vendor master = the Supplier Profile module's list (shared persisted store),
+  // so "Add New" here creates a real supplier that also shows on that page.
+  const [suppliers, setSuppliers] = usePersistedState<Supplier[]>(SUPPLIER_STORE_KEY, SUPPLIER_SEED);
+  const supplierOptions = useMemo(() => suppliers.filter((s) => s.status === "Active"), [suppliers]);
+  const [addVendorOpen, setAddVendorOpen] = useState(false);
+
   // ── Direct Purchase (spot buy — no prior PO) ────────────────────────────────
   const [directOpen, setDirectOpen] = useState(false);
   const [dpVendor, setDpVendor] = useState("");
@@ -191,6 +200,14 @@ export default function ReceiveItem() {
   const [dpLines, setDpLines] = useState<FormLine[]>([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
   // Direct-receive attachments (approving authority is decided in Approval Management).
   const [dpAttachments, setDpAttachments] = useState<{ name: string; url: string; isImage: boolean }[]>([]);
+  // Item rates come from Configuration → Price Setup (shared store), so a picked
+  // item's Rate auto-fills and the user needn't type it. Lines the user edits by
+  // hand are tracked in `dpManualRate` so auto-pricing never clobbers an override.
+  const [priceRows] = usePersistedState<ItemPrice[]>(PRICE_STORE_KEY, PRICE_SEED);
+  const [dpManualRate, setDpManualRate] = useState<Set<string>>(new Set());
+  // Resolve a line's rate from Price Setup for the current vendor & receive date.
+  const dpResolveRate = (name: string, code?: string): number | undefined =>
+    resolveItemPrice(priceRows, { name, code, supplier: dpVendor, on: dpDate })?.unitPrice;
 
   // Purchase Requisitions that still have outstanding (unreceived) lines — the
   // pickable set for "Receive from PR". Refreshed each time the dialog opens.
@@ -221,7 +238,7 @@ export default function ReceiveItem() {
       outstanding.length > 0
         ? outstanding.map(({ l, remaining }, i) => ({
             id: `d${i + 1}`, name: l.itemName, qty: remaining, uom: l.uom,
-            expiry: "", rate: l.rate || 0, prLineId: l.id,
+            expiry: "", rate: l.rate || dpResolveRate(l.itemName) || 0, prLineId: l.id,
           }))
         : [{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }],
     );
@@ -252,8 +269,30 @@ export default function ReceiveItem() {
   const dpItemOptions = useMemo(() => activeItems.slice(0, 120), []);
   const dpPickItem = (id: string, itemName: string) => {
     const it = dpItemOptions.find(i => i.name === itemName);
-    setDpLines(prev => prev.map(l => l.id === id ? { ...l, name: itemName, uom: it?.uom ?? l.uom } : l));
+    // Picking a (new) item resets any manual rate override and auto-fills the
+    // Price Setup rate for this item + vendor. Falls back to the item master's
+    // cost price, else 0 (so the field is prefilled, not blank).
+    const resolved = dpResolveRate(itemName, it?.code) ?? it?.costPrice ?? 0;
+    setDpManualRate(prev => { const n = new Set(prev); n.delete(id); return n; });
+    setDpLines(prev => prev.map(l => l.id === id ? { ...l, name: itemName, uom: it?.uom ?? l.uom, rate: resolved } : l));
   };
+  // Re-price every non-overridden line when the vendor or receive date changes —
+  // Price Setup rates can be supplier- and date-specific.
+  useEffect(() => {
+    setDpLines(prev => prev.map(l => {
+      if (!l.name || dpManualRate.has(l.id)) return l;
+      const it = dpItemOptions.find(i => i.name === l.name);
+      const resolved = dpResolveRate(l.name, it?.code) ?? it?.costPrice;
+      return resolved !== undefined ? { ...l, rate: resolved } : l;
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dpVendor, dpDate, dpManualRate, priceRows]);
+  // Mark a line's rate as manually overridden, then apply the edit.
+  const dpEditRate = (id: string, value: number) => {
+    setDpManualRate(prev => new Set(prev).add(id));
+    dpUpdateLine(id, "rate", value);
+  };
+  const dpRateIsAuto = (l: FormLine) => l.name !== "" && !dpManualRate.has(l.id);
 
   const resetDirect = () => {
     setDpVendor(""); setDpReceivedBy(""); setDpOfficeId("OFF-001"); setDpWarehouseId("WH-001");
@@ -261,6 +300,7 @@ export default function ReceiveItem() {
     setDpFromPr(false); setDpPrId("");
     setDpDate(new Date().toISOString().slice(0, 10)); setDpChallanNo(""); setDpVehicleNo("");
     setDpLines([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
+    setDpManualRate(new Set());
     dpAttachments.forEach((a) => { try { URL.revokeObjectURL(a.url); } catch { /* ignore */ } });
     setDpAttachments([]);
   };
@@ -919,7 +959,7 @@ export default function ReceiveItem() {
 
       {/* Direct Purchase Dialog — spot buy with no prior PO */}
       <Dialog open={directOpen} onOpenChange={(v) => { if (!v) { setDirectOpen(false); resetDirect(); } }}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Zap className="h-4 w-4 text-amber-500" /> Direct Receive — Spot Buy
@@ -975,14 +1015,27 @@ export default function ReceiveItem() {
               />
             </div>
             <div>
-              <Label>Vendor *</Label>
+              <div className="flex items-center justify-between">
+                <Label>Vendor *</Label>
+                <button
+                  type="button"
+                  onClick={() => setAddVendorOpen(true)}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                >
+                  <Plus className="h-3 w-3" /> Add New
+                </button>
+              </div>
               <select
                 value={dpVendor}
                 onChange={(e) => setDpVendor(e.target.value)}
                 className="w-full mt-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
               >
                 <option value="">Select a vendor...</option>
-                {vendors.map((v) => <option key={v.id} value={v.name}>{v.name}</option>)}
+                {supplierOptions.map((s) => <option key={s.id} value={s.name}>{s.name}</option>)}
+                {/* Keep a previously chosen vendor selectable even if it's now inactive/absent. */}
+                {dpVendor && !supplierOptions.some((s) => s.name === dpVendor) && (
+                  <option value={dpVendor}>{dpVendor}</option>
+                )}
               </select>
             </div>
             <div>
@@ -1083,27 +1136,27 @@ export default function ReceiveItem() {
               </Button>
             </div>
             <div className="rounded-md border border-border overflow-x-auto">
-              <table className="w-full text-sm min-w-[740px]">
+              <table className="w-full text-sm min-w-[860px] table-fixed border-separate border-spacing-0">
                 <thead className="bg-muted/50">
                   <tr>
-                    <th className="p-2 text-left font-semibold">Item</th>
-                    <th className="p-2 text-left font-semibold w-20">Qty</th>
-                    <th className="p-2 text-left font-semibold w-16">UOM</th>
-                    <th className="p-2 text-right font-semibold w-24">Rate</th>
-                    <th className="p-2 text-right font-semibold w-28">Total</th>
-                    <th className="p-2 text-left font-semibold w-32">Batch / Lot</th>
-                    <th className="p-2 text-left font-semibold w-28">Expiry</th>
-                    <th className="w-8" />
+                    <th className="px-3 py-2.5 text-left font-semibold w-[20%]">Item</th>
+                    <th className="px-3 py-2.5 text-left font-semibold w-[15%]">Qty</th>
+                    <th className="px-3 py-2.5 text-left font-semibold w-[8%]">UOM</th>
+                    <th className="px-3 py-2.5 text-right font-semibold w-[13%]">Rate</th>
+                    <th className="px-3 py-2.5 text-right font-semibold w-[12%]">Total</th>
+                    <th className="px-3 py-2.5 text-left font-semibold w-[16%]">Batch / Lot</th>
+                    <th className="px-3 py-2.5 text-left font-semibold w-[13%]">Expiry</th>
+                    <th className="px-3 py-2.5 w-[3%]" />
                   </tr>
                 </thead>
                 <tbody>
                   {dpLines.map(line => (
                     <tr key={line.id} className="border-t border-border/50">
-                      <td className="p-2">
+                      <td className="px-3 py-2 align-middle">
                         <select
                           value={line.name}
                           onChange={(e) => dpPickItem(line.id, e.target.value)}
-                          className="w-full h-7 text-xs rounded-md border border-input bg-background px-2"
+                          className="w-full h-8 text-xs rounded-md border border-input bg-background px-2"
                         >
                           <option value="">Select item…</option>
                           {line.name && !dpItemOptions.some((it) => it.name === line.name) && (
@@ -1114,51 +1167,57 @@ export default function ReceiveItem() {
                           ))}
                         </select>
                       </td>
-                      <td className="p-2">
+                      <td className="px-3 py-2 align-middle">
                         <Input
                           type="number" min={0}
                           value={line.qty}
                           onChange={(e) => dpUpdateLine(line.id, "qty", Number(e.target.value))}
-                          className="h-7 text-xs"
+                          className="h-8 text-xs"
                         />
                       </td>
-                      <td className="p-2">
+                      <td className="px-3 py-2 align-middle">
                         <Input
                           value={line.uom}
                           readOnly
                           tabIndex={-1}
-                          className="h-7 text-xs w-14 bg-muted/50 text-muted-foreground cursor-default"
+                          className="h-8 text-xs w-full bg-muted/50 text-muted-foreground cursor-default"
                         />
                       </td>
-                      <td className="p-2">
+                      <td className="px-3 py-2 align-middle">
                         <Input
                           type="number" min={0} step="any"
                           value={line.rate || ""}
                           placeholder="0.00"
-                          onChange={(e) => dpUpdateLine(line.id, "rate", Number(e.target.value))}
-                          className="h-7 text-xs text-right tabular-nums"
+                          onChange={(e) => dpEditRate(line.id, Number(e.target.value))}
+                          className="h-8 text-xs text-right tabular-nums"
+                          title={dpRateIsAuto(line) && line.rate > 0 ? "Auto-filled from Price Setup — edit to override" : undefined}
                         />
+                        {dpRateIsAuto(line) && line.rate > 0 && (
+                          <span className="mt-0.5 block text-right text-[9px] uppercase tracking-wider text-primary/70">
+                            from Price Setup
+                          </span>
+                        )}
                       </td>
-                      <td className="p-2 text-right text-xs font-medium tabular-nums whitespace-nowrap">
+                      <td className="px-3 py-2 align-middle text-right text-xs font-medium tabular-nums whitespace-nowrap">
                         {fmtBdt(dpLineTotal(line))}
                       </td>
-                      <td className="p-2">
+                      <td className="px-3 py-2 align-middle">
                         <Input
                           value={line.batchNo ?? ""}
                           onChange={(e) => dpUpdateLine(line.id, "batchNo", e.target.value)}
-                          className="h-7 text-xs"
+                          className="h-8 text-xs"
                           placeholder="Batch / lot"
                         />
                       </td>
-                      <td className="p-2">
+                      <td className="px-3 py-2 align-middle">
                         <Input
                           type="date"
                           value={line.expiry}
                           onChange={(e) => dpUpdateLine(line.id, "expiry", e.target.value)}
-                          className="h-7 text-xs"
+                          className="h-8 text-xs"
                         />
                       </td>
-                      <td className="p-2">
+                      <td className="px-3 py-2 align-middle text-center">
                         <button type="button" onClick={() => dpRemoveLine(line.id)} className="text-muted-foreground hover:text-destructive">
                           <X className="h-3.5 w-3.5" />
                         </button>
@@ -1168,10 +1227,10 @@ export default function ReceiveItem() {
                 </tbody>
                 <tfoot className="border-t border-border bg-muted/30">
                   <tr>
-                    <td className="p-2 text-xs font-semibold text-muted-foreground" colSpan={4}>
+                    <td className="px-3 py-2.5 text-xs font-semibold text-muted-foreground" colSpan={4}>
                       Grand Total ({dpLines.length} item{dpLines.length === 1 ? "" : "s"})
                     </td>
-                    <td className="p-2 text-right text-sm font-bold tabular-nums whitespace-nowrap">
+                    <td className="px-3 py-2.5 text-right text-sm font-bold tabular-nums whitespace-nowrap">
                       {fmtBdt(dpGrandTotal)}
                     </td>
                     <td colSpan={3} />
@@ -1190,6 +1249,17 @@ export default function ReceiveItem() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Add New vendor = create a Supplier Profile; new supplier is auto-selected */}
+      <AddSupplierDialog
+        open={addVendorOpen}
+        onOpenChange={setAddVendorOpen}
+        nextId={`SUP-${String(suppliers.length + 1).padStart(3, "0")}`}
+        onCreate={(s) => {
+          setSuppliers((p) => [s, ...p]);
+          setDpVendor(s.name);
+        }}
+      />
 
       {/* View PO — read-only, with receipt progress per line */}
       <Dialog open={!!viewPO} onOpenChange={(v) => !v && setViewPO(null)}>

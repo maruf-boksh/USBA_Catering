@@ -5,6 +5,8 @@ export type AuthUser = {
   name: string;
   email: string;
   role: string;
+  /** Profile picture as a resized base64 data URL. Absent ⇒ show initials. */
+  photoUrl?: string;
 };
 
 export function getAuthUser(): AuthUser | null {

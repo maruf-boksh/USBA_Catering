@@ -13,7 +13,7 @@ import {
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
-import { Plus, RotateCcw, Save, Scale } from "lucide-react";
+import { Plus, RotateCcw, Save, Scale, ArrowLeft, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import {
   BASIS_LABEL, STOCK_DEFAULT_STANDARDS, computeStandard, isMealMixKey, galleyAircraftTypes,
@@ -62,6 +62,10 @@ export default function GalleyLoadingStandardsPage() {
   const [aircraft, setAircraft] = useState(() => aircraftTypes[0] ?? "");
   const [standards, setStandards] = useState<LoadingStandard[]>(() => connectToInventory(loadStandardsForAircraft(aircraftTypes[0])));
   const [dirty, setDirty] = useState(false);
+  // Land on the saved-standards list; open a row to edit that aircraft's scales.
+  const [view, setView] = useState<"list" | "edit">("list");
+  // When each aircraft type's standard was last saved (drives the list column).
+  const [savedAt, setSavedAt] = usePersistedState<Record<string, string>>("galley-loading-standards-savedat", {});
   // Sample flight used only to preview what each rule yields.
   const [previewPax, setPreviewPax] = useState(72);
   const [previewCrew, setPreviewCrew] = useState(7);
@@ -87,6 +91,24 @@ export default function GalleyLoadingStandardsPage() {
     setDirty(false);
   };
 
+  // Open a saved standard from the list into the editor.
+  const openEditor = (type: string) => {
+    changeAircraft(type);
+    setView("edit");
+  };
+
+  // One row per aircraft type for the list view: item count, how many actually
+  // load something (factor/min > 0), and when it was last saved.
+  const listRows = useMemo(
+    () =>
+      aircraftTypes.map((type) => {
+        const rules = connectToInventory(loadStandardsForAircraft(type));
+        const configured = rules.filter((r) => (r.factor ?? 0) > 0 || (r.min ?? 0) > 0).length;
+        return { type, total: rules.length, configured, savedAt: savedAt[type] };
+      }),
+    [aircraftTypes, savedAt],
+  );
+
   // Register a new aircraft (persists to the shared fleet) and jump to its
   // (default) loading standard so the manager can define scales right away.
   const onAircraftCreated = (a: Aircraft) => {
@@ -94,7 +116,7 @@ export default function GalleyLoadingStandardsPage() {
     setAircraftTypes((prev) =>
       prev.includes(a.type) ? prev : [...prev, a.type].sort((x, y) => x.localeCompare(y)),
     );
-    changeAircraft(a.type);
+    openEditor(a.type);
     setShowAddAircraft(false);
     toast.success(`Aircraft "${a.registration}" added — set its loading standard below.`);
   };
@@ -150,6 +172,7 @@ export default function GalleyLoadingStandardsPage() {
 
   const onSave = () => {
     saveStandardsForAircraft(aircraft, standards);
+    setSavedAt((prev) => ({ ...prev, [aircraft]: new Date().toISOString().slice(0, 16).replace("T", " ") }));
     setDirty(false);
     toast.success(`Loading standard saved for ${aircraft} — new galley plans on this aircraft type use these scales.`);
   };
@@ -165,8 +188,80 @@ export default function GalleyLoadingStandardsPage() {
       <PageHeader
         title="Loading Standards"
         subtitle="Beverage, amenity & equipment loading scales — defined separately per aircraft type. Meals are not set here; they flow from the order to Dispatch and into the galley."
+        actions={
+          view === "edit" ? (
+            <Button variant="outline" onClick={() => setView("list")}>
+              <ArrowLeft className="h-4 w-4 mr-1.5" /> Back to List
+            </Button>
+          ) : undefined
+        }
       />
 
+      {view === "list" ? (
+        <Card className="mb-4">
+          <CardContent className="pt-5">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <p className="text-sm font-semibold text-foreground">Saved Loading Standards</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  One standard per aircraft type. Open a row to define or update its beverage, amenity & equipment scales.
+                </p>
+              </div>
+              <span className="text-xs text-muted-foreground shrink-0">
+                {listRows.length} aircraft type{listRows.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            {listRows.length === 0 ? (
+              <div className="py-10 text-center text-sm text-muted-foreground">
+                No aircraft types yet — click <strong className="text-foreground">Add Aircraft</strong> to create one.
+              </div>
+            ) : (
+              <div className="border border-border rounded-md overflow-x-auto">
+                <Table className="min-w-[640px]">
+                  <TableHeader className="bg-muted/40">
+                    <TableRow>
+                      <TableHead className="text-xs uppercase tracking-wider">Aircraft Type</TableHead>
+                      <TableHead className="text-right text-xs uppercase tracking-wider w-24">Items</TableHead>
+                      <TableHead className="text-right text-xs uppercase tracking-wider w-28">Configured</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider w-52">Last Updated</TableHead>
+                      <TableHead className="text-right text-xs uppercase tracking-wider w-28">Action</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {listRows.map((r) => (
+                      <TableRow
+                        key={r.type}
+                        className="hover:bg-muted/30 cursor-pointer"
+                        onClick={() => openEditor(r.type)}
+                      >
+                        <TableCell className="font-medium text-sm">{r.type}</TableCell>
+                        <TableCell className="text-right tabular-nums">{r.total}</TableCell>
+                        <TableCell className="text-right tabular-nums">{r.configured}</TableCell>
+                        <TableCell>
+                          {r.savedAt ? (
+                            <span className="text-xs tabular-nums">{r.savedAt}</span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">Not saved · using defaults</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            size="sm" variant="outline" className="h-7 px-2"
+                            onClick={(e) => { e.stopPropagation(); openEditor(r.type); }}
+                          >
+                            <Pencil className="h-3.5 w-3.5 mr-1" /> Edit
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      ) : (
+      <>
       <Card className="mb-4">
         <CardContent className="pt-5 pb-4">
           <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
@@ -319,6 +414,8 @@ export default function GalleyLoadingStandardsPage() {
           <Save className="h-3.5 w-3.5 mr-1.5" /> Save Standards
         </Button>
       </div>
+      </>
+      )}
 
       {/* Add Aircraft — reuses the Configuration > Aircraft form; the new
           aircraft is a real fleet entry and its type becomes loadable here. */}

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, Fragment } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -20,9 +20,13 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { useWorkflow, type WfProductionEntryRecord } from "@/lib/workflow-store";
+import { useWorkflow, type WfProductionEntryRecord, type WfProductionInputMaterial } from "@/lib/workflow-store";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import { PRODUCTION_ITEMS, type RecipeItem } from "@/routes/production-entry";
+import { resolveProductionItem } from "@/lib/meal-recipe";
+import { usePersistedState } from "@/lib/use-persisted-state";
+import { inventory, type InventoryItem } from "@/lib/sample-data";
+import { roundQty, fmtQty } from "@/lib/num";
 
 const SHIFTS = ["Morning", "Evening", "Night"] as const;
 const PRODUCERS = ["F. Begum", "T. Islam", "M. Karim", "N. Hossen", "S. Ahmed", "R. Karim"];
@@ -37,13 +41,14 @@ export default function ProductionEntryPage() {
   const [filterWarehouse, setFilterWarehouse] = useState("");
   const [viewEntry, setViewEntry] = useState<WfProductionEntryRecord | null>(null);
 
-  // Orders that can accept new entries: anything Approved or In Preparation
-  // (Pending = not approved yet, Ready for QC / Completed = order target met).
+  // Orders that can accept new entries: Approved, Production Initiation, or In
+  // Preparation (Pending = not approved yet, Ready for QC / Completed = target met).
   const fulfillableOrders = useMemo(
     () =>
       productionEntries.filter(
         (o) =>
           o.status === "Approved" ||
+          o.status === "Production Initiation" ||
           o.status === "In Preparation",
       ),
     [productionEntries],
@@ -195,6 +200,24 @@ function CreateEntry({
   const [officeId, setOfficeId] = useState("OFF-001");
   const [warehouseId, setWarehouseId] = useState("WH-003");
   const [remarks, setRemarks] = useState("");
+  // User overrides for the Actual Quantity column. Keyed by row key; a missing
+  // entry means the field still tracks the (scaled) BOM quantity default.
+  const [actuals, setActuals] = useState<Record<string, string>>({});
+  // Reason notes for rows whose Actual differs from the BOM quantity. Keyed by row key.
+  const [reasons, setReasons] = useState<Record<string, string>>({});
+
+  // Live stock — the same persisted store the Stock Overview reads — so the
+  // Available Quantity column matches what the inventory screen shows.
+  const [invItems] = usePersistedState<InventoryItem[]>("inventory-items", inventory);
+  const availableFor = useMemo(() => {
+    const byKey = new Map<string, number>();
+    for (const it of invItems) {
+      byKey.set(it.id.toLowerCase(), it.stock);
+      byKey.set(it.name.toLowerCase(), it.stock);
+    }
+    return (code: string, name: string) =>
+      byKey.get(code.toLowerCase()) ?? byKey.get(name.toLowerCase()) ?? 0;
+  }, [invItems]);
 
   const selectedOrder = useMemo(
     () => orders.find((o) => o.id === orderId) ?? null,
@@ -204,8 +227,28 @@ function CreateEntry({
     ? Math.max(0, (selectedOrder.orderQty ?? selectedOrder.producedQty) - selectedOrder.producedQty)
     : 0;
 
+  // BOM materials for the selected order's output item, tagged with their BOM
+  // bucket (raw / packaging / other consumption) so the table can segregate them.
+  // Quantities are per-unit here; the table scales them by produced qty.
+  const materials = useMemo<MaterialLine[]>(() => {
+    if (!selectedOrder) return [];
+    const recipe = resolveProductionItem({
+      name: selectedOrder.outputItemName ?? selectedOrder.bom,
+      code: selectedOrder.outputItemCode,
+    });
+    return [
+      ...recipe.rawMaterials.map((m) => ({ ...m, category: "Raw Material" as MaterialCategory })),
+      ...recipe.packagingMaterials.map((m) => ({ ...m, category: "Packaging" as MaterialCategory })),
+      ...recipe.otherConsumption.map((m) => ({ ...m, category: "Other Consumption" as MaterialCategory })),
+    ];
+  }, [selectedOrder]);
+
+  const producedQty = Number(qty) || 0;
+
   const handleSelectOrder = (id: string) => {
     setOrderId(id);
+    setActuals({}); // clear any actual-qty overrides from the previous order
+    setReasons({}); // clear any variance reasons from the previous order
     const o = orders.find((x) => x.id === id);
     if (o) {
       // Pre-fill warehouse from the order
@@ -230,6 +273,27 @@ function CreateEntry({
     if (!officeId) { toast.error("Office is required."); return; }
     if (!warehouseId) { toast.error("Warehouse is required."); return; }
 
+    // Snapshot the Input Materials (BOM vs actual, variance, reason) onto the
+    // record so the entry's View dialog can show exactly what was captured here.
+    const inputMaterials: WfProductionInputMaterial[] = materials.map((m, i) => {
+      const key = `${m.itemCode}#${i}`;
+      const bomQty = roundQty(m.qtyPerUnit * q);
+      const actualQty = roundQty(Number(actuals[key] ?? String(bomQty)) || 0);
+      const available = availableFor(m.itemCode, m.itemName);
+      return {
+        itemCode: m.itemCode,
+        itemName: m.itemName,
+        uom: m.uom,
+        category: m.category,
+        bomQty,
+        actualQty,
+        variance: roundQty(actualQty - bomQty),
+        available,
+        remaining: roundQty(available - actualQty),
+        reason: (reasons[key] ?? "").trim() || undefined,
+      };
+    });
+
     const id = `PE-2026-${String(nextSeq).padStart(6, "0")}`;
     const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
     onSave({
@@ -246,6 +310,7 @@ function CreateEntry({
       officeId,
       warehouseId,
       remarks: remarks.trim() || undefined,
+      inputMaterials: inputMaterials.length ? inputMaterials : undefined,
     });
   };
 
@@ -403,6 +468,19 @@ function CreateEntry({
               />
             </div>
           </div>
+
+          {/* Input Materials — BOM for the output item, scaled to produced qty */}
+          {selectedOrder && (
+            <InputMaterialsSection
+              materials={materials}
+              producedQty={producedQty}
+              actuals={actuals}
+              setActuals={setActuals}
+              reasons={reasons}
+              setReasons={setReasons}
+              availableFor={availableFor}
+            />
+          )}
         </CardContent>
       </Card>
 
@@ -436,6 +514,175 @@ function SummaryStat({
       >
         {value}
       </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Input Materials — the output item's BOM, scaled to the produced quantity, and
+// segregated by BOM bucket: Raw / Input Materials, Packaging Materials, Other
+// Consumptions. BOM Quantity = per-unit recipe qty × produced qty. Actual Quantity
+// defaults to the BOM figure but is editable; Remaining = Available − Actual.
+// Read-only w.r.t. stock — nothing is deducted here.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type MaterialCategory = "Raw Material" | "Packaging" | "Other Consumption";
+type MaterialLine = RecipeItem & { category: MaterialCategory };
+
+const CATEGORY_ORDER: MaterialCategory[] = ["Raw Material", "Packaging", "Other Consumption"];
+const CATEGORY_LABEL: Record<MaterialCategory, string> = {
+  "Raw Material": "Raw / Input Materials",
+  "Packaging": "Packaging Materials",
+  "Other Consumption": "Other Consumptions",
+};
+
+function InputMaterialsSection({
+  materials, producedQty, actuals, setActuals, reasons, setReasons, availableFor,
+}: {
+  materials: MaterialLine[];
+  producedQty: number;
+  actuals: Record<string, string>;
+  setActuals: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  reasons: Record<string, string>;
+  setReasons: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  availableFor: (code: string, name: string) => number;
+}) {
+  const rows = useMemo(
+    () =>
+      materials.map((m, i) => {
+        const key = `${m.itemCode}#${i}`;
+        const bomQty = roundQty(m.qtyPerUnit * producedQty);
+        const actualStr = actuals[key] ?? String(bomQty);
+        const actual = Number(actualStr) || 0;
+        const available = availableFor(m.itemCode, m.itemName);
+        return {
+          key, mat: m, category: m.category, bomQty, actualStr, actual, available,
+          variance: roundQty(actual - bomQty),
+          remaining: roundQty(available - actual),
+        };
+      }),
+    [materials, producedQty, actuals, availableFor],
+  );
+
+  const totalBom = roundQty(rows.reduce((s, r) => s + r.bomQty, 0));
+  const totalActual = roundQty(rows.reduce((s, r) => s + r.actual, 0));
+  const totalVariance = roundQty(totalActual - totalBom);
+  let sl = 0; // continuous serial across all buckets
+
+  return (
+    <div className="mt-6 border-t border-border pt-5">
+      <SectionTitle icon={Package} label="Input Materials" />
+      {rows.length === 0 ? (
+        <div className="mt-3 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-foreground">
+          <AlertCircle className="h-4 w-4 inline-block mr-1.5" />
+          No BOM materials registered for this output item.
+        </div>
+      ) : (
+        <div className="mt-3 overflow-x-auto rounded-md border border-border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-[48px]">SL</TableHead>
+                <TableHead>Item Code</TableHead>
+                <TableHead>Item Name</TableHead>
+                <TableHead>UoM</TableHead>
+                <TableHead className="text-right">BOM Quantity</TableHead>
+                <TableHead className="text-right">Actual Quantity</TableHead>
+                <TableHead className="text-right">Increase / Decrease</TableHead>
+                <TableHead className="text-right">Available Quantity</TableHead>
+                <TableHead className="text-right">Remaining Quantity</TableHead>
+                <TableHead className="min-w-[200px]">Reason</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {CATEGORY_ORDER.map((cat) => {
+                const group = rows.filter((r) => r.category === cat);
+                if (group.length === 0) return null;
+                return (
+                  <Fragment key={cat}>
+                    <TableRow className="bg-muted/60 hover:bg-muted/60">
+                      <TableCell colSpan={10} className="py-1.5 text-[11px] font-semibold uppercase tracking-wider text-primary">
+                        {CATEGORY_LABEL[cat]}
+                        <span className="ml-1.5 font-normal text-muted-foreground">· {group.length} item{group.length === 1 ? "" : "s"}</span>
+                      </TableCell>
+                    </TableRow>
+                    {group.map((r) => {
+                      sl += 1;
+                      return (
+                        <TableRow key={r.key}>
+                          <TableCell className="tabular-nums text-muted-foreground">{sl}</TableCell>
+                          <TableCell className="font-mono text-xs">{r.mat.itemCode}</TableCell>
+                          <TableCell>{r.mat.itemName}</TableCell>
+                          <TableCell>{r.mat.uom}</TableCell>
+                          <TableCell className="text-right tabular-nums">{fmtQty(r.bomQty)}</TableCell>
+                          <TableCell className="text-right">
+                            <Input
+                              type="number"
+                              min={0}
+                              value={r.actualStr}
+                              onChange={(e) =>
+                                setActuals((prev) => ({ ...prev, [r.key]: e.target.value }))
+                              }
+                              className="h-8 w-28 ml-auto text-right tabular-nums"
+                            />
+                          </TableCell>
+                          <TableCell
+                            className={cn(
+                              "text-right tabular-nums font-medium",
+                              r.variance > 0 && "text-amber-600",
+                              r.variance < 0 && "text-sky-600",
+                              r.variance === 0 && "text-muted-foreground font-normal",
+                            )}
+                          >
+                            {r.variance === 0 ? "—" : `${r.variance > 0 ? "+" : ""}${fmtQty(r.variance)}`}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">{fmtQty(r.available, 4)}</TableCell>
+                          <TableCell
+                            className={cn(
+                              "text-right tabular-nums",
+                              r.remaining < 0 && "text-destructive font-medium",
+                            )}
+                          >
+                            {fmtQty(r.remaining, 4)}
+                          </TableCell>
+                          <TableCell>
+                            <Input
+                              value={reasons[r.key] ?? ""}
+                              onChange={(e) =>
+                                setReasons((prev) => ({ ...prev, [r.key]: e.target.value }))
+                              }
+                              disabled={r.variance === 0}
+                              placeholder={r.variance === 0 ? "—" : "Reason for change…"}
+                              className="h-8 text-xs"
+                            />
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </Fragment>
+                );
+              })}
+              <TableRow className="bg-muted/40 font-semibold hover:bg-muted/40">
+                <TableCell colSpan={4} className="text-right">Total</TableCell>
+                <TableCell className="text-right tabular-nums">{fmtQty(totalBom)}</TableCell>
+                <TableCell className="text-right tabular-nums">{fmtQty(totalActual)}</TableCell>
+                <TableCell
+                  className={cn(
+                    "text-right tabular-nums",
+                    totalVariance > 0 && "text-amber-600",
+                    totalVariance < 0 && "text-sky-600",
+                  )}
+                >
+                  {totalVariance === 0 ? "—" : `${totalVariance > 0 ? "+" : ""}${fmtQty(totalVariance)}`}
+                </TableCell>
+                <TableCell />
+                <TableCell />
+                <TableCell />
+              </TableRow>
+            </TableBody>
+          </Table>
+        </div>
+      )}
     </div>
   );
 }
@@ -554,6 +801,74 @@ function ProductionEntryDetailDialog({
                 </TableBody>
               </Table>
             </div>
+
+            {/* ── Recorded Input Materials (BOM vs actual, variance, reason) ── */}
+            {entry.inputMaterials && entry.inputMaterials.length > 0 && (
+              <>
+                <SectionTitle icon={Package} label="Input Materials" />
+                <div className="overflow-x-auto rounded-md border border-border">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="w-[48px]">SL</TableHead>
+                        <TableHead>Item Code</TableHead>
+                        <TableHead>Item Name</TableHead>
+                        <TableHead>UoM</TableHead>
+                        <TableHead className="text-right">BOM Qty</TableHead>
+                        <TableHead className="text-right">Actual Qty</TableHead>
+                        <TableHead className="text-right">Increase / Decrease</TableHead>
+                        <TableHead>Reason</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {(() => {
+                        let sl = 0;
+                        return CATEGORY_ORDER.map((cat) => {
+                          const group = entry.inputMaterials!.filter((l) => l.category === cat);
+                          if (group.length === 0) return null;
+                          return (
+                            <Fragment key={cat}>
+                              <TableRow className="bg-muted/60 hover:bg-muted/60">
+                                <TableCell colSpan={8} className="py-1.5 text-[11px] font-semibold uppercase tracking-wider text-primary">
+                                  {CATEGORY_LABEL[cat]}
+                                  <span className="ml-1.5 font-normal text-muted-foreground">· {group.length} item{group.length === 1 ? "" : "s"}</span>
+                                </TableCell>
+                              </TableRow>
+                              {group.map((l) => {
+                                sl += 1;
+                                return (
+                                  <TableRow key={`${l.itemCode}-${sl}`}>
+                                    <TableCell className="tabular-nums text-muted-foreground">{sl}</TableCell>
+                                    <TableCell className="font-mono text-xs">{l.itemCode}</TableCell>
+                                    <TableCell>{l.itemName}</TableCell>
+                                    <TableCell>{l.uom}</TableCell>
+                                    <TableCell className="text-right tabular-nums">{fmtQty(l.bomQty)}</TableCell>
+                                    <TableCell className="text-right tabular-nums font-medium">{fmtQty(l.actualQty)}</TableCell>
+                                    <TableCell
+                                      className={cn(
+                                        "text-right tabular-nums font-medium",
+                                        l.variance > 0 && "text-amber-600",
+                                        l.variance < 0 && "text-sky-600",
+                                        l.variance === 0 && "text-muted-foreground font-normal",
+                                      )}
+                                    >
+                                      {l.variance === 0 ? "—" : `${l.variance > 0 ? "+" : ""}${fmtQty(l.variance)}`}
+                                    </TableCell>
+                                    <TableCell className="text-xs">
+                                      {l.reason ? l.reason : <span className="text-muted-foreground">—</span>}
+                                    </TableCell>
+                                  </TableRow>
+                                );
+                              })}
+                            </Fragment>
+                          );
+                        });
+                      })()}
+                    </TableBody>
+                  </Table>
+                </div>
+              </>
+            )}
 
             {/* ── Materials breakdown ──────────────────────────────────── */}
             {breakdown ? (

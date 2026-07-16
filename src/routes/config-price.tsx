@@ -18,44 +18,32 @@ import {
 import { KpiCard } from "@/components/common/KpiCard";
 import { toast } from "sonner";
 import { rowEditors } from "@/lib/row-editors";
-
-type Price = {
-  id: string;
-  itemCode: string;
-  item: string;
-  uom: string;
-  supplier: string;
-  unitPrice: number;
-  currency: string;
-  effectiveFrom: string;
-  effectiveTo: string;
-  status: "Active" | "Expired" | "Scheduled";
-};
+import { type ItemPrice as Price, PRICE_STORE_KEY, PRICE_SEED } from "@/lib/item-prices";
+import { activeItems } from "@/lib/sample-data";
 
 const SUPPLIERS = ["Agro Fresh Ltd.", "Meat & Co.", "Dairy Plus", "Packaging BD", "Pure Water Co."];
-const ITEMS: { code: string; name: string; uom: string }[] = [
-  { code: "RM-RICE-BSMT", name: "Basmati Rice",  uom: "Kg" },
-  { code: "RM-CHK-BRST",  name: "Chicken Breast", uom: "Kg" },
-  { code: "RM-VEG-TOM",   name: "Tomato",         uom: "Kg" },
-  { code: "RM-OIL-CKG",   name: "Cooking Oil",    uom: "Litre" },
-  { code: "PK-BOX-MEAL",  name: "Meal Box",       uom: "Piece" },
-  { code: "BV-WTR-250",   name: "Mineral Water 250ml", uom: "Bottle" },
-];
+
+// Priceable items come from the shared item master — the same set Direct Receive
+// (and other purchasing screens) pick from — so every line item can be given a
+// price here and consumers can join a picked item back to its rate by code/name.
+// Deduped by name and sorted for a clean dropdown.
+const ITEMS: { code: string; name: string; uom: string }[] = (() => {
+  const seen = new Set<string>();
+  const out: { code: string; name: string; uom: string }[] = [];
+  for (const it of activeItems) {
+    const key = it.name.trim().toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ code: it.code, name: it.name, uom: it.uom });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+})();
 
 const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
-const SEED: Price[] = [
-  { id: "PRC-001", itemCode: "RM-RICE-BSMT", item: "Basmati Rice",   uom: "Kg",     supplier: "Agro Fresh Ltd.", unitPrice: 145.00, currency: "BDT", effectiveFrom: "2026-04-01", effectiveTo: "2026-06-30", status: "Active"    },
-  { id: "PRC-002", itemCode: "RM-CHK-BRST",  item: "Chicken Breast",  uom: "Kg",     supplier: "Meat & Co.",      unitPrice: 380.00, currency: "BDT", effectiveFrom: "2026-04-15", effectiveTo: "2026-07-15", status: "Active"    },
-  { id: "PRC-003", itemCode: "RM-VEG-TOM",   item: "Tomato",          uom: "Kg",     supplier: "Agro Fresh Ltd.", unitPrice: 65.00,  currency: "BDT", effectiveFrom: "2026-05-01", effectiveTo: "2026-05-31", status: "Active"    },
-  { id: "PRC-004", itemCode: "RM-OIL-CKG",   item: "Cooking Oil",     uom: "Litre",  supplier: "Agro Fresh Ltd.", unitPrice: 195.50, currency: "BDT", effectiveFrom: "2026-04-01", effectiveTo: "2026-06-30", status: "Active"    },
-  { id: "PRC-005", itemCode: "PK-BOX-MEAL",  item: "Meal Box",        uom: "Piece",  supplier: "Packaging BD",    unitPrice: 18.00,  currency: "BDT", effectiveFrom: "2026-06-01", effectiveTo: "2026-12-31", status: "Scheduled" },
-  { id: "PRC-006", itemCode: "BV-WTR-250",   item: "Mineral Water 250ml", uom: "Bottle", supplier: "Pure Water Co.", unitPrice: 12.00, currency: "BDT", effectiveFrom: "2026-01-01", effectiveTo: "2026-03-31", status: "Expired"   },
-];
-
 export default function ConfigPricePage() {
-  const [rows, setRows] = usePersistedState<Price[]>("config-price-rows", SEED);
+  const [rows, setRows] = usePersistedState<Price[]>(PRICE_STORE_KEY, PRICE_SEED);
   const [view, setView] = useState<"list" | "create" | "bulk">("list");
 
   const add = (p: Price) => { setRows((prev) => [p, ...prev]); setView("list"); };

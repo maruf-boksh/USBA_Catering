@@ -6,6 +6,7 @@ import {
   CoffeeOutlined,
   WarningOutlined,
   ShoppingCartOutlined,
+  FileTextOutlined,
   SafetyCertificateOutlined,
   CarOutlined,
   DollarOutlined,
@@ -29,6 +30,7 @@ import { useFlightOrders, getFlightOrders, getAllAmendments } from "@/lib/flight
 import { flagArrival } from "@/lib/arrival-flash";
 import { loadDelayEvents, isActiveDelayEvent } from "@/routes/delay-management";
 import { usePersistedState } from "@/lib/use-persisted-state";
+import { getPurchaseRequisitions, isPrApprovalOverdue } from "@/lib/purchase-requisitions";
 import {
   INITIAL_PACKAGING_ROWS, buildDispatchList, FLIGHT_STATUS_BADGE,
   type PackagingRow,
@@ -154,16 +156,16 @@ function useDashboardKpis(period: Period, range?: DateRange) {
   const qcResolved = qcChecks.filter((q) => q.result === "Pass").length;
   const qcRowIds = qcFailed.map((q) => q.id);
 
-  const pendingSeedPOs = purchaseOrders.filter((p) => p.status === "Pending Approval");
-  const pendingWfPOs = wfPurchaseOrders.filter((p) => p.status === "Pending Approval");
-  const pendingReqs = wfRequisitions.filter((r) => r.status === "Pending Accounts");
-  const pendingPOCount = pendingSeedPOs.length + pendingReqs.length;
-  const pendingPOAmount = pendingSeedPOs.reduce((s, p) => s + p.amount, 0);
-  const pendingPORowIds = [
-    ...pendingSeedPOs.map((p) => p.id),
-    ...pendingWfPOs.map((p) => p.id),
-    ...pendingReqs.map((r) => r.id),
-  ];
+  // Pending Purchase Requisitions — awaiting approval, with value + SLA status.
+  const pendingPRs = getPurchaseRequisitions().filter((pr) => {
+    const s = pr.status.toLowerCase();
+    return s === "pending" || s === "pending approval";
+  });
+  const pendingPRCount = pendingPRs.length;
+  const pendingPRValue = pendingPRs.reduce((s, pr) => s + (pr.totalAmount || 0), 0);
+  const pendingPRUrgent = pendingPRs.filter((pr) => pr.priority === "Urgent").length;
+  const pendingPROverdue = pendingPRs.filter((pr) => isPrApprovalOverdue(pr)).length;
+  const pendingPRRowIds = pendingPRs.map((pr) => pr.id);
 
   const lowItems = inventory.filter((i) => i.status === "Low");
   const criticalItems = inventory.filter((i) => i.status === "Critical");
@@ -247,12 +249,6 @@ function useDashboardKpis(period: Period, range?: DateRange) {
   const dOut = delayDirSplit(true);
   const dRet = delayDirSplit(false);
 
-  // Pending procurement value split — central/airport, each PR vs Direct Purchase.
-  const poCentralAmt = Math.round(pendingPOAmount * 0.6);
-  const poAirportAmt = pendingPOAmount - poCentralAmt;
-  const poCentralPr = Math.round(poCentralAmt * 0.7); const poCentralDp = poCentralAmt - poCentralPr;
-  const poAirportPr = Math.round(poAirportAmt * 0.7); const poAirportDp = poAirportAmt - poAirportPr;
-
   // Stock alerts — items nearing expiry (≤ 30 days).
   const nowMs = Date.now();
   const nearExpiryCount = inventory.filter((i) => {
@@ -306,10 +302,11 @@ function useDashboardKpis(period: Period, range?: DateRange) {
           { label: "Daily Hygiene", value: 0, icon: "🧹" },
           { label: "Personal Hygiene", value: 0, icon: "🧼" },
         ] },
-      pendingPOs:{ value: pendingPOCount, sub: pendingPOAmount > 0 ? `${formatLakh(pendingPOAmount)} pending` : "no value pending", ids: pendingPORowIds,
+      pendingPRs:{ value: pendingPRCount, sub: pendingPRValue > 0 ? `${formatLakh(pendingPRValue)} pending` : "no value pending", ids: pendingPRRowIds,
         breakdown: [
-          { label: "Central Warehouse", value: formatLakh(poCentralAmt), icon: "🏭" },
-          { label: "Airport Warehouse", value: formatLakh(poAirportAmt), icon: "🛬" },
+          { label: "Awaiting Approval", value: pendingPRCount, icon: "📝" },
+          { label: "Urgent", value: pendingPRUrgent, icon: "🚨" },
+          { label: "Overdue (SLA)", value: pendingPROverdue, icon: "⏰" },
         ] },
       invAlerts:{ value: invAlerts, sub: `${criticalItems.length} critical`, ids: invAlertRowIds,
         breakdown: [
@@ -820,7 +817,7 @@ export default function Dashboard() {
       ["Meals Prepared", k.meals.value, k.meals.sub],
       ["Delayed Flights", k.delayed.value, k.delayed.sub],
       ["QC Issues", k.qcIssues.value, k.qcIssues.sub],
-      ["Pending POs", k.pendingPOs.value, k.pendingPOs.sub],
+      ["Pending PRs", k.pendingPRs.value, k.pendingPRs.sub],
       ["Stock Alert", k.invAlerts.value, k.invAlerts.sub],
       ["Dispatch Active", k.dispatch.value, k.dispatch.sub],
       ["Stock Value", k.dailyCost.value, k.dailyCost.sub],
@@ -938,8 +935,8 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mt-3">
         {showKpi("kpi-pos") && (
-        <KpiLink to="/procurement" highlight="po-list" ids={data.kpis.pendingPOs.ids}>
-          <KpiCard label="Pending POs"      value={data.kpis.pendingPOs.value} sub={data.kpis.pendingPOs.sub} icon={ShoppingCartOutlined} tone="blue" variant="aurora" breakdown={data.kpis.pendingPOs.breakdown} hint="Purchase orders awaiting approval, with total value." />
+        <KpiLink to="/purchase-requisition" highlight="pr-list" ids={data.kpis.pendingPRs.ids}>
+          <KpiCard label="Pending PRs"      value={data.kpis.pendingPRs.value} sub={data.kpis.pendingPRs.sub} icon={FileTextOutlined} tone="blue" variant="aurora" breakdown={data.kpis.pendingPRs.breakdown} hint="Purchase requisitions awaiting approval, with total value and SLA status." />
         </KpiLink>
         )}
         {showKpi("kpi-inv") && (

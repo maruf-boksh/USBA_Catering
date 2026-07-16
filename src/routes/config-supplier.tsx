@@ -14,6 +14,9 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Plus, ArrowLeft, Save, Truck, CheckCircle, XCircle,
   Upload, Download, FileSpreadsheet, CheckCircle2, AlertCircle,
 } from "lucide-react";
@@ -22,7 +25,7 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { rowEditors } from "@/lib/row-editors";
 
-type Supplier = {
+export type Supplier = {
   id: string;
   code: string;
   name: string;
@@ -35,12 +38,15 @@ type Supplier = {
   status: "Active" | "Inactive";
 };
 
+/** localStorage key (under the shared prefix) for the Supplier Profile master. */
+export const SUPPLIER_STORE_KEY = "config-supplier-rows";
+
 const CATEGORIES = ["Grocery", "Meat & Poultry", "Dairy", "Beverage", "Packaging", "Equipment", "Service"];
 
 const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
-const SEED: Supplier[] = [
+export const SUPPLIER_SEED: Supplier[] = [
   { id: "SUP-001", code: "AGRO-FRESH", name: "Agro Fresh Ltd.",      contactPerson: "Md. Karim",      phone: "+880 1711-123456", email: "sales@agrofresh.bd", address: "Tejgaon, Dhaka",         taxId: "TIN-001245", category: "Grocery",       status: "Active" },
   { id: "SUP-002", code: "MEAT-CO",    name: "Meat & Co.",           contactPerson: "S. Ahmed",       phone: "+880 1712-234567", email: "orders@meatco.bd",   address: "Mirpur, Dhaka",          taxId: "TIN-002344", category: "Meat & Poultry",status: "Active" },
   { id: "SUP-003", code: "DAIRY-PL",   name: "Dairy Plus",           contactPerson: "F. Begum",       phone: "+880 1713-345678", email: "hello@dairyplus.bd", address: "Savar, Dhaka",           taxId: "TIN-003456", category: "Dairy",         status: "Active" },
@@ -49,7 +55,7 @@ const SEED: Supplier[] = [
 ];
 
 export default function ConfigSupplierPage() {
-  const [rows, setRows] = usePersistedState<Supplier[]>("config-supplier-rows", SEED);
+  const [rows, setRows] = usePersistedState<Supplier[]>(SUPPLIER_STORE_KEY, SUPPLIER_SEED);
   const [view, setView] = useState<"list" | "create" | "bulk">("list");
 
   const toggle = (id: string) =>
@@ -164,7 +170,7 @@ function SupplierCreate({ nextId, onSave }: { nextId: string; onSave: (s: Suppli
  * identical layout.
  */
 function SupplierFields({
-  mode, nextId, initial, onSave, onSubmit, onClose,
+  mode, nextId, initial, onSave, onSubmit, onClose, embedded,
 }: {
   mode: "create" | "edit";
   nextId?: string;
@@ -172,6 +178,9 @@ function SupplierFields({
   onSave?: (s: Supplier) => void;
   onSubmit?: (patch: Record<string, unknown>) => void;
   onClose?: () => void;
+  /** When true (create inside a dialog), hide the inline page header and render
+   *  a Cancel/Save footer instead, closing via onClose after a successful save. */
+  embedded?: boolean;
 }) {
   const isEdit = mode === "edit";
   const [code, setCode] = useState(initial?.code ?? "");
@@ -196,12 +205,13 @@ function SupplierFields({
     } else {
       onSave?.({ id: nextId!, ...payload, status: "Active" });
       toast.success(`Supplier "${name.trim()}" created.`);
+      if (embedded) onClose?.();
     }
   };
 
   return (
     <>
-      {!isEdit && (
+      {!isEdit && !embedded && (
         <div className="flex items-center justify-between mb-6">
           <h3 className="text-sm font-semibold uppercase tracking-wider">Create Supplier</h3>
           <Button onClick={save}><Save className="h-4 w-4 mr-1.5" /> Save</Button>
@@ -247,13 +257,49 @@ function SupplierFields({
           <Textarea value={address} onChange={(e) => setAddress(e.target.value)} className="mt-1" rows={2} />
         </div>
       </div>
-      {isEdit && (
+      {(isEdit || embedded) && (
         <div className="flex justify-end gap-2 mt-6 pt-4 border-t border-border">
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={save}><Save className="h-4 w-4 mr-1.5" /> Save Changes</Button>
+          <Button onClick={save}>
+            <Save className="h-4 w-4 mr-1.5" /> {isEdit ? "Save Changes" : "Save Supplier"}
+          </Button>
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * Reusable "Create Supplier" modal — the same SupplierFields form the Supplier
+ * Profile page uses, wrapped in a Dialog. The caller owns the supplier list and
+ * appends the created record via onCreate (so it persists under
+ * SUPPLIER_STORE_KEY and the caller's own dropdown updates immediately).
+ */
+export function AddSupplierDialog({
+  open, onOpenChange, nextId, onCreate,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  nextId: string;
+  onCreate: (supplier: Supplier) => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Truck className="h-5 w-5 text-primary" /> Create Supplier
+          </DialogTitle>
+        </DialogHeader>
+        <SupplierFields
+          mode="create"
+          embedded
+          nextId={nextId}
+          onSave={onCreate}
+          onClose={() => onOpenChange(false)}
+        />
+      </DialogContent>
+    </Dialog>
   );
 }
 

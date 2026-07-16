@@ -164,6 +164,7 @@ interface AppLayoutProps {
   currentUser?: {
     userId: string;
     displayName?: string;
+    photoUrl?: string;
   };
   onSignOut?: () => void;
 }
@@ -418,6 +419,7 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
                 <div className="header-profile" role="button" tabIndex={0}>
                   <Avatar
                     size={34}
+                    src={currentUser?.photoUrl}
                     icon={<UserOutlined />}
                     style={{
                       background: 'linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%)',

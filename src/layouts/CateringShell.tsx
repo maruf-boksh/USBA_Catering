@@ -45,7 +45,7 @@ export function CateringShell() {
   if (!isAuthenticated()) return null;
 
   const user = getAuthUser();
-  const currentUser = user ? { userId: user.userId, displayName: user.name } : undefined;
+  const currentUser = user ? { userId: user.userId, displayName: user.name, photoUrl: user.photoUrl } : undefined;
 
   const handleSignOut = () => {
     clearAuthUser();

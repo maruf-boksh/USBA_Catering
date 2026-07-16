@@ -19,6 +19,12 @@ import {
 import { useWorkflow, type WfPurchaseOrder, type WfRequisition } from "@/lib/workflow-store";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import { useArrivalFlash } from "@/lib/arrival-flash";
+import { getPurchaseRequisitions, type PurchaseRequisition } from "@/lib/purchase-requisitions";
+
+/** Quantity on a PR still not placed on any Purchase Order (qty − orderedQty). */
+function prOutstandingToOrder(pr: PurchaseRequisition): number {
+  return pr.lines.reduce((sum, l) => sum + Math.max(l.qty - (l.orderedQty ?? 0), 0), 0);
+}
 
 type POLineRow = { id: string; name: string; qty: number; uom: string; unitPrice: number; prefilled?: boolean };
 
@@ -36,13 +42,61 @@ export default function ProcurementPage() {
   const [poLines, setPoLines] = useState<POLineRow[]>([]);
   const [poOfficeId, setPoOfficeId] = useState("OFF-001");
   const [poWarehouseId, setPoWarehouseId] = useState("WH-001");
+  // "From Purchase Requisition" toggle + picked PR id (Direct PO only).
+  const [poFromPr, setPoFromPr] = useState(false);
+  const [poPrId, setPoPrId] = useState("");
 
   // List filter state
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
 
+  // Purchase Requisitions still open to order against — the pickable set for the
+  // "From Purchase Requisition" mode. Refreshed each time the dialog opens.
+  const orderablePRs = useMemo(() => {
+    if (!poDialogOpen) return [];
+    return getPurchaseRequisitions().filter((pr) => {
+      const s = pr.status.toLowerCase();
+      if (["rejected", "cancelled", "closed", "draft", "pending approval", "pending"].includes(s)) return false;
+      return prOutstandingToOrder(pr) > 0;
+    });
+  }, [poDialogOpen]);
+
+  // Load a PR's un-ordered lines into the PO form (qty defaults to each line's
+  // outstanding-to-order balance; unit price seeds from the PR rate).
+  const poSelectPr = (prId: string) => {
+    setPoPrId(prId);
+    if (!prId) return;
+    const pr = getPurchaseRequisitions().find((p) => p.id === prId);
+    if (!pr) return;
+    setPoOfficeId(pr.officeId || "OFF-001");
+    setPoWarehouseId(pr.warehouseId || "WH-001");
+    setPoNotes(`PO against Purchase Requisition ${pr.id}.`);
+    const outstanding = pr.lines
+      .map((l) => ({ l, remaining: Math.max(l.qty - (l.orderedQty ?? 0), 0) }))
+      .filter((x) => x.remaining > 0);
+    setPoLines(
+      outstanding.length > 0
+        ? outstanding.map(({ l, remaining }, i) => ({
+            id: `pr-${i}`, name: l.itemName, qty: remaining, uom: l.uom,
+            unitPrice: l.rate || 0, prefilled: true,
+          }))
+        : [{ id: `line-${Date.now()}`, name: "", qty: 1, uom: "Kg", unitPrice: 0 }],
+    );
+  };
+
+  // Toggle "From Purchase Requisition"; clears the PR link and lines when off.
+  const poToggleFromPr = (on: boolean) => {
+    setPoFromPr(on);
+    if (!on) {
+      setPoPrId("");
+      setPoNotes("");
+      setPoLines([{ id: `line-${Date.now()}`, name: "", qty: 1, uom: "Kg", unitPrice: 0 }]);
+    }
+  };
+
   const openPODialog = (req: WfRequisition) => {
     setSelectedReq(req);
+    setPoFromPr(false); setPoPrId("");
     const isAsset = req.source === "Fleet Operations";
     const availVendors = isAsset
       ? vendors.filter(v => v.category === "Equipment/Assets")
@@ -69,6 +123,7 @@ export default function ProcurementPage() {
   // Open the same dialog without a backing requisition — for ad-hoc POs.
   const openBlankPODialog = () => {
     setSelectedReq(null);
+    setPoFromPr(false); setPoPrId("");
     setPoVendor(vendors[0]?.name ?? "");
     setPoDeliveryDate("");
     setPoNotes("");
@@ -124,7 +179,7 @@ export default function ProcurementPage() {
       amount: totalAmount,
       date: new Date().toISOString().slice(0, 10),
       status: submitForApproval ? "Pending Approval" : "Draft",
-      requisitionRef: selectedReq?.id ?? "—",
+      requisitionRef: selectedReq?.id ?? (poPrId || "—"),
       deliveryDate: poDeliveryDate,
       notes: poNotes,
       officeId: poOfficeId,
@@ -286,6 +341,46 @@ export default function ProcurementPage() {
             </DialogTitle>
           </DialogHeader>
 
+          {/* From Purchase Requisition — load a PR's un-ordered lines instead of keying them in */}
+          {!selectedReq && (
+            <div className="rounded-md border border-border bg-muted/30 p-3 mb-1">
+              <label className="flex items-center gap-2 cursor-pointer text-sm font-medium">
+                <input
+                  type="checkbox"
+                  checked={poFromPr}
+                  onChange={(e) => poToggleFromPr(e.target.checked)}
+                  className="h-4 w-4 accent-primary"
+                />
+                From Purchase Requisition
+              </label>
+              {poFromPr && (
+                <div className="mt-3">
+                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">Purchase Requisition</Label>
+                  <select
+                    value={poPrId}
+                    onChange={(e) => poSelectPr(e.target.value)}
+                    className="w-full mt-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  >
+                    <option value="">Select a requisition…</option>
+                    {orderablePRs.map((pr) => (
+                      <option key={pr.id} value={pr.id}>
+                        {pr.id} — {pr.requestedBy} ({prOutstandingToOrder(pr)} to order)
+                      </option>
+                    ))}
+                  </select>
+                  {poPrId && (
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Un-ordered lines loaded from {poPrId} — adjust quantities and set unit prices.
+                    </p>
+                  )}
+                  {orderablePRs.length === 0 && (
+                    <p className="mt-1 text-[11px] text-muted-foreground">No approved requisitions with items left to order.</p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-4">
             <div>
               <Label>PO Number (auto)</Label>
@@ -295,7 +390,7 @@ export default function ProcurementPage() {
               <Label>Requisition Ref</Label>
               <Input
                 disabled
-                value={selectedReq?.id ?? "— Direct PO —"}
+                value={selectedReq?.id ?? (poPrId || "— Direct PO —")}
                 className="mt-1 bg-muted/50 text-muted-foreground"
               />
             </div>

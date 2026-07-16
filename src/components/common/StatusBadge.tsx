@@ -33,6 +33,7 @@ const MAP: Record<string, string> = {
   boarding:              "bg-[#f0fdfa] text-[#0f766e] border border-[#99f6e4]",
   ordered:               "bg-[#f0fdfa] text-[#0f766e] border border-[#99f6e4]",
   processing:            "bg-[#f0fdfa] text-[#0f766e] border border-[#99f6e4]",
+  "production initiation": "bg-[#f0fdfa] text-[#0f766e] border border-[#99f6e4]",
   dispatched:            "bg-[#f0fdfa] text-[#0f766e] border border-[#99f6e4]",
   inside:                "bg-[#f0fdfa] text-[#0f766e] border border-[#99f6e4]",
   "en route":            "bg-[#f0fdfa] text-[#0f766e] border border-[#99f6e4]",

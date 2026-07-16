@@ -350,6 +350,7 @@ export type WfMaintenanceApproval = {
 export type WfProductionEntryStatus =
   | "Pending"
   | "Approved"
+  | "Production Initiation"
   | "In Preparation"
   | "Ready for QC"
   | "Completed"
@@ -423,6 +424,23 @@ export type WfMrpRun = {
 // A Production Entry RECORD is the actual production-floor log against a
 // Production Order. Multiple entry records can be made against one order
 // until the order's producedQty reaches its orderQty.
+
+/** One recorded Input Material line captured with a Production Entry: the BOM
+ *  requirement scaled to the produced qty, the actual consumed, the variance,
+ *  and (when the actual differs from BOM) the reason for the change. */
+export type WfProductionInputMaterial = {
+  itemCode: string;
+  itemName: string;
+  uom: string;
+  category: "Raw Material" | "Packaging" | "Other Consumption";
+  bomQty: number;
+  actualQty: number;
+  variance: number;            // actualQty − bomQty (+ = more, − = less)
+  available: number;           // live stock snapshot at entry time
+  remaining: number;           // available − actualQty at entry time
+  reason?: string;             // why actual differs from BOM
+};
+
 export type WfProductionEntryRecord = {
   id: string;                  // PE-2026-NNNNNN
   date: string;
@@ -437,6 +455,7 @@ export type WfProductionEntryRecord = {
   remarks?: string;
   officeId: string;
   warehouseId: string;
+  inputMaterials?: WfProductionInputMaterial[]; // recorded BOM vs actual per line
 };
 
 // ── Context type ───────────────────────────────────────────────────────────────
@@ -876,7 +895,7 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
             const nextProduced = o.producedQty + record.producedQty;
             const orderTarget = o.orderQty ?? nextProduced;
             let nextStatus: WfProductionEntryStatus = o.status;
-            if (o.status === "Pending" || o.status === "Approved") {
+            if (o.status === "Pending" || o.status === "Approved" || o.status === "Production Initiation") {
               nextStatus = nextProduced >= orderTarget ? "Ready for QC" : "In Preparation";
             } else if (o.status === "In Preparation" && nextProduced >= orderTarget) {
               nextStatus = "Ready for QC";

@@ -29,7 +29,7 @@ import { toast } from "sonner";
 import {
   billOfMaterials, inventory, warehouses as ALL_WAREHOUSES,
   isDomesticSector, itemsByType, allocateFefo, SPECIAL_MEAL_BY_CODE,
-  type FlightOrderRow, type MealSlot, type ItemMaster,
+  type FlightOrderRow, type MealSlot, type ItemMaster, type InventoryItem,
 } from "@/lib/sample-data";
 import { getItemStock } from "@/lib/inventory-stock";
 import { roundQty } from "@/lib/num";
@@ -318,7 +318,7 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
   const [viewOpen, setViewOpen] = useState(false);
   const [prDetail, setPrDetail] = useState<PurchaseRequisition | null>(null);
   const [grnDetail, setGrnDetail] = useState<WfGRN | null>(null);
-  const { grns } = useWorkflow();
+  const { grns, updateProductionEntryStatus } = useWorkflow();
   const prList = getPurchaseRequisitions();
 
   // Purchase history per material — was it received via a Direct Purchase (a
@@ -351,9 +351,16 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
   const stageHint =
     entry.status === "Pending"      ? "Approval handled in Approval Management"
     : entry.status === "Approved"   ? "Will move to In Preparation once any Production Entry is logged"
+    : entry.status === "Production Initiation" ? "Available in Production Entry — log a run to start production"
     : entry.status === "In Preparation" ? "Will move to Ready for QC once orderQty is fully produced"
     : entry.status === "Ready for QC"   ? "QC sign-off in Cooking Temp & Sensory"
     : null;
+
+  // Production Initiation is offered for orders not already initiated or finished.
+  const canInitiate =
+    entry.status !== "Production Initiation" &&
+    entry.status !== "Ready for QC" &&
+    entry.status !== "Completed";
 
   const recipe = resolveProductionItem({
     name: entry.outputItemName ?? entry.bom,
@@ -392,6 +399,20 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
           <DropdownMenuItem onClick={() => window.print()}>
             <Printer className="h-4 w-4 mr-2" /> Print
           </DropdownMenuItem>
+
+          {canInitiate && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={() => {
+                  updateProductionEntryStatus(entry.id, "Production Initiation");
+                  toast.success(`${entry.id} moved to Production Initiation — now available in the Production Entry order list.`);
+                }}
+              >
+                <Zap className="h-4 w-4 mr-2" /> Production Initiation
+              </DropdownMenuItem>
+            </>
+          )}
 
           {stageHint && (
             <>
@@ -855,6 +876,37 @@ export default function ProductionEntryPage() {
   const [adjustEntry, setAdjustEntry] = useState<NumberedEntry | null>(null);
   const [adjustQty, setAdjustQty] = useState("");
   const [adjustReq, setAdjustReq] = useState<{ qty: number; breakdown: string } | null>(null);
+  // Order whose material requirement-vs-stock breakdown is open.
+  const [materialsOrder, setMaterialsOrder] = useState<NumberedEntry | null>(null);
+
+  // Live stock — the same persisted store the Stock Overview / Production Entry
+  // read — so Available matches everywhere in the app.
+  const [invItems] = usePersistedState<InventoryItem[]>("inventory-items", inventory);
+  const availableFor = useMemo(() => {
+    const byKey = new Map<string, number>();
+    for (const it of invItems) {
+      byKey.set(it.id.toLowerCase(), it.stock);
+      byKey.set(it.name.toLowerCase(), it.stock);
+    }
+    return (code: string, name: string) =>
+      byKey.get((code ?? "").toLowerCase()) ?? byKey.get((name ?? "").toLowerCase()) ?? 0;
+  }, [invItems]);
+
+  // Materials required to fulfill an order (BOM scaled to order qty) vs stock.
+  const orderMaterials = (entry: { id: string; outputItemCode?: string; outputItemName?: string; bom: string; orderQty?: number; producedQty: number }) => {
+    const orderQty = entry.orderQty ?? entry.producedQty;
+    const { raw, pkg, other } = aggregateMaterials([{
+      id: entry.id,
+      itemCode: entry.outputItemCode ?? "",
+      itemName: entry.outputItemName ?? entry.bom,
+      qty: orderQty,
+    }]);
+    return [...raw, ...pkg, ...other].map((m) => {
+      const reqQty = roundQty(m.reqQty);
+      const available = availableFor(m.itemCode, m.itemName);
+      return { ...m, reqQty, available, short: roundQty(Math.max(0, reqQty - available)) };
+    });
+  };
   const flightOrders = useFlightOrders();
   const navigate = useNavigate();
   const forwardedOrders = useMemo(() => buildForwardedOrders(flightOrders), [flightOrders]);
@@ -1328,6 +1380,34 @@ export default function ProductionEntryPage() {
         );
       },
     },
+    {
+      key: "bom" as keyof NumberedEntry,
+      header: "Materials",
+      sortable: false,
+      className: "text-center",
+      render: (r) => {
+        const mats = orderMaterials(r);
+        if (mats.length === 0) return <span className="text-muted-foreground">—</span>;
+        const shortCount = mats.filter((m) => m.short > 0).length;
+        return (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setMaterialsOrder(r); }}
+            className={cn(
+              "inline-flex items-center gap-1 rounded-full border px-2 h-6 text-[11px] font-medium transition hover:brightness-95",
+              shortCount > 0
+                ? "border-rose-200 bg-rose-50 text-rose-700"
+                : "border-emerald-200 bg-emerald-50 text-emerald-700",
+            )}
+            title="View materials required to fulfill this order vs current stock"
+          >
+            <Package className="h-3 w-3" />
+            {mats.length} items · {shortCount > 0 ? `${shortCount} short` : "all ok"}
+            <ArrowRight className="h-3 w-3 opacity-60" />
+          </button>
+        );
+      },
+    },
     { key: "status", header: "Status", render: (r) => (
       <ReviewStatusCell category="Production Order" refId={r.id}>
         <StatusBadge status={r.status} />
@@ -1743,6 +1823,91 @@ export default function ProductionEntryPage() {
         date={selectedForwardedDate}
         readOnly={isViewOnly}
       />
+
+      {/* Materials — requirement (BOM × order qty) vs current stock, per order. */}
+      <Dialog open={!!materialsOrder} onOpenChange={(o) => { if (!o) setMaterialsOrder(null); }}>
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Package className="h-5 w-5 text-primary" />
+              Materials to Fulfil Order
+            </DialogTitle>
+          </DialogHeader>
+          {materialsOrder && (() => {
+            const mats = orderMaterials(materialsOrder);
+            const orderQty = materialsOrder.orderQty ?? materialsOrder.producedQty;
+            const shortCount = mats.filter((m) => m.short > 0).length;
+            return (
+              <div className="space-y-4">
+                <div className="rounded-md border border-border bg-muted/20 px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-sm">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Order</div>
+                    <div className="mt-0.5 font-semibold text-foreground">
+                      {materialsOrder.outputItemName ?? materialsOrder.bom}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground mt-0.5">
+                      <span className="font-mono text-primary">{materialsOrder.id}</span> · Order Qty {orderQty.toLocaleString()}
+                    </div>
+                  </div>
+                  <div className={cn(
+                    "inline-flex items-center gap-1.5 rounded-md border px-2.5 h-7 text-xs font-medium",
+                    shortCount > 0
+                      ? "border-rose-200 bg-rose-50 text-rose-700"
+                      : "border-emerald-200 bg-emerald-50 text-emerald-700",
+                  )}>
+                    {shortCount > 0
+                      ? <><AlertCircle className="h-3.5 w-3.5" /> {shortCount} of {mats.length} short</>
+                      : <><CheckCircle2 className="h-3.5 w-3.5" /> All {mats.length} materials in stock</>}
+                  </div>
+                </div>
+
+                {mats.length === 0 ? (
+                  <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-foreground">
+                    <AlertCircle className="h-4 w-4 inline-block mr-1.5" />
+                    No BOM materials registered for this output item.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto rounded-md border border-border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-[48px]">SL</TableHead>
+                          <TableHead>Item Code</TableHead>
+                          <TableHead>Item Name</TableHead>
+                          <TableHead>UoM</TableHead>
+                          <TableHead className="text-right">Required Qty</TableHead>
+                          <TableHead className="text-right">Available Qty</TableHead>
+                          <TableHead className="text-right">Shortfall</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {mats.map((m, i) => (
+                          <TableRow key={`${m.itemCode}-${i}`} className={m.short > 0 ? "bg-rose-50/40" : undefined}>
+                            <TableCell className="tabular-nums text-muted-foreground">{i + 1}</TableCell>
+                            <TableCell className="font-mono text-xs">{m.itemCode}</TableCell>
+                            <TableCell>{m.itemName}</TableCell>
+                            <TableCell>{m.uom}</TableCell>
+                            <TableCell className="text-right tabular-nums">{roundQty(m.reqQty)}</TableCell>
+                            <TableCell className="text-right tabular-nums">{roundQty(m.available)}</TableCell>
+                            <TableCell className="text-right tabular-nums">
+                              {m.short > 0
+                                ? <span className="text-rose-700 font-medium">{m.short}</span>
+                                : <span className="text-emerald-600">—</span>}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setMaterialsOrder(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Adjust batch — correct an in-progress order's target for an LMC. */}
       <Dialog open={!!adjustEntry} onOpenChange={(o) => { if (!o) { setAdjustEntry(null); setAdjustReq(null); } }}>
