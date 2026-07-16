@@ -475,6 +475,34 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
               </div>
             </div>
 
+            {/* Wastage / Damaged Product Disposal log — shown when this production
+                order was adjusted by an approved wastage report. */}
+            {entry.wastageRef && (
+              <div className="rounded-md border border-orange-200 bg-orange-50 px-4 py-3">
+                <div className="text-xs font-semibold uppercase tracking-wider text-orange-700 mb-2 flex items-center gap-1.5">
+                  <Trash2 className="h-3.5 w-3.5" /> Wastage / Damaged Product Disposal — <span className="font-mono">{entry.wastageRef}</span>
+                </div>
+                <div className="grid grid-cols-4 gap-3 text-center">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Order Qty</div>
+                    <div className="mt-0.5 font-bold tabular-nums">{(entry.orderQty ?? entry.producedQty).toLocaleString()}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Failed QC</div>
+                    <div className="mt-0.5 font-bold tabular-nums text-amber-700">{(entry.failedQcQty ?? 0).toLocaleString()}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Disposal</div>
+                    <div className="mt-0.5 font-bold tabular-nums text-red-600">−{(entry.disposedQty ?? 0).toLocaleString()}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Current Qty</div>
+                    <div className="mt-0.5 font-bold tabular-nums text-emerald-700">{entry.producedQty.toLocaleString()}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Material Requirements */}
             {materials ? (
               <div>
@@ -1230,7 +1258,22 @@ export default function ProductionEntryPage() {
       className: "w-12 text-center",
       render: (r) => <span className="tabular-nums">{r.__sl}</span>,
     },
-    { key: "id",         header: "Order No" },
+    {
+      key: "id", header: "Order No",
+      render: (r) => (
+        <span className="inline-flex items-center gap-1.5">
+          <span>{r.id}</span>
+          {r.wastageRef && (
+            <span
+              className="inline-flex items-center gap-0.5 rounded border border-orange-300 bg-orange-50 px-1 h-4 text-[9px] font-bold uppercase tracking-wider text-orange-700"
+              title={`Wastage-adjusted — disposal report ${r.wastageRef}. Produced Qty reflects the remaining (current) quantity.`}
+            >
+              <Trash2 className="h-2.5 w-2.5" /> Wastage
+            </span>
+          )}
+        </span>
+      ),
+    },
     { key: "date",       header: "Date" },
     {
       key: "officeId" as keyof NumberedEntry, header: "Office / Warehouse",

@@ -1555,6 +1555,26 @@ export default function ApprovalManagementPage() {
                 status: "Approved",
               });
             }
+            // Log the disposal against the originating production order (the
+            // failed-QC re-cook batch, linked via the wastage report's batch
+            // code): Order Qty = production order qty, Produced Qty = current
+            // (remaining) qty. Keep the failed-QC & disposal figures for the
+            // Production Order View modal.
+            const prodOrder = productionEntries.find((p) => p.id === entry.batchCode);
+            if (prodOrder) {
+              const poQty = (entry.previousStock && entry.previousStock > 0)
+                ? entry.previousStock
+                : (prodOrder.orderQty ?? prodOrder.producedQty);
+              const disposed = entry.disposalQty;
+              const current = Math.max(0, poQty - disposed);
+              updateProductionEntryStatus(prodOrder.id, "Completed", {
+                orderQty: poQty,
+                producedQty: current,
+                failedQcQty: disposed,   // failed-QC qty equals the disposed qty
+                disposedQty: disposed,
+                wastageRef: entry.id,
+              });
+            }
           }
         }
       }

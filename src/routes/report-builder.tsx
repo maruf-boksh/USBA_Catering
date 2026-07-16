@@ -7,14 +7,20 @@ import { Input } from "@/components/ui/input";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
-import { FileBarChart, Columns3, Eye, CheckCheck, Square, Filter as FilterIcon, Plus, X, FileText, FileSpreadsheet, FileType2 } from "lucide-react";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { FileBarChart, Columns3, Eye, CheckCheck, Square, Filter as FilterIcon, Plus, X, FileText, FileSpreadsheet, FileType2, Database, ShieldCheck, Table2, UserCircle2, Download, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { useAllRoles, useAccess, canElement, columnElementId, ADMIN_ROLE } from "@/lib/access-control";
+import { useAccess, canElement, columnElementId, ADMIN_ROLE } from "@/lib/access-control";
+import { useRole } from "@/lib/roles";
 import { REPORT_DATASETS, getDataset, type ReportColumn } from "@/lib/report-datasets";
 
 // ── Row filters ───────────────────────────────────────────────────────────────
-type FilterOp = "contains" | "eq" | "neq" | "gt" | "lt" | "gte" | "lte";
-type Filter = { id: number; col: string; op: FilterOp; value: string };
+// A filter is scoped to a specific dataset (report) + column so it only narrows
+// that report's rows. `between` uses value (from) + value2 (to) → date/number
+// range; `empty` / `nempty` need no value.
+type FilterOp = "contains" | "eq" | "neq" | "gt" | "lt" | "gte" | "lte" | "between" | "empty" | "nempty";
+type Filter = { id: number; ds: string; col: string; op: FilterOp; value: string; value2?: string };
 
 const OPERATORS: { value: FilterOp; label: string }[] = [
   { value: "contains", label: "contains" },
@@ -24,6 +30,22 @@ const OPERATORS: { value: FilterOp; label: string }[] = [
   { value: "lt", label: "<" },
   { value: "gte", label: "≥" },
   { value: "lte", label: "≤" },
+  { value: "between", label: "range (from–to)" },
+  { value: "empty", label: "is empty" },
+  { value: "nempty", label: "is not empty" },
+];
+
+// Soft, professional accent themes cycled across report tabs so each report is
+// easy to tell apart at a glance (tab chip + its preview panel background).
+const TAB_THEMES = [
+  { trigger: "border-sky-200 text-sky-700 hover:bg-sky-50 data-[state=active]:bg-sky-100 data-[state=active]:text-sky-800 data-[state=active]:border-sky-300",           panel: "bg-sky-50/50 border-sky-200" },
+  { trigger: "border-emerald-200 text-emerald-700 hover:bg-emerald-50 data-[state=active]:bg-emerald-100 data-[state=active]:text-emerald-800 data-[state=active]:border-emerald-300", panel: "bg-emerald-50/50 border-emerald-200" },
+  { trigger: "border-violet-200 text-violet-700 hover:bg-violet-50 data-[state=active]:bg-violet-100 data-[state=active]:text-violet-800 data-[state=active]:border-violet-300",   panel: "bg-violet-50/50 border-violet-200" },
+  { trigger: "border-amber-200 text-amber-700 hover:bg-amber-50 data-[state=active]:bg-amber-100 data-[state=active]:text-amber-800 data-[state=active]:border-amber-300",       panel: "bg-amber-50/50 border-amber-200" },
+  { trigger: "border-rose-200 text-rose-700 hover:bg-rose-50 data-[state=active]:bg-rose-100 data-[state=active]:text-rose-800 data-[state=active]:border-rose-300",           panel: "bg-rose-50/50 border-rose-200" },
+  { trigger: "border-teal-200 text-teal-700 hover:bg-teal-50 data-[state=active]:bg-teal-100 data-[state=active]:text-teal-800 data-[state=active]:border-teal-300",           panel: "bg-teal-50/50 border-teal-200" },
+  { trigger: "border-indigo-200 text-indigo-700 hover:bg-indigo-50 data-[state=active]:bg-indigo-100 data-[state=active]:text-indigo-800 data-[state=active]:border-indigo-300", panel: "bg-indigo-50/50 border-indigo-200" },
+  { trigger: "border-cyan-200 text-cyan-700 hover:bg-cyan-50 data-[state=active]:bg-cyan-100 data-[state=active]:text-cyan-800 data-[state=active]:border-cyan-300",           panel: "bg-cyan-50/50 border-cyan-200" },
 ];
 
 /**
@@ -50,14 +72,28 @@ function compareValues(rawA: unknown, rawB: string): number {
 
 /** Does a row satisfy one filter rule? Empty value = no-op (ignored). */
 function matchesFilter(row: Record<string, unknown>, colDef: ReportColumn | undefined, f: Filter): boolean {
-  if (!colDef || f.value.trim() === "") return true;
+  if (!colDef) return true;
   const raw = colDef.get(row);
-  const s = String(raw ?? "").toLowerCase();
+  const s = String(raw ?? "").trim();
+  // Presence checks — no value needed.
+  if (f.op === "empty") return s === "";
+  if (f.op === "nempty") return s !== "";
+  // Range (from–to) — either bound may be blank (open-ended); both blank = no-op.
+  if (f.op === "between") {
+    const lo = f.value.trim();
+    const hi = (f.value2 ?? "").trim();
+    if (lo === "" && hi === "") return true;
+    const okLo = lo === "" || compareValues(raw, lo) >= 0;
+    const okHi = hi === "" || compareValues(raw, hi) <= 0;
+    return okLo && okHi;
+  }
+  if (f.value.trim() === "") return true;
+  const sl = s.toLowerCase();
   const fv = f.value.trim().toLowerCase();
   switch (f.op) {
-    case "contains": return s.includes(fv);
-    case "eq": return s === fv;
-    case "neq": return s !== fv;
+    case "contains": return sl.includes(fv);
+    case "eq": return sl === fv;
+    case "neq": return sl !== fv;
     case "gt": return compareValues(raw, f.value) > 0;
     case "lt": return compareValues(raw, f.value) < 0;
     case "gte": return compareValues(raw, f.value) >= 0;
@@ -151,58 +187,114 @@ async function exportPdf(filename: string, title: string, subtitle: string, cols
 }
 
 export default function ReportBuilderPage() {
-  const roles = useAllRoles();
+  const { role } = useRole();               // auto-selected from the signed-in system user
   const access = useAccess();
-  const [datasetKey, setDatasetKey] = useState(REPORT_DATASETS[0]?.key ?? "");
-  const [role, setRole] = useState<string>(ADMIN_ROLE);
-  const [selectedCols, setSelectedCols] = useState<Set<string>>(new Set());
+  // Multiple reports (datasets) can be selected at once — each downloads on its own.
+  const [selectedDatasets, setSelectedDatasets] = useState<string[]>(
+    [REPORT_DATASETS[0]?.key ?? ""].filter(Boolean),
+  );
+  // Column selection is kept per dataset (report).
+  const [colsByDs, setColsByDs] = useState<Record<string, Set<string>>>({});
   const [filters, setFilters] = useState<Filter[]>([]);
-  const [generated, setGenerated] = useState<{ cols: string[]; ds: string; role: string } | null>(null);
+  // Generated = data populated (else the table is blank). Once generated it stays
+  // on, so adding/removing reports or columns never closes the open report.
+  const [generated, setGenerated] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<string>("");   // controlled tab so adding a report keeps the view
+  const [removeMode, setRemoveMode] = useState(false);       // show a × on each tab
+  const [removeAllOpen, setRemoveAllOpen] = useState(false); // "Remove all" confirmation
   const filterId = useRef(0);
 
-  const dataset = getDataset(datasetKey);
+  // Can this role view a given dataset column? (role scopes the columns).
+  const canViewCol = (ds: { route: string }, key: string) =>
+    canElement(role, ds.route, columnElementId(key), "view", access);
 
-  // Columns the chosen role is permitted to view (role scopes the columns).
-  const availableCols = useMemo(() => {
-    if (!dataset) return [];
-    return dataset.columns.filter((c) =>
-      canElement(role, dataset.route, columnElementId(c.key), "view", access),
-    );
-  }, [dataset, role, access]);
-
-  // Keep selection within the available set when dataset/role changes.
-  const effectiveSelected = useMemo(
-    () => availableCols.filter((c) => selectedCols.has(c.key)),
-    [availableCols, selectedCols],
+  // Reports (datasets) this role is permitted to report on — has ≥1 viewable column.
+  const permissibleDatasets = useMemo(
+    () => REPORT_DATASETS.filter((ds) => ds.columns.some((c) => canViewCol(ds, c.key))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [role, access],
   );
 
-  const toggleCol = (key: string) =>
-    setSelectedCols((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key); else next.add(key);
-      return next;
-    });
+  // Role-scoped columns available for a given dataset.
+  const availableColsFor = (dsKey: string): ReportColumn[] => {
+    const ds = getDataset(dsKey);
+    if (!ds) return [];
+    return ds.columns.filter((c) => canViewCol(ds, c.key));
+  };
 
-  const selectAll = () => setSelectedCols(new Set(availableCols.map((c) => c.key)));
-  const clearAll = () => setSelectedCols(new Set());
+  // Datasets that are both selected AND permissible for the current role.
+  const effectiveDatasets = useMemo(
+    () => selectedDatasets.filter((k) => permissibleDatasets.some((d) => d.key === k)),
+    [selectedDatasets, permissibleDatasets],
+  );
+
+  // Selected columns for a dataset, limited to what the role may view.
+  const effectiveColsFor = (dsKey: string): ReportColumn[] => {
+    const chosen = colsByDs[dsKey] ?? new Set<string>();
+    return availableColsFor(dsKey).filter((c) => chosen.has(c.key));
+  };
+
+  const totalSelectedCols = useMemo(
+    () => effectiveDatasets.reduce((n, k) => n + effectiveColsFor(k).length, 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [effectiveDatasets, colsByDs, role, access],
+  );
+
+  // ── Selection handlers ─────────────────────────────────────────────────────
+  // Adding/removing a report or toggling columns never blanks an already-open
+  // report — the preview stays generated and updates live.
+  const toggleDataset = (key: string) => {
+    setSelectedDatasets((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  };
+  const toggleCol = (dsKey: string, colKey: string) => {
+    setColsByDs((prev) => {
+      const cur = new Set(prev[dsKey] ?? []);
+      if (cur.has(colKey)) cur.delete(colKey); else cur.add(colKey);
+      return { ...prev, [dsKey]: cur };
+    });
+  };
+  const selectAllCols = (dsKey: string) =>
+    setColsByDs((prev) => ({ ...prev, [dsKey]: new Set(availableColsFor(dsKey).map((c) => c.key)) }));
+  const clearCols = (dsKey: string) =>
+    setColsByDs((prev) => ({ ...prev, [dsKey]: new Set() }));
+
+  // Remove a single report (its columns + filters go with it); stay on the page.
+  const removeDataset = (key: string) => {
+    setSelectedDatasets((prev) => prev.filter((k) => k !== key));
+    setColsByDs((prev) => { const next = { ...prev }; delete next[key]; return next; });
+    setFilters((prev) => prev.filter((f) => f.ds !== key));
+  };
+  // Remove every selected report at once (from the confirm dialog); stay here.
+  const removeAll = () => {
+    setSelectedDatasets([]);
+    setColsByDs({});
+    setFilters([]);
+    setGenerated(false);
+    setRemoveMode(false);
+    setRemoveAllOpen(false);
+  };
 
   // ── Filters ──────────────────────────────────────────────────────────────
   const addFilter = () => {
-    const first = availableCols[0];
-    if (!first) return;
-    setFilters((prev) => [...prev, { id: ++filterId.current, col: first.key, op: "contains", value: "" }]);
+    const firstDs = effectiveDatasets[0];
+    if (!firstDs) return;
+    const firstCol = availableColsFor(firstDs)[0];
+    if (!firstCol) return;
+    // A date column defaults to an inline from–to range; everything else to "contains".
+    const op: FilterOp = columnInputType(firstDs, firstCol.key) === "date" ? "between" : "contains";
+    setFilters((prev) => [...prev, { id: ++filterId.current, ds: firstDs, col: firstCol.key, op, value: "", value2: "" }]);
   };
   const updateFilter = (id: number, patch: Partial<Filter>) =>
     setFilters((prev) => prev.map((f) => (f.id === id ? { ...f, ...patch } : f)));
   const removeFilter = (id: number) => setFilters((prev) => prev.filter((f) => f.id !== id));
 
-  // Sniff a column's value type from the data so the filter value field can be a
-  // date picker / number input (and so the right comparison kicks in).
-  const columnInputType = (colKey: string): "date" | "number" | "text" => {
-    if (!dataset) return "text";
-    const colDef = dataset.columns.find((c) => c.key === colKey);
-    if (!colDef) return "text";
-    for (const row of dataset.rows()) {
+  // Sniff a column's value type so the filter value field is a date / number
+  // picker (and so the right comparison kicks in).
+  const columnInputType = (dsKey: string, colKey: string): "date" | "number" | "text" => {
+    const ds = getDataset(dsKey);
+    const colDef = ds?.columns.find((c) => c.key === colKey);
+    if (!ds || !colDef) return "text";
+    for (const row of ds.rows()) {
       const s = String(colDef.get(row) ?? "").trim();
       if (s === "") continue;
       if (!Number.isNaN(Number(s))) return "number";
@@ -212,140 +304,244 @@ export default function ReportBuilderPage() {
     return "text";
   };
 
-  // Only keep filters whose column the role may still view (role/dataset changes).
+  // Keep only filters whose dataset is selected and whose column the role may view.
   const activeFilters = useMemo(
-    () => filters.filter((f) => availableCols.some((c) => c.key === f.col)),
-    [filters, availableCols],
+    () => filters.filter((f) => effectiveDatasets.includes(f.ds) && availableColsFor(f.ds).some((c) => c.key === f.col)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filters, effectiveDatasets, role, access],
   );
 
   const generate = () => {
-    if (!dataset || effectiveSelected.length === 0) return;
-    setGenerated({ cols: effectiveSelected.map((c) => c.key), ds: dataset.key, role });
+    if (totalSelectedCols === 0) return;
+    setGenerated(true);
   };
 
-  const onPickDataset = (key: string) => {
-    setDatasetKey(key);
-    setSelectedCols(new Set());
-    setFilters([]);
-    setGenerated(null);
-  };
-  const onPickRole = (r: string) => {
-    setRole(r);
-    setGenerated(null);
+  // ── Per-report resolution ──────────────────────────────────────────────────
+  // Each selected report contributes its (role-scoped, chosen) columns and its
+  // own filtered rows. Headers are always live (blank preview); rows only
+  // populate once "Generate report" is clicked. Each report downloads on its own.
+  const reports = useMemo(() => {
+    return effectiveDatasets
+      .map((dsKey) => {
+        const ds = getDataset(dsKey)!;
+        const cols = effectiveColsFor(dsKey);
+        const dsFilters = activeFilters.filter((f) => f.ds === dsKey);
+        const colByKey = new Map(ds.columns.map((c) => [c.key, c]));
+        const rows = dsFilters.length === 0
+          ? ds.rows()
+          : ds.rows().filter((row) => dsFilters.every((f) => matchesFilter(row, colByKey.get(f.col), f)));
+        return { ds, cols, rows, total: ds.rows().length, filters: dsFilters };
+      })
+      .filter((g) => g.cols.length > 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveDatasets, colsByDs, activeFilters, role, access]);
+
+  type ReportGroup = { ds: { key: string; label: string }; cols: ReportColumn[]; rows: Record<string, unknown>[]; total: number; filters: Filter[] };
+
+  // Write one report's file (no toast — the callers handle messaging).
+  const exportGroupFile = async (kind: "csv" | "xlsx" | "pdf", g: ReportGroup) => {
+    const fileBase = `${g.ds.label.replace(/[^\w]+/g, "-").toLowerCase()}-report`;
+    const subtitle = `Role: ${role} · ${g.cols.length} columns · ${g.rows.length}`
+      + `${g.filters.length ? ` of ${g.total}` : ""} rows`
+      + `${g.filters.length ? ` · ${g.filters.length} filter(s)` : ""}`;
+    if (kind === "csv") exportCsv(fileBase, g.cols, g.rows);
+    else if (kind === "xlsx") await exportXlsx(fileBase, g.cols, g.rows);
+    else await exportPdf(fileBase, `${g.ds.label} — report`, subtitle, g.cols, g.rows);
   };
 
-  // Resolve the generated report (columns + filtered rows) for preview. Filters
-  // apply live, so tweaking a rule updates the preview without re-generating.
-  const report = useMemo(() => {
-    if (!generated) return null;
-    const ds = getDataset(generated.ds);
-    if (!ds) return null;
-    const cols = ds.columns.filter((c) => generated.cols.includes(c.key));
-    const allRows = ds.rows();
-    const colByKey = new Map(ds.columns.map((c) => [c.key, c]));
-    const rows = activeFilters.length === 0
-      ? allRows
-      : allRows.filter((row) => activeFilters.every((f) => matchesFilter(row, colByKey.get(f.col), f)));
-    return { ds, cols, rows, total: allRows.length };
-  }, [generated, activeFilters]);
-
-  const onExport = async (kind: "csv" | "xlsx" | "pdf") => {
-    if (!report || report.rows.length === 0) return;
-    const fileBase = `${report.ds.label.replace(/[^\w]+/g, "-").toLowerCase()}-report`;
-    const subtitle = `Role: ${generated!.role} · ${report.cols.length} columns · ${report.rows.length}`
-      + `${activeFilters.length ? ` of ${report.total}` : ""} rows`
-      + `${activeFilters.length ? ` · ${activeFilters.length} filter(s)` : ""}`;
+  // Download a single report on its own.
+  const onExportGroup = async (kind: "csv" | "xlsx" | "pdf", g: ReportGroup) => {
+    if (!generated || g.rows.length === 0) return;
     try {
-      if (kind === "csv") exportCsv(fileBase, report.cols, report.rows);
-      else if (kind === "xlsx") await exportXlsx(fileBase, report.cols, report.rows);
-      else await exportPdf(fileBase, `${report.ds.label} — report`, subtitle, report.cols, report.rows);
-      toast.success(`Exported ${report.rows.length} row${report.rows.length === 1 ? "" : "s"} as ${kind.toUpperCase()}.`);
+      await exportGroupFile(kind, g);
+      toast.success(`Exported ${g.rows.length} row${g.rows.length === 1 ? "" : "s"} as ${kind.toUpperCase()}.`);
     } catch (e) {
       toast.error(`Export failed: ${(e as Error).message}`);
     }
   };
 
+  // Download every selected report at once (one file each).
+  const downloadAll = async (kind: "csv" | "xlsx" | "pdf") => {
+    if (!generated) return;
+    const usable = reports.filter((g) => g.rows.length > 0);
+    if (usable.length === 0) { toast.error("No rows to download in the selected reports."); return; }
+    try {
+      for (const g of usable) await exportGroupFile(kind, g);
+      toast.success(`Downloaded ${usable.length} report${usable.length === 1 ? "" : "s"} as ${kind.toUpperCase()}.`);
+    } catch (e) {
+      toast.error(`Download failed: ${(e as Error).message}`);
+    }
+  };
+
+  // One report's preview panel (meta + its own download buttons + table). Reused
+  // for the single-report card and each tab of the multi-report view.
+  const reportPanel = (g: ReportGroup) => (
+    <>
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <div>
+          <div className="text-sm font-semibold text-foreground flex items-center gap-1.5">
+            <Database className="h-4 w-4 text-muted-foreground" /> {g.ds.label} — report
+          </div>
+          <div className="text-xs text-muted-foreground">
+            Role: <strong className="text-foreground">{role}</strong> · {g.cols.length} columns ·{" "}
+            {generated
+              ? (g.filters.length > 0
+                  ? <><strong className="text-foreground">{g.rows.length}</strong> of {g.total} rows ({g.filters.length} filter{g.filters.length > 1 ? "s" : ""})</>
+                  : <>{g.rows.length} rows</>)
+              : <span className="italic">blank preview — click “Generate report” to populate rows</span>}
+          </div>
+        </div>
+        {generated && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] uppercase tracking-wider text-muted-foreground mr-1">Download</span>
+            <Button size="sm" variant="outline" className="h-8 px-2.5 text-xs" disabled={g.rows.length === 0} onClick={() => onExportGroup("csv", g)}>
+              <FileText className="h-3.5 w-3.5 mr-1" /> CSV
+            </Button>
+            <Button size="sm" variant="outline" className="h-8 px-2.5 text-xs" disabled={g.rows.length === 0} onClick={() => onExportGroup("xlsx", g)}>
+              <FileSpreadsheet className="h-3.5 w-3.5 mr-1" /> Excel
+            </Button>
+            <Button size="sm" variant="outline" className="h-8 px-2.5 text-xs" disabled={g.rows.length === 0} onClick={() => onExportGroup("pdf", g)}>
+              <FileType2 className="h-3.5 w-3.5 mr-1" /> PDF
+            </Button>
+          </div>
+        )}
+      </div>
+      <div className="rounded-md border border-border overflow-x-auto w-fit max-w-full bg-background">
+        <Table className="!w-auto">
+          <TableHeader className="bg-muted/40">
+            <TableRow>
+              {g.cols.map((c) => (
+                <TableHead key={c.key} className="text-[10px] uppercase tracking-wider whitespace-nowrap px-6">{c.label}</TableHead>
+              ))}
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {!generated ? (
+              <TableRow>
+                <TableCell colSpan={g.cols.length} className="text-center text-xs text-muted-foreground italic py-8">
+                  Blank preview — {g.cols.length} column{g.cols.length === 1 ? "" : "s"} selected. Click “Generate report” to populate rows.
+                </TableCell>
+              </TableRow>
+            ) : g.rows.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={g.cols.length} className="text-center text-sm text-muted-foreground py-8">No rows match the current filters.</TableCell>
+              </TableRow>
+            ) : (
+              g.rows.map((row, i) => (
+                <TableRow key={(row.id as string) ?? i}>
+                  {g.cols.map((c) => (
+                    <TableCell key={c.key} className="text-sm whitespace-nowrap tabular-nums px-6">{c.get(row)}</TableCell>
+                  ))}
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </div>
+    </>
+  );
+
   return (
     <>
       <PageHeader
         title="Report Builder"
-        subtitle="Build a report by picking a dataset, a role, and the columns that role may view. The selected role scopes which columns are available."
+        subtitle="Your role is auto-detected. Pick one or more permissible reports, choose the columns to include, then generate. Each selected report previews and downloads on its own."
       />
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Dataset */}
-        <Card>
-          <CardContent className="py-4">
-            <div className="text-xs uppercase tracking-wider text-muted-foreground mb-2">1 · Dataset</div>
-            <select
-              value={datasetKey}
-              onChange={(e) => onPickDataset(e.target.value)}
-              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-            >
-              {REPORT_DATASETS.map((ds) => (
-                <option key={ds.key} value={ds.key}>{ds.label}</option>
-              ))}
-            </select>
-            <p className="text-[11px] text-muted-foreground mt-2">
-              Pick the data source to report on. {REPORT_DATASETS.length} datasets available across the system.
-            </p>
-            <div className="mt-3 rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground flex items-center gap-2">
-              <FileBarChart className="h-3.5 w-3.5 shrink-0" />
-              <span><strong className="text-foreground tabular-nums">{dataset?.columns.length ?? 0}</strong> columns in this dataset</span>
-            </div>
-          </CardContent>
-        </Card>
+      {/* Permissible reports — clickable, right below the banner */}
+      <Card className="mt-4">
+        <CardContent className="py-3">
+          <div className="flex items-center gap-2 flex-wrap mb-2">
+            <ShieldCheck className="h-4 w-4 text-primary shrink-0" />
+            <span className="text-xs uppercase tracking-wider text-muted-foreground">Permissible Reports</span>
+            <Badge variant="outline" className="h-5 px-1.5 text-[10px] tabular-nums">{permissibleDatasets.length}</Badge>
+            <span className="text-[11px] text-muted-foreground inline-flex items-center gap-1 border-l border-border pl-2">
+              <UserCircle2 className="h-3.5 w-3.5" /> {role}
+            </span>
+            <span className="text-[11px] text-muted-foreground">— {role === ADMIN_ROLE ? "you can report on every report & column. " : ""}click a report to include it; its columns open below. Select several to combine.</span>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {permissibleDatasets.length === 0 ? (
+              <span className="text-[11px] text-muted-foreground">Your role can view no reports.</span>
+            ) : (
+              permissibleDatasets.map((ds) => {
+                const on = selectedDatasets.includes(ds.key);
+                return (
+                  <button
+                    key={ds.key}
+                    type="button"
+                    onClick={() => toggleDataset(ds.key)}
+                    className={`inline-flex items-center gap-1.5 rounded-md px-2.5 h-7 text-xs font-medium border transition-colors ${
+                      on
+                        ? "bg-primary text-primary-foreground border-primary"
+                        : "bg-background text-foreground border-border hover:bg-muted"
+                    }`}
+                    title={on ? "Selected — click to remove" : "Click to include this report"}
+                  >
+                    {on ? <CheckCheck className="h-3.5 w-3.5" /> : <Database className="h-3.5 w-3.5" />}
+                    {ds.label}
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
-        {/* Role */}
-        <Card>
-          <CardContent className="py-4">
-            <div className="text-xs uppercase tracking-wider text-muted-foreground mb-2">2 · Role (scopes columns)</div>
-            <select
-              value={role}
-              onChange={(e) => onPickRole(e.target.value)}
-              className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-            >
-              {roles.map((r) => <option key={r} value={r}>{r}</option>)}
-            </select>
-            <p className="text-[11px] text-muted-foreground mt-2">
-              {role === ADMIN_ROLE
-                ? "GM/Admin can report on every column."
-                : `Only columns "${role}" is permitted to view are selectable. Adjust in Configuration → User Access Control.`}
-            </p>
-            <div className="mt-3 rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
-              <strong className="text-foreground tabular-nums">{availableCols.length}</strong> of{" "}
-              <strong className="text-foreground tabular-nums">{dataset?.columns.length ?? 0}</strong> columns available to this role
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Columns */}
-        <Card>
-          <CardContent className="py-4">
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-xs uppercase tracking-wider text-muted-foreground">3 · Columns</div>
-              <div className="flex gap-1.5">
-                <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={selectAll}><CheckCheck className="h-3.5 w-3.5 mr-1" /> All</Button>
-                <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={clearAll}><Square className="h-3.5 w-3.5 mr-1" /> None</Button>
-              </div>
-            </div>
-            <div className="space-y-1 max-h-[260px] overflow-y-auto pr-1">
-              {availableCols.length === 0 && (
-                <div className="text-xs text-muted-foreground py-4 text-center">This role has no viewable columns for this dataset.</div>
-              )}
-              {availableCols.map((c) => (
-                <label key={c.key} className="flex items-center gap-2.5 text-sm cursor-pointer py-0.5">
-                  <input type="checkbox" className="h-4 w-4 accent-primary" checked={selectedCols.has(c.key)} onChange={() => toggleCol(c.key)} />
-                  <Columns3 className="h-3.5 w-3.5 text-muted-foreground" />
-                  <span className="text-foreground">{c.label}</span>
-                </label>
-              ))}
-            </div>
-            <Button className="w-full mt-3" disabled={effectiveSelected.length === 0} onClick={generate}>
-              <Eye className="h-4 w-4 mr-1.5" /> Generate report ({effectiveSelected.length})
-            </Button>
-          </CardContent>
-        </Card>
+      {/* Columns — a SEPARATE card per selected report, laid out side by side */}
+      <div className="mt-4">
+        <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+          <div className="text-xs uppercase tracking-wider text-muted-foreground flex items-center gap-2">
+            Columns
+            <span className="normal-case text-[11px] text-muted-foreground inline-flex items-center gap-1">
+              <FileBarChart className="h-3.5 w-3.5" />
+              <strong className="text-foreground tabular-nums">{effectiveDatasets.length}</strong> report{effectiveDatasets.length === 1 ? "" : "s"} · <strong className="text-foreground tabular-nums">{totalSelectedCols}</strong> column{totalSelectedCols === 1 ? "" : "s"}
+            </span>
+          </div>
+        </div>
+        {effectiveDatasets.length === 0 ? (
+          <Card>
+            <CardContent className="py-8">
+              <div className="text-center text-sm text-muted-foreground">Select one or more reports above to choose their columns.</div>
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 items-start">
+            {effectiveDatasets.map((dsKey) => {
+              const ds = getDataset(dsKey)!;
+              const cols = availableColsFor(dsKey);
+              const chosen = colsByDs[dsKey] ?? new Set<string>();
+              const chosenCount = cols.filter((c) => chosen.has(c.key)).length;
+              return (
+                <Card key={dsKey}>
+                  <CardContent className="py-4">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-semibold text-foreground flex items-center gap-1.5 min-w-0">
+                        <Database className="h-3.5 w-3.5 text-muted-foreground shrink-0" /> <span className="truncate">{ds.label}</span>
+                        <Badge variant="outline" className="h-4 px-1 text-[10px] tabular-nums shrink-0">{chosenCount}/{cols.length}</Badge>
+                      </span>
+                      <div className="flex gap-1.5 shrink-0">
+                        <Button size="sm" variant="outline" className="h-6 px-1.5 text-[10px]" onClick={() => selectAllCols(dsKey)}><CheckCheck className="h-3 w-3 mr-0.5" /> All</Button>
+                        <Button size="sm" variant="outline" className="h-6 px-1.5 text-[10px]" onClick={() => clearCols(dsKey)}><Square className="h-3 w-3 mr-0.5" /> None</Button>
+                      </div>
+                    </div>
+                    <div className="space-y-1 max-h-[280px] overflow-y-auto pr-1">
+                      {cols.length === 0 ? (
+                        <div className="text-[11px] text-muted-foreground py-2 text-center">No viewable columns for this role.</div>
+                      ) : cols.map((c) => (
+                        <label key={c.key} className="flex items-center gap-2.5 text-sm cursor-pointer py-0.5">
+                          <input type="checkbox" className="h-4 w-4 accent-primary" checked={chosen.has(c.key)} onChange={() => toggleCol(dsKey, c.key)} />
+                          <Columns3 className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                          <span className="text-foreground">{c.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Filters */}
@@ -359,28 +555,53 @@ export default function ReportBuilderPage() {
                 <Badge variant="outline" className="h-5 px-1.5 text-[10px]">{activeFilters.length} active</Badge>
               )}
             </div>
-            <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={addFilter} disabled={availableCols.length === 0}>
+            <Button size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={addFilter} disabled={effectiveDatasets.length === 0}>
               <Plus className="h-3.5 w-3.5 mr-1" /> Add filter
             </Button>
           </div>
 
           {filters.length === 0 ? (
             <p className="text-xs text-muted-foreground">
-              No filters — the report shows all rows. Add a rule to narrow by a column value (rules combine with AND).
+              No filters — each report shows all rows. Add a rule to narrow a report by a column value — text match, comparison, a
+              <strong className="text-foreground"> date / number range (from–to)</strong>, or empty / not-empty (rules on the same report combine with AND).
             </p>
           ) : (
             <div className="space-y-2">
               {filters.map((f) => {
-                const stale = !availableCols.some((c) => c.key === f.col);
+                const dsSelected = effectiveDatasets.includes(f.ds);
+                const dsCols = availableColsFor(f.ds);
+                const staleCol = !dsCols.some((c) => c.key === f.col);
+                const stale = !dsSelected || staleCol;
+                const inputType = columnInputType(f.ds, f.col);
+                const dsLabel = getDataset(f.ds)?.label ?? f.ds;
                 return (
                   <div key={f.id} className="flex items-center gap-2 flex-wrap">
+                    {/* Report (dataset) scope */}
+                    <select
+                      value={f.ds}
+                      onChange={(e) => {
+                        const nextDs = e.target.value;
+                        const firstCol = availableColsFor(nextDs)[0];
+                        const isDate = firstCol ? columnInputType(nextDs, firstCol.key) === "date" : false;
+                        updateFilter(f.id, { ds: nextDs, col: firstCol?.key ?? "", op: isDate ? "between" : (f.op === "between" ? "contains" : f.op), value: "", value2: "" });
+                      }}
+                      className={`rb-filter-ds rounded-md border bg-background px-2 py-1.5 text-sm min-w-[150px] ${!dsSelected ? "border-destructive text-destructive" : "border-border"}`}
+                    >
+                      {!dsSelected && <option value={f.ds}>{dsLabel} (not selected)</option>}
+                      {effectiveDatasets.map((k) => <option key={k} value={k}>{getDataset(k)?.label ?? k}</option>)}
+                    </select>
                     <select
                       value={f.col}
-                      onChange={(e) => updateFilter(f.id, { col: e.target.value, value: "" })}
-                      className={`rb-filter-col rounded-md border bg-background px-2 py-1.5 text-sm min-w-[140px] ${stale ? "border-destructive text-destructive" : "border-border"}`}
+                      onChange={(e) => {
+                        const nextCol = e.target.value;
+                        // Picking a date column gives an inline from–to range beside it.
+                        const isDate = columnInputType(f.ds, nextCol) === "date";
+                        updateFilter(f.id, { col: nextCol, op: isDate ? "between" : (f.op === "between" ? "contains" : f.op), value: "", value2: "" });
+                      }}
+                      className={`rb-filter-col rounded-md border bg-background px-2 py-1.5 text-sm min-w-[140px] ${staleCol ? "border-destructive text-destructive" : "border-border"}`}
                     >
-                      {stale && <option value={f.col}>{f.col} (unavailable)</option>}
-                      {availableCols.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+                      {staleCol && <option value={f.col}>{f.col} (unavailable)</option>}
+                      {dsCols.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
                     </select>
                     <select
                       value={f.op}
@@ -389,17 +610,38 @@ export default function ReportBuilderPage() {
                     >
                       {OPERATORS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
-                    <Input
-                      type={columnInputType(f.col)}
-                      value={f.value}
-                      onChange={(e) => updateFilter(f.id, { value: e.target.value })}
-                      placeholder="value"
-                      className="rb-filter-val h-9 w-44"
-                    />
+                    {/* Value input(s) — none for empty/nempty, two for a range */}
+                    {f.op === "empty" || f.op === "nempty" ? null : f.op === "between" ? (
+                      <>
+                        <Input
+                          type={inputType}
+                          value={f.value}
+                          onChange={(e) => updateFilter(f.id, { value: e.target.value })}
+                          placeholder={inputType === "date" ? "from date" : "from"}
+                          className="rb-filter-val h-9 w-40"
+                        />
+                        <span className="text-xs text-muted-foreground">to</span>
+                        <Input
+                          type={inputType}
+                          value={f.value2 ?? ""}
+                          onChange={(e) => updateFilter(f.id, { value2: e.target.value })}
+                          placeholder={inputType === "date" ? "to date" : "to"}
+                          className="rb-filter-val2 h-9 w-40"
+                        />
+                      </>
+                    ) : (
+                      <Input
+                        type={inputType}
+                        value={f.value}
+                        onChange={(e) => updateFilter(f.id, { value: e.target.value })}
+                        placeholder="value"
+                        className="rb-filter-val h-9 w-44"
+                      />
+                    )}
                     <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-muted-foreground hover:text-destructive" onClick={() => removeFilter(f.id)} title="Remove filter">
                       <X className="h-4 w-4" />
                     </Button>
-                    {stale && <span className="text-[11px] text-destructive">column not available for this role — ignored</span>}
+                    {stale && <span className="text-[11px] text-destructive">{!dsSelected ? "report not selected — ignored" : "column not available for this role — ignored"}</span>}
                   </div>
                 );
               })}
@@ -408,64 +650,143 @@ export default function ReportBuilderPage() {
         </CardContent>
       </Card>
 
-      {/* Preview */}
-      {report && (
-        <Card className="mt-4">
-          <CardContent className="pt-5">
-            <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-              <div>
-                <div className="text-sm font-semibold text-foreground">{report.ds.label} — report</div>
-                <div className="text-xs text-muted-foreground">
-                  Role: <strong className="text-foreground">{generated!.role}</strong> · {report.cols.length} columns ·{" "}
-                  {activeFilters.length > 0
-                    ? <><strong className="text-foreground">{report.rows.length}</strong> of {report.total} rows ({activeFilters.length} filter{activeFilters.length > 1 ? "s" : ""})</>
-                    : <>{report.rows.length} rows</>}
-                </div>
-              </div>
+      {/* Results toolbar — Generate report (moved here, below the filters) plus a
+          one-click "Download all" so multiple reports don't need scrolling. */}
+      {effectiveDatasets.length > 0 && (
+        <div className="mt-4 flex items-center justify-between flex-wrap gap-2">
+          <div className="text-[11px] text-muted-foreground flex items-center gap-1.5">
+            <FileBarChart className="h-3.5 w-3.5 shrink-0" />
+            {totalSelectedCols === 0
+              ? "Tick columns above, then generate."
+              : reports.length > 1
+                ? <>{reports.length} reports — switch tabs to view; download one, or all at once.</>
+                : "Generate to populate rows, then download."}
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            {generated && reports.length > 0 && (
               <div className="flex items-center gap-1.5">
-                <span className="text-[11px] uppercase tracking-wider text-muted-foreground mr-1">Export</span>
-                <Button size="sm" variant="outline" className="h-8 px-2.5 text-xs" disabled={report.rows.length === 0} onClick={() => onExport("csv")}>
-                  <FileText className="h-3.5 w-3.5 mr-1" /> CSV
+                <span className="text-[11px] uppercase tracking-wider text-muted-foreground">Download all</span>
+                <Button size="sm" variant="outline" className="h-9 px-2.5 text-xs" onClick={() => downloadAll("csv")}>
+                  <Download className="h-3.5 w-3.5 mr-1" /> CSV
                 </Button>
-                <Button size="sm" variant="outline" className="h-8 px-2.5 text-xs" disabled={report.rows.length === 0} onClick={() => onExport("xlsx")}>
-                  <FileSpreadsheet className="h-3.5 w-3.5 mr-1" /> Excel
+                <Button size="sm" variant="outline" className="h-9 px-2.5 text-xs" onClick={() => downloadAll("xlsx")}>
+                  <Download className="h-3.5 w-3.5 mr-1" /> Excel
                 </Button>
-                <Button size="sm" variant="outline" className="h-8 px-2.5 text-xs" disabled={report.rows.length === 0} onClick={() => onExport("pdf")}>
-                  <FileType2 className="h-3.5 w-3.5 mr-1" /> PDF
+                <Button size="sm" variant="outline" className="h-9 px-2.5 text-xs" onClick={() => downloadAll("pdf")}>
+                  <Download className="h-3.5 w-3.5 mr-1" /> PDF
                 </Button>
               </div>
-            </div>
-            <div className="rounded-md border border-border overflow-x-auto">
-              <Table>
-                <TableHeader className="bg-muted/40">
-                  <TableRow>
-                    {report.cols.map((c) => (
-                      <TableHead key={c.key} className="text-[10px] uppercase tracking-wider whitespace-nowrap">{c.label}</TableHead>
-                    ))}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {report.rows.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={report.cols.length} className="text-center text-sm text-muted-foreground py-8">
-                        No rows match the current filters.
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    report.rows.map((row, i) => (
-                      <TableRow key={(row.id as string) ?? i}>
-                        {report.cols.map((c) => (
-                          <TableCell key={c.key} className="text-sm whitespace-nowrap tabular-nums">{c.get(row)}</TableCell>
-                        ))}
-                      </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
+            )}
+            <Button className="h-9" disabled={totalSelectedCols === 0} onClick={generate}>
+              <Eye className="h-4 w-4 mr-1.5" /> Generate report ({totalSelectedCols})
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Preview — tabs when several reports are selected (no scrolling); a single
+          card otherwise. Columns populate live; rows appear on Generate. */}
+      {reports.length === 0 ? (
+        <Card className="mt-3">
+          <CardContent className="py-8">
+            <div className="text-center text-sm text-muted-foreground flex flex-col items-center gap-2">
+              <Table2 className="h-6 w-6 text-muted-foreground/60" />
+              Select one or more reports and their columns — the report table builds here.
             </div>
           </CardContent>
         </Card>
+      ) : reports.length === 1 ? (
+        <Card className="mt-3">
+          <CardContent className="pt-5">{reportPanel(reports[0])}</CardContent>
+        </Card>
+      ) : (
+        <Card className="mt-3">
+          <CardContent className="pt-5">
+            <Tabs
+              value={reports.some((r) => r.ds.key === activeTab) ? activeTab : reports[0].ds.key}
+              onValueChange={setActiveTab}
+            >
+              {/* Tabs + remove controls at the top */}
+              <div className="flex items-center justify-between gap-2 flex-wrap mb-3">
+                <TabsList className="flex flex-wrap h-auto gap-1.5 bg-transparent p-0">
+                  {reports.map((g, i) => {
+                    const theme = TAB_THEMES[i % TAB_THEMES.length];
+                    return (
+                      <TabsTrigger key={g.ds.key} value={g.ds.key} className={`text-xs gap-1.5 border ${theme.trigger}`}>
+                        <Database className="h-3.5 w-3.5" /> {g.ds.label}
+                        <Badge variant="outline" className="h-4 px-1 text-[10px] tabular-nums ml-0.5 bg-white/60">{g.cols.length}</Badge>
+                        {removeMode && (
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            title={`Remove ${g.ds.label}`}
+                            onClick={(e) => { e.stopPropagation(); e.preventDefault(); removeDataset(g.ds.key); }}
+                            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.stopPropagation(); e.preventDefault(); removeDataset(g.ds.key); } }}
+                            className="ml-1 inline-flex items-center justify-center h-4 w-4 rounded-full bg-destructive/15 text-destructive hover:bg-destructive hover:text-white transition-colors"
+                          >
+                            <X className="h-3 w-3" />
+                          </span>
+                        )}
+                      </TabsTrigger>
+                    );
+                  })}
+                </TabsList>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className={`h-7 px-2 text-xs no-brand ${removeMode ? "bg-destructive/10 text-destructive border-destructive/40 hover:bg-destructive/15 hover:text-destructive" : ""}`}
+                    onClick={() => setRemoveMode((m) => !m)}
+                    title="Show a × on each tab to remove that report"
+                  >
+                    {removeMode ? <><CheckCheck className="h-3.5 w-3.5 mr-1" /> Done</> : <><X className="h-3.5 w-3.5 mr-1" /> Remove</>}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 px-2 text-xs no-brand text-destructive border-destructive/40 hover:bg-destructive/10 hover:text-destructive"
+                    onClick={() => setRemoveAllOpen(true)}
+                    title="Remove every selected report"
+                  >
+                    <Trash2 className="h-3.5 w-3.5 mr-1" /> Remove All
+                  </Button>
+                </div>
+              </div>
+              {reports.map((g, i) => {
+                const theme = TAB_THEMES[i % TAB_THEMES.length];
+                return (
+                  <TabsContent key={g.ds.key} value={g.ds.key} className="mt-0">
+                    <div className={`rounded-lg border p-4 ${theme.panel}`}>
+                      {reportPanel(g)}
+                    </div>
+                  </TabsContent>
+                );
+              })}
+            </Tabs>
+          </CardContent>
+        </Card>
       )}
+
+      {/* Remove-all confirmation */}
+      <Dialog open={removeAllOpen} onOpenChange={setRemoveAllOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Trash2 className="h-5 w-5 text-destructive" /> Remove all reports?
+            </DialogTitle>
+            <DialogDescription>
+              This clears all {effectiveDatasets.length} selected report{effectiveDatasets.length === 1 ? "" : "s"}, their chosen
+              columns and filters. You'll stay on this page and can add reports again anytime.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRemoveAllOpen(false)}>Cancel</Button>
+            <Button variant="destructive" onClick={removeAll}>
+              <Trash2 className="h-4 w-4 mr-1.5" /> Yes, remove all
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

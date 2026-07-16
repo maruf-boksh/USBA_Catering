@@ -374,6 +374,14 @@ export type WfProductionEntry = {
   qcFailReason?: string;
   officeId?: string;
   warehouseId?: string;
+  // Wastage log: set when a failed-QC (Re-Cook) batch is disposed via Wastage
+  // Management and the report is Final Approved. `failedQcQty` is the batch that
+  // failed QC, `disposedQty` is the quantity written off, and `producedQty` is
+  // updated to the remaining good (Current) quantity. `wastageRef` links to the
+  // approved wastage report so the production order View can show the breakdown.
+  failedQcQty?: number;
+  disposedQty?: number;
+  wastageRef?: string;
 };
 
 // ── Material Requirement Planning (MRP) run ────────────────────────────────

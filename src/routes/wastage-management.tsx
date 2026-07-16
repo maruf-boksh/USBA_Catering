@@ -41,6 +41,12 @@ export const STOCK_BACKED_TYPES: WastageType[] = ["Production", "Airport Store",
 export const isStockBackedType = (t: WastageType | ""): boolean =>
   t === "Production" || t === "Airport Store" || t === "Transfer";
 
+// Accountability fields (Responsible Person, Correction, Corrective Action Plan,
+// Eligible for Compensation) apply to Production wastage only — they are NOT
+// captured for Galley Returns ("Airport Store") or Transfer wastage.
+export const isAccountabilityType = (t: WastageType | ""): boolean =>
+  t !== "Airport Store" && t !== "Transfer";
+
 // Salvage-sale details captured when the Disposal Method is "Sell".
 export type WastageSaleDetails = {
   buyer: string;
@@ -471,7 +477,7 @@ export default function WastageManagementPage() {
       toast.error("Please specify the disposal reason."); return;
     }
     if (!form.rootCause.trim()) { toast.error("Root cause is required."); return; }
-    if (!form.compensationJustification.trim()) {
+    if (isAccountabilityType(form.wastageType) && !form.compensationJustification.trim()) {
       toast.error("Compensation justification is required (Yes or No)."); return;
     }
     if (form.disposalMethod === "Sell") {
@@ -640,7 +646,7 @@ export default function WastageManagementPage() {
   return (
     <>
       <PageHeader
-        title="Wastage Management"
+        title="Damaged Product Disposal"
         subtitle="Production & Galley Returns Wastage — Disposal Reports & Approval Tracking"
       />
 
@@ -1012,6 +1018,25 @@ export default function WastageManagementPage() {
                               { label: "Packaging Materials", rows: recipe.packagingMaterials },
                               { label: "Other Consumption",   rows: recipe.otherConsumption   },
                             ];
+                            // Disposal can never exceed the Production Order QTY — no QTY can ever
+                            // be negative. Production Order QTY stays constant; Current QTY updates
+                            // as the disposal is entered.
+                            const disposedQty = Math.max(0, Math.min(batchQty, itemStock));
+                            const currentQty = Math.max(0, itemStock - disposedQty);
+                            const unitCost = (m: { qtyPerUnit: number; rate: number }) => m.qtyPerUnit * m.rate;    // BOM money per FG unit
+                            const lineCost = (m: { qtyPerUnit: number; rate: number }) => unitCost(m) * disposedQty; // per-item wastage value
+                            const matCost = matSections.reduce(
+                              (s, sec) => s + sec.rows.reduce((t, m) => t + lineCost(m), 0), 0,
+                            );
+                            // % loss is measured against the TOTAL production-order cost value
+                            // (BOM cost per unit × produced qty) — a fixed base, independent of
+                            // Current QTY.
+                            const fullUnitCost = matSections.reduce(
+                              (s, sec) => s + sec.rows.reduce((t, m) => t + unitCost(m), 0), 0,
+                            );
+                            const producedForCost = entry.producedQty || 0;
+                            const totalProductionCost = fullUnitCost * producedForCost;
+                            const lossPct = totalProductionCost > 0 ? (matCost / totalProductionCost) * 100 : 0;
                             return (
                               <>
                                 <div className="flex items-center gap-2 px-4 pb-2 pt-0.5 bg-orange-50/70">
@@ -1019,12 +1044,27 @@ export default function WastageManagementPage() {
                                   <Input
                                     type="number"
                                     min="0"
+                                    max={itemStock}
                                     className="h-7 text-xs w-28"
                                     value={form.recookBatchQtys[entry.id] ?? ""}
-                                    onChange={(e) => setForm({
-                                      ...form,
-                                      recookBatchQtys: { ...form.recookBatchQtys, [entry.id]: e.target.value },
-                                    })}
+                                    onChange={(e) => {
+                                      // Disposal can never exceed available stock (Current QTY
+                                      // can never be negative) — clamp to [0, QTY Before].
+                                      const raw = Number(e.target.value);
+                                      const clamped = e.target.value === ""
+                                        ? ""
+                                        : String(Math.max(0, Math.min(isNaN(raw) ? 0 : raw, itemStock)));
+                                      const nextQtys = { ...form.recookBatchQtys, [entry.id]: clamped };
+                                      // Keep field 05 (Disposal Quantity) in sync with the total
+                                      // disposal entered across all selected re-cook FGs.
+                                      const total = form.selectedRecookBatchIds
+                                        .reduce((s, id) => s + (Number(nextQtys[id]) || 0), 0);
+                                      setForm({
+                                        ...form,
+                                        recookBatchQtys: nextQtys,
+                                        disposalQty: total > 0 ? String(total) : "",
+                                      });
+                                    }}
                                     placeholder="0"
                                   />
                                   <span className="text-[11px] text-muted-foreground">Units</span>
@@ -1042,16 +1082,16 @@ export default function WastageManagementPage() {
                                     {/* QTY Before / Disposal / Current strip */}
                                     <div className="grid grid-cols-3 border-b border-orange-200 text-center">
                                       <div className="px-2 py-2 border-r border-orange-200">
-                                        <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">QTY Before</p>
+                                        <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">Production Order QTY</p>
                                         <p className="text-xs font-bold mt-0.5">{itemStock.toLocaleString()} Units</p>
                                       </div>
                                       <div className="px-2 py-2 border-r border-orange-200">
                                         <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">Disposal</p>
-                                        <p className="text-xs font-bold mt-0.5 text-red-600">{batchQty > 0 ? `−${batchQty}` : "0"} Units</p>
+                                        <p className="text-xs font-bold mt-0.5 text-red-600">{disposedQty > 0 ? `−${disposedQty.toLocaleString()}` : "0"} Units</p>
                                       </div>
                                       <div className="px-2 py-2">
                                         <p className="text-[9px] uppercase tracking-wider text-muted-foreground font-semibold">Current QTY</p>
-                                        <p className="text-xs font-bold mt-0.5 text-primary">{itemStock - batchQty} Units</p>
+                                        <p className="text-xs font-bold mt-0.5 text-primary">{currentQty.toLocaleString()} Units</p>
                                       </div>
                                     </div>
                                     {batchQty === 0 ? (
@@ -1059,19 +1099,48 @@ export default function WastageManagementPage() {
                                         Enter Disposal QTY above to see material calculations.
                                       </div>
                                     ) : (
-                                      matSections.map(({ label, rows }) => rows.length === 0 ? null : (
+                                      <>
+                                      {matSections.map(({ label, rows }) => rows.length === 0 ? null : (
                                         <div key={label}>
-                                          <div className="px-3 py-1 bg-orange-50 border-b border-orange-100">
+                                          <div className="flex items-center justify-between px-3 py-1 bg-orange-50 border-b border-orange-100">
                                             <p className="text-[9px] font-bold uppercase tracking-wider text-orange-500">{label}</p>
+                                            <p className="text-[9px] font-bold tabular-nums text-orange-500">
+                                              Tk. {rows.reduce((t, m) => t + lineCost(m), 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                            </p>
                                           </div>
                                           {rows.map((m) => (
                                             <div key={m.itemCode} className="flex items-center justify-between px-3 py-1.5 text-xs border-b border-orange-100 last:border-0">
                                               <span className="font-medium">{m.itemName}</span>
-                                              <span className="tabular-nums text-muted-foreground">{(m.qtyPerUnit * batchQty).toFixed(3)} {m.uom}</span>
+                                              <span className="flex items-center gap-3 tabular-nums">
+                                                <span className="text-muted-foreground">{(m.qtyPerUnit * disposedQty).toFixed(3)} {m.uom}</span>
+                                                {/* Calculation: disposal QTY × BOM value per unit = line value */}
+                                                <span className="text-[11px] text-muted-foreground">{disposedQty.toLocaleString()} × {unitCost(m).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                                <span className="w-24 text-right font-semibold text-foreground">= Tk. {lineCost(m).toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>
+                                              </span>
                                             </div>
                                           ))}
                                         </div>
-                                      ))
+                                      ))}
+                                      {/* BOM money value of the disposed quantity + % loss vs total production cost */}
+                                      <div className="px-3 py-2 bg-orange-100 border-t border-orange-200 space-y-1">
+                                        <div className="flex items-center justify-between">
+                                          <span className="text-[11px] font-bold uppercase tracking-wider text-orange-700">
+                                            Est. Wastage Value (BOM) · {disposedQty.toLocaleString()} Units
+                                          </span>
+                                          <span className="text-sm font-bold tabular-nums text-orange-700">
+                                            Tk. {matCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                          </span>
+                                        </div>
+                                        <div className="flex items-center justify-between">
+                                          <span className="text-[10px] text-orange-600">
+                                            Loss vs total production cost ({producedForCost.toLocaleString()} Units · Tk. {totalProductionCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
+                                          </span>
+                                          <span className="text-xs font-bold tabular-nums text-red-600">
+                                            {lossPct.toFixed(1)}% loss · Tk. {matCost.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                          </span>
+                                        </div>
+                                      </div>
+                                      </>
                                     )}
                                   </div>
                                 )}
@@ -1565,8 +1634,9 @@ export default function WastageManagementPage() {
               </div>
             )}
 
-            {/* Stock QTY Summary — Production, Airport Store & Transfer */}
-            {isStockBackedType(form.wastageType) && (() => {
+            {/* Stock QTY Summary — Galley Returns & Transfer only (Production shows
+                its per-batch QTY strip inside the Re-Cook Batches card above). */}
+            {isStockBackedType(form.wastageType) && form.wastageType !== "Production" && (() => {
               // Issued QTY is resolved live from the relevant source (inventory /
               // galley stock / production) for the selected item; falls back to
               // the captured previous stock for multi-select / manual entries.
@@ -1612,6 +1682,10 @@ export default function WastageManagementPage() {
                 placeholder="Describe the root cause in detail..."
               />
             </div>
+
+            {/* Accountability fields — Production wastage only (not Galley Returns / Transfer) */}
+            {isAccountabilityType(form.wastageType) && (
+            <>
 
             {/* Responsible Persons */}
             <div>
@@ -1796,6 +1870,9 @@ export default function WastageManagementPage() {
               </div>
             </div>
 
+            </>
+            )}
+
             {/* Prepared By — auto-saved display */}
             <div className="p-3 bg-primary/5 border border-primary/20 rounded-md">
               <p className="text-xs font-semibold text-primary mb-1.5">Prepared By (auto-saved on submit)</p>
@@ -1929,11 +2006,13 @@ export default function WastageManagementPage() {
                 </div>
               )}
 
-              {/* Correction */}
-              <div>
-                <p className="text-xs font-bold mb-1">Correction:</p>
-                <p className="text-sm bg-muted/30 p-3 rounded-md">{viewEntry.correction}</p>
-              </div>
+              {/* Correction — Production wastage only */}
+              {isAccountabilityType(viewEntry.wastageType) && (
+                <div>
+                  <p className="text-xs font-bold mb-1">Correction:</p>
+                  <p className="text-sm bg-muted/30 p-3 rounded-md">{viewEntry.correction}</p>
+                </div>
+              )}
 
               {/* Corrective Action Plan */}
               {viewEntry.correctiveActionPlan.length > 0 && (
@@ -1947,19 +2026,21 @@ export default function WastageManagementPage() {
                 </div>
               )}
 
-              {/* Compensation */}
-              <div className={cn(
-                "p-3 rounded-md border",
-                viewEntry.eligibleForCompensation ? "bg-emerald-50 border-emerald-200" : "bg-red-50 border-red-200",
-              )}>
-                <p className="text-xs font-bold mb-1">
-                  Eligible for Compensation:{" "}
-                  <span className={viewEntry.eligibleForCompensation ? "text-emerald-700" : "text-red-700"}>
-                    {viewEntry.eligibleForCompensation ? "Yes" : "No"}
-                  </span>
-                </p>
-                <p className="text-sm text-muted-foreground">{viewEntry.compensationJustification}</p>
-              </div>
+              {/* Compensation — Production wastage only */}
+              {isAccountabilityType(viewEntry.wastageType) && (
+                <div className={cn(
+                  "p-3 rounded-md border",
+                  viewEntry.eligibleForCompensation ? "bg-emerald-50 border-emerald-200" : "bg-red-50 border-red-200",
+                )}>
+                  <p className="text-xs font-bold mb-1">
+                    Eligible for Compensation:{" "}
+                    <span className={viewEntry.eligibleForCompensation ? "text-emerald-700" : "text-red-700"}>
+                      {viewEntry.eligibleForCompensation ? "Yes" : "No"}
+                    </span>
+                  </p>
+                  <p className="text-sm text-muted-foreground">{viewEntry.compensationJustification}</p>
+                </div>
+              )}
 
               {/* Stock Impact */}
               {viewEntry.stockItemName && (
@@ -1989,6 +2070,18 @@ export default function WastageManagementPage() {
                         variant="outline"
                         className="h-6 px-2 text-[11px] gap-1 border-blue-300 text-blue-700 hover:bg-blue-50"
                         onClick={() => {
+                          // Production wastage linked to a production order → jump to the
+                          // Production Order table and flash (blink) that order's row.
+                          if (
+                            viewEntry.wastageType === "Production" &&
+                            viewEntry.batchCode &&
+                            productionEntries.some((e) => e.id === viewEntry.batchCode)
+                          ) {
+                            flagArrival({ target: "production-list", ids: [viewEntry.batchCode] });
+                            setViewOpen(false);
+                            navigate(`/production-entry?pro=${encodeURIComponent(viewEntry.batchCode)}`);
+                            return;
+                          }
                           const targetIds: string[] = [];
                           try {
                             const raw = window.localStorage.getItem("harvest-data-v1:inventory-items");
