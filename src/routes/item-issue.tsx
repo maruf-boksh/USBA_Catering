@@ -16,7 +16,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import {
-  Plus, PackageCheck, Clock, CheckCircle2, Send, Search, Trash2, ChevronDown, Eye, AlertTriangle, Save,
+  Plus, PackageCheck, Clock, CheckCircle2, Send, Search, Trash2, ChevronDown, Eye, AlertTriangle, Save, ArrowLeft,
 } from "lucide-react";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { toast } from "sonner";
@@ -686,14 +686,14 @@ function FulfillmentMethodTab({
   plan: FulfillmentPlan;
   setPlan: Dispatch<SetStateAction<FulfillmentPlan>>;
 }) {
+  // demandId === "" → show the demand list; a set id → show that demand's items.
   const [demandId, setDemandId] = useState("");
   const [methodDraft, setMethodDraft] = useState<Record<string, FulfillMethod>>({});
   const [qtyDraft, setQtyDraft] = useState<Record<string, string>>({});
 
-  // Keep the selection valid as the demand list changes.
+  // Drop back to the list if the viewed demand leaves the list (e.g. fulfilled).
   useEffect(() => {
-    if (demands.length === 0) { setDemandId(""); return; }
-    setDemandId((cur) => (demands.some((d) => d.id === cur) ? cur : demands[0].id));
+    setDemandId((cur) => (cur && demands.some((d) => d.id === cur) ? cur : ""));
   }, [demands]);
 
   const demand = demands.find((d) => d.id === demandId) ?? null;
@@ -738,6 +738,7 @@ function FulfillmentMethodTab({
         ? `Methods saved for ${demand.id} (${n} item${n === 1 ? "" : "s"}) — run the actions from the demand's View button.`
         : `Cleared fulfilment methods for ${demand.id}.`,
     );
+    setDemandId(""); // return to the demand list after saving
   };
 
   if (demands.length === 0) {
@@ -752,28 +753,74 @@ function FulfillmentMethodTab({
     );
   }
 
+  // ── List view: pick a demand, then load its items on View ──────────────────
+  if (!demand) {
+    return (
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">Fulfillment Method</CardTitle>
+        </CardHeader>
+        <CardContent className="pt-0 space-y-3">
+          <p className="text-[11px] text-muted-foreground">
+            Select a demand to view its shortfall items and assign a fulfilment method.
+          </p>
+          <div className="rounded-lg border border-border overflow-x-auto">
+            <div className="min-w-[560px]">
+              <div className="grid grid-cols-[140px_minmax(140px,1fr)_120px_minmax(140px,1fr)_100px] gap-2 px-3 py-2 bg-muted/50 border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground font-medium items-center">
+                <div>Demand</div><div>Requested By</div>
+                <div className="text-right">Shortfall Items</div>
+                <div>Method Assigned</div>
+                <div className="text-right">Action</div>
+              </div>
+              {demands.map((d) => {
+                const total = demandShortfalls(d).length;
+                const assigned = Object.keys(plan[d.id] ?? {}).length;
+                const status =
+                  assigned === 0 ? { label: "Not started", cls: "bg-muted text-muted-foreground", Icon: Clock }
+                  : assigned < total ? { label: `${assigned}/${total} assigned`, cls: "bg-amber-100 text-amber-700", Icon: AlertTriangle }
+                  : { label: "Ready", cls: "bg-emerald-100 text-emerald-700", Icon: CheckCircle2 };
+                return (
+                  <div key={d.id} className="grid grid-cols-[140px_minmax(140px,1fr)_120px_minmax(140px,1fr)_100px] gap-2 px-3 py-2 border-b border-border last:border-b-0 items-center">
+                    <div className="text-xs font-mono text-primary truncate" title={d.id}>{d.id}</div>
+                    <div className="text-sm truncate" title={d.requestedBy}>{d.requestedBy}</div>
+                    <div className="text-right text-sm font-semibold tabular-nums text-red-600">{total}</div>
+                    <div>
+                      <span className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${status.cls}`}>
+                        <status.Icon className="h-3 w-3" /> {status.label}
+                      </span>
+                    </div>
+                    <div className="flex justify-end">
+                      <Button size="sm" variant="outline" className="h-7 px-2" onClick={() => setDemandId(d.id)}>
+                        <Eye className="h-3.5 w-3.5 mr-1" /> View
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // ── Detail view: assign a method per shortfall item for the viewed demand ───
   const pillCls = "text-xs font-medium px-2.5 py-1 rounded-full border transition-colors";
   return (
     <Card>
       <CardHeader className="pb-3">
-        <CardTitle className="text-base">Fulfillment Method</CardTitle>
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button size="sm" variant="outline" className="h-8" onClick={() => setDemandId("")}>
+            <ArrowLeft className="h-3.5 w-3.5 mr-1" /> Back
+          </Button>
+          <CardTitle className="text-base">
+            Fulfillment Method
+            <span className="ml-2 font-mono text-sm text-primary">{demand.id}</span>
+            <span className="ml-1 text-xs font-normal text-muted-foreground">· {demand.requestedBy}</span>
+          </CardTitle>
+        </div>
       </CardHeader>
       <CardContent className="pt-0 space-y-3">
-        <div className="min-w-[260px] max-w-sm">
-          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Demand</Label>
-          <select
-            value={demandId}
-            onChange={(e) => setDemandId(e.target.value)}
-            className="w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm"
-          >
-            {demands.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.id} — {d.requestedBy} ({demandShortfalls(d).length} shortfall)
-              </option>
-            ))}
-          </select>
-        </div>
-
         <p className="text-[11px] text-muted-foreground">
           Assign a method to each shortfall item and <span className="font-medium">Save</span> — nothing leaves this page.
           Run Direct Receive / Create Requisition from the demand's <span className="font-medium">View</span> button.

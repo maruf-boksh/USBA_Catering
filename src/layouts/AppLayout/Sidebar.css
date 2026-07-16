@@ -379,8 +379,7 @@ html[data-motion="reduced"] .sb-brand:hover .sb-brand-mark { transform: none; }
   border-radius: 6px;
   transition: background 0.12s ease, color 0.12s ease;
 }
-.sb-expand-all:hover,
-.sb-expand-all.is-active {
+.sb-expand-all:hover {
   background: var(--color-primary-light, #EEF2FF);
   color: var(--color-primary-dark, #2952C8);
 }

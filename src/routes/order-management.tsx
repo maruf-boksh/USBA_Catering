@@ -48,7 +48,8 @@ import {
   type SpecialMealEntry, type SpecialMealCategory,
 } from "@/lib/sample-data";
 import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-settings";
-import { useSpecialMealCountConfig, applySpecialMealMode } from "@/lib/special-meal-count-settings";
+import { useSpecialMealCountConfig, applySpecialMealMode, type SpecialMealMode } from "@/lib/special-meal-count-settings";
+import { useFlightSpecialMealRules, setFlightSpecialMealMode } from "@/lib/flight-special-meal-rules";
 import {
   useFlightOrders, addFlightOrders, updateFlightOrder,
   amendOrder, getOrderAmendments, revertAmendment, canRevertAmendment,
@@ -6600,6 +6601,48 @@ function SpecialMealRosterPanel({ legs, level = "passenger" }: { legs: FlightOrd
   );
 }
 
+/** Tri-state Special-Meal count rule selector: Global (inherit) · Addition ·
+ *  Deduction. Passing undefined clears the per-order override (back to global). */
+function SpecialMealRuleRow({
+  label, value, global, onChange,
+}: {
+  label: string;
+  value?: SpecialMealMode;
+  global: SpecialMealMode;
+  onChange: (mode: SpecialMealMode | undefined) => void;
+}) {
+  const opts: { key: "inherit" | SpecialMealMode; label: string }[] = [
+    { key: "inherit", label: "Default" },
+    { key: "additional", label: "Addition" },
+    { key: "deducted", label: "Deduction" },
+  ];
+  const current: "inherit" | SpecialMealMode = value ?? "inherit";
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-xs text-foreground">{label}</span>
+      <div className="inline-flex rounded-md border border-input overflow-hidden">
+        {opts.map((o) => {
+          const active = current === o.key;
+          return (
+            <button
+              key={o.key}
+              type="button"
+              title={o.key === "inherit" ? `Follow default (${global === "additional" ? "Addition" : "Deduction"})` : undefined}
+              onClick={() => onChange(o.key === "inherit" ? undefined : (o.key as SpecialMealMode))}
+              className={cn(
+                "px-2.5 h-7 text-[11px] font-medium border-l first:border-l-0 border-input transition-colors",
+                active ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-muted",
+              )}
+            >
+              {o.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function FlightOrderDetailsDialog({
   order, legs, allOrders = [], onClose,
 }: {
@@ -6615,6 +6658,8 @@ function FlightOrderDetailsDialog({
   // Special-meal count rules (Configuration → Meal Config) decide whether
   // specials are deducted (alternative — total unchanged) or additional.
   const specialCfg = useSpecialMealCountConfig();
+  // Per-flight-number rules — a BS-901 rule applies to every BS-901 order.
+  const flightRules = useFlightSpecialMealRules();
 
   // ── Individual flight detail (clicking View on a single row) ──────────────
   if (order && !isMulti) {
@@ -6633,8 +6678,12 @@ function FlightOrderDetailsDialog({
     // are added back to the total (additional) or deducted from it.
     const paxRegular = Math.max(0, leg.pax - paxSpecial);
     const crewRegular = Math.max(0, crewBase - crewSpecial);
-    const paxTotal = applySpecialMealMode(leg.pax, paxSpecial, specialCfg.passenger);
-    const crewTotal = applySpecialMealMode(crewBase, crewSpecial, specialCfg.crew);
+    // Effective rule: this flight number's rule if set, else the global config.
+    const flightRule = flightRules[leg.flight];
+    const paxMode = flightRule?.passenger ?? specialCfg.passenger;
+    const crewMode = flightRule?.crew ?? specialCfg.crew;
+    const paxTotal = applySpecialMealMode(leg.pax, paxSpecial, paxMode);
+    const crewTotal = applySpecialMealMode(crewBase, crewSpecial, crewMode);
     return (
       <Dialog open={!!order} onOpenChange={(open) => !open && onClose()}>
         <DialogContent className={cn(rosterCount > 0 ? "max-w-2xl" : "max-w-lg", "max-h-[85vh] overflow-y-auto")}>
@@ -6715,7 +6764,7 @@ function FlightOrderDetailsDialog({
                   <span className="font-medium tabular-nums text-foreground">{paxTotal.toLocaleString()}</span>
                 </div>
                 <div className="pl-3 mt-0.5 text-[11px] text-muted-foreground tabular-nums">
-                  {specialCfg.passenger === "additional"
+                  {paxMode === "additional"
                     ? `${paxRegular.toLocaleString()} regular meal + ${paxSpecial.toLocaleString()} special meal = ${paxTotal.toLocaleString()}`
                     : `${leg.pax.toLocaleString()} − ${paxSpecial.toLocaleString()} special meal = ${paxTotal.toLocaleString()}`}
                 </div>
@@ -6726,7 +6775,7 @@ function FlightOrderDetailsDialog({
                   <span className="font-medium tabular-nums text-foreground">{crewTotal.toLocaleString()}</span>
                 </div>
                 <div className="pl-3 mt-0.5 text-[11px] text-muted-foreground tabular-nums">
-                  {specialCfg.crew === "additional"
+                  {crewMode === "additional"
                     ? `${crewRegular.toLocaleString()} regular crew meal + ${crewSpecial.toLocaleString()} special crew meal = ${crewTotal.toLocaleString()}`
                     : `${crewBase.toLocaleString()} − ${crewSpecial.toLocaleString()} special crew meal = ${crewTotal.toLocaleString()}`}
                 </div>
@@ -6740,6 +6789,38 @@ function FlightOrderDetailsDialog({
                   </span>
                 </span>
               </div>
+            </div>
+
+            {/* Per-flight-number Special-Meal count rule — overrides the global
+                Meal Config for EVERY order on this flight number, across all
+                dates; "Global" leaves it inheriting. */}
+            <div className="rounded-md border border-dashed border-primary/40 bg-primary/5 px-3 py-2.5 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+                  Special-Meal Count Rule · flight {leg.flight}
+                </span>
+                {(flightRule?.passenger || flightRule?.crew) ? (
+                  <span className="text-[10px] font-semibold text-primary">Overridden</span>
+                ) : (
+                  <span className="text-[10px] text-muted-foreground">Inheriting default</span>
+                )}
+              </div>
+              <SpecialMealRuleRow
+                label="Passengers"
+                value={flightRule?.passenger}
+                global={specialCfg.passenger}
+                onChange={(mode) => setFlightSpecialMealMode(leg.flight, "passenger", mode)}
+              />
+              <SpecialMealRuleRow
+                label="Crew"
+                value={flightRule?.crew}
+                global={specialCfg.crew}
+                onChange={(mode) => setFlightSpecialMealMode(leg.flight, "crew", mode)}
+              />
+              <p className="text-[10px] text-muted-foreground">
+                Applies to all <strong>{leg.flight}</strong> flights across every date.
+                <strong> Default</strong> follows Configuration → Meal Config.
+              </p>
             </div>
           </div>
           <DialogFooter className="mt-4">

@@ -18,7 +18,9 @@
       "Bash(node probe-issue2.cjs)",
       "Bash(node probe-issued.cjs)",
       "Bash(node probe-ve.cjs)",
-      "Bash(node probe-edit.cjs)"
+      "Bash(node probe-edit.cjs)",
+      "Bash(node verify-workflow.mjs)",
+      "PowerShell($c = Get-NetTCPConnection -LocalPort 5178 -State Listen -ErrorAction SilentlyContinue; if \\($c\\) { $c | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { try { Stop-Process -Id $_ -Force -ErrorAction Stop; \"killed $_\" } catch {} } } else { \"nothing on 5178\" })"
     ],
     "additionalDirectories": [
       "C:\\Users\\TechnoNext\\.claude\\projects\\d--USBA-Catering-USBA-Catering"
