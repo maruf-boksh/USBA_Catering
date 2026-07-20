@@ -980,17 +980,27 @@ export default function Dispatch() {
 
   // ── Packaging handlers ──────────────────────────────────────────────────────
 
+  // Rows in the same dispatch run as `ref` — round-trip legs share a Dispatch ID
+  // (dspRef), so packaging, labels and scanning treat both legs / orders as one
+  // unit. A leg without a dspRef falls back to its own flight + departure slot.
+  const sameRun = (r: PackagingRow, ref: PackagingRow) =>
+    ref.dspRef ? r.dspRef === ref.dspRef : r.flight === ref.flight && r.depTime === ref.depTime;
+
   const handleConfirmMaterials = (row: PackagingRow) => {
-    // Start packaging for every "Ready for Packaging" meal on this flight/slot.
+    // Start packaging for every "Ready for Packaging" meal across the whole
+    // dispatch run (both round-trip legs / orders), not just one leg.
     const updated = packagingRows.map((r) =>
-      r.flight === row.flight && r.depTime === row.depTime && r.packagingStatus === "Ready for Packaging"
+      sameRun(r, row) && r.packagingStatus === "Ready for Packaging"
         ? { ...r, packagingStatus: "Packaging In Progress" as PackagingStatus }
         : r
     );
     setPackagingRows(updated);
-    if (row.dspRef) recalcDSP(updated, row.dspRef);
+    const dspRefs = new Set(
+      packagingRows.filter((r) => sameRun(r, row)).map((r) => r.dspRef).filter(Boolean) as string[],
+    );
+    dspRefs.forEach((d) => recalcDSP(updated, d));
     setMaterialsRow(null);
-    toast.success(`${row.flight} — packaging started.`);
+    toast.success(`${row.dspRef ?? row.flight} — packaging started for all items.`);
   };
 
   const handleMarkPackagingDone = (row: PackagingRow) => {
@@ -1018,9 +1028,7 @@ export default function Dispatch() {
     if (!labelRow) return;
     const code = raw.trim().toUpperCase();
     if (!code) return;
-    const flightRows = packagingRows.filter(
-      (r) => r.flight === labelRow.flight && r.depTime === labelRow.depTime
-    );
+    const flightRows = packagingRows.filter((r) => sameRun(r, labelRow));
     const target = flightRows.find(
       (r) =>
         r.packagingStatus === "Packaging In Progress" &&
@@ -1040,7 +1048,8 @@ export default function Dispatch() {
     setScanInput("");
     toast.success(`Scanned ${target.mealName} — ${labelCode(target)}.`);
 
-    // Once every in-progress item on this flight is scanned → Packaging Done.
+    // Once every in-progress item across the whole dispatch run is scanned →
+    // Packaging Done for all of them (both round-trip legs / orders).
     const inProgress = flightRows.filter((r) => r.packagingStatus === "Packaging In Progress");
     if (inProgress.length > 0 && inProgress.every((r) => nextScanned.has(r.id))) {
       const ids = new Set(inProgress.map((r) => r.id));
@@ -1050,7 +1059,7 @@ export default function Dispatch() {
       setPackagingRows(updated);
       const dspRefs = new Set(inProgress.map((r) => r.dspRef).filter(Boolean) as string[]);
       dspRefs.forEach((d) => recalcDSP(updated, d));
-      toast.success(`All ${ids.size} label(s) scanned — flight ${labelRow.flight} marked Packaging Done.`);
+      toast.success(`All ${ids.size} label(s) scanned — ${labelRow.dspRef ?? labelRow.flight} marked Packaging Done.`);
     }
   };
 
@@ -2374,14 +2383,32 @@ export default function Dispatch() {
                               >
                                 <Eye className="h-3.5 w-3.5" />
                               </Button>
-                              {flightQCState !== "done" && flightGroup.rows.some((r) => r.packagingStatus === "Ready for Packaging") && (
+                              {/* One combined Print Label per dispatch — inline after
+                                  View, on the first leg, covering every in-progress item
+                                  across all legs / orders of the run. */}
+                              {run.first && runFgs.some((fg) => fg.rows.some((r) => r.packagingStatus === "Packaging In Progress")) && (
                                 <Button
                                   size="sm"
                                   variant="outline"
                                   className="h-7 px-3 text-xs shrink-0"
-                                  onClick={() => setMaterialsRow(flightGroup.rows.find((r) => r.packagingStatus === "Ready for Packaging")!)}
+                                  onClick={() => openLabelModal(runFgs.flatMap((fg) => fg.rows).find((r) => r.packagingStatus === "Packaging In Progress")!)}
+                                  title={isRoundTrip ? "Print & scan labels for both outbound & return legs" : "Print & scan labels"}
                                 >
-                                  <Package className="h-3 w-3 mr-1" /> Initiate Packaging
+                                  <Printer className="h-3 w-3 mr-1" /> Print Label
+                                </Button>
+                              )}
+                              {/* One combined Initiate Packaging per dispatch — only on
+                                  the first leg, starting every "Ready for Packaging"
+                                  meal across all legs / orders of the run. */}
+                              {run.first && runFgs.some((fg) => fg.rows.some((r) => r.packagingStatus === "Ready for Packaging")) && (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-7 px-3 text-xs shrink-0"
+                                  onClick={() => setMaterialsRow(runFgs.flatMap((fg) => fg.rows).find((r) => r.packagingStatus === "Ready for Packaging")!)}
+                                  title={isRoundTrip ? "Start packaging for both outbound & return legs" : "Start packaging"}
+                                >
+                                  <Package className="h-3 w-3 mr-1" /> Initiate Packaging{isRoundTrip ? " (Round Trip)" : ""}
                                 </Button>
                               )}
                               {/* One combined Initiate Dispatch per dispatch — only
@@ -2415,11 +2442,6 @@ export default function Dispatch() {
                                   </Button>
                                 </DropdownMenuTrigger>
                                 <DropdownMenuContent align="end" className="w-52">
-                                  {flightGroup.rows.some((r) => r.packagingStatus === "Packaging In Progress") && (
-                                    <DropdownMenuItem onClick={() => openLabelModal(flightGroup.rows[0])}>
-                                      <Printer className="h-4 w-4 mr-2" /> Print Label
-                                    </DropdownMenuItem>
-                                  )}
                                   <DropdownMenuItem onClick={() => setQcReport({ flight: flightGroup.flight, qcState: flightQCState, checkedAt: flightQCData?.qcCheckedAt })}>
                                     View QC Report
                                   </DropdownMenuItem>
@@ -2674,13 +2696,14 @@ export default function Dispatch() {
         <DialogContent className="w-full max-w-full sm:max-w-2xl max-h-[100vh] sm:max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden">
           <div className="px-6 pt-5 pb-4 border-b shrink-0">
             <DialogTitle className="text-base font-semibold">
-              Start Packaging — {materialsRow?.flight}
+              Start Packaging — {materialsRow?.dspRef ?? materialsRow?.flight}
             </DialogTitle>
           </div>
           {materialsRow && (() => {
-            // Full manifest for this flight/slot — every meal, whatever its status.
+            // Full manifest for the whole dispatch run — every meal on both
+            // round-trip legs / orders, whatever its status.
             const flightRows = packagingRows
-              .filter((r) => r.flight === materialsRow.flight && r.depTime === materialsRow.depTime)
+              .filter((r) => sameRun(r, materialsRow))
               .slice()
               .sort((a, b) =>
                 (a.packagingStatus === "Ready for Packaging" ? 0 : 1) -
@@ -2792,12 +2815,12 @@ export default function Dispatch() {
         <DialogContent className="w-full max-w-full sm:max-w-3xl max-h-[100vh] sm:max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden">
           <div className="px-6 pt-5 pb-4 border-b shrink-0">
             <DialogTitle className="text-base font-semibold flex items-center gap-2">
-              <Printer className="h-4 w-4" /> Print &amp; Scan Labels — {labelRow?.flight}
+              <Printer className="h-4 w-4" /> Print &amp; Scan Labels — {labelRow?.dspRef ?? labelRow?.flight}
             </DialogTitle>
           </div>
           {labelRow && (() => {
             const flightRows = packagingRows
-              .filter((r) => r.flight === labelRow.flight && r.depTime === labelRow.depTime)
+              .filter((r) => sameRun(r, labelRow))
               .slice()
               .sort((a, b) =>
                 (a.packagingStatus === "Packaging In Progress" ? 0 : 1) -

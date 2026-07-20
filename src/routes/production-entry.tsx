@@ -405,8 +405,27 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={() => {
-                  updateProductionEntryStatus(entry.id, "Production Initiation");
-                  toast.success(`${entry.id} moved to Production Initiation — now available in the Production Entry order list.`);
+                  if (entry.status === "Re-Cook") {
+                    // Re-Cook restart: reset production progress to zero and route
+                    // the order back through approval (status "Pending"), tagged as
+                    // a Re-Cook. The QC-failure context (reason / by / at) is kept so
+                    // it shows in the Approval Management detail view. On approval the
+                    // order becomes "Approved" and available for a fresh entry run.
+                    updateProductionEntryStatus(entry.id, "Pending", {
+                      producedQty: 0,
+                      reCook: true,
+                      reCookFailedQty: entry.producedQty,
+                      qcPassedAt: undefined,
+                      qcCheckedBy: undefined,
+                      qcLogId: undefined,
+                      completedAt: undefined,
+                      inventoryAdded: undefined,
+                    });
+                    toast.success(`${entry.id} sent to Approval Management (Production) as a Re-Cook re-initiation. It becomes available for entry once approved.`);
+                  } else {
+                    updateProductionEntryStatus(entry.id, "Production Initiation");
+                    toast.success(`${entry.id} moved to Production Initiation — now available in the Production Entry order list.`);
+                  }
                 }}
               >
                 <Zap className="h-4 w-4 mr-2" /> Production Initiation
@@ -1394,16 +1413,16 @@ export default function ProductionEntryPage() {
             type="button"
             onClick={(e) => { e.stopPropagation(); setMaterialsOrder(r); }}
             className={cn(
-              "inline-flex items-center gap-1 rounded-full border px-2 h-6 text-[11px] font-medium transition hover:brightness-95",
+              "inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 h-6 text-[11px] font-medium transition hover:brightness-95",
               shortCount > 0
                 ? "border-rose-200 bg-rose-50 text-rose-700"
                 : "border-emerald-200 bg-emerald-50 text-emerald-700",
             )}
             title="View materials required to fulfill this order vs current stock"
           >
-            <Package className="h-3 w-3" />
-            {mats.length} items · {shortCount > 0 ? `${shortCount} short` : "all ok"}
-            <ArrowRight className="h-3 w-3 opacity-60" />
+            <Package className="h-3 w-3 shrink-0" />
+            <span className="whitespace-nowrap">{mats.length} items · {shortCount > 0 ? `${shortCount} short` : "all ok"}</span>
+            <ArrowRight className="h-3 w-3 shrink-0 opacity-60" />
           </button>
         );
       },

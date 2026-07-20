@@ -56,6 +56,10 @@ export type WfDemandRequest = {
   rejectedBy?: string;
   rejectedAt?: string;
   rejectionReason?: string;
+  /** True when the demand was auto-raised from a Re-Cook production entry whose
+   *  BOM materials were short of stock. Drives a "Re-Cook" tag on the Demand
+   *  Requests page and in the Approval Management queue. */
+  reCook?: boolean;
 };
 
 export type WfRequisition = {
@@ -383,6 +387,13 @@ export type WfProductionEntry = {
   failedQcQty?: number;
   disposedQty?: number;
   wastageRef?: string;
+  // Re-Cook re-initiation: set when a failed-QC (Re-Cook) batch is re-initiated
+  // from the Production Order list. The order re-enters the approval queue
+  // (status back to "Pending") tagged as a Re-Cook; on approval it becomes
+  // "Approved" and available for a fresh Production Entry run. reCookFailedQty
+  // snapshots the batch quantity that failed QC before producedQty was reset.
+  reCook?: boolean;
+  reCookFailedQty?: number;
 };
 
 // ── Material Requirement Planning (MRP) run ────────────────────────────────

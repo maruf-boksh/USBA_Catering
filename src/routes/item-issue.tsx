@@ -460,15 +460,26 @@ function DemandViewDialog({
   const plannedIds = useMemo(() => {
     if (!demand) return [] as string[];
     const s = plan[demand.id] ?? {};
+    // Re-Cook demands arrive pre-planned: each short material defaults to a
+    // Requisition at its shortfall qty, so the procurement actions are usable
+    // without a manual pass on the Fulfillment Method tab (still overridable there).
+    const dflt: FulfillMethod = demand.reCook ? "requisition" : "";
     return tagged
-      .filter((it) => it.insufficient && s[it.id]?.method && (s[it.id]?.qty ?? 0) > 0)
+      .filter(
+        (it) =>
+          it.insufficient &&
+          (s[it.id]?.method ?? dflt) &&
+          (s[it.id]?.qty ?? (demand.reCook ? it.shortfall : 0)) > 0,
+      )
       .map((it) => it.id);
   }, [demand, tagged, plan]);
 
-  // Start with nothing checked whenever the demand (or its saved plan) changes.
+  // Start with nothing checked whenever the demand (or its saved plan) changes —
+  // except Re-Cook demands, whose planned rows are pre-selected so the matching
+  // procurement action is immediately usable.
   useEffect(() => {
-    setSelectedIds(new Set());
-  }, [demand?.id, plannedIds]);
+    setSelectedIds(demand?.reCook ? new Set(plannedIds) : new Set());
+  }, [demand?.id, demand?.reCook, plannedIds]);
 
   if (!demand) return null;
 
@@ -476,9 +487,16 @@ function DemandViewDialog({
   const saved = plan[demandId] ?? {};
   const sufficientItems = tagged.filter((it) => !it.insufficient);
   // Shortfall rows carry their SAVED method + planned qty from the Fulfillment tab.
+  // Re-Cook demands fall back to a Requisition at shortfall qty so the plan is
+  // ready-to-act on the moment the demand is opened.
+  const dfltMethod: FulfillMethod = demand.reCook ? "requisition" : "";
   const shortfallItems = tagged
     .filter((it) => it.insufficient)
-    .map((it) => ({ ...it, method: saved[it.id]?.method ?? ("" as FulfillMethod), planQty: saved[it.id]?.qty ?? 0 }));
+    .map((it) => ({
+      ...it,
+      method: saved[it.id]?.method ?? dfltMethod,
+      planQty: saved[it.id]?.qty ?? (demand.reCook ? it.shortfall : 0),
+    }));
   const canProcure = demand.status !== "Pending Approval" && demand.status !== "Rejected";
 
   // Actions run only on rows the user has checked (and only where a method applies).
@@ -576,6 +594,11 @@ function DemandViewDialog({
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
           <div className="rounded-md border border-border bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
             Ref: <strong className="text-foreground">{demand.reference}</strong>
+            {demand.reCook && (
+              <span className="ml-1.5 inline-flex items-center rounded-full border border-rose-300 bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 align-middle">
+                Re-Cook
+              </span>
+            )}
             {" · "}By <strong className="text-foreground">{demand.requestedBy}</strong> ({demand.role})
             {" · "}{demand.date}
           </div>
@@ -705,8 +728,11 @@ function FulfillmentMethodTab({
     const saved = plan[demand.id] ?? {};
     const m: Record<string, FulfillMethod> = {};
     const q: Record<string, string> = {};
+    // Re-Cook demands pre-select Requisition for each short material so the
+    // store just reviews + saves (still fully overridable).
+    const dflt: FulfillMethod = demand.reCook ? "requisition" : "";
     for (const it of demandShortfalls(demand)) {
-      m[it.id] = saved[it.id]?.method ?? "";
+      m[it.id] = saved[it.id]?.method ?? dflt;
       q[it.id] = String(saved[it.id]?.qty ?? it.shortfall);
     }
     setMethodDraft(m);

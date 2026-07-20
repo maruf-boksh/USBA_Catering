@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
-import { useWorkflow, type WfProductionEntryRecord, type WfProductionInputMaterial } from "@/lib/workflow-store";
+import { useWorkflow, type WfProductionEntryRecord, type WfProductionInputMaterial, type WfDemandRequest } from "@/lib/workflow-store";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import { PRODUCTION_ITEMS, type RecipeItem } from "@/routes/production-entry";
 import { resolveProductionItem } from "@/lib/meal-recipe";
@@ -192,6 +192,7 @@ function CreateEntry({
   nextSeq: number;
   onSave: (record: WfProductionEntryRecord) => void;
 }) {
+  const { addDemands, demands } = useWorkflow();
   const [orderId, setOrderId] = useState("");
   const [qty, setQty] = useState("");
   const [batch, setBatch] = useState("");
@@ -200,6 +201,9 @@ function CreateEntry({
   const [officeId, setOfficeId] = useState("OFF-001");
   const [warehouseId, setWarehouseId] = useState("WH-003");
   const [remarks, setRemarks] = useState("");
+  // DR id once a Re-Cook material demand has been raised for the current order,
+  // so the button flips to a confirmation and can't double-raise.
+  const [demandRaised, setDemandRaised] = useState<string | null>(null);
   // User overrides for the Actual Quantity column. Keyed by row key; a missing
   // entry means the field still tracks the (scaled) BOM quantity default.
   const [actuals, setActuals] = useState<Record<string, string>>({});
@@ -249,6 +253,7 @@ function CreateEntry({
     setOrderId(id);
     setActuals({}); // clear any actual-qty overrides from the previous order
     setReasons({}); // clear any variance reasons from the previous order
+    setDemandRaised(null); // reset the Re-Cook demand button for the new order
     const o = orders.find((x) => x.id === id);
     if (o) {
       // Pre-fill warehouse from the order
@@ -314,6 +319,68 @@ function CreateEntry({
     });
   };
 
+  // ── Re-Cook shortfall → Demand Requisition ────────────────────────────────
+  // For a Re-Cook order, materials whose available stock can't cover the BOM
+  // requirement need to be purchased. We surface them here so the user can raise
+  // ONE Demand Requisition (at BOM qty) that flows through the normal approval
+  // layer, tagged as Re-Cook.
+  const shortMaterials = useMemo(() => {
+    if (!selectedOrder?.reCook) return [];
+    return materials
+      .map((m) => {
+        const bomQty = roundQty(m.qtyPerUnit * producedQty);
+        const available = availableFor(m.itemCode, m.itemName);
+        return { mat: m, bomQty, available };
+      })
+      .filter((r) => r.bomQty > 0 && r.available < r.bomQty);
+  }, [selectedOrder, materials, producedQty, availableFor]);
+
+  const handleGenerateDemand = () => {
+    if (!selectedOrder) return;
+    if (shortMaterials.length === 0) {
+      toast.info("No material shortfall — every BOM item is in stock.");
+      return;
+    }
+    const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const drId = `DR-${9000 + demands.length + 1}`;
+    const items = shortMaterials.map(({ mat, bomQty }) => {
+      const invRow = invItems.find(
+        (i) =>
+          i.id.toLowerCase() === mat.itemCode.toLowerCase() ||
+          i.name.toLowerCase() === mat.itemName.toLowerCase(),
+      );
+      const bucket =
+        mat.category === "Packaging" ? "Packaging"
+        : mat.category === "Other Consumption" ? "Other"
+        : "Raw";
+      return {
+        id: invRow?.id ?? mat.itemCode,
+        name: mat.itemName,
+        qty: bomQty,
+        uom: mat.uom,
+        type: bucket,
+      };
+    });
+    const dr: WfDemandRequest = {
+      id: drId,
+      reference: selectedOrder.id,
+      requestedBy: producer.trim() || "Production",
+      role: "Production (Re-Cook)",
+      date: stamp,
+      status: "Pending Approval",
+      items,
+      note: `Auto-generated from Re-Cook production entry for ${selectedOrder.id} (${selectedOrder.outputItemName ?? selectedOrder.bom}). ${items.length} short material${items.length === 1 ? "" : "s"} requested at BOM quantity for purchase.`,
+      source: "Kitchen",
+      officeId,
+      warehouseId,
+      reCook: true,
+      autoFulfill: false,
+    };
+    addDemands([dr]);
+    setDemandRaised(drId);
+    toast.success(`Demand Requisition ${drId} raised (Re-Cook) for ${items.length} short material${items.length === 1 ? "" : "s"} — pending approval.`);
+  };
+
   return (
     <div className="space-y-6">
       <Card>
@@ -351,7 +418,7 @@ function CreateEntry({
                   const rem = Math.max(0, target - o.producedQty);
                   return (
                     <option key={o.id} value={o.id}>
-                      {o.id} — {o.outputItemName ?? o.bom} · {o.producedQty}/{target} produced · {rem} remaining · {o.status}
+                      {o.id}{o.reCook ? " · Re-Cook" : ""} — {o.outputItemName ?? o.bom} · {o.producedQty}/{target} produced · {rem} remaining · {o.status}
                     </option>
                   );
                 })
@@ -468,6 +535,44 @@ function CreateEntry({
               />
             </div>
           </div>
+
+          {/* Re-Cook material shortfall → raise a Demand Requisition for the
+              short BOM items so they can be purchased through the normal flow. */}
+          {selectedOrder?.reCook && shortMaterials.length > 0 && (
+            <div className="mt-6 rounded-md border border-rose-200 bg-rose-50 px-4 py-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="h-4 w-4 text-rose-600 shrink-0" />
+                    <span className="text-sm font-semibold text-rose-800">
+                      Re-Cook material shortfall
+                    </span>
+                    <span className="inline-flex items-center rounded-full border border-rose-300 bg-white px-1.5 py-0.5 text-[10px] font-semibold text-rose-700">
+                      Re-Cook
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[12px] text-rose-700/90">
+                    {shortMaterials.length} material{shortMaterials.length === 1 ? "" : "s"} short of stock.
+                    Raise a Demand Requisition at BOM quantity to purchase {shortMaterials.length === 1 ? "it" : "them"}.
+                    It routes through the normal approval layer.
+                  </p>
+                </div>
+                {demandRaised ? (
+                  <div className="flex items-center gap-1.5 text-[12px] font-medium text-emerald-700 shrink-0">
+                    <CheckCircle2 className="h-4 w-4" />
+                    {demandRaised} raised — pending approval
+                  </div>
+                ) : (
+                  <Button
+                    onClick={handleGenerateDemand}
+                    className="shrink-0 bg-rose-600 hover:bg-rose-700 text-white"
+                  >
+                    <PackageOpen className="h-4 w-4 mr-1.5" /> Generate Demand Req
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Input Materials — BOM for the output item, scaled to produced qty */}
           {selectedOrder && (

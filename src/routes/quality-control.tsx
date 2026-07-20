@@ -8,13 +8,13 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import {
-  ClipboardCheck, CheckCircle2, CircleDashed, XCircle, Lock,
+  ClipboardCheck, CheckCircle2, CircleDashed, XCircle, Lock, Eye,
 } from "lucide-react";
 import { toast } from "sonner";
 import { receiveItems } from "@/lib/sample-data";
 import { useWorkflow, type WfGRNQcStatus } from "@/lib/workflow-store";
 import { applyInventoryStock } from "@/lib/stock-adjustments";
-import { logAudit } from "@/lib/audit-log";
+import { logAudit, getAuditEvents } from "@/lib/audit-log";
 import { LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import { SEED_RETURNS } from "@/routes/purchase-return";
 
@@ -43,6 +43,14 @@ type QcRow = {
   warehouseId?: string;
   qcPassQty?: number;
   qcFailQty?: number;
+};
+
+// Format an ISO timestamp / locale date string for display; passthrough if it
+// can't be parsed (some seed dates are already human-readable).
+const fmtTs = (s?: string) => {
+  if (!s) return "—";
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? s : d.toLocaleString();
 };
 
 const statusCls = (status: string) =>
@@ -100,6 +108,8 @@ export default function QualityControl() {
   // GRN-level, item-wise inspection dialog. Every pending line of the GRN is a
   // row; each is split into Pass / Fail with its own Remarks. No temperature.
   const [inspectGrnId, setInspectGrnId] = useState<string | null>(null);
+  // Row whose full trace + history log is being viewed (read-only).
+  const [viewRow, setViewRow] = useState<QcRow | null>(null);
   const [drafts, setDrafts] = useState<Record<number, { qcQty: string; passQty: string; remarks: string }>>({});
 
   const inspectGrn = useMemo(() => grns.find((g) => g.id === inspectGrnId) ?? null, [grns, inspectGrnId]);
@@ -274,22 +284,33 @@ export default function QualityControl() {
         columns={cols}
         searchKeys={["grnId", "po", "vendor", "item", "status"]}
         selectable={false}
-        actions={(r) =>
-          r.editable ? (
+        actions={(r) => (
+          <div className="flex items-center gap-1.5">
+            {r.editable ? (
+              <Button
+                size="sm" variant="outline"
+                className="h-7 px-2.5 text-xs text-primary border-primary/30 hover:bg-primary/5 disabled:opacity-40"
+                disabled={r.status !== "Pending"}
+                onClick={() => openInspect(r)}
+              >
+                <ClipboardCheck className="h-3.5 w-3.5 mr-1" /> Inspect
+              </Button>
+            ) : (
+              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                <Lock className="h-3 w-3" /> Historical
+              </span>
+            )}
             <Button
-              size="sm" variant="outline"
-              className="h-7 px-2.5 text-xs text-primary border-primary/30 hover:bg-primary/5 disabled:opacity-40"
-              disabled={r.status !== "Pending"}
-              onClick={() => openInspect(r)}
+              size="icon" variant="outline"
+              className="h-7 w-7"
+              title="View item trace & history log"
+              aria-label="View item trace & history log"
+              onClick={() => setViewRow(r)}
             >
-              <ClipboardCheck className="h-3.5 w-3.5 mr-1" /> Inspect
+              <Eye className="h-3.5 w-3.5" />
             </Button>
-          ) : (
-            <span className="flex items-center gap-1 text-xs text-muted-foreground">
-              <Lock className="h-3 w-3" /> Historical
-            </span>
-          )
-        }
+          </div>
+        )}
       />
 
       {/* GRN-level, item-wise inspection — every item split into Pass / Fail */}
@@ -380,6 +401,115 @@ export default function QualityControl() {
             <Button className="bg-primary hover:bg-primary/90" onClick={confirmInspect} disabled={inspectLines.length === 0}>
               <ClipboardCheck className="h-4 w-4 mr-1.5" /> Confirm QC
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Item trace + history log — read-only detail view */}
+      <Dialog open={!!viewRow} onOpenChange={(v) => { if (!v) setViewRow(null); }}>
+        <DialogContent className="max-w-3xl max-h-[88vh] overflow-hidden flex flex-col p-0 gap-0">
+          <DialogHeader className="px-6 pt-5 pb-4 border-b border-border">
+            <DialogTitle className="flex items-center gap-2 flex-wrap">
+              <Eye className="h-4 w-4 text-primary" /> Item Trace — {viewRow?.item}
+              {viewRow && (
+                <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${statusCls(viewRow.status)}`}>{viewRow.status}</span>
+              )}
+            </DialogTitle>
+          </DialogHeader>
+
+          {viewRow && (() => {
+            const g = grns.find((x) => x.id === viewRow.grnId);
+            const line = g && viewRow.lineIdx >= 0 ? g.lines[viewRow.lineIdx] : undefined;
+            const history = getAuditEvents().filter((e) => e.entity === viewRow.grnId);
+            const qcEvent = history.find((e) => e.module === "Quality Control");
+            const receivedAt = g?.grnDate ?? g?.date;
+            const passQty = line?.qcPassQty ?? viewRow.qcPassQty;
+            const failQty = line?.qcFailQty ?? viewRow.qcFailQty;
+            const field = (label: string, value: React.ReactNode) => (
+              <div className="rounded-lg border border-border px-3 py-2 bg-muted/30">
+                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</div>
+                <div className="mt-0.5 text-sm font-medium break-words">{value ?? "—"}</div>
+              </div>
+            );
+            return (
+              <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
+                {/* Item & receipt */}
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Item &amp; Receipt</div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {field("GRN #", viewRow.grnId)}
+                    {field("PO Ref", viewRow.po)}
+                    {field("Vendor", viewRow.vendor)}
+                    {field("Item", viewRow.item)}
+                    {field("Quantity", `${viewRow.qty} ${viewRow.uom}`)}
+                    {field("Temp °C", viewRow.temp || "—")}
+                    {field("Expiry", viewRow.expiry || "—")}
+                    {field("Batch / Lot", line?.batchNo || "—")}
+                    {field("Received By", viewRow.receivedBy)}
+                    {field("Office / Warehouse", <LocationCell officeId={viewRow.officeId} warehouseId={viewRow.warehouseId} />)}
+                    {field("Received Date", fmtTs(receivedAt))}
+                  </div>
+                </div>
+
+                {/* Quality Control outcome */}
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">Quality Control</div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {field("QC Status", <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${statusCls(viewRow.status)}`}>{viewRow.status}</span>)}
+                    {field("Passed Qty", passQty != null ? `${passQty} ${viewRow.uom}` : "—")}
+                    {field("Failed Qty", failQty != null ? `${failQty} ${viewRow.uom}` : "—")}
+                    {field("Complied", line?.qcCompliedQty ?? "—")}
+                    {field("Approved / Inspected At", qcEvent ? fmtTs(qcEvent.ts) : (viewRow.status === "Pending" ? "Pending inspection" : "—"))}
+                    {field("Inspected By", qcEvent?.actor ?? "—")}
+                    {field("Remarks", line?.qcRemarks ?? "—")}
+                    {field("Reason", line?.qcReason ?? "—")}
+                  </div>
+                </div>
+
+                {/* History log / trace */}
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+                    History Log ({history.length + (receivedAt ? 1 : 0)})
+                  </div>
+                  {history.length === 0 && !receivedAt ? (
+                    <div className="rounded-lg border border-dashed border-border px-3 py-4 text-xs text-muted-foreground">
+                      No history recorded for this item yet.
+                    </div>
+                  ) : (
+                    <ol className="relative border-l border-border ml-2 space-y-4">
+                      {history.map((e) => (
+                        <li key={e.id} className="ml-4">
+                          <span className="absolute -left-[7px] mt-1 h-3 w-3 rounded-full bg-primary/70 border-2 border-background" />
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <span className="text-sm font-semibold text-foreground">{e.action}</span>
+                            <span className="text-[11px] text-muted-foreground tabular-nums">{fmtTs(e.ts)}</span>
+                          </div>
+                          {e.detail && <div className="mt-0.5 text-xs text-muted-foreground">{e.detail}</div>}
+                          <div className="text-[11px] text-muted-foreground">by {e.actor} · {e.module}</div>
+                        </li>
+                      ))}
+                      {receivedAt && (
+                        <li className="ml-4">
+                          <span className="absolute -left-[7px] mt-1 h-3 w-3 rounded-full bg-emerald-500 border-2 border-background" />
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <span className="text-sm font-semibold text-foreground">Goods Received</span>
+                            <span className="text-[11px] text-muted-foreground tabular-nums">{fmtTs(receivedAt)}</span>
+                          </div>
+                          <div className="mt-0.5 text-xs text-muted-foreground">
+                            {viewRow.item} — {viewRow.qty} {viewRow.uom} received against {viewRow.po}
+                          </div>
+                          <div className="text-[11px] text-muted-foreground">by {viewRow.receivedBy} · Receive Items</div>
+                        </li>
+                      )}
+                    </ol>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          <DialogFooter className="px-6 py-4 border-t border-border">
+            <Button variant="outline" onClick={() => setViewRow(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

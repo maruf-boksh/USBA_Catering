@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X, Zap, BarChart2, Send, Check, Paperclip, FileText, Eye, Ban, ClipboardList } from "lucide-react";
+import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X, Zap, BarChart2, Send, Check, Paperclip, FileText, Eye, Ban, ClipboardList, Info, CalendarDays } from "lucide-react";
 import { receiveItems, activeItems, inventory } from "@/lib/sample-data";
 import { applyReceiptToPR, getPurchaseRequisitions, prReceived } from "@/lib/purchase-requisitions";
 import { roundQty } from "@/lib/num";
@@ -41,6 +41,8 @@ type GRNRow = {
   officeId?: string;
   warehouseId?: string;
   inventoryId?: string;
+  /** GRN / receipt date for the date-range filter (YYYY-MM-DD when available). */
+  date?: string;
 };
 
 // GRN form line state. QC outcome is NOT set here — received lines start
@@ -56,6 +58,9 @@ type FormLine = {
   orderedQty?: number;
   /** Supplier batch / lot number for this received line. */
   batchNo?: string;
+  /** How this line was received. "batch" makes the Expiry date mandatory;
+   *  "single" (or unset) leaves it optional. */
+  receiveMode?: "batch" | "single";
   /** Set when this line was prefilled from a Purchase Requisition shortfall —
    *  the PR line id to write the received qty back to on save. */
   prLineId?: string;
@@ -103,7 +108,17 @@ function wfGRNToRows(grn: WfGRN): GRNRow[] {
     officeId: grn.officeId,
     warehouseId: grn.warehouseId,
     inventoryId: l.itemId,
+    date: grn.grnDate ?? grn.date,
   }));
+}
+
+// Extract a YYYY-MM-DD day from a date string (ISO date or locale timestamp).
+function toDay(s?: string): string {
+  if (!s) return "";
+  const m = s.match(/\d{4}-\d{2}-\d{2}/);
+  if (m) return m[0];
+  const d = new Date(s);
+  return Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
 }
 
 /**
@@ -172,6 +187,9 @@ export default function ReceiveItem() {
   const [grnWarehouseId, setGrnWarehouseId] = useState("WH-001");
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
+  // Date-range filter (on GRN / PO date). Empty = no bound.
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
   const [formLines, setFormLines] = useState<FormLine[]>([{ id: "l0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
 
   // Vendor master = the Supplier Profile module's list (shared persisted store),
@@ -356,6 +374,11 @@ export default function ReceiveItem() {
   const submitForApproval = () => {
     if (!dpVendor) { toast.error("Select a vendor."); return; }
     if (!dpDate) { toast.error("Receipt date is required."); return; }
+    // Batch-received items require an expiry date; single-received items don't.
+    if (dpLines.some(l => (Number(l.qty) || 0) > 0 && l.receiveMode === "batch" && !l.expiry)) {
+      toast.error("Expiry Date is required");
+      return;
+    }
     if (!dpReceivedBy) { toast.error("Received By is required."); return; }
     if (!dpWarehouseId) { toast.error("Warehouse is required."); return; }
     if (!dpJustification.trim()) { toast.error("A justification is required for a direct receive."); return; }
@@ -490,6 +513,13 @@ export default function ReceiveItem() {
   const saveGRN = () => {
     if (!selectedPORef) { toast.error("Please select a PO."); return; }
     if (!grnDate) { toast.error("GRN date is required."); return; }
+    // Batch-received items require an expiry date; single-received items don't.
+    // Checked ahead of the other required fields so a Batch row with a missing
+    // expiry reports "Expiry Date is required" rather than an unrelated field.
+    if (formLines.some(l => (Number(l.qty) || 0) > 0 && l.receiveMode === "batch" && !l.expiry)) {
+      toast.error("Expiry Date is required");
+      return;
+    }
     if (!receivedBy.trim()) { toast.error("Received By is required."); return; }
     if (!grnOfficeId) { toast.error("Office is required."); return; }
     if (!grnWarehouseId) { toast.error("Warehouse is required."); return; }
@@ -582,6 +612,12 @@ export default function ReceiveItem() {
   const filteredRows = allRows.filter((r) => {
     if (filterOffice && r.officeId !== filterOffice) return false;
     if (filterWarehouse && r.warehouseId !== filterWarehouse) return false;
+    if (dateFrom || dateTo) {
+      const day = toDay(r.date);
+      if (!day) return false;
+      if (dateFrom && day < dateFrom) return false;
+      if (dateTo && day > dateTo) return false;
+    }
     return true;
   });
 
@@ -620,6 +656,14 @@ export default function ReceiveItem() {
     wfPurchaseOrders
       .filter(p => PO_TAB_STATUSES.includes(p.status))
       .filter(p => (!filterOffice || p.officeId === filterOffice) && (!filterWarehouse || p.warehouseId === filterWarehouse))
+      .filter(p => {
+        if (!dateFrom && !dateTo) return true;
+        const day = toDay(p.date);
+        if (!day) return false;
+        if (dateFrom && day < dateFrom) return false;
+        if (dateTo && day > dateTo) return false;
+        return true;
+      })
       .map(p => {
         const r = poReceipt(p, grns);
         return {
@@ -628,7 +672,7 @@ export default function ReceiveItem() {
           status: p.status, _po: p,
         };
       }),
-    [wfPurchaseOrders, grns, filterOffice, filterWarehouse]);
+    [wfPurchaseOrders, grns, filterOffice, filterWarehouse, dateFrom, dateTo]);
 
   const poCols: Column<PORow>[] = [
     { key: "id", header: "PO #" },
@@ -672,12 +716,41 @@ export default function ReceiveItem() {
         <KpiCard label="Accepted" value={accepted} icon={PackageCheck} tone="success" />
         <KpiCard label="Rejected" value={rejected} icon={AlertOctagon} tone="red" />
       </div>
-      <div className="mb-4">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         <LocationFilter
           officeId={filterOffice}
           warehouseId={filterWarehouse}
           onChange={(n) => { setFilterOffice(n.officeId); setFilterWarehouse(n.warehouseId); }}
         />
+        <div className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-2.5 py-1 shadow-sm">
+          <CalendarDays className="h-3.5 w-3.5 text-muted-foreground" />
+          <span className="field-label">Date</span>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            aria-label="From date"
+            className="h-7 rounded-md border border-input bg-background px-2 text-xs tabular-nums"
+          />
+          <span className="text-xs text-muted-foreground">→</span>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            aria-label="To date"
+            className="h-7 rounded-md border border-input bg-background px-2 text-xs tabular-nums"
+          />
+          {(dateFrom || dateTo) && (
+            <button
+              type="button"
+              onClick={() => { setDateFrom(""); setDateTo(""); }}
+              className="text-xs text-muted-foreground hover:text-foreground"
+              title="Clear date filter"
+            >
+              Clear
+            </button>
+          )}
+        </div>
       </div>
       <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "po" | "received")}>
         <TabsList className="mb-4">
@@ -786,8 +859,10 @@ export default function ReceiveItem() {
               <Input
                 type="date"
                 value={grnDate}
-                onChange={(e) => setGrnDate(e.target.value)}
-                className="mt-1"
+                readOnly
+                tabIndex={-1}
+                title="System-generated — current date"
+                className="mt-1 bg-muted/50 text-muted-foreground cursor-default"
               />
             </div>
             <div>
@@ -868,8 +943,12 @@ export default function ReceiveItem() {
 
           {/* Line items */}
           <div className="mt-2 min-w-0">
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center justify-between gap-3 flex-wrap mb-2">
               <Label>Items Received</Label>
+              <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-800 shadow-sm">
+                <Info className="h-4 w-4 shrink-0 text-amber-600" />
+                Note: For Batch / LOT receive, expiry date is mandatory
+              </span>
             </div>
             <div className="rounded-md border border-border overflow-x-auto">
               <table className="w-full text-sm min-w-[620px]">
@@ -879,7 +958,7 @@ export default function ReceiveItem() {
                     <th className="p-2 text-left font-semibold w-20">Ordered</th>
                     <th className="p-2 text-left font-semibold w-20">Received</th>
                     <th className="p-2 text-left font-semibold w-16">UOM</th>
-                    <th className="p-2 text-left font-semibold w-32">Batch / Lot</th>
+                    <th className="p-2 text-left font-semibold w-44">Received With</th>
                     <th className="p-2 text-left font-semibold w-28">Expiry</th>
                     <th className="w-8" />
                   </tr>
@@ -920,19 +999,34 @@ export default function ReceiveItem() {
                         />
                       </td>
                       <td className="p-2">
-                        <Input
-                          value={line.batchNo ?? ""}
-                          onChange={(e) => updateLine(line.id, "batchNo", e.target.value)}
-                          className="h-7 text-xs"
-                          placeholder="Batch / lot"
-                        />
+                        <div className="flex items-center gap-3">
+                          <label className="inline-flex items-center gap-1 text-xs cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={line.receiveMode === "batch"}
+                              onChange={(e) => updateLine(line.id, "receiveMode", e.target.checked ? "batch" : undefined)}
+                              className="h-3.5 w-3.5 accent-primary"
+                            />
+                            Batch
+                          </label>
+                          <label className="inline-flex items-center gap-1 text-xs cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={line.receiveMode === "single"}
+                              onChange={(e) => updateLine(line.id, "receiveMode", e.target.checked ? "single" : undefined)}
+                              className="h-3.5 w-3.5 accent-primary"
+                            />
+                            Single
+                          </label>
+                        </div>
                       </td>
                       <td className="p-2">
                         <Input
                           type="date"
                           value={line.expiry}
                           onChange={(e) => updateLine(line.id, "expiry", e.target.value)}
-                          className="h-7 text-xs"
+                          className={`h-7 text-xs ${line.receiveMode === "batch" && !line.expiry ? "border-destructive focus-visible:ring-destructive" : ""}`}
+                          title={line.receiveMode === "batch" ? "Expiry is required for batch-received items" : undefined}
                         />
                       </td>
                       <td className="p-2">
@@ -1129,8 +1223,14 @@ export default function ReceiveItem() {
 
           {/* Line items — entered manually for a direct buy */}
           <div className="mt-2 min-w-0">
-            <div className="flex items-center justify-between mb-2">
-              <Label>Items Received</Label>
+            <div className="flex items-center justify-between gap-3 flex-wrap mb-2">
+              <div className="flex items-center gap-3 flex-wrap">
+                <Label>Items Received</Label>
+                <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-800 shadow-sm">
+                  <Info className="h-4 w-4 shrink-0 text-amber-600" />
+                  Note: For Batch / LOT receive, expiry date is mandatory
+                </span>
+              </div>
               <Button size="sm" variant="outline" onClick={dpAddLine}>
                 <Plus className="h-3.5 w-3.5 mr-1" /> Add Row
               </Button>
@@ -1144,7 +1244,7 @@ export default function ReceiveItem() {
                     <th className="px-3 py-2.5 text-left font-semibold w-[8%]">UOM</th>
                     <th className="px-3 py-2.5 text-right font-semibold w-[13%]">Rate</th>
                     <th className="px-3 py-2.5 text-right font-semibold w-[12%]">Total</th>
-                    <th className="px-3 py-2.5 text-left font-semibold w-[16%]">Batch / Lot</th>
+                    <th className="px-3 py-2.5 text-left font-semibold w-[16%]">Received With</th>
                     <th className="px-3 py-2.5 text-left font-semibold w-[13%]">Expiry</th>
                     <th className="px-3 py-2.5 w-[3%]" />
                   </tr>
@@ -1202,19 +1302,34 @@ export default function ReceiveItem() {
                         {fmtBdt(dpLineTotal(line))}
                       </td>
                       <td className="px-3 py-2 align-middle">
-                        <Input
-                          value={line.batchNo ?? ""}
-                          onChange={(e) => dpUpdateLine(line.id, "batchNo", e.target.value)}
-                          className="h-8 text-xs"
-                          placeholder="Batch / lot"
-                        />
+                        <div className="flex items-center gap-2">
+                          <label className="inline-flex items-center gap-1 text-xs cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={line.receiveMode === "batch"}
+                              onChange={(e) => dpUpdateLine(line.id, "receiveMode", e.target.checked ? "batch" : undefined)}
+                              className="h-3.5 w-3.5 accent-primary"
+                            />
+                            Batch
+                          </label>
+                          <label className="inline-flex items-center gap-1 text-xs cursor-pointer select-none">
+                            <input
+                              type="checkbox"
+                              checked={line.receiveMode === "single"}
+                              onChange={(e) => dpUpdateLine(line.id, "receiveMode", e.target.checked ? "single" : undefined)}
+                              className="h-3.5 w-3.5 accent-primary"
+                            />
+                            Single
+                          </label>
+                        </div>
                       </td>
                       <td className="px-3 py-2 align-middle">
                         <Input
                           type="date"
                           value={line.expiry}
                           onChange={(e) => dpUpdateLine(line.id, "expiry", e.target.value)}
-                          className="h-8 text-xs"
+                          className={`h-8 text-xs ${line.receiveMode === "batch" && !line.expiry ? "border-destructive focus-visible:ring-destructive" : ""}`}
+                          title={line.receiveMode === "batch" ? "Expiry is required for batch-received items" : undefined}
                         />
                       </td>
                       <td className="px-3 py-2 align-middle text-center">

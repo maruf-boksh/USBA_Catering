@@ -18,7 +18,7 @@ import {
 } from "@/components/ui/table";
 import {
   Plus, ArrowLeft, Save, MoveRight, Trash2, CheckCircle, Clock, Truck, Undo2,
-  LayoutGrid, Info, ArrowRight,
+  LayoutGrid, Info, ArrowRight, Eye, CalendarDays,
 } from "lucide-react";
 import { KpiCard } from "@/components/common/KpiCard";
 import { toast } from "sonner";
@@ -44,6 +44,18 @@ type TransferLine = {
   transferredQty: number;
 };
 
+// One logged action taken on an In-Transit transfer (Receive / Return). The row
+// stays on the In Transit tab after the action; this log records what happened
+// so the View dialog can show the full history.
+type TransferAction = {
+  type: "Receive" | "Return";
+  qty: number;
+  by: string;
+  at: string;
+  detail: string;
+  reason?: string;
+};
+
 type Transfer = {
   id: string;
   date: string;
@@ -64,6 +76,9 @@ type Transfer = {
   dispatchRef?: string;
   /** Dispatch lifecycle for the badge — set only on dispatch-linked transfers. */
   dispatchStatus?: TransferDispatchStatus;
+  /** Receive / Return actions logged against this transfer. The row is kept on
+   *  the In Transit tab after an action; View surfaces this history. */
+  actionLog?: TransferAction[];
 };
 
 /** The linked dispatch id for a transfer, if any (from an explicit dispatchRef
@@ -276,9 +291,13 @@ export default function TransferPage() {
   const [actionMode, setActionMode] = useState<ActionMode>("receive");
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
-  // Guides the user after a receipt: the "Transfer In / Received" tab badge
-  // blinks until that tab is opened. Purely a navigation cue — no logic change.
+  // Date-range filter (on the transfer date). Empty = no bound.
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  // Guides the user after a receipt / return: the "Transfer In / Received" and
+  // "Return List" tab badges blink until that tab is opened. Navigation cue only.
   const [blinkReceived, setBlinkReceived] = useState(false);
+  const [blinkReturn, setBlinkReturn] = useState(false);
 
   // Dispatch-originated notes are materialized into the local mutable rows once
   // (so they can be sent/received), rather than shown as read-only bridged rows.
@@ -319,6 +338,10 @@ export default function TransferPage() {
   const filtered = combined.filter((r) => {
     if (filterOffice && r.officeId !== filterOffice) return false;
     if (filterWarehouse && r.warehouseId !== filterWarehouse) return false;
+    // Compare on the date portion (rows store "YYYY-MM-DD HH:mm").
+    const day = r.date.slice(0, 10);
+    if (dateFrom && day < dateFrom) return false;
+    if (dateTo && day > dateTo) return false;
     return true;
   });
 
@@ -343,6 +366,21 @@ export default function TransferPage() {
 
   const closeAction = () => setActionTransfer(null);
 
+  // Ship a still-pending outbound transfer: it advances to "In Transit" so it can
+  // be received on the Transfer In Transit tab (otherwise a Pending transfer is a
+  // dead-end and the In Transit tab has no way to be repopulated). Deducts the
+  // transferred qty from the source store, mirroring `add` for an already-shipped
+  // transfer. Dispatch-linked (DSP-) transfers move stock via deltas — not here.
+  const applySend = (id: string) => {
+    const target = rows.find((r) => r.id === id);
+    if (!target || target.status !== "Pending") return;
+    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, status: "In Transit" as TransferStatus } : r)));
+    if (target.kind === "Outbound" && !dispatchIdOf(target)) {
+      for (const l of target.lines) applyInventoryStock(l.item, -l.transferredQty);
+    }
+    toast.success(`${id} sent — now In Transit and ready to receive.`);
+  };
+
   const applyReceive = (id: string, qty: Record<string, number>) => {
     const target = rows.find((r) => r.id === id);
     if (!target) { closeAction(); return; }
@@ -353,44 +391,37 @@ export default function TransferPage() {
       return { line: l, received, remaining: roundQty(l.transferredQty - received) };
     });
     const totalReceived = split.reduce((s, x) => s + x.received, 0);
-    const totalRemaining = split.reduce((s, x) => s + x.remaining, 0);
     if (totalReceived <= 0) { toast.error("Enter a quantity to receive."); return; }
 
     const now = new Date().toISOString().slice(0, 16).replace("T", " ");
-    // The accepted portion becomes a Completed (Received) record.
+    // The accepted portion becomes a Completed (Received) record — the normal
+    // downstream flow. The ORIGINAL transfer is KEPT on the In Transit tab (it is
+    // not removed / flipped to Completed) and gains a logged Receive action so the
+    // list stays populated and the View dialog can show the full history.
     const receivedLines: TransferLine[] = split
       .filter((x) => x.received > 0)
       .map((x) => ({ ...x.line, requestedQty: x.received, transferredQty: x.received }));
-
-    setRows((prev) => {
-      if (totalRemaining <= 0) {
-        // Fully received — the original record itself becomes Completed.
-        return prev.map((r) =>
-          r.id === id
-            ? { ...r, status: "Completed", date: now, lines: receivedLines,
-                receivedBy: r.receivedBy === "—" ? "(received)" : r.receivedBy }
-            : r);
-      }
-      // Partial — the original keeps its id and stays In Transit holding only the
-      // remaining (un-received) quantity, so it isn't lost; the accepted portion
-      // is split out as a separate Completed record.
-      const remainingRec: Transfer = {
-        ...target,
-        status: "In Transit",
-        lines: split
-          .filter((x) => x.remaining > 0)
-          .map((x) => ({ ...x.line, requestedQty: x.remaining, transferredQty: x.remaining })),
-      };
-      const receivedRec: Transfer = {
-        ...target,
-        id: `${target.id}-RCV-${now.replace(/[^0-9]/g, "").slice(-6)}`,
-        date: now,
-        status: "Completed",
-        receivedBy: target.receivedBy === "—" ? "(received)" : target.receivedBy,
-        lines: receivedLines,
-      };
-      return prev.flatMap((r) => (r.id === id ? [remainingRec, receivedRec] : [r]));
-    });
+    const receivedBy = target.receivedBy && target.receivedBy !== "—" ? target.receivedBy : "(received)";
+    const logEntry: TransferAction = {
+      type: "Receive",
+      qty: roundQty(totalReceived),
+      by: receivedBy,
+      at: now,
+      detail: receivedLines.map((l) => `${l.item} ${l.transferredQty} ${l.uom}`).join(", "),
+    };
+    const receivedRec: Transfer = {
+      ...target,
+      id: `${target.id}-RCV-${(target.actionLog?.length ?? 0) + 1}-${now.replace(/[^0-9]/g, "").slice(-6)}`,
+      date: now,
+      status: "Completed",
+      receivedBy,
+      lines: receivedLines,
+      actionLog: undefined,
+    };
+    setRows((prev) => [
+      receivedRec,
+      ...prev.map((r) => (r.id === id ? { ...r, actionLog: [...(r.actionLog ?? []), logEntry] } : r)),
+    ]);
 
     // Close the inventory loop for dispatch-originated transfers (trRef = the
     // DSP-XXXX id): the accepted meals land in the destination warehouse as an
@@ -414,9 +445,7 @@ export default function TransferPage() {
     }
 
     toast.success(
-      totalRemaining > 0
-        ? `${id} — ${totalReceived} received; ${totalRemaining} still in transit.`
-        : `${id} received — ${totalReceived} unit${totalReceived === 1 ? "" : "s"} accepted.`,
+      `${id} — ${totalReceived} unit${totalReceived === 1 ? "" : "s"} received. Kept in the In Transit list; open View for the action log.`,
     );
     // Nudge the user toward the received items (now eligible for galley planning).
     setBlinkReceived(true);
@@ -462,35 +491,31 @@ export default function TransferPage() {
       dispatchRef: dspId,
       dispatchStatus: dspId ? "Returned" : undefined,
     };
-    const totalInHand = target.lines.reduce((s, l) => s + l.transferredQty, 0);
-    const fullyReturned = total >= totalInHand;
-    setRows((prev) => {
-      const updated = prev.map((r) => {
-        if (r.id !== id) return r;
-        // Dispatch-linked transfer: it STAYS "In Transit" — only the returned
-        // quantity peels off (that portion comes back for re-dispatch through the
-        // usual packaging → QC → dispatch flow). The remaining load keeps moving.
-        if (dspId) {
-          return {
-            ...r,
-            status: "In Transit" as TransferStatus,
-            lines: r.lines.map((l) => ({ ...l, transferredQty: Math.max(0, l.transferredQty - (qty[l.id] ?? 0)) })),
-            receivedBy: r.receivedBy === "—" ? "(received)" : r.receivedBy,
-            dispatchStatus: "Returned" as TransferDispatchStatus,
-          };
-        }
-        // Regular transfer: full return → Rejected, partial → Completed.
-        return {
-          ...r,
-          status: (fullyReturned ? "Rejected" : "Completed") as TransferStatus,
-          lines: fullyReturned
-            ? r.lines
-            : r.lines.map((l) => ({ ...l, transferredQty: l.transferredQty - (qty[l.id] ?? 0) })),
-          receivedBy: r.receivedBy === "—" ? "(received)" : r.receivedBy,
-        };
-      });
-      return [ret, ...updated];
-    });
+    // The return record is created as the normal downstream flow. The ORIGINAL
+    // transfer is KEPT on the In Transit tab (status stays "In Transit") and gains
+    // a logged Return action, so the list stays populated and View shows history.
+    const logEntry: TransferAction = {
+      type: "Return",
+      qty: roundQty(total),
+      by: target.receivedBy && target.receivedBy !== "—" ? target.receivedBy : "(destination)",
+      at: now,
+      detail: returnLines.map((l) => `${l.item} ${l.requestedQty} ${l.uom}`).join(", "),
+      reason: reason.trim() || undefined,
+    };
+    setRows((prev) => [
+      ret,
+      ...prev.map((r) =>
+        r.id === id
+          ? {
+              ...r,
+              status: "In Transit" as TransferStatus,
+              receivedBy: r.receivedBy === "—" ? "(received)" : r.receivedBy,
+              ...(dspId ? { dispatchStatus: "Returned" as TransferDispatchStatus } : {}),
+              actionLog: [...(r.actionLog ?? []), logEntry],
+            }
+          : r,
+      ),
+    ]);
     // Reflect the return on the linked dispatch record (Dispatch page shows
     // "Returned") and carry the returned lines/quantities so the Dispatch page
     // re-dispatches ONLY this returned load, not the whole original dispatch.
@@ -505,11 +530,11 @@ export default function TransferPage() {
     }
     toast.success(
       dspId
-        ? `${total} unit${total === 1 ? "" : "s"} returned — ${id} stays In Transit; dispatch ${dspId} flagged Returned. Re-dispatch restarts packaging → QC → dispatch.`
-        : fullyReturned
-        ? `${id} rejected — return ${newId} created.`
-        : `Partial return ${newId} created. ${id} kept ${totalInHand - total} unit${(totalInHand - total) === 1 ? "" : "s"}.`,
+        ? `${total} unit${total === 1 ? "" : "s"} returned — ${id} kept In Transit; dispatch ${dspId} flagged Returned. Re-dispatch restarts packaging → QC → dispatch.`
+        : `${total} unit${total === 1 ? "" : "s"} returned — return ${newId} created. ${id} kept in the In Transit list; open View for the log.`,
     );
+    // Nudge the user toward the Return List (blinks until that tab is opened).
+    setBlinkReturn(true);
     closeAction();
   };
 
@@ -540,20 +565,52 @@ export default function TransferPage() {
             <KpiCard label="In Transit" value={inTransit} icon={Truck} tone="navy" />
             <KpiCard label="Completed" value={completed} icon={CheckCircle} tone="success" />
           </div>
-          <div className="mb-4">
+          <div className="mb-4 flex flex-wrap items-center gap-2">
             <LocationFilter
               officeId={filterOffice}
               warehouseId={filterWarehouse}
               onChange={(n) => { setFilterOffice(n.officeId); setFilterWarehouse(n.warehouseId); }}
             />
+            <div className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-2.5 py-1 shadow-sm">
+              <CalendarDays className="h-3.5 w-3.5 text-muted-foreground" />
+              <span className="field-label">Date</span>
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                aria-label="From date"
+                className="h-7 rounded-md border border-input bg-background px-2 text-xs tabular-nums"
+              />
+              <span className="text-xs text-muted-foreground">→</span>
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                aria-label="To date"
+                className="h-7 rounded-md border border-input bg-background px-2 text-xs tabular-nums"
+              />
+              {(dateFrom || dateTo) && (
+                <button
+                  type="button"
+                  onClick={() => { setDateFrom(""); setDateTo(""); }}
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                  title="Clear date filter"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
           </div>
           <TransferTabs
             data={filtered}
             onReceive={(id) => openAction(id, "receive")}
             onReturn={(id) => openAction(id, "return")}
+            onSend={applySend}
             editors={rowEditors(setRows)}
             blinkReceived={blinkReceived}
             onClearBlink={() => setBlinkReceived(false)}
+            blinkReturn={blinkReturn}
+            onClearReturnBlink={() => setBlinkReturn(false)}
           />
         </>
       ) : (
@@ -774,15 +831,20 @@ function TabCount({ n, tone, blink }: { n: number; tone: "warning" | "navy" | "s
 }
 
 function TransferTabs({
-  data, onReceive, onReturn, editors, blinkReceived, onClearBlink,
+  data, onReceive, onReturn, onSend, editors, blinkReceived, onClearBlink, blinkReturn, onClearReturnBlink,
 }: {
   data: Transfer[];
   onReceive: (id: string) => void;
   onReturn: (id: string) => void;
+  /** Ship a Pending outbound transfer → In Transit (Transfer Out tab). */
+  onSend: (id: string) => void;
   editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
   /** When true, blink the "Transfer In / Received" tab badge until it's opened. */
   blinkReceived: boolean;
   onClearBlink: () => void;
+  /** When true, blink the "Return List" tab badge until it's opened. */
+  blinkReturn: boolean;
+  onClearReturnBlink: () => void;
 }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -790,8 +852,12 @@ function TransferTabs({
   // Transfer In Transit tab and blink the rows waiting to be received.
   const wantReceive = (location.state as { receiveInTransit?: boolean } | null)?.receiveInTransit === true;
   const [tab, setTab] = useState(wantReceive ? "transit" : "out");
-  // Opening the received tab is what the blink is nudging toward — clear it then.
-  const changeTab = (v: string) => { setTab(v); if (v === "received") onClearBlink(); };
+  // Opening the target tab is what each blink nudges toward — clear it then.
+  const changeTab = (v: string) => {
+    setTab(v);
+    if (v === "received") onClearBlink();
+    if (v === "return") onClearReturnBlink();
+  };
 
   // Blink the In Transit rows once when arrived via "Receive Items". The Ant
   // rows mount a tick after the tab activates, so retry briefly until found.
@@ -851,7 +917,7 @@ function TransferTabs({
         </TabsTrigger>
         <TabsTrigger value="return"     className={TAB_PILL_CLS}>
           Return List
-          <TabCount n={returns.length} tone="muted" />
+          <TabCount n={returns.length} tone="muted" blink={blinkReturn} />
         </TabsTrigger>
         <TabsTrigger value="received"   className={TAB_PILL_CLS}>
           Transfer In / Received
@@ -859,7 +925,7 @@ function TransferTabs({
         </TabsTrigger>
       </TabsList>
 
-      <TabsContent value="out"      className="mt-0"><TransferList data={transferOut} qtyBreakdown noActions emptyHint="No outgoing transfers." editors={editors} /></TabsContent>
+      <TabsContent value="out"      className="mt-0"><TransferList data={transferOut} qtyBreakdown onSend={onSend} emptyHint="No outgoing transfers." editors={editors} /></TabsContent>
       <TabsContent value="transit"  className="mt-0">
         <TransferList
           data={inTransit}
@@ -951,12 +1017,40 @@ function TransferDetail({ t }: { t: Transfer }) {
           </TableBody>
         </Table>
       </div>
+
+      {/* Action log — every Receive / Return taken on this transfer, newest last. */}
+      <div>
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">
+          Action Log ({t.actionLog?.length ?? 0})
+        </div>
+        {(t.actionLog?.length ?? 0) === 0 ? (
+          <div className="rounded-lg border border-dashed border-border px-3 py-3 text-xs text-muted-foreground">
+            No actions taken yet. Receiving or returning this transfer will be logged here.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {t.actionLog!.map((a, i) => (
+              <div key={i} className="rounded-lg border border-border px-3 py-2 bg-muted/30">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${a.type === "Receive" ? "bg-success/10 text-success" : "bg-navy/10 text-navy"}`}>
+                    {a.type === "Receive" ? <CheckCircle className="h-3 w-3" /> : <Undo2 className="h-3 w-3" />}
+                    {a.type} · {a.qty}
+                  </span>
+                  <span className="text-[11px] text-muted-foreground tabular-nums">{a.at} · by {a.by}</span>
+                </div>
+                {a.detail && <div className="mt-1 text-xs text-foreground">{a.detail}</div>}
+                {a.reason && <div className="mt-0.5 text-[11px] text-muted-foreground">Reason: {a.reason}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
 function TransferList({
-  data, emptyHint, qtyBreakdown, noActions, onReceive, onReturn, editors, onGoToTransit,
+  data, emptyHint, qtyBreakdown, noActions, onReceive, onReturn, onSend, editors, onGoToTransit,
 }: {
   data: Transfer[];
   emptyHint?: string;
@@ -967,6 +1061,8 @@ function TransferList({
   noActions?: boolean;
   onReceive?: (id: string) => void;
   onReturn?: (id: string) => void;
+  /** Ship a Pending outbound transfer → In Transit (Transfer Out tab). */
+  onSend?: (id: string) => void;
   editors: { onSave: (u: Record<string, unknown>) => void; onDelete: (u: Record<string, unknown>) => void };
   /** When set, each row shows a shortcut button to the Transfer In Transit tab
    *  (where transfers are received). Navigation only — no data change. */
@@ -974,6 +1070,8 @@ function TransferList({
 }) {
   const sumReq = (r: Transfer) => r.lines.reduce((s, l) => s + l.requestedQty, 0);
   const sumDone = (r: Transfer) => r.lines.reduce((s, l) => s + l.transferredQty, 0);
+  // In-Transit row whose detail + action log is being viewed (read-only).
+  const [viewT, setViewT] = useState<Transfer | null>(null);
   const num = (n: number) => <span className="text-xs tabular-nums">{n.toFixed(2)}</span>;
   const qtyCols: Column<Transfer>[] = [
     { key: "totalQty",     header: "Total Qty",     sortable: false, render: (r) => num(sumReq(r)) },
@@ -1057,6 +1155,7 @@ function TransferList({
     );
   }
   return (
+    <>
     <DataTable
       title="transfers"
       data={data}
@@ -1065,24 +1164,84 @@ function TransferList({
       selectable={false}
       actions={noActions ? undefined : (r) => {
         if (onReceive && onReturn && r.status === "In Transit") {
+          // Once a Receive / Return has been logged on this row, its button flips
+          // to the done state ("Received" / "Returned") — the row itself stays.
+          const hasReceived = r.actionLog?.some((a) => a.type === "Receive");
+          const hasReturned = r.actionLog?.some((a) => a.type === "Return");
+          return (
+            <div className="flex items-center gap-1.5">
+              <Button
+                size="icon"
+                variant="outline"
+                className="h-7 w-7"
+                title="View details & action log"
+                aria-label="View details & action log"
+                onClick={() => setViewT(r)}
+              >
+                <Eye className="h-3.5 w-3.5" />
+              </Button>
+              {hasReceived ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled
+                  className="h-7 px-2.5 text-xs border-success/40 text-success bg-success/10 disabled:opacity-100"
+                >
+                  <CheckCircle className="h-3 w-3 mr-1" /> Received
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 px-2.5 text-xs border-success/40 text-success hover:bg-success/10 hover:text-success"
+                  onClick={() => onReceive(r.id)}
+                >
+                  <CheckCircle className="h-3 w-3 mr-1" /> Receive
+                </Button>
+              )}
+              {hasReturned ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled
+                  className="h-7 px-2.5 text-xs border-navy/40 text-navy bg-navy/10 disabled:opacity-100"
+                >
+                  <Undo2 className="h-3 w-3 mr-1" /> Returned
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 px-2.5 text-xs border-navy/40 text-navy hover:bg-navy/10 hover:text-navy"
+                  onClick={() => onReturn(r.id)}
+                >
+                  <Undo2 className="h-3 w-3 mr-1" /> Return
+                </Button>
+              )}
+            </div>
+          );
+        }
+        // Ship a still-pending outbound transfer → In Transit so it can be
+        // received (keeps the In Transit tab supplied after receipts).
+        if (onSend && r.kind === "Outbound" && r.status === "Pending") {
           return (
             <div className="flex items-center gap-1.5">
               <Button
                 size="sm"
                 variant="outline"
-                className="h-7 px-2.5 text-xs border-success/40 text-success hover:bg-success/10 hover:text-success"
-                onClick={() => onReceive(r.id)}
+                className="h-7 px-2.5 text-xs border-primary/40 text-primary hover:bg-primary/10 hover:text-primary"
+                onClick={() => onSend(r.id)}
+                title="Ship this transfer — moves it to Transfer In Transit for receiving"
               >
-                <CheckCircle className="h-3 w-3 mr-1" /> Receive
+                <Truck className="h-3 w-3 mr-1" /> Send
               </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-7 px-2.5 text-xs border-navy/40 text-navy hover:bg-navy/10 hover:text-navy"
-                onClick={() => onReturn(r.id)}
-              >
-                <Undo2 className="h-3 w-3 mr-1" /> Return
-              </Button>
+              <RowActions
+                row={r}
+                actions={["view", "edit", "print"]}
+                detail={<TransferDetail t={r} />}
+                onSave={editors.onSave}
+                editDetail={({ save, close }) => <TransferFields mode="edit" initial={r} onSubmit={save} onClose={close} />}
+              />
             </div>
           );
         }
@@ -1113,6 +1272,20 @@ function TransferList({
         );
       }}
     />
+    <Dialog open={!!viewT} onOpenChange={(o) => !o && setViewT(null)}>
+      <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden flex flex-col p-0 gap-0">
+        <DialogHeader className="px-5 py-4 border-b border-border">
+          <DialogTitle className="font-mono text-base">Transfer {viewT?.id}</DialogTitle>
+        </DialogHeader>
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          {viewT && <TransferDetail t={viewT} />}
+        </div>
+        <DialogFooter className="px-5 py-3 border-t border-border">
+          <Button variant="outline" onClick={() => setViewT(null)}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 }
 

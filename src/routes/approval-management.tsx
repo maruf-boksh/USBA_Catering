@@ -226,6 +226,9 @@ type ApprovalItem = {
   lines?: ApprovalLine[];
   /** Single-record field list for categories without line items (e.g. User). */
   fields?: { label: string; value: string }[];
+  /** Production Order re-initiated from a failed-QC (Re-Cook) batch — drives the
+   *  "(Re-Cook)" tag shown next to the request in the list and detail views. */
+  reCook?: boolean;
 };
 
 const SEED: ApprovalItem[] = [
@@ -736,7 +739,9 @@ export default function ApprovalManagementPage() {
       id: `DR-AP-${d.id}`,
       category: "Demand Request" as Category,
       refId: d.id,
-      title: d.autoFulfill
+      title: d.reCook
+        ? `Re-Cook material demand — ${d.reference}`
+        : d.autoFulfill
         ? "Auto-fulfill demand from Menu Plan"
         : `Material demand from ${d.role}`,
       requestedBy: d.requestedBy,
@@ -747,6 +752,7 @@ export default function ApprovalManagementPage() {
       processedBy: d.approvedBy ?? d.rejectedBy,
       processedAt: d.approvedAt ?? d.rejectedAt,
       rejectionReason: d.rejectionReason,
+      reCook: d.reCook,
     }));
   }, [demands]);
 
@@ -965,20 +971,36 @@ export default function ApprovalManagementPage() {
         const decision = productionDecisions[e.id];
         const item = e.outputItemName ?? e.bom;
         const qty = e.orderQty ?? 0;
+        // Re-Cook re-initiations carry the failed-QC context so the approver sees
+        // why the batch is being re-produced.
+        const reCookFields = e.reCook
+          ? [
+              { label: "Re-Cook Reason", value: e.qcFailReason || "—" },
+              { label: "Failed QC Batch Qty", value: `${(e.reCookFailedQty ?? 0).toLocaleString()} portion${(e.reCookFailedQty ?? 0) === 1 ? "" : "s"}` },
+              { label: "Sent to Re-Cook By", value: e.qcFailedBy || "—" },
+              { label: "Failed At", value: e.qcFailedAt || "—" },
+              { label: "Re-Order Qty", value: `${qty.toLocaleString()} portion${qty === 1 ? "" : "s"}` },
+              { label: "BOM", value: e.bom },
+            ]
+          : undefined;
         return {
           id: `PRO-AP-${e.id}`,
           category: "Production Order" as Category,
           refId: e.id,
-          title: `${item} — production order`,
+          title: e.reCook ? `${item} — production order (Re-Cook re-initiation)` : `${item} — production order`,
           requestedBy: "Production",
           requestedAt: e.date,
-          summary: `${qty.toLocaleString()} portion${qty === 1 ? "" : "s"} · BOM ${e.bom}`,
+          summary: e.reCook
+            ? `Re-Cook re-initiation · ${qty.toLocaleString()} portion${qty === 1 ? "" : "s"} · BOM ${e.bom}`
+            : `${qty.toLocaleString()} portion${qty === 1 ? "" : "s"} · BOM ${e.bom}`,
           itemsCount: 1,
           status: decision ? decision.status : "Pending",
           processedBy: decision?.by,
           processedAt: decision?.at,
           rejectionReason: decision?.reason,
+          reCook: e.reCook,
           lines: [{ name: item, qty, uom: "portions", note: `BOM ${e.bom}` }],
+          fields: reCookFields,
         };
       });
   }, [productionEntries, productionDecisions]);
@@ -3169,6 +3191,11 @@ export default function ApprovalManagementPage() {
                               >
                                 <div className="flex items-center gap-1.5">
                                   <span className="font-mono text-xs text-foreground">{it.refId}</span>
+                                  {it.reCook && (
+                                    <span className="inline-flex items-center rounded-full border border-rose-300 bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700">
+                                      Re-Cook
+                                    </span>
+                                  )}
                                   {isPrApprovalItemOverdue(it) && (
                                     <span className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
                                       <AlertTriangle className="h-2.5 w-2.5" /> 72h overdue · notified
@@ -3268,6 +3295,11 @@ export default function ApprovalManagementPage() {
                                 <Icon className="h-2.5 w-2.5 mr-1" /> {it.category}
                               </Badge>
                               <span className="font-mono text-xs text-foreground">{it.refId}</span>
+                              {it.reCook && (
+                                <span className="inline-flex items-center rounded-full border border-rose-300 bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700">
+                                  Re-Cook
+                                </span>
+                              )}
                             </div>
                             <div className="mt-1 text-sm font-medium">{it.title}</div>
                             <div className="text-[11px] text-muted-foreground">{it.summary}</div>
@@ -3501,6 +3533,11 @@ export default function ApprovalManagementPage() {
                 return <Icon className="h-4 w-4 text-primary" />;
               })()}
               <span className="font-mono text-sm text-muted-foreground">{detailItem?.refId}</span>
+              {detailItem?.reCook && (
+                <span className="inline-flex items-center rounded-full border border-rose-300 bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-700">
+                  Re-Cook
+                </span>
+              )}
               <span className="text-foreground">— {detailItem?.title}</span>
             </DialogTitle>
             <DialogDescription>{detailItem?.category} approval detail</DialogDescription>

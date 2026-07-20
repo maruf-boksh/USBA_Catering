@@ -93,7 +93,19 @@ export default function DemandOrders() {
   const fulfilled = useMemo(() => demands.filter(r => r.status === "Fulfilled").length, [demands]);
 
   const requestCols: Column<WfDemandRequest>[] = [
-    { key: "id", header: "Request #" },
+    {
+      key: "id", header: "Request #",
+      render: (r) => (
+        <div className="flex items-center gap-1.5">
+          <span>{r.id}</span>
+          {r.reCook && (
+            <span className="inline-flex items-center rounded-full border border-rose-300 bg-rose-50 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700">
+              Re-Cook
+            </span>
+          )}
+        </div>
+      ),
+    },
     { key: "requestedBy", header: "Requested By" },
     {
       key: "officeId" as keyof WfDemandRequest, header: "Office / Warehouse",
@@ -242,7 +254,14 @@ export default function DemandOrders() {
             <DialogContent className="max-w-3xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
               <DialogHeader className="px-5 py-4 border-b border-border">
                 <DialogTitle className="flex items-center justify-between gap-3">
-                  <span>Demand Request — {activeDemand?.id}</span>
+                  <span className="flex items-center gap-2">
+                    Demand Request — {activeDemand?.id}
+                    {activeDemand?.reCook && (
+                      <span className="inline-flex items-center rounded-full border border-rose-300 bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-700">
+                        Re-Cook
+                      </span>
+                    )}
+                  </span>
                   <button
                     type="button"
                     aria-label="Close"

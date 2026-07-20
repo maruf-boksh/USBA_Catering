@@ -13,6 +13,8 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
@@ -20,7 +22,7 @@ import {
 import { KpiCard } from "@/components/common/KpiCard";
 import {
   Clock, Plus, ArrowLeft, CheckCircle2, AlertTriangle, Truck, ShoppingCart,
-  PackageOpen, Send, Timer, Eye, ChevronRight,
+  PackageOpen, Send, Timer, Eye, ChevronRight, ChevronDown,
   ExternalLink, Trash2, PlusCircle, ListChecks, Zap, History, X, ChefHat,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -558,11 +560,17 @@ export default function DelayManagementPage() {
   // Purchase continue the flow, so the rest is unchanged.
   const openFulfillment = (eventId: string) => { setActiveEventId(eventId); setView("production"); };
 
-  const createEvent = (ev: DelayEvent) => {
-    setDelayEvents((prev) => [ev, ...prev]);
-    setActiveEventId(ev.id);
-    setView("production");
-    toast.success(`${ev.id} created — check production requirements.`);
+  const createEvents = (evs: DelayEvent[]) => {
+    if (evs.length === 0) return;
+    setDelayEvents((prev) => [...evs, ...prev]);
+    // Land back on the Delay Events list — each new event sits there as
+    // "Fulfillment Pending" with its own Fulfil action (per-event fulfillment).
+    setView("list");
+    toast.success(
+      evs.length === 1
+        ? `${evs[0].id} created — Fulfillment Pending in the list.`
+        : `${evs.length} delay events created (one per flight) — all Fulfillment Pending in the list.`,
+    );
   };
 
   const setEventFulfillmentAndGo = (
@@ -869,7 +877,7 @@ export default function DelayManagementPage() {
             <DelayCreate
               nextId={nextDelId}
               nextDfrId={nextDfrId}
-              onCreate={(ev) => { setCreateOpen(false); createEvent(ev); }}
+              onCreate={(evs) => { setCreateOpen(false); createEvents(evs); }}
             />
           </div>
         </DialogContent>
@@ -1077,23 +1085,55 @@ function DelayList({
 
 // ─── Delay Create ─────────────────────────────────────────────────────────────
 
+// Soft, eye-soothing tints cycled across the per-flight cards so each flight is
+// easy to tell apart at a glance.
+const CARD_TONES = [
+  "bg-sky-50/70 border-sky-200",
+  "bg-emerald-50/70 border-emerald-200",
+  "bg-violet-50/70 border-violet-200",
+  "bg-amber-50/70 border-amber-200",
+  "bg-rose-50/70 border-rose-200",
+  "bg-teal-50/70 border-teal-200",
+];
+
+function DetailCell({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-0.5 text-sm font-medium">{value ?? "—"}</div>
+    </div>
+  );
+}
+
 function DelayCreate({
   nextId, nextDfrId, onCreate,
 }: {
   nextId: string;
   nextDfrId: string;
-  onCreate: (ev: DelayEvent) => void;
+  onCreate: (evs: DelayEvent[]) => void;
 }) {
+  const navigate     = useNavigate();
   const flightOrders = useFlightOrders();
   const dispatched   = useMemo(() => flightOrders.filter((o) => o.status === "Dispatched"), [flightOrders]);
 
   const [mealPlanCards] = usePersistedState<MealCardMinimal[]>("meal-planning-config", []);
+  // Read the same dispatch records the Dispatch page persists, so we can surface
+  // each selected flight's Dispatch ID + previously dispatched meal count.
+  const [dispatchRecords] = usePersistedState<DispatchRecordLike[]>("dispatch-records", []);
+  const dispatchFor = (flight: string) => dispatchRecords.find((r) => r.flightNos.includes(flight));
+  // Delay event date — auto-selected to the current date.
+  const [eventDate] = useState(() => new Date().toISOString().slice(0, 10));
 
-  const [selectedOrderId, setSelectedOrderId]   = useState("");
-  const [durationHours, setDurationHours]       = useState("2");
-  const [selectedMealType, setSelectedMealType] = useState("");
-  const [reasonPreset, setReasonPreset]         = useState("");
-  const [reasonCustom, setReasonCustom]         = useState("");
+  const [selectedOrderIds, setSelectedOrderIds]   = useState<string[]>([]);
+  // Delay duration is captured PER flight (keyed by flight order id) so different
+  // flights can be delayed by different hours.
+  const [durationByFlight, setDurationByFlight]   = useState<Record<string, string>>({});
+  // Meal types are captured PER flight (keyed by flight order id) so each flight
+  // can have its own meal selection.
+  const [mealsByFlight, setMealsByFlight]         = useState<Record<string, string[]>>({});
+  // Delay reason is captured PER flight (keyed by flight order id).
+  const [reasonByFlight, setReasonByFlight]       = useState<Record<string, string>>({});
+  const [reasonCustomByFlight, setReasonCustomByFlight] = useState<Record<string, string>>({});
   const [reportedBy, setReportedBy]             = useState("");
 
   // Dynamic items for "Other" meal type
@@ -1101,43 +1141,39 @@ function DelayCreate({
     { name: "", qty: 0, unitCost: 0 },
   ]);
 
-  const selectedOrder = dispatched.find((o) => o.id === selectedOrderId);
-  const effectivePax  = selectedOrder?.pax  ?? 0;
-  const effectiveCrew = selectedOrder?.crew ?? 0;
-  const totalPax      = effectivePax + effectiveCrew;
-  const hours         = Number(durationHours) || 0;
-  const suggestedQty  = Math.ceil(totalPax * durationMultiplier(hours));
-
-  // Airline-standard delayed departure time
-  const originalEtd   = (selectedOrder as any)?.etd as string | undefined;
-  const delayedDepTime = originalEtd && hours > 0
-    ? to12h(addHoursToEtd(originalEtd, hours))
-    : null;
-
-  const handleMealTypeChange = (mt: string) => {
-    setSelectedMealType(mt);
-    if (mt === "Other" && otherItems.length === 0) {
-      setOtherItems([{ name: "", qty: 0, unitCost: 0 }]);
-    }
+  // Multiple flights + meal types can be selected. The "primary" (first) of each
+  // drives the live preview; on save we fan out one delay event per flight × meal
+  // combination, so every downstream screen keeps working on single-value events.
+  const selectedOrders = dispatched.filter((o) => selectedOrderIds.includes(o.id));
+  const hoursFor = (id: string) => Number(durationByFlight[id]) || 0;
+  const setDurationFor = (id: string, v: string) => setDurationByFlight((prev) => ({ ...prev, [id]: v }));
+  const mealsFor = (id: string) => mealsByFlight[id] ?? [];
+  const toggleMealFor = (id: string, mt: string) => {
+    setMealsByFlight((prev) => {
+      const cur = prev[id] ?? [];
+      return { ...prev, [id]: cur.includes(mt) ? cur.filter((x) => x !== mt) : [...cur, mt] };
+    });
+    if (mt === "Other" && otherItems.length === 0) setOtherItems([{ name: "", qty: 0, unitCost: 0 }]);
+  };
+  const reasonFor = (id: string) => reasonByFlight[id] ?? "";
+  const effectiveReasonFor = (id: string) =>
+    reasonFor(id) === "Other" ? (reasonCustomByFlight[id] ?? "").trim() : reasonFor(id);
+  // Any selected flight using the "Other" meal type → show the manual items entry.
+  const anyOther = selectedOrders.some((o) => mealsFor(o.id).includes("Other"));
+  const toggleOrder = (id: string, on: boolean) => {
+    setSelectedOrderIds((prev) => (on ? [...prev, id] : prev.filter((x) => x !== id)));
+    // Default a newly-selected flight's delay to 2h (kept if already set).
+    if (on) setDurationByFlight((prev) => (prev[id] ? prev : { ...prev, [id]: "2" }));
   };
 
-  // Auto-populate items from meal plan
-  const planMenuItems = useMemo((): DelayMenuItem[] => {
-    if (!selectedMealType || selectedMealType === "Other" || !selectedOrder || totalPax === 0) return [];
-    return menuItemsFromPlan(selectedMealType, selectedOrder.date, totalPax, mealPlanCards);
-  }, [selectedMealType, selectedOrder, totalPax, mealPlanCards]);
-
-  // Items for "Other" — derived from otherItems state with unitCost
-  const otherMenuItems = useMemo((): DelayMenuItem[] => {
-    if (selectedMealType !== "Other") return [];
-    return otherItems
-      .filter((i) => i.name.trim() !== "")
-      .map((i) => ({ name: i.name.trim(), requiredQty: i.qty, uom: "pcs", unitCost: i.unitCost }));
-  }, [selectedMealType, otherItems]);
-
-  const menuItems = selectedMealType === "Other" ? otherMenuItems : planMenuItems;
-
   const otherTotal = otherItems.reduce((s, i) => s + i.qty * i.unitCost, 0);
+
+  // Menu items for a given flight + meal (used by save's fan-out). Mirrors the
+  // preview logic: "Other" draws from the manual item rows, otherwise from plan.
+  const itemsFor = (order: typeof dispatched[number], meal: string, tp: number): DelayMenuItem[] =>
+    meal === "Other"
+      ? otherItems.filter((i) => i.name.trim() !== "").map((i) => ({ name: i.name.trim(), requiredQty: i.qty, uom: "pcs", unitCost: i.unitCost }))
+      : (tp > 0 ? menuItemsFromPlan(meal, order.date, tp, mealPlanCards) : []);
 
   const updateOtherItem = (idx: number, field: "name" | "qty" | "unitCost", val: string) => {
     setOtherItems((prev) => prev.map((it, i) =>
@@ -1147,158 +1183,316 @@ function DelayCreate({
   const addOtherItem    = () => setOtherItems((prev) => [...prev, { name: "", qty: 0, unitCost: 0 }]);
   const removeOtherItem = (idx: number) => setOtherItems((prev) => prev.filter((_, i) => i !== idx));
 
-  const planMatched = selectedOrder && selectedMealType && selectedMealType !== "Other" &&
-    mealPlanCards.some((c) =>
-      c.mealType.toLowerCase() === selectedMealType.toLowerCase() &&
-      c.day === new Date(selectedOrder.date + "T00:00:00").toLocaleDateString("en-US", { weekday: "long" }),
-    );
-
-  const effectiveReason = reasonPreset === "Other" ? reasonCustom.trim() : reasonPreset;
+  // Bump the numeric suffix of a base id (e.g. DEL-0005 → DEL-0006) so each
+  // fanned-out event gets a distinct id.
+  const bumpId = (baseId: string, offset: number) => {
+    const m = baseId.match(/^(.*?)(\d+)$/);
+    if (!m) return `${baseId}-${offset + 1}`;
+    return `${m[1]}${String(Number(m[2]) + offset).padStart(m[2].length, "0")}`;
+  };
 
   const save = () => {
-    if (!selectedOrder) { toast.error("Select a dispatched flight order."); return; }
-    if (!hours || hours <= 0) { toast.error("Delay duration must be positive."); return; }
-    if (!selectedMealType) { toast.error("Select a meal type."); return; }
-    if (!reasonPreset) { toast.error("Select a delay reason."); return; }
-    if (reasonPreset === "Other" && !reasonCustom.trim()) { toast.error("Enter the delay reason."); return; }
+    if (selectedOrders.length === 0) { toast.error("Select at least one dispatched flight order."); return; }
+    if (selectedOrders.some((o) => hoursFor(o.id) <= 0)) { toast.error("Enter a positive delay duration for each selected flight."); return; }
+    if (selectedOrders.some((o) => mealsFor(o.id).length === 0)) { toast.error("Select at least one meal type for each selected flight."); return; }
+    if (selectedOrders.some((o) => !effectiveReasonFor(o.id))) { toast.error("Select a delay reason for each selected flight."); return; }
     if (!reportedBy.trim()) { toast.error("Reported by is required."); return; }
-    if (selectedMealType === "Other") {
+    if (anyOther) {
       const valid = otherItems.filter((i) => i.name.trim() && i.qty > 0);
-      if (valid.length === 0) { toast.error("Add at least one item with a name and quantity."); return; }
+      if (valid.length === 0) { toast.error("Add at least one item with a name and quantity for the Other meal type."); return; }
     }
     const now = stamp();
-    const event: DelayEvent = {
-      id: nextId,
-      flightOrderId: selectedOrder.id,
-      orderNo: selectedOrder.orderNo,
-      flightNumber: selectedOrder.flight,
-      flightDate: selectedOrder.date,
-      sector: selectedOrder.sector,
-      paxCount: effectivePax,
-      crewCount: effectiveCrew,
-      delayDurationHours: hours,
-      reason: effectiveReason,
-      reportedBy: reportedBy.trim(),
-      status: "Fulfillment Pending",
-      createdAt: now,
-      updatedAt: now,
-      mealType: selectedMealType,
-      originalEtd: originalEtd ?? undefined,
-      menuItems,
-      fulfillment: {
-        id: nextDfrId,
-        itemType: selectedMealType,
-        suggestedQty,
-        finalQty: suggestedQty,
-        fulfillmentType: "Direct Receive",
-        requestedBy: reportedBy.trim(),
-        notes: "",
-      },
-    };
-    onCreate(event);
+    // Fan out: ONE delay event per flight (not per meal). Each event carries ALL
+    // selected meal types — a combined label plus the aggregated menu items — so a
+    // single Delay ID covers the flight's whole refreshment requirement.
+    const events: DelayEvent[] = [];
+    let k = 0;
+    for (const order of selectedOrders) {
+      const pax  = order.pax ?? 0;
+      const crew = order.crew ?? 0;
+      const tp   = pax + crew;
+      const hrs  = hoursFor(order.id);
+      const sq   = Math.ceil(tp * durationMultiplier(hrs));
+      const etd  = (order as any)?.etd as string | undefined;
+      const meals = mealsFor(order.id);
+      const mealLabel = meals.join(", ");
+      const aggItems = meals.flatMap((meal) => itemsFor(order, meal, tp));
+      events.push({
+        id: bumpId(nextId, k),
+        flightOrderId: order.id,
+        orderNo: order.orderNo,
+        flightNumber: order.flight,
+        flightDate: order.date,
+        sector: order.sector,
+        paxCount: pax,
+        crewCount: crew,
+        delayDurationHours: hrs,
+        reason: effectiveReasonFor(order.id),
+        reportedBy: reportedBy.trim(),
+        status: "Fulfillment Pending",
+        createdAt: now,
+        updatedAt: now,
+        mealType: mealLabel,
+        originalEtd: etd ?? undefined,
+        menuItems: aggItems,
+        fulfillment: {
+          id: bumpId(nextDfrId, k),
+          itemType: mealLabel,
+          suggestedQty: sq,
+          finalQty: sq,
+          fulfillmentType: "Direct Receive",
+          requestedBy: reportedBy.trim(),
+          notes: "",
+        },
+      });
+      k++;
+    }
+    onCreate(events);
   };
 
   return (
     <div className="space-y-5">
       <div className="space-y-5">
-        {/* Flight Order */}
-        <div>
-          <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-            Dispatched Flight Order <span className="text-destructive">*</span>
-          </Label>
-          <Select value={selectedOrderId} onValueChange={setSelectedOrderId}>
-            <SelectTrigger className="mt-1 h-9">
-              <SelectValue placeholder="Select dispatched order…" />
-            </SelectTrigger>
-            <SelectContent>
-              {dispatched.length === 0 ? (
-                <SelectItem value="_none" disabled>No dispatched orders found</SelectItem>
-              ) : (
-                dispatched.map((o) => (
-                  <SelectItem key={o.id} value={o.id}>
-                    {o.flight} — {o.sector} ({o.date}) · {o.orderNo}
-                  </SelectItem>
-                ))
+        {/* Flight Order (multi-select dropdown) + auto event date */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+              Dispatched Flight Order(s) <span className="text-destructive">*</span>
+              {selectedOrderIds.length > 0 && (
+                <span className="ml-1 font-normal normal-case text-primary">· {selectedOrderIds.length} selected</span>
               )}
-            </SelectContent>
-          </Select>
+            </Label>
+            <Popover>
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  className="mt-1 h-9 w-full flex items-center justify-between rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  <span className={selectedOrderIds.length === 0 ? "text-muted-foreground" : ""}>
+                    {selectedOrderIds.length === 0
+                      ? "Select dispatched order(s)…"
+                      : `${selectedOrderIds.length} flight order${selectedOrderIds.length === 1 ? "" : "s"} selected`}
+                  </span>
+                  <ChevronDown className="h-4 w-4 opacity-60 shrink-0" />
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-1 max-h-64 overflow-y-auto">
+                {dispatched.length === 0 ? (
+                  <div className="px-3 py-2 text-sm text-muted-foreground">No dispatched orders found</div>
+                ) : (
+                  dispatched.map((o) => (
+                    <label key={o.id} className="flex items-center gap-2 px-2 py-1.5 text-sm cursor-pointer rounded hover:bg-muted/50">
+                      <Checkbox
+                        checked={selectedOrderIds.includes(o.id)}
+                        onCheckedChange={(v) => toggleOrder(o.id, v === true)}
+                      />
+                      <span>{o.flight} — {o.sector} ({o.date}) · {o.orderNo}</span>
+                    </label>
+                  ))
+                )}
+              </PopoverContent>
+            </Popover>
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Event Date</Label>
+            <Input
+              type="date"
+              value={eventDate}
+              readOnly
+              tabIndex={-1}
+              title="Auto-selected — current date"
+              className="mt-1 tabular-nums bg-muted/50 text-muted-foreground cursor-default"
+            />
+          </div>
         </div>
 
-        {selectedOrder && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 p-4 rounded-md bg-muted/30 border border-border">
-            {[["Flight #", selectedOrder.flight], ["Date", selectedOrder.date],
-              ["Sector", selectedOrder.sector], ["Order No.", selectedOrder.orderNo]].map(([label, val]) => (
-              <div key={label}>
-                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
-                <div className="mt-0.5 text-sm font-medium">{val}</div>
+        {/* Per-flight details — dispatched meal counts + clickable Order / Dispatch IDs */}
+        {selectedOrders.map((o, idx) => {
+          const dsp = dispatchFor(o.flight);
+          const dispatchedMeals = dsp?.detail?.flightKitchen?.totalMeals;
+          const hrs = hoursFor(o.id);
+          const revised = o.etd && hrs > 0 ? to12h(addHoursToEtd(o.etd, hrs)) : null;
+          const tone = CARD_TONES[idx % CARD_TONES.length];
+          const weekday = new Date(o.date + "T00:00:00").toLocaleDateString("en-US", { weekday: "long" });
+          const tp = (o.pax ?? 0) + (o.crew ?? 0);
+          const meals = mealsFor(o.id);
+          return (
+            <div key={o.id} className={cn("rounded-md border p-4 space-y-3", tone)}>
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-sm font-semibold">{o.flight} · {o.sector}</span>
+                <span className="text-[11px] text-muted-foreground tabular-nums">
+                  {o.date} · ETD {o.etd ? to12h(o.etd) : "—"}
+                </span>
               </div>
-            ))}
-          </div>
-        )}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <DetailCell label="Flight Name" value={o.flight} />
+                <DetailCell label="Total PAX" value={o.pax?.toLocaleString() ?? "—"} />
+                <DetailCell label="Crew Meal" value={o.crew?.toLocaleString() ?? "—"} />
+                <DetailCell label="Special Meal" value={o.specialMeals?.toLocaleString() ?? "—"} />
+                <DetailCell
+                  label="Order ID"
+                  value={
+                    <button
+                      type="button"
+                      className="font-mono text-primary hover:underline"
+                      onClick={() => navigate(`/order-management?ord=${o.orderNo}`)}
+                    >
+                      {o.orderNo}
+                    </button>
+                  }
+                />
+                <DetailCell
+                  label="Dispatch ID"
+                  value={
+                    dsp ? (
+                      <button
+                        type="button"
+                        className="font-mono text-primary hover:underline"
+                        onClick={() => navigate("/dispatch")}
+                      >
+                        {dsp.id}
+                      </button>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )
+                  }
+                />
+                <DetailCell
+                  label="Dispatched Meals"
+                  value={dispatchedMeals != null ? dispatchedMeals.toLocaleString() : "—"}
+                />
+              </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-4">
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              Delay Duration (hours) <span className="text-destructive">*</span>
-            </Label>
-            <Input type="number" min={0.5} step={0.5} value={durationHours}
-              onChange={(e) => setDurationHours(e.target.value)} className="mt-1 tabular-nums" />
-          </div>
+              {/* Per-flight delay duration → this flight's revised departure time */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 items-end pt-1 border-t border-border/50">
+                <div>
+                  <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Delay Duration (hours) <span className="text-destructive">*</span>
+                  </Label>
+                  <Input
+                    type="number"
+                    min={0.5}
+                    step={0.5}
+                    value={durationByFlight[o.id] ?? ""}
+                    onChange={(e) => setDurationFor(o.id, e.target.value)}
+                    className="mt-1 h-9 tabular-nums"
+                  />
+                </div>
+                <DetailCell
+                  label={`Revised Dep. Time${hrs > 0 ? ` (ETD + ${hrs}h)` : ""}`}
+                  value={revised ? <span className="font-semibold text-amber-700 tabular-nums">{revised}</span> : "—"}
+                />
+                <div className="sm:col-span-2">
+                  <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Meal Type(s) <span className="text-destructive">*</span>
+                    {mealsFor(o.id).length > 0 && (
+                      <span className="ml-1 font-normal normal-case text-primary">· {mealsFor(o.id).length} selected</span>
+                    )}
+                  </Label>
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <button
+                        type="button"
+                        className="mt-1 h-9 w-full flex items-center justify-between rounded-md border border-input bg-background px-3 text-sm"
+                      >
+                        <span className={cn("truncate", mealsFor(o.id).length === 0 && "text-muted-foreground")}>
+                          {mealsFor(o.id).length === 0 ? "Select meal type(s)…" : mealsFor(o.id).join(", ")}
+                        </span>
+                        <ChevronDown className="h-4 w-4 opacity-60 shrink-0" />
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-1">
+                      {MEAL_TYPES.map((mt) => (
+                        <label key={mt} className="flex items-center gap-2 px-2 py-1.5 text-sm cursor-pointer rounded hover:bg-muted/50">
+                          <Checkbox checked={mealsFor(o.id).includes(mt)} onCheckedChange={() => toggleMealFor(o.id, mt)} />
+                          <span>{mt}</span>
+                        </label>
+                      ))}
+                    </PopoverContent>
+                  </Popover>
+                </div>
+              </div>
 
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              Meal Type <span className="text-destructive">*</span>
-            </Label>
-            <Select value={selectedMealType} onValueChange={handleMealTypeChange}>
-              <SelectTrigger className="mt-1 h-9">
-                <SelectValue placeholder="Select meal type…" />
-              </SelectTrigger>
-              <SelectContent>
-                {MEAL_TYPES.map((mt) => (
-                  <SelectItem key={mt} value={mt}>{mt}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+              {/* Per-flight delay reason */}
+              <div className="pt-1 border-t border-border/50">
+                <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                  Delay Reason <span className="text-destructive">*</span>
+                </Label>
+                <Select value={reasonFor(o.id)} onValueChange={(v) => setReasonByFlight((prev) => ({ ...prev, [o.id]: v }))}>
+                  <SelectTrigger className="mt-1 h-9 bg-background">
+                    <SelectValue placeholder="Select delay reason…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {DELAY_REASONS.map((r) => (
+                      <SelectItem key={r} value={r}>{r}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {reasonFor(o.id) === "Other" && (
+                  <Input
+                    value={reasonCustomByFlight[o.id] ?? ""}
+                    onChange={(e) => setReasonCustomByFlight((prev) => ({ ...prev, [o.id]: e.target.value }))}
+                    placeholder="Describe the delay reason…"
+                    className="mt-2 text-sm bg-background"
+                  />
+                )}
+              </div>
 
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Pax Count</Label>
-            <div className="mt-1 h-9 flex items-center px-3 rounded-md border border-input bg-muted/50 text-sm tabular-nums text-muted-foreground select-none">
-              {effectivePax || "—"}
+              {/* Selected meals — day-wise configuration shown inside the card */}
+              {meals.length > 0 && (
+                <div className="pt-1 border-t border-border/50 space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <ListChecks className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        Selected Meals · Day-wise Config ({weekday})
+                      </span>
+                    </div>
+                    <Button size="sm" variant="outline" className="h-7 text-xs bg-background" onClick={() => navigate("/meal-planning")}>
+                      <ExternalLink className="h-3 w-3 mr-1" /> Change Menu
+                    </Button>
+                  </div>
+                  <div className="rounded-md border border-border/60 bg-background/70 divide-y divide-border/50">
+                    {meals.map((meal) => {
+                      const isOther = meal === "Other";
+                      const items = isOther
+                        ? otherItems.filter((i) => i.name.trim() !== "").map((i) => ({ name: i.name.trim(), requiredQty: i.qty, uom: "pcs" }))
+                        : menuItemsFromPlan(meal, o.date, tp, mealPlanCards);
+                      const matched = !isOther && mealPlanCards.some(
+                        (c) => c.mealType.toLowerCase() === meal.toLowerCase() && c.day === weekday,
+                      );
+                      return (
+                        <div key={meal} className="px-3 py-2">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-xs font-semibold text-primary">{meal}</span>
+                            {!isOther && (
+                              <span className="text-[10px] text-muted-foreground">{matched ? "(matched to plan)" : "(defaults)"}</span>
+                            )}
+                          </div>
+                          {items.length === 0 ? (
+                            <div className="text-[11px] text-muted-foreground">No items configured.</div>
+                          ) : (
+                            <ul className="space-y-0.5">
+                              {items.map((it, i) => (
+                                <li key={i} className="flex items-center justify-between text-xs">
+                                  <span className="text-foreground">{it.name}</span>
+                                  <span className="tabular-nums text-muted-foreground">{it.requiredQty} {it.uom}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
-          </div>
+          );
+        })}
 
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Crew Count</Label>
-            <div className="mt-1 h-9 flex items-center px-3 rounded-md border border-input bg-muted/50 text-sm tabular-nums text-muted-foreground select-none">
-              {effectiveCrew || "—"}
-            </div>
-          </div>
-
-          <div className="md:col-span-2">
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-              Delay Reason <span className="text-destructive">*</span>
-            </Label>
-            <Select value={reasonPreset} onValueChange={setReasonPreset}>
-              <SelectTrigger className="mt-1 h-9">
-                <SelectValue placeholder="Select delay reason…" />
-              </SelectTrigger>
-              <SelectContent>
-                {DELAY_REASONS.map((r) => (
-                  <SelectItem key={r} value={r}>{r}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {reasonPreset === "Other" && (
-              <Input
-                value={reasonCustom}
-                onChange={(e) => setReasonCustom(e.target.value)}
-                placeholder="Describe the delay reason…"
-                className="mt-2 text-sm"
-              />
-            )}
-          </div>
-
+        {/* Reported By */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">
               Reported By <span className="text-destructive">*</span>
@@ -1306,25 +1500,14 @@ function DelayCreate({
             <Input value={reportedBy} onChange={(e) => setReportedBy(e.target.value)}
               placeholder="Name / department" className="mt-1" />
           </div>
-
-          {delayedDepTime && (
-            <div>
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-                Revised Dep. Time (ETD + {hours}h)
-              </Label>
-              <div className="mt-1 h-9 flex items-center px-3 rounded-md border border-amber-300 bg-amber-50 text-sm font-semibold text-amber-800 tabular-nums">
-                {delayedDepTime}
-              </div>
-            </div>
-          )}
         </div>
 
         {/* ── "Other" dynamic item entry ──────────────────────────────── */}
-        {selectedMealType === "Other" && (
+        {anyOther && (
           <div>
             <div className="flex items-center justify-between mb-2">
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-                Items <span className="text-destructive">*</span>
+                Items — Other <span className="text-destructive">*</span>
               </Label>
               <Button size="sm" variant="outline" className="h-7 text-xs" onClick={addOtherItem}>
                 <PlusCircle className="h-3.5 w-3.5 mr-1" /> Add Item
@@ -1381,61 +1564,16 @@ function DelayCreate({
           </div>
         )}
 
-        {/* ── Summary + auto-populated plan items preview ─────────────── */}
-        {selectedOrder && hours > 0 && selectedMealType && selectedMealType !== "Other" && (
-          <div className="space-y-3">
-            <div className="grid grid-cols-3 gap-3 p-4 rounded-md border border-primary/20 bg-primary/[0.04]">
-              <div className="text-center">
-                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Total Pax + Crew</div>
-                <div className="mt-0.5 text-base font-bold tabular-nums">{totalPax}</div>
-              </div>
-              <div className="text-center border-x border-primary/10">
-                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Suggested Qty</div>
-                <div className="mt-0.5 text-base font-bold tabular-nums text-primary">{suggestedQty}</div>
-              </div>
-              <div className="text-center">
-                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Meal Type</div>
-                <div className="mt-0.5 text-sm font-semibold">{selectedMealType}</div>
-              </div>
-            </div>
-
-            {planMenuItems.length > 0 && (
-              <div className="border border-border rounded-md overflow-hidden">
-                <div className="px-4 py-2 bg-muted/40 flex items-center gap-2">
-                  <ListChecks className="h-3.5 w-3.5 text-muted-foreground" />
-                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    Items from Menu Plan — {selectedMealType}
-                    {planMatched ? " (matched)" : " (defaults)"}
-                  </span>
-                </div>
-                <Table>
-                  <TableHeader className="bg-muted/20">
-                    <TableRow>
-                      <TableHead className="text-xs uppercase tracking-wider">Item Name</TableHead>
-                      <TableHead className="text-xs uppercase tracking-wider text-right w-32">Required Qty</TableHead>
-                      <TableHead className="text-xs uppercase tracking-wider w-20">UoM</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {planMenuItems.map((item, i) => (
-                      <TableRow key={i}>
-                        <TableCell className="text-sm font-medium">{item.name}</TableCell>
-                        <TableCell className="text-right tabular-nums text-sm">{item.requiredQty}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground">{item.uom}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-                <div className="px-4 py-2 text-xs text-muted-foreground bg-muted/10">
-                  Stock availability will be verified in the next step.
-                </div>
-              </div>
-            )}
-          </div>
-        )}
       </div>
 
-      <div className="flex justify-end pt-2 border-t border-border">
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border">
+        {selectedOrders.length > 0 && selectedOrders.some((o) => mealsFor(o.id).length > 0) ? (
+          <span className="text-xs text-muted-foreground">
+            Will create{" "}
+            <span className="font-semibold text-foreground">{selectedOrders.length}</span>{" "}
+            delay event{selectedOrders.length === 1 ? "" : "s"} (one per flight), each covering its own meal type(s).
+          </span>
+        ) : <span />}
         <Button onClick={save} className="mt-3">
           <Send className="h-4 w-4 mr-1.5" /> Create &amp; Go to Fulfillment
         </Button>

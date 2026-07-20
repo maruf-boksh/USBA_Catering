@@ -180,7 +180,6 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/hygiene-monitoring',            label: 'Daily Hygiene Monitoring',            icon: I(ClipboardCheck) },
       { key: '/personal-hygiene-monitoring',   label: 'Health & Personal Hygiene Monitoring', icon: I(Users) },
       { key: '/cooking-temp',                  label: 'Cooking Temp & Sensory',              icon: I(ThermometerSun) },
-      { key: '/dispatch-monitoring',  label: 'Dispatch Monitoring',       icon: I(Truck) },
     ],
   },
 
@@ -192,6 +191,7 @@ export const NAV_MODULES: NavModule[] = [
     children: [
       { key: '/packaging-dispatch-overview', label: 'Dispatch Dashboard', icon: I(LayoutDashboard) },
       { key: '/dispatch',                    label: 'Dispatch', icon: I(PackageCheck) },
+      { key: '/dispatch-monitoring',         label: 'Dispatch Monitoring', icon: I(Truck) },
     ],
   },
 
