@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
+import {
+  FULFILL_PLAN_KEY, PROCUREMENT_METHODS, demandShortfalls, allocationTotal,
+  type Allocation, type FulfillmentPlan, type PlanLine,
+} from "@/lib/fulfillment-plan";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
@@ -25,7 +29,9 @@ import {
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
   PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane, MailQuestion, PlaneLanding, PlaneTakeoff,
   BadgeDollarSign, Wrench, MessageSquare, CornerUpLeft, LayoutGrid, Timer, Trash2, Undo2, Gavel,
+  ChevronDown,
 } from "lucide-react";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -38,6 +44,7 @@ import { roundQty } from "@/lib/num";
 import { useFlightOrders, updateFlightOrdersWhere, type FlightOrder } from "@/lib/flight-orders-store";
 import { useApprovalReviews, setReview, reviewKey } from "@/lib/approval-reviews";
 import { useDirectReceiptApprovals, setDirectReceiptApprovalStatus } from "@/lib/direct-receipt-approvals";
+import { useOrderSummaryAdjustments, setOrderSummaryAdjustmentStatus } from "@/lib/order-summary-adjustments";
 import { applyReceiptToPR } from "@/lib/purchase-requisitions";
 import { getRfqs, setRfqStatus } from "@/lib/rfqs";
 import { getPurchaseRequisitions, setPurchaseRequisitionStatus } from "@/lib/purchase-requisitions";
@@ -77,7 +84,8 @@ type Category =
   | "Daily Hygiene Monitoring"
   | "Wastage Entry"
   | "Delay Refreshment Fulfillment"
-  | "Last-Minute Change";
+  | "Last-Minute Change"
+  | "Meal Quantity Adjustment";
 
 // Shared type with dispatch-monitoring.tsx via "galley_loading" sessionStorage key
 type SignOffLog = { name: string; designation: string; signedAt: string };
@@ -152,12 +160,13 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Wastage Entry",       label: "Damaged Product Disposal",    icon: Trash2          },
   { key: "Delay Refreshment Fulfillment", label: "Delay Refreshment", icon: Timer           },
   { key: "Last-Minute Change",  label: "Last-Minute Change", icon: AlertTriangle   },
+  { key: "Meal Quantity Adjustment", label: "Meal Qty Adjustment", icon: SlidersHorizontal },
 ];
 
 // Overview grid — categories grouped into business sections (mirrors the
 // reference layout). Each card drills into that category's pending queue.
 const APPROVAL_SECTIONS: { label: string; keys: Category[] }[] = [
-  { label: "Operations Approval",     keys: ["Flight Orders", "Crew Orders", "Last-Minute Change"] },
+  { label: "Operations Approval",     keys: ["Flight Orders", "Crew Orders", "Last-Minute Change", "Meal Quantity Adjustment"] },
   { label: "Dispatch Approval",       keys: ["Dispatch"] },
   { label: "Procurement Approval",    keys: ["Request for Quotation", "Quotation", "Purchase Requisition", "Purchase Order", "Goods Receipt", "Purchase Return"] },
   { label: "Inventory Approval",      keys: ["Demand Request", "Transfer Request", "Stock Adjustment"] },
@@ -358,6 +367,7 @@ const APPROVAL_CHAINS: Partial<Record<Category, { role: string; name: string }[]
   "Purchase Return":       [{ role: "Store In-Charge", name: "S. Ahmed" }, { role: "Procurement Head", name: "R. Hossain" }],
   "Wastage Entry":         [{ role: "Production In-Charge", name: "M. Alam" }, { role: "GM Catering", name: "R. Hossain" }, { role: "Final Authorization", name: "GM / Admin" }],
   "Delay Refreshment Fulfillment": [{ role: "Duty Manager", name: "S. Ahmed" }, { role: "GM / Admin", name: "R. Hossain" }],
+  "Meal Quantity Adjustment": [{ role: "Catering Supervisor", name: "A. Chowdhury" }, { role: "GM / Admin", name: "R. Hossain" }],
   "Personal Hygiene":      [{ role: "Senior Executive", name: "F. Haque" }, { role: "GM Catering", name: "R. Hossain" }],
   "Daily Hygiene Monitoring": [{ role: "QA Lead", name: "F. Haque" }, { role: "GM Catering", name: "R. Hossain" }],
 };
@@ -462,6 +472,119 @@ function ApprovalWorkflow({ item }: { item: ApprovalItem }) {
   );
 }
 
+// Allocation popover for splitting a shortfall item's procurement qty across
+// procurement methods. Scales to any number of methods (PROCUREMENT_METHODS):
+// the table cell shows a compact summary chip, the popover holds one capped qty
+// input per method plus quick actions. Read-only mode just renders the chips.
+function MethodAllocator({
+  cap, value, editable, onChange,
+}: {
+  cap: number;
+  value: Allocation;
+  editable: boolean;
+  onChange: (next: Allocation) => void;
+}) {
+  const total = allocationTotal(value);
+  const active = PROCUREMENT_METHODS.filter((m) => (value[m.key] ?? 0) > 0);
+
+  const chips = active.length > 0 ? (
+    <span className="flex flex-wrap items-center justify-center gap-1">
+      {active.map((m) => (
+        <span key={m.key} className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${m.soft} ${m.text}`}>
+          {m.short} {roundQty(value[m.key])}
+        </span>
+      ))}
+    </span>
+  ) : null;
+
+  if (!editable) {
+    return chips ?? <span className="text-xs text-muted-foreground">—</span>;
+  }
+
+  const setMethod = (key: string, raw: string) => {
+    const others = roundQty(total - (Number(value[key]) || 0));
+    if (raw === "") { onChange({ ...value, [key]: 0 }); return; }
+    const n = Number(raw);
+    if (Number.isNaN(n)) return;
+    const clamped = Math.max(0, Math.min(n, roundQty(Math.max(0, cap - others))));
+    onChange({ ...value, [key]: roundQty(clamped) });
+  };
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex items-center gap-1.5 h-7 max-w-full rounded-md border border-input bg-background px-2 text-xs shadow-sm hover:bg-muted/40 transition-colors"
+        >
+          {chips ?? <span className="text-muted-foreground">Assign method…</span>}
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-64 p-3">
+        <div className="text-[11px] text-muted-foreground mb-2">
+          Assign <span className="font-semibold text-foreground tabular-nums">{roundQty(cap)}</span> across methods
+        </div>
+        <div className="space-y-1.5">
+          {PROCUREMENT_METHODS.map((m) => (
+            <div key={m.key} className="flex items-center justify-between gap-2">
+              <span className="flex items-center gap-1.5 text-xs">
+                <span className={`h-2 w-2 rounded-full ${m.swatch}`} /> {m.label}
+              </span>
+              <Input
+                type="number" min="0" step="0.001"
+                className="h-7 w-20 text-center text-xs no-spinner"
+                value={value[m.key] ? String(value[m.key]) : ""}
+                onChange={(e) => setMethod(m.key, e.target.value)}
+              />
+            </div>
+          ))}
+        </div>
+        <div className={`mt-2 text-[11px] tabular-nums ${total > cap ? "text-destructive" : total === roundQty(cap) ? "text-emerald-600" : "text-muted-foreground"}`}>
+          {total} / {roundQty(cap)} allocated
+        </div>
+        <div className="mt-2 flex flex-wrap gap-1.5 border-t border-border pt-2">
+          {PROCUREMENT_METHODS.map((m) => (
+            <button
+              key={m.key}
+              type="button"
+              onClick={() => onChange({ [m.key]: roundQty(cap) })}
+              className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${m.soft} ${m.text} hover:opacity-80`}
+            >
+              All {m.short}
+            </button>
+          ))}
+          {PROCUREMENT_METHODS.length > 1 && (
+            <button
+              type="button"
+              onClick={() => {
+                const each = roundQty(cap / PROCUREMENT_METHODS.length);
+                const ev: Allocation = {};
+                PROCUREMENT_METHODS.forEach((m, i) => {
+                  ev[m.key] = i === PROCUREMENT_METHODS.length - 1
+                    ? roundQty(cap - each * (PROCUREMENT_METHODS.length - 1))
+                    : each;
+                });
+                onChange(ev);
+              }}
+              className="text-[10px] px-2 py-0.5 rounded-full font-medium bg-muted text-muted-foreground hover:bg-muted/70"
+            >
+              Split evenly
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => onChange({})}
+            className="text-[10px] px-2 py-0.5 rounded-full font-medium bg-muted text-muted-foreground hover:bg-muted/70"
+          >
+            Clear
+          </button>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export default function ApprovalManagementPage() {
   const { role } = useRole();
   const navigate = useNavigate();
@@ -477,6 +600,7 @@ export default function ApprovalManagementPage() {
     applyStockDeltas, addGRN,
   } = useWorkflow();
   const directReceipts = useDirectReceiptApprovals();
+  const mealQtyAdjustments = useOrderSummaryAdjustments();
   const flightOrders = useFlightOrders();
 
   const [items, setItems] = useState<ApprovalItem[]>(SEED);
@@ -552,6 +676,11 @@ export default function ApprovalManagementPage() {
   const [fulfillStoreDone, setFulfillStoreDone] = useState(false);
   const [escalateDone, setEscalateDone] = useState(false);
   const [shortfallQtys, setShortfallQtys] = useState<Record<string, string>>({});
+  // Per shortfall item, how its (fixed) procurement qty is allocated across
+  // procurement methods while approving a demand. Seeded from (and, on Approve,
+  // saved to) the shared fulfilment plan that Item Issue reads to run each method.
+  const [fulfillPlan, setFulfillPlan] = usePersistedState<FulfillmentPlan>(FULFILL_PLAN_KEY, {});
+  const [allocations, setAllocations] = useState<Record<string, Allocation>>({});
   const [detailRejectOpen, setDetailRejectOpen] = useState(false);
   const [detailRejectReason, setDetailRejectReason] = useState("");
   const [detailReviewOpen, setDetailReviewOpen] = useState(false);
@@ -1235,8 +1364,31 @@ export default function ApprovalManagementPage() {
     lines: d.grn.lines.map((l) => ({ name: l.name, qty: l.qty, uom: l.uom })),
   })), [directReceipts]);
 
+  // Meal-quantity adjustments raised from Order Management's Order Summary tab —
+  // a request to increase/decrease Total Meals for a Date × Flight-Type line.
+  // Approving applies the delta to the effective summary total there.
+  const mealQtyAdjItems: ApprovalItem[] = useMemo(() => mealQtyAdjustments.map((a) => {
+    const dir = a.delta >= 0 ? "Increase" : "Decrease";
+    const sign = a.delta >= 0 ? "+" : "−";
+    return {
+      id: `MQA-AP-${a.id}`,
+      category: "Meal Quantity Adjustment" as Category,
+      refId: a.id,
+      title: `Meal Qty ${dir} — ${a.date} · ${a.flightType}`,
+      requestedBy: a.requestedBy,
+      requestedAt: a.requestedAt,
+      summary: `${a.date} · ${a.flightType} · Total Meals ${a.baseTotal.toLocaleString()} → ${a.newTotal.toLocaleString()} (${sign}${Math.abs(a.delta).toLocaleString()}) — ${a.reason}`,
+      itemsCount: 1,
+      status: a.status,
+      processedBy: a.processedBy,
+      processedAt: a.processedAt,
+      rejectionReason: a.rejectionReason,
+      lines: [{ name: `${a.date} · ${a.flightType}`, qty: a.delta, uom: "meals", note: `${a.baseTotal.toLocaleString()} → ${a.newTotal.toLocaleString()}` }],
+    } as ApprovalItem;
+  }), [mealQtyAdjustments]);
+
   const allItems = useMemo(() => {
-    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...prItems, ...stockAdjItems, ...wfPoItems, ...wfPoCloseItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...hygieneAppealItems, ...hygieneDailyItems, ...wastageItems, ...delayApprovalItems, ...directReceiptItems, ...items];
+    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...prItems, ...stockAdjItems, ...wfPoItems, ...wfPoCloseItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...hygieneAppealItems, ...hygieneDailyItems, ...wastageItems, ...delayApprovalItems, ...directReceiptItems, ...mealQtyAdjItems, ...items];
     // Overlay "Reviewed" (returned for correction) onto still-pending requests.
     return base.map((it) => {
       const rv = reviews[reviewKey(it.category, it.refId)];
@@ -1245,7 +1397,7 @@ export default function ApprovalManagementPage() {
       }
       return it;
     });
-  }, [flightOrderItems, demandItems, rfqItems, quotationItems, prItems, stockAdjItems, wfPoItems, wfPoCloseItems, productionItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, hygieneAppealItems, hygieneDailyItems, wastageItems, delayApprovalItems, directReceiptItems, items, reviews]);
+  }, [flightOrderItems, demandItems, rfqItems, quotationItems, prItems, stockAdjItems, wfPoItems, wfPoCloseItems, productionItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, hygieneAppealItems, hygieneDailyItems, wastageItems, delayApprovalItems, directReceiptItems, mealQtyAdjItems, items, reviews]);
 
   const counts = useMemo(() => {
     const pendingByCat = new Map<Category, number>();
@@ -1467,6 +1619,20 @@ export default function ApprovalManagementPage() {
         if (!silent) toast.error(`Demand ${it.refId} not found.`);
         return;
       }
+      // Persist the fulfilment method chosen per shortfall item during approval, so
+      // Item Issue's demand View dialog can run Direct Receive / Create Requisition.
+      const map: Record<string, PlanLine> = {};
+      demandShortfalls(dr).forEach((sf) => {
+        const alloc = allocations[sf.id] ?? {};
+        const clean: Allocation = {};
+        for (const [k, v] of Object.entries(alloc)) {
+          const n = roundQty(Number(v) || 0);
+          if (n > 0) clean[k] = n;
+        }
+        const total = allocationTotal(clean);
+        if (total > 0) map[sf.id] = { qty: total, allocations: clean };
+      });
+      setFulfillPlan((p) => ({ ...p, [dr.id]: map }));
       approveDemand(dr, silent);
       return;
     }
@@ -1524,6 +1690,11 @@ export default function ApprovalManagementPage() {
         [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
       }));
       if (!silent) toast.success(`${it.refId} approved — stock balance updated.`);
+      return;
+    }
+    if (it.category === "Meal Quantity Adjustment") {
+      setOrderSummaryAdjustmentStatus(it.refId, "Approved", `${role} (GM/Admin)`, { at: stamp() });
+      if (!silent) toast.success(`${it.refId} approved — adjustment applied to the order summary.`);
       return;
     }
     if (it.category === "Production Order" && it.id.startsWith("PRO-AP-")) {
@@ -1843,6 +2014,8 @@ export default function ApprovalManagementPage() {
         ...p,
         [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
+    } else if (it.category === "Meal Quantity Adjustment") {
+      setOrderSummaryAdjustmentStatus(it.refId, "Rejected", `${role} (GM/Admin)`, { at: stamp(), rejectionReason: reason });
     } else if (it.category === "Production Order" && it.id.startsWith("PRO-AP-")) {
       setProductionDecisions((p) => ({
         ...p,
@@ -2010,6 +2183,18 @@ export default function ApprovalManagementPage() {
     setDetailOpen(true);
     setFulfillStoreDone(false);
     setEscalateDone(false);
+    // Seed each shortfall item's method allocation from the saved fulfilment plan.
+    if (it.category === "Demand Request") {
+      const dr = demands.find((d) => d.id === it.refId);
+      const saved = fulfillPlan[it.refId] ?? {};
+      const a: Record<string, Allocation> = {};
+      (dr ? demandShortfalls(dr) : []).forEach((sf) => {
+        a[sf.id] = { ...(saved[sf.id]?.allocations ?? {}) };
+      });
+      setAllocations(a);
+    } else {
+      setAllocations({});
+    }
     setShortfallQtys({});
     setDetailRejectOpen(false);
     setDetailRejectReason("");
@@ -2137,6 +2322,8 @@ export default function ApprovalManagementPage() {
         ...p,
         [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
+    } else if (detailItem.category === "Meal Quantity Adjustment") {
+      setOrderSummaryAdjustmentStatus(detailItem.refId, "Rejected", `${role} (GM/Admin)`, { at: stamp(), rejectionReason: reason });
     } else if (detailItem.category === "Production Order" && detailItem.id.startsWith("PRO-AP-")) {
       setProductionDecisions((p) => ({
         ...p,
@@ -3493,7 +3680,7 @@ export default function ApprovalManagementPage() {
 
       {/* Detail dialog */}
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
           <DialogHeader className="px-5 py-4 border-b border-border">
             <DialogTitle className="flex items-center gap-2">
               {detailItem && (() => {
@@ -3806,6 +3993,31 @@ export default function ApprovalManagementPage() {
                 });
                 const sufficientItems = taggedItems.filter((it) => !it.insufficient);
                 const shortfallItems  = taggedItems.filter((it) => it.insufficient);
+                const editable = detailItem.status === "Pending" && !escalateDone;
+                // Apply an allocation template to every shortfall row: put the full
+                // procure qty on one method, split evenly, or clear.
+                const applyAll = (mode: string) => {
+                  setAllocations((prev) => {
+                    const next = { ...prev };
+                    shortfallItems.forEach((s) => {
+                      const cap = Math.ceil(s.shortfall);
+                      if (mode === "clear") { next[s.id] = {}; return; }
+                      if (mode === "even") {
+                        const each = roundQty(cap / PROCUREMENT_METHODS.length);
+                        const ev: Allocation = {};
+                        PROCUREMENT_METHODS.forEach((m, i) => {
+                          ev[m.key] = i === PROCUREMENT_METHODS.length - 1
+                            ? roundQty(cap - each * (PROCUREMENT_METHODS.length - 1))
+                            : each;
+                        });
+                        next[s.id] = ev;
+                        return;
+                      }
+                      next[s.id] = { [mode]: cap };
+                    });
+                    return next;
+                  });
+                };
                 return (
                   <>
                     {/* Sufficient Items */}
@@ -3862,6 +4074,37 @@ export default function ApprovalManagementPage() {
                             Shortfall Items ({shortfallItems.length})
                           </span>
                         </div>
+                        {editable && (
+                          <div className="flex flex-wrap items-center gap-1.5 mb-3">
+                            <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mr-0.5">Set all:</span>
+                            {PROCUREMENT_METHODS.map((m) => (
+                              <button
+                                key={m.key}
+                                type="button"
+                                onClick={() => applyAll(m.key)}
+                                className={`text-xs font-medium px-2.5 py-1 rounded-full border transition-colors ${m.soft} ${m.text} border-transparent hover:opacity-80`}
+                              >
+                                All {m.short}
+                              </button>
+                            ))}
+                            {PROCUREMENT_METHODS.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => applyAll("even")}
+                                className="text-xs font-medium px-2.5 py-1 rounded-full border border-border bg-muted/40 text-muted-foreground hover:bg-muted transition-colors"
+                              >
+                                Split evenly
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => applyAll("clear")}
+                              className="text-xs font-medium px-2.5 py-1 rounded-full border border-border bg-muted/40 text-muted-foreground hover:bg-muted transition-colors"
+                            >
+                              Clear
+                            </button>
+                          </div>
+                        )}
                         <div className="rounded-md border border-destructive/30 overflow-hidden">
                           <table className="w-full text-sm">
                             <thead className="bg-destructive/5">
@@ -3870,11 +4113,16 @@ export default function ApprovalManagementPage() {
                                 <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-20">In Stock</th>
                                 <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-20">Required</th>
                                 <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-20">Shortfall</th>
-                                <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-28">Escalate Qty</th>
+                                <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-28">Procure Qty</th>
+                                <th className="text-center px-3 py-2 text-[10px] uppercase tracking-wider font-medium text-muted-foreground w-56">Method</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {shortfallItems.map((item, idx) => (
+                              {shortfallItems.map((item, idx) => {
+                                // Procure Qty is fixed at the shortfall (rounded up); the method
+                                // allocation for this row must sum to at most this cap.
+                                const cap = Math.ceil(item.shortfall);
+                                return (
                                 <tr key={item.id} className={`border-t border-border ${idx % 2 === 0 ? "" : "bg-muted/20"}`}>
                                   <td className="px-3 py-2">
                                     <div className="font-medium text-foreground">{item.name}</div>
@@ -3892,28 +4140,24 @@ export default function ApprovalManagementPage() {
                                     <div className="text-[10px] text-destructive">{item.uom} short</div>
                                   </td>
                                   <td className="px-3 py-2 text-center">
-                                    {detailItem.status === "Pending" && !escalateDone ? (
-                                      <Input
-                                        type="number"
-                                        min="0"
-                                        step="0.001"
-                                        className="h-7 w-24 text-center text-xs mx-auto"
-                                        placeholder={String(Math.ceil(item.shortfall))}
-                                        value={shortfallQtys[item.id] ?? ""}
-                                        onChange={(e) =>
-                                          setShortfallQtys((p) => ({ ...p, [item.id]: e.target.value }))
-                                        }
+                                    {/* Fixed at the shortfall — not editable; the Both split caps to it. */}
+                                    <span className="text-xs tabular-nums font-semibold">
+                                      {roundQty(cap)}
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-2">
+                                    <div className="flex justify-center">
+                                      <MethodAllocator
+                                        cap={cap}
+                                        value={allocations[item.id] ?? {}}
+                                        editable={editable}
+                                        onChange={(next) => setAllocations((p) => ({ ...p, [item.id]: next }))}
                                       />
-                                    ) : (
-                                      <span className="text-xs tabular-nums text-muted-foreground">
-                                        {shortfallQtys[item.id] !== undefined && shortfallQtys[item.id] !== ""
-                                          ? shortfallQtys[item.id]
-                                          : Math.ceil(item.shortfall)}
-                                      </span>
-                                    )}
+                                    </div>
                                   </td>
                                 </tr>
-                              ))}
+                                );
+                              })}
                             </tbody>
                           </table>
                         </div>
@@ -4048,6 +4292,13 @@ export default function ApprovalManagementPage() {
                       onClick={() => setDetailRejectOpen(true)}
                     >
                       <XIcon className="h-4 w-4 mr-1.5" /> Reject
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="border-amber-400 text-amber-700 hover:bg-amber-50"
+                      onClick={() => setDetailReviewOpen(true)}
+                    >
+                      <CornerUpLeft className="h-4 w-4 mr-1.5" /> Review
                     </Button>
                     <Button
                       className="bg-success text-success-foreground hover:bg-success/90"

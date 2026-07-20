@@ -21,7 +21,7 @@ import {
   Plus, Upload, Download, Save, FileSpreadsheet, FileText, FileType,
   History, CheckCircle2, AlertCircle, Eye, CalendarRange, X, Plane, ArrowLeft, Pencil, CircleDot,
   Users, Utensils, CornerUpLeft, MessageSquare, Trash2, Search, ChevronDown, Check, RotateCcw,
-  HelpCircle, Wand2,
+  HelpCircle, Wand2, SlidersHorizontal, Clock, TrendingUp, TrendingDown,
 } from "lucide-react";
 import {
   Tooltip, TooltipContent, TooltipTrigger, TooltipProvider,
@@ -57,6 +57,10 @@ import {
   type OrderAmendment,
 } from "@/lib/flight-orders-store";
 import { getAuthUser } from "@/lib/auth";
+import {
+  useOrderSummaryAdjustments, addOrderSummaryAdjustment,
+  approvedDeltaFor, pendingAdjustmentFor, type FlightTypeScope,
+} from "@/lib/order-summary-adjustments";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useArrivalFlash } from "@/lib/arrival-flash";
 import { useRole } from "@/lib/roles";
@@ -521,7 +525,7 @@ export default function OrderManagementPage() {
   const [detailView, setDetailView] = useState<{ order: FlightOrder; legs: FlightOrder[] } | null>(null);
   const viewLeg = (o: FlightOrder) => setDetailView({ order: o, legs: [o] });
   const viewOrder = (legs: FlightOrder[]) => { if (legs.length) setDetailView({ order: legs[0], legs }); };
-  const [activeTab, setActiveTab] = useState<"flights" | "crew">("flights");
+  const [activeTab, setActiveTab] = useState<"flights" | "crew" | "summary">("flights");
   const [confirmedOrder, setConfirmedOrder] = useState<MealOrderConfirmation | null>(null);
   const [nextDayDraftSaved, setNextDayDraftSaved] = useState(false);
   const [showNextDaySummary, setShowNextDaySummary] = useState(false);
@@ -537,8 +541,11 @@ export default function OrderManagementPage() {
     from: "",
     to: "",
   };
-  const [draft, setDraft] = useState(EMPTY_FILTER);
-  const [applied, setApplied] = useState(EMPTY_FILTER);
+  // Default view is scoped to today's orders (Reset returns here). Users widen to
+  // all dates via the date control's "Clear".
+  const DEFAULT_FILTER = { ...EMPTY_FILTER, from: todayStr, to: todayStr };
+  const [draft, setDraft] = useState(DEFAULT_FILTER);
+  const [applied, setApplied] = useState(DEFAULT_FILTER);
   const [lmcOnly, setLmcOnly] = useState<boolean>(
     () => new URLSearchParams(window.location.search).get("lmc") === "1",
   );
@@ -546,7 +553,7 @@ export default function OrderManagementPage() {
   const [dateOpen, setDateOpen] = useState(false);
   const patchDraft = (p: Partial<typeof EMPTY_FILTER>) => setDraft((d) => ({ ...d, ...p }));
   const applyFilters = () => setApplied(draft);
-  const resetFilters = () => { setDraft(EMPTY_FILTER); setApplied(EMPTY_FILTER); setLmcOnly(false); };
+  const resetFilters = () => { setDraft(DEFAULT_FILTER); setApplied(DEFAULT_FILTER); setLmcOnly(false); };
   const filterDirty = JSON.stringify(draft) !== JSON.stringify(applied);
   const filtersActive =
     applied.search !== "" || applied.scope !== "All" || applied.airline !== "All" ||
@@ -1003,7 +1010,7 @@ export default function OrderManagementPage() {
 
           <Tabs
             value={activeTab}
-            onValueChange={(v) => setActiveTab(v as "flights" | "crew")}
+            onValueChange={(v) => setActiveTab(v as "flights" | "crew" | "summary")}
             className="space-y-4 mt-4"
           >
             <TabsList className="h-auto bg-transparent p-0 border-b border-border w-full justify-start rounded-none">
@@ -1021,6 +1028,12 @@ export default function OrderManagementPage() {
                 Crew Meals
                 <span className="ml-2 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-muted-foreground">{crewOrderCount}</span>
               </TabsTrigger>
+              <TabsTrigger
+                value="summary"
+                className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-4 pb-3"
+              >
+                Order Summary
+              </TabsTrigger>
             </TabsList>
 
             <TabsContent value="flights" className="mt-0">
@@ -1029,6 +1042,14 @@ export default function OrderManagementPage() {
 
             <TabsContent value="crew" className="mt-0">
               <CrewMealsView orders={crewOrders} hasFilters={filtersActive} />
+            </TabsContent>
+
+            <TabsContent value="summary" className="mt-0">
+              <OrderSummaryView
+                orders={flightOrders}
+                dateFrom={applied.from}
+                dateTo={applied.to}
+              />
             </TabsContent>
           </Tabs>
 
@@ -1175,6 +1196,281 @@ export default function OrderManagementPage() {
         onClose={() => setDetailView(null)}
       />
     </>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Order Summary tab — the flight orders rolled up by Date × Flight Type (the
+// same shape Production reads as "Required Meals"). Each line's Total Meals can
+// be increased/decreased; that raises a request routed to Approval Management
+// and only applies once approved.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Split a leg's special meals into passenger vs crew via its roster audience
+ *  (entries with no audience default to Passenger; no roster ⇒ all passenger). */
+function splitSpecialMeals(o: FlightOrder): { pax: number; crew: number } {
+  const roster = o.specialMealRoster;
+  if (roster && roster.length > 0) {
+    let crew = 0;
+    for (const e of roster) if (e.audience === "Crew") crew++;
+    return { pax: roster.length - crew, crew };
+  }
+  return { pax: o.specialMeals, crew: 0 };
+}
+
+type SummaryLine = {
+  date: string;
+  flightType: FlightTypeScope;
+  flights: number;
+  passengers: number;
+  crew: number;
+  specialPax: number;
+  specialCrew: number;
+  baseTotal: number;
+};
+
+function OrderSummaryView({
+  orders, dateFrom, dateTo,
+}: {
+  orders: FlightOrder[];
+  dateFrom: string;
+  dateTo: string;
+}) {
+  // Re-render whenever an adjustment is raised/approved/rejected.
+  useOrderSummaryAdjustments();
+  const [adjustLine, setAdjustLine] = useState<SummaryLine | null>(null);
+
+  // Mandatory filter: a date range must be applied before the summary renders.
+  const dateApplied = !!dateFrom || !!dateTo;
+
+  const lines = useMemo<SummaryLine[]>(() => {
+    const map = new Map<string, SummaryLine>();
+    for (const o of orders) {
+      const flightType: FlightTypeScope = isDomesticSector(o.sector) ? "Domestic" : "International";
+      const key = `${o.date}__${flightType}`;
+      let r = map.get(key);
+      if (!r) {
+        r = { date: o.date, flightType, flights: 0, passengers: 0, crew: 0, specialPax: 0, specialCrew: 0, baseTotal: 0 };
+        map.set(key, r);
+      }
+      const sp = splitSpecialMeals(o);
+      r.flights += 1;
+      r.passengers += o.pax;
+      r.crew += o.crew ?? 0;
+      r.specialPax += sp.pax;
+      r.specialCrew += sp.crew;
+      r.baseTotal += o.pax + (o.crew ?? 0) + o.specialMeals;
+    }
+    return Array.from(map.values()).sort(
+      (a, b) => a.date.localeCompare(b.date) || a.flightType.localeCompare(b.flightType),
+    );
+  }, [orders]);
+
+  const totals = lines.reduce(
+    (a, r) => ({
+      flights: a.flights + r.flights,
+      passengers: a.passengers + r.passengers,
+      crew: a.crew + r.crew,
+      specialPax: a.specialPax + r.specialPax,
+      specialCrew: a.specialCrew + r.specialCrew,
+      baseTotal: a.baseTotal + r.baseTotal,
+      effective: a.effective + r.baseTotal + approvedDeltaFor(r.date, r.flightType),
+    }),
+    { flights: 0, passengers: 0, crew: 0, specialPax: 0, specialCrew: 0, baseTotal: 0, effective: 0 },
+  );
+
+  return (
+    <Card>
+      <CardContent className="pt-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-border">
+          <div>
+            <div className="text-sm font-semibold uppercase tracking-wider text-primary">
+              Order Summary <span className="text-muted-foreground font-normal normal-case">— derived from flight orders</span>
+            </div>
+            <div className="text-[11px] text-muted-foreground mt-0.5">
+              Grouped by Date × Flight Type. Total Meals = Passengers + Crew + Special.
+            </div>
+          </div>
+          <Badge variant="outline" className="text-[10px] font-normal">
+            <CalendarRange className="h-3 w-3 mr-1" />
+            {dateApplied ? (dateFrom === dateTo ? dateFrom : `${dateFrom || "…"} → ${dateTo || "…"}`) : "No date filter"}
+          </Badge>
+        </div>
+
+        {!dateApplied ? (
+          <div className="rounded-md border border-warning/40 bg-warning/10 px-4 py-6 text-center">
+            <AlertCircle className="h-5 w-5 mx-auto text-warning-foreground mb-1.5" />
+            <div className="text-sm font-medium">A date filter is required</div>
+            <div className="text-[11px] text-muted-foreground mt-0.5">
+              Pick a date (or range) in the filter bar above and press Apply to build the order summary.
+            </div>
+          </div>
+        ) : lines.length === 0 ? (
+          <div className="text-center text-sm text-muted-foreground py-10">
+            No flight orders match the current filters.
+          </div>
+        ) : (
+          <div className="border border-border rounded-md overflow-x-auto">
+            <Table>
+              <TableHeader className="bg-muted/40">
+                <TableRow>
+                  <TableHead className="text-[10px] uppercase tracking-wider">Date</TableHead>
+                  <TableHead className="text-[10px] uppercase tracking-wider">Flight Type</TableHead>
+                  <TableHead className="text-[10px] uppercase tracking-wider text-right">Flights</TableHead>
+                  <TableHead className="text-[10px] uppercase tracking-wider text-right">Passengers</TableHead>
+                  <TableHead className="text-[10px] uppercase tracking-wider text-right">Crew</TableHead>
+                  <TableHead className="text-[10px] uppercase tracking-wider text-right">Special (Pax)</TableHead>
+                  <TableHead className="text-[10px] uppercase tracking-wider text-right">Special (Crew)</TableHead>
+                  <TableHead className="text-[10px] uppercase tracking-wider text-right">Total Meals</TableHead>
+                  <TableHead className="text-[10px] uppercase tracking-wider text-right">Action</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {lines.map((r) => {
+                  const delta = approvedDeltaFor(r.date, r.flightType);
+                  const effective = r.baseTotal + delta;
+                  const pending = pendingAdjustmentFor(r.date, r.flightType);
+                  return (
+                    <TableRow key={`${r.date}-${r.flightType}`} className="hover:bg-muted/20">
+                      <TableCell className="font-medium tabular-nums">{r.date}</TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className={cn("text-[10px] font-normal", r.flightType === "Domestic" ? "border-success/30 bg-success/5 text-success" : "border-navy/30 bg-navy/5 text-navy")}>
+                          <Plane className="h-2.5 w-2.5 mr-1" /> {r.flightType}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">{r.flights}</TableCell>
+                      <TableCell className="text-right tabular-nums">{r.passengers.toLocaleString()}</TableCell>
+                      <TableCell className="text-right tabular-nums">{r.crew.toLocaleString()}</TableCell>
+                      <TableCell className="text-right tabular-nums">{r.specialPax.toLocaleString()}</TableCell>
+                      <TableCell className="text-right tabular-nums">{r.specialCrew.toLocaleString()}</TableCell>
+                      <TableCell className="text-right tabular-nums font-semibold">
+                        <div className="inline-flex items-center justify-end gap-1.5">
+                          {delta !== 0 && (
+                            <span className="text-[10px] text-muted-foreground line-through">{r.baseTotal.toLocaleString()}</span>
+                          )}
+                          <span className={delta !== 0 ? "text-primary" : ""}>{effective.toLocaleString()}</span>
+                          {delta !== 0 && (
+                            <Badge variant="outline" className={cn("text-[9px] font-semibold", delta > 0 ? "border-success/40 text-success" : "border-destructive/40 text-destructive")}>
+                              {delta > 0 ? <TrendingUp className="h-2.5 w-2.5 mr-0.5" /> : <TrendingDown className="h-2.5 w-2.5 mr-0.5" />}
+                              {delta > 0 ? "+" : "−"}{Math.abs(delta).toLocaleString()}
+                            </Badge>
+                          )}
+                          {pending && (
+                            <Badge variant="outline" className="text-[9px] font-semibold border-warning/50 bg-warning/10 text-warning-foreground">
+                              <Clock className="h-2.5 w-2.5 mr-0.5" /> Pending {pending.delta > 0 ? "+" : "−"}{Math.abs(pending.delta).toLocaleString()}
+                            </Badge>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2 text-[11px]"
+                          disabled={!!pending}
+                          title={pending ? "An adjustment is already pending approval for this line" : "Adjust Total Meals"}
+                          onClick={() => setAdjustLine(r)}
+                        >
+                          <SlidersHorizontal className="h-3 w-3 mr-1" /> Adjust
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+                <TableRow className="bg-muted/30 font-semibold">
+                  <TableCell colSpan={2} className="text-right uppercase text-[10px] tracking-wider">Grand Total</TableCell>
+                  <TableCell className="text-right tabular-nums">{totals.flights}</TableCell>
+                  <TableCell className="text-right tabular-nums">{totals.passengers.toLocaleString()}</TableCell>
+                  <TableCell className="text-right tabular-nums">{totals.crew.toLocaleString()}</TableCell>
+                  <TableCell className="text-right tabular-nums">{totals.specialPax.toLocaleString()}</TableCell>
+                  <TableCell className="text-right tabular-nums">{totals.specialCrew.toLocaleString()}</TableCell>
+                  <TableCell className="text-right tabular-nums text-primary">{totals.effective.toLocaleString()}</TableCell>
+                  <TableCell />
+                </TableRow>
+              </TableBody>
+            </Table>
+          </div>
+        )}
+      </CardContent>
+
+      <AdjustTotalDialog line={adjustLine} onClose={() => setAdjustLine(null)} />
+    </Card>
+  );
+}
+
+/** Increase/Decrease the Total Meals for one summary line — raises a request to
+ *  Approval Management (mandatory reason). */
+function AdjustTotalDialog({ line, onClose }: { line: SummaryLine | null; onClose: () => void }) {
+  const effective = line ? line.baseTotal + approvedDeltaFor(line.date, line.flightType) : 0;
+  const [target, setTarget] = useState("");
+  const [reason, setReason] = useState("");
+
+  useEffect(() => {
+    if (line) { setTarget(String(line.baseTotal + approvedDeltaFor(line.date, line.flightType))); setReason(""); }
+  }, [line]);
+
+  if (!line) return null;
+  const next = Number(target);
+  const delta = (Number.isFinite(next) ? next : effective) - effective;
+
+  const submit = () => {
+    if (!Number.isFinite(next) || next < 0) { toast.error("Enter a valid new total (0 or more)."); return; }
+    if (delta === 0) { toast.error("New total must differ from the current total."); return; }
+    if (!reason.trim()) { toast.error("A reason is required for the adjustment."); return; }
+    const user = getAuthUser();
+    addOrderSummaryAdjustment({
+      date: line.date,
+      flightType: line.flightType,
+      baseTotal: effective,
+      newTotal: next,
+      reason: reason.trim(),
+      requestedBy: user?.name ?? "Operations",
+      requestedAt: new Date().toISOString().slice(0, 16).replace("T", " "),
+    });
+    toast.success(`Adjustment submitted for approval — ${line.date} · ${line.flightType} (${delta > 0 ? "+" : "−"}${Math.abs(delta)} meals).`);
+    onClose();
+  };
+
+  return (
+    <Dialog open={!!line} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <SlidersHorizontal className="h-4 w-4 text-primary" />
+            Adjust Total Meals
+          </DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">{line.date} · {line.flightType}</span>
+              <span className="tabular-nums">Current: <strong>{effective.toLocaleString()}</strong> meals</span>
+            </div>
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">New Total Meals <span className="text-destructive">*</span></Label>
+            <Input type="number" min={0} value={target} onChange={(e) => setTarget(e.target.value)} className="mt-1 tabular-nums" autoFocus />
+            {Number.isFinite(next) && delta !== 0 && (
+              <div className={cn("mt-1 text-[11px] font-medium inline-flex items-center gap-1", delta > 0 ? "text-success" : "text-destructive")}>
+                {delta > 0 ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+                {delta > 0 ? "Increase" : "Decrease"} of {Math.abs(delta).toLocaleString()} meal{Math.abs(delta) === 1 ? "" : "s"} ({effective.toLocaleString()} → {next.toLocaleString()})
+              </div>
+            )}
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Reason <span className="text-destructive">*</span></Label>
+            <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why is this change needed?" className="mt-1" />
+          </div>
+          <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+            This change is not applied immediately — it is submitted to <span className="font-medium text-foreground">Approval Management</span> (Operations Approval) and takes effect only once approved.
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button onClick={submit}><Check className="h-4 w-4 mr-1.5" /> Submit for Approval</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

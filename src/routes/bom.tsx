@@ -5,7 +5,7 @@ import {
   Plus, Layers, FileText, CheckCircle, Save, Trash2, ArrowLeft, Eye, Printer, Search,
 } from "lucide-react";
 import {
-  billOfMaterials, itemsByType,
+  billOfMaterials, itemsByType, purchaseOrders,
   type BillOfMaterial, type BomProductionItem, type BomInputMaterial,
 } from "@/lib/sample-data";
 import { KpiCard } from "@/components/common/KpiCard";
@@ -22,6 +22,8 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
+import { Select as AntSelect } from "antd";
+import { readItemPrices, resolveUnitPrice } from "@/lib/item-prices";
 
 const HEADER_ITEM_TYPES = ["Finished Good", "Semi-Finished Good"];
 const HEADER_CATEGORIES = ["Hot Kitchen", "Cold Kitchen", "Bakery", "Beverage"];
@@ -41,6 +43,92 @@ const MATERIAL_ITEMS = itemsByType("Raw Material", "Packaging", "Consumable")
 
 const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50";
+
+/** Latest purchase-order unit price for an item code (most recent PO by date). */
+function latestPurchasePrice(code: string): number | undefined {
+  const key = code.trim().toLowerCase();
+  let best: { date: string; price: number } | undefined;
+  for (const po of purchaseOrders) {
+    for (const li of po.lineItems) {
+      if (li.itemId.trim().toLowerCase() === key) {
+        if (!best || po.date > best.date) best = { date: po.date, price: li.unitPrice };
+      }
+    }
+  }
+  return best?.price;
+}
+
+/** Resolve the input-material rate for a dropdown value formatted as
+ *  "CODE - Name (UOM)". Prefers the configured Price Setup rate, then falls back
+ *  to the item's latest purchase price so unpriced items still surface a rate.
+ *  Returns the rate plus where it came from, or undefined when nothing is known. */
+function rateForMaterial(matItem: string): { rate: number; source: string } | undefined {
+  if (!matItem) return undefined;
+  const sep = matItem.indexOf(" - ");
+  const code = (sep >= 0 ? matItem.slice(0, sep) : matItem).trim();
+  const name = (sep >= 0 ? matItem.slice(sep + 3) : "").replace(/\s*\([^)]*\)\s*$/, "").trim();
+
+  const setup = resolveUnitPrice(readItemPrices(), { code, name });
+  if (setup != null) return { rate: setup, source: "Price Setup" };
+
+  const po = latestPurchasePrice(code);
+  if (po != null) return { rate: po, source: "last purchase price" };
+
+  return undefined;
+}
+
+/** Styled single-select dropdown (antd) for plain string option lists — matches
+ *  the FG/SFG and Office/Warehouse pickers on this form. */
+function PlainSelect({
+  value,
+  onChange,
+  options,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: readonly string[];
+  placeholder: string;
+}) {
+  return (
+    <AntSelect
+      value={value || undefined}
+      onChange={(v?: string) => onChange(v ?? "")}
+      placeholder={placeholder}
+      allowClear
+      showSearch
+      optionFilterProp="label"
+      className="mt-1 w-full block h9-antd"
+      getPopupContainer={(trigger) => trigger.parentElement as HTMLElement}
+      options={options.map((o) => ({ value: o, label: o }))}
+    />
+  );
+}
+
+/** Searchable FG/SFG item picker — type to filter by code or name. */
+function FgSfgSelect({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <AntSelect
+      value={value || undefined}
+      onChange={(v?: string) => onChange(v ?? "")}
+      placeholder="Search FG/SFG item…"
+      showSearch
+      allowClear
+      optionFilterProp="label"
+      className="mt-1 w-full block h9-antd"
+      // Render the dropdown inside the field container so a modal overlay
+      // doesn't clip or block the options.
+      getPopupContainer={(trigger) => trigger.parentElement as HTMLElement}
+      options={FG_SFG_ITEMS.map((i) => ({ value: i, label: i }))}
+    />
+  );
+}
 
 type LineItem = {
   id: string;
@@ -365,7 +453,7 @@ function BomEditForm({ row }: { row: BillOfMaterial }) {
   const [fgSfgItem, setFgSfgItem] = useState("");
   const [lotSize, setLotSize] = useState(initialLotSize);
 
-  const [matItemType, setMatItemType] = useState(MATERIAL_ITEM_TYPES[0]);
+  const [matItemType, setMatItemType] = useState("");
   const [matCategory, setMatCategory] = useState("");
   const [matSubCategory, setMatSubCategory] = useState("");
   const [matItem, setMatItem] = useState("");
@@ -453,10 +541,7 @@ function BomEditForm({ row }: { row: BillOfMaterial }) {
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">
                 FG/SFG Item
               </Label>
-              <select value={fgSfgItem} onChange={(e) => setFgSfgItem(e.target.value)} className={selectCls}>
-                <option value="">Select FG/SFG Item</option>
-                {FG_SFG_ITEMS.map((i) => <option key={i} value={i}>{i}</option>)}
-              </select>
+              <FgSfgSelect value={fgSfgItem} onChange={setFgSfgItem} />
             </div>
 
             <div className="md:max-w-xs">
@@ -484,32 +569,33 @@ function BomEditForm({ row }: { row: BillOfMaterial }) {
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
             <div className="md:col-span-2">
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item Type</Label>
-              <select value={matItemType} onChange={(e) => setMatItemType(e.target.value)} className={selectCls}>
-                {MATERIAL_ITEM_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-              </select>
+              <PlainSelect value={matItemType} onChange={setMatItemType} options={MATERIAL_ITEM_TYPES} placeholder="Select" />
             </div>
 
             <div className="md:col-span-2">
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Category</Label>
-              <select value={matCategory} onChange={(e) => setMatCategory(e.target.value)} className={selectCls}>
-                <option value="">Category</option>
-                {MATERIAL_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
+              <PlainSelect value={matCategory} onChange={setMatCategory} options={MATERIAL_CATEGORIES} placeholder="Select" />
             </div>
 
             <div className="md:col-span-2">
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Sub Category</Label>
-              <select value={matSubCategory} onChange={(e) => setMatSubCategory(e.target.value)} className={selectCls}>
-                <option value="">Sub Category</option>
-                {MATERIAL_SUB_CATEGORIES.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
+              <PlainSelect value={matSubCategory} onChange={setMatSubCategory} options={MATERIAL_SUB_CATEGORIES} placeholder="Select" />
             </div>
 
             <div className="md:col-span-2">
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">
                 Material Item <span className="text-destructive">*</span>
               </Label>
-              <select value={matItem} onChange={(e) => setMatItem(e.target.value)} className={selectCls}>
+              <select
+                value={matItem}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setMatItem(v);
+                  const priced = rateForMaterial(v);
+                  setMatRate(priced ? String(priced.rate) : "");
+                }}
+                className={selectCls}
+              >
                 <option value="">Select item</option>
                 {MATERIAL_ITEMS.map((i) => <option key={i} value={i}>{i}</option>)}
               </select>
@@ -644,7 +730,7 @@ function BomCreate({ onSave }: { onSave?: (bom: BillOfMaterial) => void }) {
 
   const [prodLines, setProdLines] = useState<ProdLine[]>([]);
 
-  const [matItemType, setMatItemType] = useState(MATERIAL_ITEM_TYPES[0]);
+  const [matItemType, setMatItemType] = useState("");
   const [matCategory, setMatCategory] = useState("");
   const [matSubCategory, setMatSubCategory] = useState("");
   const [matItem, setMatItem] = useState("");
@@ -705,8 +791,6 @@ function BomCreate({ onSave }: { onSave?: (bom: BillOfMaterial) => void }) {
 
   const handleSave = () => {
     if (!bomName.trim()) { toast.error("BOM Name is required."); return; }
-    if (!officeId) { toast.error("Office is required."); return; }
-    if (!warehouseId) { toast.error("Warehouse is required."); return; }
     if (prodLines.length === 0) { toast.error("Add at least one production item."); return; }
     if (lines.length === 0) { toast.error("Add at least one input material."); return; }
 
@@ -789,6 +873,7 @@ function BomCreate({ onSave }: { onSave?: (bom: BillOfMaterial) => void }) {
               officeId={officeId}
               warehouseId={warehouseId}
               onChange={(n) => { setOfficeId(n.officeId); setWarehouseId(n.warehouseId); }}
+              required={false}
             />
 
             <div>
@@ -837,14 +922,7 @@ function BomCreate({ onSave }: { onSave?: (bom: BillOfMaterial) => void }) {
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">
                 FG/SFG Item
               </Label>
-              <select
-                value={fgSfgItem}
-                onChange={(e) => setFgSfgItem(e.target.value)}
-                className={selectCls}
-              >
-                <option value="">Select FG/SFG Item</option>
-                {FG_SFG_ITEMS.map((i) => <option key={i} value={i}>{i}</option>)}
-              </select>
+              <FgSfgSelect value={fgSfgItem} onChange={setFgSfgItem} />
             </div>
 
             <div className="md:max-w-xs">
@@ -942,41 +1020,21 @@ function BomCreate({ onSave }: { onSave?: (bom: BillOfMaterial) => void }) {
                   <Label className="text-xs uppercase tracking-wider text-muted-foreground">
                     Item Type
                   </Label>
-                  <select
-                    value={matItemType}
-                    onChange={(e) => setMatItemType(e.target.value)}
-                    className={selectCls}
-                  >
-                    {MATERIAL_ITEM_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                  </select>
+                  <PlainSelect value={matItemType} onChange={setMatItemType} options={MATERIAL_ITEM_TYPES} placeholder="Select" />
                 </div>
 
                 <div className="md:col-span-2">
                   <Label className="text-xs uppercase tracking-wider text-muted-foreground">
                     Category
                   </Label>
-                  <select
-                    value={matCategory}
-                    onChange={(e) => setMatCategory(e.target.value)}
-                    className={selectCls}
-                  >
-                    <option value="">Category</option>
-                    {MATERIAL_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
+                  <PlainSelect value={matCategory} onChange={setMatCategory} options={MATERIAL_CATEGORIES} placeholder="Select" />
                 </div>
 
                 <div className="md:col-span-2">
                   <Label className="text-xs uppercase tracking-wider text-muted-foreground">
                     Sub Category
                   </Label>
-                  <select
-                    value={matSubCategory}
-                    onChange={(e) => setMatSubCategory(e.target.value)}
-                    className={selectCls}
-                  >
-                    <option value="">Sub Category</option>
-                    {MATERIAL_SUB_CATEGORIES.map((s) => <option key={s} value={s}>{s}</option>)}
-                  </select>
+                  <PlainSelect value={matSubCategory} onChange={setMatSubCategory} options={MATERIAL_SUB_CATEGORIES} placeholder="Select" />
                 </div>
 
                 <div className="md:col-span-2">
@@ -985,7 +1043,12 @@ function BomCreate({ onSave }: { onSave?: (bom: BillOfMaterial) => void }) {
                   </Label>
                   <select
                     value={matItem}
-                    onChange={(e) => setMatItem(e.target.value)}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setMatItem(v);
+                      const priced = rateForMaterial(v);
+                      setMatRate(priced ? String(priced.rate) : "");
+                    }}
                     className={selectCls}
                   >
                     <option value="">Select item</option>

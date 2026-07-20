@@ -29,11 +29,13 @@ import { toast } from "sonner";
 import {
   billOfMaterials, inventory, warehouses as ALL_WAREHOUSES,
   isDomesticSector, itemsByType, allocateFefo, SPECIAL_MEAL_BY_CODE,
+  items as MASTER_ITEMS, itemCanProduce,
   type FlightOrderRow, type MealSlot, type ItemMaster, type InventoryItem,
 } from "@/lib/sample-data";
 import { getItemStock } from "@/lib/inventory-stock";
 import { roundQty } from "@/lib/num";
 import { logAudit } from "@/lib/audit-log";
+import { useOrderSummaryAdjustments, approvedDeltaFor, type FlightTypeScope } from "@/lib/order-summary-adjustments";
 import {
   useProductionBasisSettings, effectiveBasis, productionQtyForBasis,
   PRODUCTION_BASIS_LABEL, type ProductionBasis,
@@ -112,8 +114,28 @@ type OrderRequirement = {
   passengers: number;
   crew: number;
   specialMeals: number;
+  /** Special meals split by audience (from each order's roster; entries with no
+   *  audience default to Passenger). `specialPax + specialCrew === specialMeals`. */
+  specialPax: number;
+  specialCrew: number;
   orders: FlightOrderRow[];
 };
+
+/**
+ * Split a flight order's special meals into passenger vs crew. When a per-person
+ * roster is present it's the source of truth (each entry's `audience`, default
+ * Passenger); otherwise the whole `specialMeals` count is treated as passenger
+ * specials (crew specials only ever come in via an audience-tagged roster).
+ */
+function splitSpecialMeals(o: FlightOrderRow): { pax: number; crew: number } {
+  const roster = o.specialMealRoster;
+  if (roster && roster.length > 0) {
+    let crew = 0;
+    for (const e of roster) if (e.audience === "Crew") crew++;
+    return { pax: roster.length - crew, crew };
+  }
+  return { pax: o.specialMeals, crew: 0 };
+}
 
 /**
  * Compute the production quantity for a meal-plan item, given the day's flight
@@ -176,14 +198,18 @@ function computeOrderRequirements(orders: FlightOrderRow[]): OrderRequirement[] 
     const key = `${day}|${flightType}`;
     if (!map.has(key)) {
       map.set(key, {
-        day, flightType, flights: 0, passengers: 0, crew: 0, specialMeals: 0, orders: [],
+        day, flightType, flights: 0, passengers: 0, crew: 0, specialMeals: 0,
+        specialPax: 0, specialCrew: 0, orders: [],
       });
     }
     const r = map.get(key)!;
+    const sp = splitSpecialMeals(o);
     r.flights += 1;
     r.passengers += o.pax;
     r.crew += o.crew;
     r.specialMeals += o.specialMeals;
+    r.specialPax += sp.pax;
+    r.specialCrew += sp.crew;
     r.orders.push(o);
   }
   return Array.from(map.values()).sort((a, b) => {
@@ -2401,6 +2427,20 @@ function ProductionEntryCreate({
   const [outputItem, setOutputItem] = useState<OutputLine | null>(initialItem ?? null);
   const [itemQty, setItemQty] = useState<string>(initialItem ? String(initialItem.qty) : "");
 
+  // Only items marked "Can be Produced" in Item Configuration are offered as a
+  // production output. Read the persisted master (config-item-rows) so edits
+  // apply; a production item with no matching master row stays visible (the
+  // recipe catalog is the source of truth there), only an explicit
+  // canProduce=false hides it.
+  const [itemMaster] = usePersistedState<ItemMaster[]>("config-item-rows", MASTER_ITEMS);
+  const producibleOutputs = useMemo(() => {
+    const byCode = new Map(itemMaster.map((i) => [i.code.toUpperCase(), i]));
+    return PRODUCTION_ITEMS.filter((p) => {
+      const m = byCode.get(p.code.toUpperCase());
+      return !m || itemCanProduce(m);
+    });
+  }, [itemMaster]);
+
   // Editing state for the materials list (per bucket).
   // BOM-loaded rows are computed; users can also add custom rows and remove
   // any row with a remark. `deletedBomCodes` hides BOM rows so that re-running
@@ -2691,7 +2731,7 @@ function ProductionEntryCreate({
                   className={selectCls}
                 >
                   <option value="">Select Production Item</option>
-                  {PRODUCTION_ITEMS.map((p) => (
+                  {producibleOutputs.map((p) => (
                     <option key={p.code} value={p.code}>
                       {p.code} — {p.name}
                     </option>
@@ -3010,11 +3050,25 @@ function MealPlanningDetailsDialog({
 }) {
   const navigate = useNavigate();
   const flightOrders = useFlightOrders();
+  // Re-render when an approved Order-Summary adjustment lands so the header
+  // Total Meals stays in sync with the Required Meals table below.
+  useOrderSummaryAdjustments();
   const ordersForDate = useMemo(
     () => (date ? flightOrders.filter((o) => o.date === date) : flightOrders),
     [date, flightOrders],
   );
   const requirements = useMemo(() => computeOrderRequirements(ordersForDate), [ordersForDate]);
+  // Net approved Total-Meals adjustment across the Date × Flight-Type buckets in
+  // view (raised from Order Management → Order Summary, approved in Approval Mgmt).
+  const adjustDelta = useMemo(() => {
+    const keys = new Set(ordersForDate.map((o) => `${o.date}__${getFlightTypeFromSector(o.sector)}`));
+    let d = 0;
+    keys.forEach((k) => {
+      const [dt, ft] = k.split("__");
+      d += approvedDeltaFor(dt, ft as FlightTypeScope);
+    });
+    return d;
+  }, [ordersForDate]);
   const orderDays = useMemo(() => new Set(requirements.map((r) => r.day)), [requirements]);
 
   // Latest configured menus from the Menu Planning page (falls back to seed).
@@ -3180,7 +3234,7 @@ function MealPlanningDetailsDialog({
   const totalPax = ordersForDate.reduce((s, o) => s + o.pax, 0);
   const totalCrew = ordersForDate.reduce((s, o) => s + o.crew, 0);
   const totalSpecial = ordersForDate.reduce((s, o) => s + o.specialMeals, 0);
-  const totalMeals = totalPax + totalCrew + totalSpecial;
+  const totalMeals = totalPax + totalCrew + totalSpecial + adjustDelta;
 
   // ── Create-All review step ────────────────────────────────────────────────
   // "Create All Orders" first opens a review where the user sees, item-wise,
@@ -3550,7 +3604,6 @@ function OrderStatusBadges({ legs }: { legs: { status: string }[] }) {
 
 function FlightOrdersTabContent({ orders }: { orders: FlightOrderRow[] }) {
   const totalPax = orders.reduce((s, o) => s + o.pax, 0);
-  const totalCrew = orders.reduce((s, o) => s + o.crew, 0);
   const totalSpecial = orders.reduce((s, o) => s + o.specialMeals, 0);
 
   // Group by Date, then by Order # within each date, then sort legs by ETD.
@@ -3572,7 +3625,6 @@ function FlightOrdersTabContent({ orders }: { orders: FlightOrderRow[] }) {
               <TableHead className="text-xs uppercase tracking-wider">ETD</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Type</TableHead>
               <TableHead className="text-xs uppercase tracking-wider text-right">PAX</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider text-right">Crew</TableHead>
               <TableHead className="text-xs uppercase tracking-wider text-right">Special</TableHead>
             </TableRow>
           </TableHeader>
@@ -3595,7 +3647,7 @@ function FlightOrdersTabContent({ orders }: { orders: FlightOrderRow[] }) {
               return (
                 <Fragment key={date}>
                   <TableRow className="bg-primary/10 border-t-2 border-t-primary/50 hover:bg-primary/15">
-                    <TableCell colSpan={7} className="py-2">
+                    <TableCell colSpan={6} className="py-2">
                       <span className="font-semibold text-primary uppercase tracking-wider text-xs">
                         {date}
                       </span>
@@ -3611,7 +3663,7 @@ function FlightOrdersTabContent({ orders }: { orders: FlightOrderRow[] }) {
                   {Array.from(byOrder.entries()).map(([orderNo, legs]) => (
                     <Fragment key={`${date}-${orderNo}`}>
                       <TableRow className="bg-primary/5 hover:bg-primary/10">
-                        <TableCell colSpan={7} className="pl-4 py-1.5">
+                        <TableCell colSpan={6} className="pl-4 py-1.5">
                           <div className="flex items-center flex-wrap gap-2">
                             <span className="font-mono text-sm font-semibold text-primary">{orderNo}</span>
                             {legs.length > 1 && (
@@ -3647,7 +3699,6 @@ function FlightOrdersTabContent({ orders }: { orders: FlightOrderRow[] }) {
                               </Badge>
                             </TableCell>
                             <TableCell className="text-right tabular-nums">{o.pax}</TableCell>
-                            <TableCell className="text-right tabular-nums">{o.crew}</TableCell>
                             <TableCell className="text-right tabular-nums">{o.specialMeals}</TableCell>
                           </TableRow>
                         );
@@ -3662,7 +3713,6 @@ function FlightOrdersTabContent({ orders }: { orders: FlightOrderRow[] }) {
                 Grand Total
               </TableCell>
               <TableCell className="text-right tabular-nums">{totalPax.toLocaleString()}</TableCell>
-              <TableCell className="text-right tabular-nums">{totalCrew.toLocaleString()}</TableCell>
               <TableCell className="text-right tabular-nums">{totalSpecial.toLocaleString()}</TableCell>
             </TableRow>
           </TableBody>
@@ -3806,16 +3856,31 @@ function CrewMealsTabContent({ orders }: { orders: FlightOrderRow[] }) {
 }
 
 function RequirementsSummary({ requirements }: { requirements: OrderRequirement[] }) {
+  // Re-render when an approved Order-Summary adjustment lands.
+  useOrderSummaryAdjustments();
+  // Net approved Total-Meals adjustment for a requirement row — summed across the
+  // distinct dates in its orders (a day-of-week group can span several dates),
+  // keyed by Date × Flight Type just like the Order Management → Order Summary tab.
+  const adjustDeltaFor = (r: OrderRequirement): number => {
+    const dates = new Set(r.orders.map((o) => o.date));
+    let d = 0;
+    dates.forEach((date) => { d += approvedDeltaFor(date, r.flightType as FlightTypeScope); });
+    return d;
+  };
+
   const totals = requirements.reduce(
     (acc, r) => ({
       flights: acc.flights + r.flights,
       passengers: acc.passengers + r.passengers,
       crew: acc.crew + r.crew,
       specialMeals: acc.specialMeals + r.specialMeals,
+      specialPax: acc.specialPax + r.specialPax,
+      specialCrew: acc.specialCrew + r.specialCrew,
     }),
-    { flights: 0, passengers: 0, crew: 0, specialMeals: 0 },
+    { flights: 0, passengers: 0, crew: 0, specialMeals: 0, specialPax: 0, specialCrew: 0 },
   );
-  const grandTotal = totals.passengers + totals.crew + totals.specialMeals;
+  const grandDelta = requirements.reduce((s, r) => s + adjustDeltaFor(r), 0);
+  const grandTotal = totals.passengers + totals.crew + totals.specialMeals + grandDelta;
 
   return (
     <div>
@@ -3825,6 +3890,9 @@ function RequirementsSummary({ requirements }: { requirements: OrderRequirement[
         </div>
         <div className="text-[11px] text-muted-foreground">
           Grouped by Day &times; Flight Type
+          {grandDelta !== 0 && (
+            <span className="ml-1.5 text-primary">· incl. approved adjustment {grandDelta > 0 ? "+" : "−"}{Math.abs(grandDelta).toLocaleString()}</span>
+          )}
         </div>
       </div>
       <div className="border border-border rounded-md overflow-hidden">
@@ -3836,13 +3904,16 @@ function RequirementsSummary({ requirements }: { requirements: OrderRequirement[
               <TableHead className="text-xs uppercase tracking-wider text-right">Flights</TableHead>
               <TableHead className="text-xs uppercase tracking-wider text-right">Passengers</TableHead>
               <TableHead className="text-xs uppercase tracking-wider text-right">Crew</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider text-right">Special</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider text-right">Special Meal (Pax)</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider text-right">Special Meal (Crew)</TableHead>
               <TableHead className="text-xs uppercase tracking-wider text-right">Total Meals</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {requirements.map((r) => {
-              const total = r.passengers + r.crew + r.specialMeals;
+              const base = r.passengers + r.crew + r.specialMeals;
+              const delta = adjustDeltaFor(r);
+              const total = base + delta;
               return (
                 <TableRow key={`${r.day}-${r.flightType}`}>
                   <TableCell className="font-medium">{r.day}</TableCell>
@@ -3854,9 +3925,20 @@ function RequirementsSummary({ requirements }: { requirements: OrderRequirement[
                   <TableCell className="text-right tabular-nums">{r.flights}</TableCell>
                   <TableCell className="text-right tabular-nums">{r.passengers.toLocaleString()}</TableCell>
                   <TableCell className="text-right tabular-nums">{r.crew.toLocaleString()}</TableCell>
-                  <TableCell className="text-right tabular-nums">{r.specialMeals.toLocaleString()}</TableCell>
+                  <TableCell className="text-right tabular-nums">{r.specialPax.toLocaleString()}</TableCell>
+                  <TableCell className="text-right tabular-nums">{r.specialCrew.toLocaleString()}</TableCell>
                   <TableCell className="text-right tabular-nums font-semibold">
-                    {total.toLocaleString()}
+                    <span className="inline-flex items-center justify-end gap-1.5">
+                      {delta !== 0 && (
+                        <span className="text-[10px] text-muted-foreground line-through">{base.toLocaleString()}</span>
+                      )}
+                      <span className={delta !== 0 ? "text-primary" : ""}>{total.toLocaleString()}</span>
+                      {delta !== 0 && (
+                        <Badge variant="outline" className={cn("text-[9px] font-semibold", delta > 0 ? "border-success/40 text-success" : "border-destructive/40 text-destructive")}>
+                          {delta > 0 ? "+" : "−"}{Math.abs(delta).toLocaleString()}
+                        </Badge>
+                      )}
+                    </span>
                   </TableCell>
                 </TableRow>
               );
@@ -3868,7 +3950,8 @@ function RequirementsSummary({ requirements }: { requirements: OrderRequirement[
               <TableCell className="text-right tabular-nums">{totals.flights}</TableCell>
               <TableCell className="text-right tabular-nums">{totals.passengers.toLocaleString()}</TableCell>
               <TableCell className="text-right tabular-nums">{totals.crew.toLocaleString()}</TableCell>
-              <TableCell className="text-right tabular-nums">{totals.specialMeals.toLocaleString()}</TableCell>
+              <TableCell className="text-right tabular-nums">{totals.specialPax.toLocaleString()}</TableCell>
+              <TableCell className="text-right tabular-nums">{totals.specialCrew.toLocaleString()}</TableCell>
               <TableCell className="text-right tabular-nums text-success">
                 {grandTotal.toLocaleString()}
               </TableCell>

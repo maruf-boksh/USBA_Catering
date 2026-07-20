@@ -20,6 +20,7 @@ import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -28,6 +29,11 @@ import {
 } from "@/lib/workflow-store";
 import { useRole } from "@/lib/roles";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
+import { usePersistedState } from "@/lib/use-persisted-state";
+import {
+  FULFILL_PLAN_KEY, PROCUREMENT_METHODS, allocationFor, allocationTotal,
+  stageDirectReceive, stageRequisition, type FulfillmentPlan,
+} from "@/lib/fulfillment-plan";
 
 const KITCHEN_SECTIONS = ["Hot Kitchen", "Cold Kitchen", "Veg Section", "Special Meal", "Bakery", "Packaging"];
 
@@ -55,6 +61,10 @@ export default function DemandOrders() {
 
   const [selectedRequest, setSelectedRequest] = useState<WfDemandRequest | null>(null);
   const [needsPurchase, setNeedsPurchase] = useState<Record<string, boolean>>({});
+  // Fulfilment plan (methods + qty per shortfall item) chosen at approval.
+  const [fulfillPlan] = usePersistedState<FulfillmentPlan>(FULFILL_PLAN_KEY, {});
+  // Which shortfall rows are ticked for a procurement action.
+  const [selectedShortfall, setSelectedShortfall] = useState<Set<string>>(new Set());
   const [newOpen, setNewOpen] = useState(false);
   const [newBy, setNewBy] = useState("");
   const [newNote, setNewNote] = useState("");
@@ -78,6 +88,7 @@ export default function DemandOrders() {
   const openDemand = (row: WfDemandRequest) => {
     setSelectedRequest(row);
     setNeedsPurchase({});
+    setSelectedShortfall(new Set());
   };
 
   const filteredDemands = demands.filter((d) => {
@@ -236,7 +247,7 @@ export default function DemandOrders() {
           <Dialog
             open={!!activeDemand}
             onOpenChange={(open) => {
-              if (!open) { setSelectedRequest(null); setNeedsPurchase({}); }
+              if (!open) { setSelectedRequest(null); setNeedsPurchase({}); setSelectedShortfall(new Set()); }
             }}
           >
             <DialogContent className="max-w-3xl max-h-[90vh] overflow-hidden flex flex-col p-0 gap-0">
@@ -246,7 +257,7 @@ export default function DemandOrders() {
                   <button
                     type="button"
                     aria-label="Close"
-                    onClick={() => { setSelectedRequest(null); setNeedsPurchase({}); }}
+                    onClick={() => { setSelectedRequest(null); setNeedsPurchase({}); setSelectedShortfall(new Set()); }}
                     className="shrink-0 rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                   >
                     <X className="h-4 w-4" />
@@ -343,7 +354,39 @@ export default function DemandOrders() {
                           )}
                           {shortfallItems.length > 0 && (() => {
                             const cols =
-                              "grid grid-cols-[88px_minmax(96px,1fr)_46px_80px_88px_80px] gap-2 px-3 items-center";
+                              "grid grid-cols-[28px_84px_minmax(90px,1fr)_40px_64px_64px_60px_minmax(120px,1fr)] gap-2 px-3 items-center";
+                            const savedPlan = fulfillPlan[activeDemand.id] ?? {};
+                            const canProcure = activeDemand.status !== "Pending Approval" && activeDemand.status !== "Rejected";
+                            // Only items with an approved allocation are actionable / selectable.
+                            const plannedIds = shortfallItems
+                              .filter((it) => allocationTotal(savedPlan[it.id]?.allocations) > 0)
+                              .map((it) => it.id);
+                            const hasPlan = plannedIds.length > 0;
+                            const allSelected = plannedIds.length > 0 && plannedIds.every((id) => selectedShortfall.has(id));
+                            const toggleAll = (on: boolean) => setSelectedShortfall(on ? new Set(plannedIds) : new Set());
+                            const toggleRow = (id: string, on: boolean) =>
+                              setSelectedShortfall((prev) => {
+                                const next = new Set(prev);
+                                if (on) next.add(id); else next.delete(id);
+                                return next;
+                              });
+                            // Lines per method for the SELECTED rows, from the approved allocation.
+                            const linesFor = (key: string) =>
+                              shortfallItems
+                                .filter((it) => selectedShortfall.has(it.id))
+                                .map((it) => ({ id: it.id, name: it.name, uom: it.uom, qty: allocationFor(savedPlan[it.id], key) }))
+                                .filter((l) => l.qty > 0);
+                            const directLines = linesFor("direct");
+                            const reqLines = linesFor("requisition");
+                            const selectedCount = plannedIds.filter((id) => selectedShortfall.has(id)).length;
+                            const runDirect = () => {
+                              const to = stageDirectReceive(activeDemand, directLines);
+                              if (to) { setSelectedRequest(null); setSelectedShortfall(new Set()); navigate(to); }
+                            };
+                            const runReq = () => {
+                              const to = stageRequisition(activeDemand, role, reqLines);
+                              if (to) { setSelectedRequest(null); setSelectedShortfall(new Set()); navigate(to); }
+                            };
                             return (
                               <div>
                                 <div className="flex items-center gap-1.5 mb-2">
@@ -353,30 +396,86 @@ export default function DemandOrders() {
                                   </span>
                                 </div>
                                 <div className="rounded-lg border border-red-200 overflow-x-auto">
-                                  <div className="min-w-[560px]">
+                                  <div className="min-w-[640px]">
                                     <div className={`${cols} py-2 bg-red-50 border-b border-red-200 text-[10px] uppercase tracking-wider text-red-700/80 font-medium`}>
+                                      <div className="flex items-center justify-center">
+                                        {canProcure && (
+                                          <Checkbox
+                                            checked={allSelected}
+                                            disabled={!hasPlan}
+                                            onCheckedChange={(v) => toggleAll(v === true)}
+                                            aria-label="Select all shortfall items"
+                                          />
+                                        )}
+                                      </div>
                                       <div>Code</div>
                                       <div>Item</div>
                                       <div>UoM</div>
                                       <div className="text-right">Required</div>
-                                      <div className="text-right">Current Stock</div>
-                                      <div className="text-right">Shortage</div>
+                                      <div className="text-right">Stock</div>
+                                      <div className="text-right">Short</div>
+                                      <div>Method</div>
                                     </div>
-                                    {shortfallItems.map((item) => (
+                                    {shortfallItems.map((item) => {
+                                      const alloc = savedPlan[item.id]?.allocations ?? {};
+                                      const active = PROCUREMENT_METHODS.filter((m) => (alloc[m.key] ?? 0) > 0);
+                                      const planned = active.length > 0;
+                                      const checked = planned && selectedShortfall.has(item.id);
+                                      return (
                                       <div
                                         key={item.id}
-                                        className={`${cols} py-2 border-b border-red-100 last:border-b-0 bg-red-50/30`}
+                                        className={`${cols} py-2 border-b border-red-100 last:border-b-0 bg-red-50/30 ${canProcure && planned && !checked ? "opacity-70" : ""}`}
                                       >
+                                        <div className="flex items-center justify-center">
+                                          {canProcure && (
+                                            <Checkbox
+                                              checked={checked}
+                                              disabled={!planned}
+                                              onCheckedChange={(v) => toggleRow(item.id, v === true)}
+                                              aria-label={`Select ${item.name}`}
+                                            />
+                                          )}
+                                        </div>
                                         <div className="text-xs font-mono text-muted-foreground truncate" title={item.id}>{item.id}</div>
                                         <div className="text-sm font-medium truncate" title={item.name}>{item.name}</div>
                                         <div className="text-xs text-muted-foreground">{item.uom}</div>
                                         <div className="text-right text-sm font-semibold tabular-nums">{item.qty}</div>
                                         <div className="text-right text-sm tabular-nums text-muted-foreground">{item.currentStock}</div>
                                         <div className="text-right text-sm font-semibold tabular-nums text-red-600">{item.shortfall}</div>
+                                        <div className="flex flex-wrap gap-1">
+                                          {planned ? (
+                                            active.map((m) => (
+                                              <span key={m.key} className={`inline-block whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] font-medium ${m.soft} ${m.text}`}>
+                                                {m.short} {alloc[m.key]}
+                                              </span>
+                                            ))
+                                          ) : (
+                                            <span className="text-[11px] text-muted-foreground">
+                                              {canProcure ? "Not set" : "Pending approval"}
+                                            </span>
+                                          )}
+                                        </div>
                                       </div>
-                                    ))}
+                                      );
+                                    })}
                                   </div>
                                 </div>
+
+                                {canProcure && hasPlan && (
+                                  <div className="mt-2 flex flex-wrap items-center justify-end gap-2">
+                                    <span className="mr-auto text-[11px] text-muted-foreground">
+                                      {selectedCount === 0
+                                        ? "Select items, then run their approved method."
+                                        : `${selectedCount} of ${plannedIds.length} item${plannedIds.length === 1 ? "" : "s"} selected.`}
+                                    </span>
+                                    <Button size="sm" variant="outline" className="h-8" onClick={runDirect} disabled={directLines.length === 0}>
+                                      <PackageCheck className="h-3.5 w-3.5 mr-1.5" /> Direct Receive ({directLines.length})
+                                    </Button>
+                                    <Button size="sm" className="h-8" onClick={runReq} disabled={reqLines.length === 0}>
+                                      <Plus className="h-3.5 w-3.5 mr-1.5" /> Create Requisition ({reqLines.length})
+                                    </Button>
+                                  </div>
+                                )}
                               </div>
                             );
                           })()}

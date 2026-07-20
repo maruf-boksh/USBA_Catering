@@ -1942,6 +1942,18 @@ export type ItemMaster = {
    * `conversion` = number of Primary units contained in 1 of this Alt unit.
    */
   altUoms?: AltUom[];
+  /**
+   * Item capability flags — govern where the item may be actioned:
+   *   • canPurchase — item appears in purchasing pickers (Direct Receive, PR/PO).
+   *     Defaults to true for every non-Asset type (assets are managed, not bought
+   *     as stock) when unset.
+   *   • canProduce  — item may be selected as a production output. Defaults to
+   *     true for Finished / Semi-Finished Goods when unset, false otherwise.
+   * Unset (undefined) means "use the type-based default", so existing items keep
+   * working; setting the flag explicitly overrides that default.
+   */
+  canPurchase?: boolean;
+  canProduce?: boolean;
 };
 
 export type AltUom = {
@@ -2225,6 +2237,25 @@ export const items: ItemMaster[] = RAW_ITEMS.map((row, i) => ({
 
 /** Active master items only (use this in pickers/DDLs by default) */
 export const activeItems: ItemMaster[] = items.filter((i) => i.status === "Active");
+
+/** Item types that are made in-house (default producible) vs. bought. */
+export const PRODUCIBLE_ITEM_TYPES: ItemMaster["itemType"][] = ["Finished Good", "Semi-Finished Good"];
+
+/**
+ * Whether an item can be purchased (shown in purchasing pickers). Explicit
+ * `canPurchase` wins; otherwise every non-Asset item is purchasable by default.
+ */
+export function itemCanPurchase(i: Pick<ItemMaster, "canPurchase" | "itemType">): boolean {
+  return i.canPurchase ?? i.itemType !== "Asset";
+}
+
+/**
+ * Whether an item can be produced (selectable as a production output). Explicit
+ * `canProduce` wins; otherwise Finished / Semi-Finished Goods default to true.
+ */
+export function itemCanProduce(i: Pick<ItemMaster, "canProduce" | "itemType">): boolean {
+  return i.canProduce ?? PRODUCIBLE_ITEM_TYPES.includes(i.itemType);
+}
 
 /** Unit/book cost of an equipment asset, resolved by name from the Asset item
  *  master — the same cost basis the Stock Overview report values assets at.

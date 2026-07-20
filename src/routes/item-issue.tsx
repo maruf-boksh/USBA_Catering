@@ -30,6 +30,10 @@ import { useRole } from "@/lib/roles";
 import { getAuthUser } from "@/lib/auth";
 import { getActiveStaff } from "@/lib/staff";
 import { LocationPicker, LocationFilter, LocationCell, officeName, warehouseName } from "@/components/common/LocationPicker";
+import {
+  FULFILL_PLAN_KEY, PROCUREMENT_METHODS, allocationTotal, allocationFor,
+  stageDirectReceive, stageRequisition, type FulfillmentPlan,
+} from "@/lib/fulfillment-plan";
 
 type IssueItem = {
   id: string;
@@ -56,9 +60,10 @@ export default function ItemIssuePage() {
   const [preselectedDemand, setPreselectedDemand] = useState("");
   const [filterOffice, setFilterOffice] = useState("");
   const [filterWarehouse, setFilterWarehouse] = useState("");
-  // Saved fulfilment methods (persisted) — assigned on the Fulfillment Method tab,
-  // acted on from the Issued Items tab.
-  const [plan, setPlan] = usePersistedState<FulfillmentPlan>(FULFILL_PLAN_KEY, {});
+  // Saved fulfilment methods (persisted) — assigned when the demand is approved
+  // (Approval Management → demand detail), read here to run Direct Receive /
+  // Create Requisition from the demand's View dialog.
+  const [plan] = usePersistedState<FulfillmentPlan>(FULFILL_PLAN_KEY, {});
 
   // Auto-open the create dialog when arriving with ?demand=<id>
   const consumedParam = useRef(false);
@@ -206,12 +211,6 @@ export default function ItemIssuePage() {
     );
   };
 
-  // Pending demands that actually have a shortfall — worked on the Fulfillment tab.
-  const demandsWithShortfall = useMemo(
-    () => pendingDemands.filter((d) => demandShortfalls(d).length > 0),
-    [pendingDemands],
-  );
-
   return (
     <>
       <PageHeader
@@ -243,20 +242,6 @@ export default function ItemIssuePage() {
                 className="h-5 px-1.5 text-[10px] tabular-nums border-warning/40 bg-warning/10 text-warning"
               >
                 {pendingDemands.length}
-              </Badge>
-            )}
-          </TabsTrigger>
-          <TabsTrigger
-            value="fulfillment"
-            className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-4 pb-3 gap-2"
-          >
-            Fulfillment Method
-            {demandsWithShortfall.length > 0 && (
-              <Badge
-                variant="outline"
-                className="h-5 px-1.5 text-[10px] tabular-nums border-destructive/40 bg-destructive/10 text-destructive"
-              >
-                {demandsWithShortfall.length}
               </Badge>
             )}
           </TabsTrigger>
@@ -354,10 +339,6 @@ export default function ItemIssuePage() {
           )}
         </TabsContent>
 
-        <TabsContent value="fulfillment" className="mt-0">
-          <FulfillmentMethodTab demands={demandsWithShortfall} plan={plan} setPlan={setPlan} />
-        </TabsContent>
-
         <TabsContent value="issued" className="mt-0">
           <div className="mb-4">
             <LocationFilter
@@ -407,30 +388,6 @@ export default function ItemIssuePage() {
   );
 }
 
-// How a shortfall item will be fulfilled: unset, a direct spot-buy receipt, a
-// purchase requisition, or both. Drives the per-item status + the two actions.
-type FulfillMethod = "" | "direct" | "requisition" | "both";
-const METHOD_META: Record<FulfillMethod, { label: string; cls: string }> = {
-  "":          { label: "Pending",        cls: "bg-muted text-muted-foreground" },
-  direct:      { label: "Direct Receive", cls: "bg-blue-100 text-blue-700" },
-  requisition: { label: "Requisition",    cls: "bg-amber-100 text-amber-700" },
-  both:        { label: "Both",           cls: "bg-purple-100 text-purple-700" },
-};
-
-// Saved fulfilment plan: per demand, per shortfall item, the chosen method + qty.
-// Persisted so the Fulfillment Method tab (assign + save) and the demand View
-// dialog (which shows the saved plan + runs the actions) share one source of truth.
-type PlanLine = { method: FulfillMethod; qty: number };
-type FulfillmentPlan = Record<string, Record<string, PlanLine>>;
-const FULFILL_PLAN_KEY = "item-issue-fulfillment-plan";
-
-// Shortfall (required − on-hand) for a demand's items, > 0 only.
-function demandShortfalls(demand: WfDemandRequest) {
-  return demand.items
-    .map((it) => ({ ...it, shortfall: roundQty(it.qty - getItemStock(it.id || it.name)) }))
-    .filter((it) => it.shortfall > 0);
-}
-
 // Read-only view of a demand: sufficient / shortfall breakdown plus the SAVED
 // fulfilment plan, from where Direct Receive / Create Requisition are run. Methods
 // themselves are assigned + saved on the Fulfillment Method tab.
@@ -461,7 +418,7 @@ function DemandViewDialog({
     if (!demand) return [] as string[];
     const s = plan[demand.id] ?? {};
     return tagged
-      .filter((it) => it.insufficient && s[it.id]?.method && (s[it.id]?.qty ?? 0) > 0)
+      .filter((it) => it.insufficient && allocationTotal(s[it.id]?.allocations) > 0)
       .map((it) => it.id);
   }, [demand, tagged, plan]);
 
@@ -475,17 +432,24 @@ function DemandViewDialog({
   const demandId = demand.id;
   const saved = plan[demandId] ?? {};
   const sufficientItems = tagged.filter((it) => !it.insufficient);
-  // Shortfall rows carry their SAVED method + planned qty from the Fulfillment tab.
+  // Shortfall rows carry their SAVED method allocation, chosen at approval — the
+  // procure qty split across procurement methods (Direct Receive / Requisition).
   const shortfallItems = tagged
     .filter((it) => it.insufficient)
-    .map((it) => ({ ...it, method: saved[it.id]?.method ?? ("" as FulfillMethod), planQty: saved[it.id]?.qty ?? 0 }));
+    .map((it) => {
+      const line = saved[it.id];
+      const alloc = line?.allocations ?? {};
+      const directQty = allocationFor(line, "direct");
+      const reqQty = allocationFor(line, "requisition");
+      return { ...it, alloc, planQty: allocationTotal(alloc), directQty, reqQty };
+    });
   const canProcure = demand.status !== "Pending Approval" && demand.status !== "Rejected";
 
-  // Actions run only on rows the user has checked (and only where a method applies).
-  const linesFor = (methods: FulfillMethod[]) =>
-    shortfallItems.filter((it) => methods.includes(it.method) && it.planQty > 0 && selectedIds.has(it.id));
-  const drCount = linesFor(["direct", "both"]).length;
-  const reqCount = linesFor(["requisition", "both"]).length;
+  // Actions run only on checked rows that carry a qty for that channel.
+  const directPicks = shortfallItems.filter((it) => it.directQty > 0 && selectedIds.has(it.id));
+  const reqPicks = shortfallItems.filter((it) => it.reqQty > 0 && selectedIds.has(it.id));
+  const drCount = directPicks.length;
+  const reqCount = reqPicks.length;
   const plannedCount = shortfallItems.filter((it) => it.method && it.planQty > 0).length;
   const selectedCount = shortfallItems.filter((it) => it.method && it.planQty > 0 && selectedIds.has(it.id)).length;
   const allPlannedSelected = plannedCount > 0 && selectedCount === plannedCount;
@@ -498,31 +462,19 @@ function DemandViewDialog({
     });
   const toggleAll = (on: boolean) => setSelectedIds(on ? new Set(plannedIds) : new Set());
 
-  // Hand the saved lines for the matching methods to the prefilled screen.
+  // Hand the saved lines for each channel to the prefilled screen, using the
+  // per-channel qty (the allocated portion for each method).
   const runRequisition = () => {
-    const picks = linesFor(["requisition", "both"]);
-    if (picks.length === 0) return;
-    sessionStorage.setItem("pr-prefill-from-inventory", JSON.stringify({
-      source: demandId,
-      requestedBy: role,
-      justification: `Raised from Demand Request ${demandId} to cover ${picks.length} shortfall material${picks.length === 1 ? "" : "s"}.`,
-      officeId: demand.officeId, warehouseId: demand.warehouseId,
-      lines: picks.map((it, i) => ({ id: `LN-${demandId}-${i + 1}`, itemName: it.name, description: it.id, qty: it.planQty, uom: it.uom, rate: 0 })),
-    }));
+    const to = stageRequisition(demand, role, reqPicks.map((it) => ({ id: it.id, name: it.name, uom: it.uom, qty: it.reqQty })));
+    if (!to) return;
     onClose();
-    navigate("/purchase-requisition");
+    navigate(to);
   };
   const runDirect = () => {
-    const picks = linesFor(["direct", "both"]);
-    if (picks.length === 0) return;
-    sessionStorage.setItem("direct-receive-prefill", JSON.stringify({
-      source: demandId,
-      justification: `Direct receive against Demand Request ${demandId} — ${picks.length} shortfall material${picks.length === 1 ? "" : "s"}.`,
-      officeId: demand.officeId, warehouseId: demand.warehouseId,
-      lines: picks.map((it) => ({ name: it.name, qty: it.planQty, uom: it.uom })),
-    }));
+    const to = stageDirectReceive(demand, directPicks.map((it) => ({ id: it.id, name: it.name, uom: it.uom, qty: it.directQty })));
+    if (!to) return;
     onClose();
-    navigate("/receive-item");
+    navigate(to);
   };
 
   const sufficientTable = sufficientItems.length > 0 ? (
@@ -612,8 +564,8 @@ function DemandViewDialog({
                         <div>Method</div>
                       </div>
                       {shortfallItems.map((item) => {
-                        const meta = METHOD_META[item.method];
-                        const planned = !!item.method && item.planQty > 0;
+                        const methods = PROCUREMENT_METHODS.filter((m) => (item.alloc[m.key] ?? 0) > 0);
+                        const planned = item.planQty > 0;
                         const checked = planned && selectedIds.has(item.id);
                         return (
                           <div key={item.id} className={`grid grid-cols-[32px_84px_minmax(120px,1fr)_44px_80px_96px_140px] gap-2 px-3 py-2 border-b border-border last:border-b-0 items-center ${planned && !checked ? "opacity-60" : ""}`}>
@@ -630,8 +582,16 @@ function DemandViewDialog({
                             <div className="text-xs text-muted-foreground">{item.uom}</div>
                             <div className="text-right text-sm font-semibold tabular-nums text-red-600">{item.shortfall}</div>
                             <div className="text-right text-sm tabular-nums">{item.planQty > 0 ? item.planQty : <span className="text-muted-foreground">—</span>}</div>
-                            <div>
-                              <span className={`inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${meta.cls}`}>{meta.label}</span>
+                            <div className="flex flex-wrap gap-1">
+                              {methods.length > 0 ? (
+                                methods.map((m) => (
+                                  <span key={m.key} className={`inline-block whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] font-medium ${m.soft} ${m.text}`}>
+                                    {m.short} {item.alloc[m.key]}
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-muted text-muted-foreground">Pending</span>
+                              )}
                             </div>
                           </div>
                         );
@@ -676,225 +636,6 @@ function DemandViewDialog({
 }
 
 
-// Page-level tab: assign a fulfilment method (Direct Receive / Requisition / Both)
-// to each shortfall item of a demand and SAVE it — no navigation. The saved plan
-// is shown and acted on from the demand's View dialog.
-function FulfillmentMethodTab({
-  demands, plan, setPlan,
-}: {
-  demands: WfDemandRequest[];
-  plan: FulfillmentPlan;
-  setPlan: Dispatch<SetStateAction<FulfillmentPlan>>;
-}) {
-  // demandId === "" → show the demand list; a set id → show that demand's items.
-  const [demandId, setDemandId] = useState("");
-  const [methodDraft, setMethodDraft] = useState<Record<string, FulfillMethod>>({});
-  const [qtyDraft, setQtyDraft] = useState<Record<string, string>>({});
-
-  // Drop back to the list if the viewed demand leaves the list (e.g. fulfilled).
-  useEffect(() => {
-    setDemandId((cur) => (cur && demands.some((d) => d.id === cur) ? cur : ""));
-  }, [demands]);
-
-  const demand = demands.find((d) => d.id === demandId) ?? null;
-  const shortfalls = useMemo(() => (demand ? demandShortfalls(demand) : []), [demand]);
-
-  // Seed drafts from the saved plan (or defaults) when the selected demand changes.
-  useEffect(() => {
-    if (!demand) { setMethodDraft({}); setQtyDraft({}); return; }
-    const saved = plan[demand.id] ?? {};
-    const m: Record<string, FulfillMethod> = {};
-    const q: Record<string, string> = {};
-    for (const it of demandShortfalls(demand)) {
-      m[it.id] = saved[it.id]?.method ?? "";
-      q[it.id] = String(saved[it.id]?.qty ?? it.shortfall);
-    }
-    setMethodDraft(m);
-    setQtyDraft(q);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [demandId]);
-
-  const setAll = (mth: FulfillMethod) =>
-    setMethodDraft((prev) => {
-      const next = { ...prev };
-      shortfalls.forEach((it) => { next[it.id] = mth; });
-      return next;
-    });
-
-  const unsetCount = shortfalls.filter((it) => !methodDraft[it.id]).length;
-
-  const save = () => {
-    if (!demand) return;
-    const map: Record<string, PlanLine> = {};
-    shortfalls.forEach((it) => {
-      const mth = methodDraft[it.id] ?? "";
-      const qty = roundQty(Number(qtyDraft[it.id]) || 0);
-      if (mth && qty > 0) map[it.id] = { method: mth, qty };
-    });
-    setPlan((p) => ({ ...p, [demand.id]: map }));
-    const n = Object.keys(map).length;
-    toast.success(
-      n > 0
-        ? `Methods saved for ${demand.id} (${n} item${n === 1 ? "" : "s"}) — run the actions from the demand's View button.`
-        : `Cleared fulfilment methods for ${demand.id}.`,
-    );
-    setDemandId(""); // return to the demand list after saving
-  };
-
-  if (demands.length === 0) {
-    return (
-      <Card>
-        <CardContent className="py-12 text-center">
-          <PackageCheck className="h-10 w-10 mx-auto text-muted-foreground/40 mb-3" />
-          <div className="text-sm font-medium text-foreground">No shortfalls to fulfil</div>
-          <div className="text-xs text-muted-foreground mt-1">Every pending demand is fully covered by stock.</div>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  // ── List view: pick a demand, then load its items on View ──────────────────
-  if (!demand) {
-    return (
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base">Fulfillment Method</CardTitle>
-        </CardHeader>
-        <CardContent className="pt-0 space-y-3">
-          <p className="text-[11px] text-muted-foreground">
-            Select a demand to view its shortfall items and assign a fulfilment method.
-          </p>
-          <div className="rounded-lg border border-border overflow-x-auto">
-            <div className="min-w-[560px]">
-              <div className="grid grid-cols-[140px_minmax(140px,1fr)_120px_minmax(140px,1fr)_100px] gap-2 px-3 py-2 bg-muted/50 border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground font-medium items-center">
-                <div>Demand</div><div>Requested By</div>
-                <div className="text-right">Shortfall Items</div>
-                <div>Method Assigned</div>
-                <div className="text-right">Action</div>
-              </div>
-              {demands.map((d) => {
-                const total = demandShortfalls(d).length;
-                const assigned = Object.keys(plan[d.id] ?? {}).length;
-                const status =
-                  assigned === 0 ? { label: "Not started", cls: "bg-muted text-muted-foreground", Icon: Clock }
-                  : assigned < total ? { label: `${assigned}/${total} assigned`, cls: "bg-amber-100 text-amber-700", Icon: AlertTriangle }
-                  : { label: "Ready", cls: "bg-emerald-100 text-emerald-700", Icon: CheckCircle2 };
-                return (
-                  <div key={d.id} className="grid grid-cols-[140px_minmax(140px,1fr)_120px_minmax(140px,1fr)_100px] gap-2 px-3 py-2 border-b border-border last:border-b-0 items-center">
-                    <div className="text-xs font-mono text-primary truncate" title={d.id}>{d.id}</div>
-                    <div className="text-sm truncate" title={d.requestedBy}>{d.requestedBy}</div>
-                    <div className="text-right text-sm font-semibold tabular-nums text-red-600">{total}</div>
-                    <div>
-                      <span className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${status.cls}`}>
-                        <status.Icon className="h-3 w-3" /> {status.label}
-                      </span>
-                    </div>
-                    <div className="flex justify-end">
-                      <Button size="sm" variant="outline" className="h-7 px-2" onClick={() => setDemandId(d.id)}>
-                        <Eye className="h-3.5 w-3.5 mr-1" /> View
-                      </Button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  // ── Detail view: assign a method per shortfall item for the viewed demand ───
-  const pillCls = "text-xs font-medium px-2.5 py-1 rounded-full border transition-colors";
-  return (
-    <Card>
-      <CardHeader className="pb-3">
-        <div className="flex items-center gap-2 flex-wrap">
-          <Button size="sm" variant="outline" className="h-8" onClick={() => setDemandId("")}>
-            <ArrowLeft className="h-3.5 w-3.5 mr-1" /> Back
-          </Button>
-          <CardTitle className="text-base">
-            Fulfillment Method
-            <span className="ml-2 font-mono text-sm text-primary">{demand.id}</span>
-            <span className="ml-1 text-xs font-normal text-muted-foreground">· {demand.requestedBy}</span>
-          </CardTitle>
-        </div>
-      </CardHeader>
-      <CardContent className="pt-0 space-y-3">
-        <p className="text-[11px] text-muted-foreground">
-          Assign a method to each shortfall item and <span className="font-medium">Save</span> — nothing leaves this page.
-          Run Direct Receive / Create Requisition from the demand's <span className="font-medium">View</span> button.
-        </p>
-
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mr-0.5">Set all:</span>
-          <button type="button" onClick={() => setAll("direct")} className={`${pillCls} border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100`}>Direct Receive</button>
-          <button type="button" onClick={() => setAll("requisition")} className={`${pillCls} border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100`}>Requisition</button>
-          <button type="button" onClick={() => setAll("both")} className={`${pillCls} border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100`}>Both</button>
-          <button type="button" onClick={() => setAll("")} className={`${pillCls} border-border bg-muted/40 text-muted-foreground hover:bg-muted`}>Clear</button>
-        </div>
-
-        <div className="rounded-lg border border-border overflow-x-auto">
-          <div className="min-w-[720px]">
-            <div className="grid grid-cols-[84px_minmax(110px,1fr)_44px_72px_96px_150px_120px] gap-2 px-3 py-2 bg-muted/50 border-b border-border text-[10px] uppercase tracking-wider text-muted-foreground font-medium items-center">
-              <div>Code</div><div>Item</div><div>UoM</div>
-              <div className="text-right">Shortage</div>
-              <div className="text-right">Procure Qty</div>
-              <div>Method</div>
-              <div>Status</div>
-            </div>
-            {shortfalls.map((item) => {
-              const m = methodDraft[item.id] ?? "";
-              const meta = METHOD_META[m];
-              return (
-                <div key={item.id} className="grid grid-cols-[84px_minmax(110px,1fr)_44px_72px_96px_150px_120px] gap-2 px-3 py-2 border-b border-border last:border-b-0 items-center">
-                  <div className="text-xs font-mono text-muted-foreground truncate" title={item.id}>{item.id}</div>
-                  <div className="text-sm font-medium truncate" title={item.name}>{item.name}</div>
-                  <div className="text-xs text-muted-foreground">{item.uom}</div>
-                  <div className="text-right text-sm font-semibold tabular-nums text-red-600">{item.shortfall}</div>
-                  <div className="flex justify-end">
-                    <Input
-                      type="number" min={0} step="any"
-                      value={qtyDraft[item.id] ?? ""}
-                      onChange={(e) => setQtyDraft((p) => ({ ...p, [item.id]: e.target.value }))}
-                      className="h-8 w-24 text-right tabular-nums"
-                    />
-                  </div>
-                  <div>
-                    <select
-                      value={m}
-                      onChange={(e) => setMethodDraft((p) => ({ ...p, [item.id]: e.target.value as FulfillMethod }))}
-                      className="w-full h-8 rounded-md border border-input bg-background px-2 text-xs"
-                    >
-                      <option value="">Select method…</option>
-                      <option value="direct">Direct Receive</option>
-                      <option value="requisition">Requisition</option>
-                      <option value="both">Both</option>
-                    </select>
-                  </div>
-                  <div>
-                    <span className={`inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ${meta.cls}`}>{meta.label}</span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-          <span className="text-[11px] text-muted-foreground">
-            {unsetCount > 0
-              ? `${unsetCount} item${unsetCount === 1 ? "" : "s"} still need a method.`
-              : "All items have a method assigned."}
-          </span>
-          <Button size="sm" className="h-8" onClick={save}>
-            <Save className="h-3.5 w-3.5 mr-1.5" /> Save Methods
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
 
 function IssueDetailsDialog({
   note, onClose, onAcknowledge,
@@ -1057,22 +798,6 @@ function CreateIssueDialog({
 
   const setIssued = (id: string, value: string) => {
     setIssuedMap((prev) => ({ ...prev, [id]: value }));
-  };
-
-  // Fill every requested line with the most that can be issued — the requested
-  // qty, capped at the source warehouse's on-hand so no line goes over stock.
-  const issueAll = () => {
-    const ids = selectedDemand ? selectedDemand.items.map((i) => i.id) : manualIds;
-    setIssuedMap((prev) => {
-      const next = { ...prev };
-      for (const id of ids) {
-        const inv = inventory.find((x) => x.id === id);
-        if (!inv) continue;
-        const target = Math.min(requestedFor(id), availableIn(inv.name));
-        next[id] = String(target);
-      }
-      return next;
-    });
   };
 
   // Rows shown in the table — depends on mode
@@ -1328,18 +1053,6 @@ function CreateIssueDialog({
                 </span>
               )}
             </div>
-            {visibleItems.length > 0 && (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-8 shrink-0"
-                onClick={issueAll}
-                title="Fill every line with the requested qty, capped at available stock"
-              >
-                <PackageCheck className="h-3.5 w-3.5 mr-1.5" /> Issue All
-              </Button>
-            )}
           </div>
         </div>
 
