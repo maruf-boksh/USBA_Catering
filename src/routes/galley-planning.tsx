@@ -463,7 +463,7 @@ export default function GalleyPlanningPage() {
   return (
     <>
       <PageHeader
-        title="Galley Planning"
+        title="Galley Plan"
         subtitle="Plan the per-flight galley load — meals, beverages, amenities, consumables & equipment — then forward to aircraft loading"
       />
 

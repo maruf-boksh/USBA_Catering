@@ -31,7 +31,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import { useArrivalFlash, peekArrivalRows } from "@/lib/arrival-flash";
-import { useWorkflow } from "@/lib/workflow-store";
+import { useWorkflow, type StockDelta } from "@/lib/workflow-store";
 import { getStockAdjustments } from "@/lib/stock-adjustments";
 import { getItemProfiles } from "@/lib/item-profiles";
 import { buildItemLedger, itemMovementTotals, itemLedgerSummary, type LedgerSources, type LedgerRange, type RawMovement } from "@/lib/stock-ledger";
@@ -401,9 +401,40 @@ export default function Inventory() {
   //   • Adjustments → approved stock corrections (persisted stock-adjustments)
   //   • Production / Dispatch → finished meals   (workflow-store stockDeltas)
   const { stockDeltas, grns, transferNotes, wfPurchaseOrders } = useWorkflow();
+
+  // Approved consumable returns credit their reusable qty back to stock. Surface
+  // each as an IN movement so the Closing Qty drill-down shows where the restocked
+  // quantity came from (keyed by the consumable item id; only consumable rows match).
+  type ReturnApprovalLite = {
+    returnId: string; date: string; status: string; processedAt?: string;
+    lines: { itemId: string; lineType?: string; reusableQty: number }[];
+  };
+  const [returnApprovals] = usePersistedState<ReturnApprovalLite[]>("consumable-return-approvals", []);
+  const consumableRestockDeltas = useMemo<StockDelta[]>(() => {
+    const out: StockDelta[] = [];
+    for (const ra of returnApprovals) {
+      if (ra.status !== "Approved") continue;
+      for (const l of ra.lines) {
+        if ((l.lineType ?? "item") !== "item") continue;
+        const q = Number(l.reusableQty) || 0;
+        if (q <= 0) continue;
+        out.push({
+          itemId: l.itemId,
+          delta: q,
+          date: (ra.processedAt || ra.date || "").slice(0, 10) || undefined,
+          reference: `Return ${ra.returnId}`,
+          label: "Consumable Return (Restock)",
+          officeId: "OFF-001",
+          warehouseId: "WH-001",
+        });
+      }
+    }
+    return out;
+  }, [returnApprovals]);
+
   const ledgerSources: LedgerSources = useMemo(
-    () => ({ grns, transferNotes, stockDeltas, adjustments: getStockAdjustments() }),
-    [grns, transferNotes, stockDeltas],
+    () => ({ grns, transferNotes, stockDeltas: [...stockDeltas, ...consumableRestockDeltas], adjustments: getStockAdjustments() }),
+    [grns, transferNotes, stockDeltas, consumableRestockDeltas],
   );
   const movementFor = (r: Item) => itemMovementTotals(r.id, r.name, ledgerSources);
   // Optional date window applied to the In/Out/Opening/Closing columns and the

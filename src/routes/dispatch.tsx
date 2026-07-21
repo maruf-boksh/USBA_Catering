@@ -26,6 +26,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { useArrivalFlash, flagArrival } from "@/lib/arrival-flash";
 import { useWorkflow } from "@/lib/workflow-store";
+import { type PackagingBatch } from "@/lib/packaging-batches";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -287,6 +288,36 @@ const MEAL_TYPE_BADGE: Record<string, string> = {
   Special:   "bg-purple-100 text-purple-700",
 };
 
+// Infer a meal type from a production item name (batches carry no explicit type).
+const mealTypeForItem = (item: string): string => {
+  const s = item.toLowerCase();
+  if (s.includes("breakfast")) return "Breakfast";
+  if (s.includes("snack")) return "Snack";
+  if (s.includes("dinner")) return "Dinner";
+  if (/vgml|chml|spml|amml|hindu|special|crew|kosher|halal|vegan/.test(s)) return "Special";
+  return "Lunch";
+};
+
+// Elapsed "m:ss" since an ISO start (empty → "0:00"). Re-renders drive the tick.
+const fmtElapsed = (iso: string): string => {
+  if (!iso) return "0:00";
+  const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+};
+
+// Human duration like "2m 05s" from a whole-second count.
+const fmtDuration = (secs: number): string =>
+  `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, "0")}s`;
+
+// Infer the preparing warehouse/section from a production item name.
+const warehouseForItem = (item: string): string => {
+  const s = item.toLowerCase();
+  if (s.includes("crew")) return "Crew Meal";
+  if (/vgml|chml|spml|amml|hindu|special|kosher|halal|vegan/.test(s)) return "Special Meal";
+  if (/veg|pulao|paratha|dal|rice|khichuri|omelette|salad|bhaji|aloo/.test(s)) return "Veg Section";
+  return "Hot Kitchen";
+};
+
 export const FLIGHT_STATUS_BADGE: Record<string, string> = {
   "Packaging Pending":                  "bg-amber-100 text-amber-700",
   "Packaging In Progress":              "bg-blue-100 text-blue-700",
@@ -515,6 +546,106 @@ export default function Dispatch() {
   // Persisted so dispatches created via "+ New Dispatch" (and packaging/QC
   // progress) survive a page reload, matching the persisted `records`.
   const [packagingRows, setPackagingRows] = usePersistedState<PackagingRow[]>("dispatch-packaging-rows", INITIAL_PACKAGING_ROWS);
+  // Batches handed over from the Packaging page — shown as a "ready to load" list.
+  const [packagedBatches, setPackagedBatches] = usePersistedState<PackagingBatch[]>("packaging-batches", []);
+  // Catering Point Dispatch Entry modal (load ready batches into a vehicle).
+  const [cpdOpen, setCpdOpen] = useState(false);
+  const [cpdVehicle, setCpdVehicle] = useState("");
+  const [cpdDriver, setCpdDriver] = useState("");
+  const [loadedBatchIds, setLoadedBatchIds] = useState<Set<string>>(new Set());
+  const [viewPkgBatch, setViewPkgBatch] = useState<PackagingBatch | null>(null);
+  // Order Details modal opened from a packaged batch's Meals cell.
+  const [mealsBatch, setMealsBatch] = useState<PackagingBatch | null>(null);
+  // Batches ticked for loading — empty means "all".
+  const [selectedLoadIds, setSelectedLoadIds] = useState<Set<string>>(new Set());
+  const readyToLoad = packagedBatches.filter((b) => b.status === "Packaging Done");
+  // Rows shown in the Dispatch list — loadable ones plus already-forwarded ones.
+  const dispatchListRows = packagedBatches.filter(
+    (b) => b.status === "Packaging Done" || b.status === "Forwarded To Airport" || b.status === "Airport Approved" || b.status === "Received At Airport",
+  );
+  const loadTargets = selectedLoadIds.size > 0 ? readyToLoad.filter((b) => selectedLoadIds.has(b.id)) : readyToLoad;
+  const allSelected = readyToLoad.length > 0 && readyToLoad.every((b) => selectedLoadIds.has(b.id));
+  const toggleSelectAll = () =>
+    setSelectedLoadIds(allSelected ? new Set() : new Set(readyToLoad.map((b) => b.id)));
+  const toggleSelectOne = (id: string) =>
+    setSelectedLoadIds((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const loadedCount = loadTargets.filter((b) => loadedBatchIds.has(b.id)).length;
+  // Forward every loaded batch to the airport (Ready to Load → Dispatched).
+  const forwardToAirport = () => {
+    if (!cpdVehicle.trim()) { toast.error("Enter the vehicle number."); return; }
+    const now = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const ids = new Set(loadTargets.map((b) => b.id));
+    setPackagedBatches((prev) =>
+      prev.map((b) => (ids.has(b.id) ? { ...b, status: "Forwarded To Airport" as PackagingBatch["status"], vehicleNo: cpdVehicle.trim(), dispatchedAt: now } : b)),
+    );
+    toast.success(`${ids.size} batch(es) loaded onto ${cpdVehicle.trim() || "vehicle"} — forwarded to airport (pending dispatch approval).`);
+    setCpdOpen(false);
+    setCpdVehicle("");
+    setCpdDriver("");
+    setLoadedBatchIds(new Set());
+    setSelectedLoadIds((prev) => { const n = new Set(prev); ids.forEach((i) => n.delete(i)); return n; });
+  };
+
+  // ── Catering Point rich form: cold-chain fields + loading timer ──────────────
+  const [cpdVehicleClean, setCpdVehicleClean] = useState<"" | "Yes" | "No">("");
+  const [cpdChilled, setCpdChilled] = useState("");
+  const [cpdFrozen, setCpdFrozen] = useState("");
+  const [cpdVehTempBegin, setCpdVehTempBegin] = useState("");
+  const [cpdVehTempEnd, setCpdVehTempEnd] = useState("");
+  const [cpdLoadStartIso, setCpdLoadStartIso] = useState(""); // running when non-empty
+  const [cpdLoadStartTime, setCpdLoadStartTime] = useState(""); // HH:MM display
+  const [cpdLoadEndTime, setCpdLoadEndTime] = useState("");
+  const [cpdLoadDurationSec, setCpdLoadDurationSec] = useState(0);
+  const [, setCpdTick] = useState(0);
+  const [scanLabelBatch, setScanLabelBatch] = useState<PackagingBatch | null>(null);
+  const cpdDispatchNo = `DSP-CP-${String(readyToLoad.length).padStart(2, "0")}`;
+
+  // 1s tick while the loading timer runs.
+  useEffect(() => {
+    if (!cpdLoadStartIso) return;
+    const t = setInterval(() => setCpdTick((x) => x + 1), 1000);
+    return () => clearInterval(t);
+  }, [cpdLoadStartIso]);
+
+  // Auto-stop the loading timer once every batch has been scanned/loaded.
+  useEffect(() => {
+    if (cpdLoadStartIso && !cpdLoadEndTime && loadTargets.length > 0 && loadedCount === loadTargets.length) {
+      const now = new Date();
+      const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      setCpdLoadDurationSec(Math.max(0, Math.floor((now.getTime() - new Date(cpdLoadStartIso).getTime()) / 1000)));
+      setCpdLoadEndTime(hhmm);
+      setCpdLoadStartIso("");
+      toast.success("All batches scanned — loading timer stopped.");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadedCount, loadTargets.length, cpdLoadStartIso, cpdLoadEndTime]);
+
+  const openLoadModal = () => {
+    setLoadedBatchIds(new Set());
+    setCpdLoadStartIso("");
+    setCpdLoadStartTime("");
+    setCpdLoadEndTime("");
+    setCpdLoadDurationSec(0);
+    setCpdVehicle("");
+    setCpdVehicleClean("");
+    setCpdChilled("");
+    setCpdFrozen("");
+    setCpdVehTempBegin("");
+    setCpdVehTempEnd("");
+    setCpdOpen(true);
+  };
+  const confirmScan = (b: PackagingBatch) => {
+    const firstScan = loadedBatchIds.size === 0;
+    setLoadedBatchIds((prev) => new Set(prev).add(b.id));
+    setScanLabelBatch(null);
+    toast.success(`${b.item} scanned & loaded into the vehicle.`);
+    // First scan auto-starts the loading timer (last scan auto-stops it via effect).
+    if (firstScan && !cpdLoadStartIso && !cpdLoadEndTime) {
+      const now = new Date();
+      setCpdLoadStartIso(now.toISOString());
+      setCpdLoadStartTime(`${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`);
+    }
+  };
   const [flightQCStates, setFlightQCStates] = useState<Map<string, FlightQCData>>(
     new Map([["BS-101", { qcState: "done", qcCheckedAt: "08:00 AM" }]])
   );
@@ -2115,6 +2246,401 @@ export default function Dispatch() {
         <KpiCard label="Delivered Today" value={deliveredToday} icon={Truck} tone="red" />
       </div>
 
+      {/* ── Packaged batches ready to load (from Packaging) ─────────────────── */}
+      {dispatchListRows.length > 0 && (
+        <div className="rounded-lg border border-emerald-200 bg-emerald-50/40 p-4 mb-6">
+          <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+              <span className="text-sm font-semibold text-emerald-800">Ready to Load — Packaged Batches</span>
+              <span className="text-[11px] text-emerald-700">Forwarded from Packaging as they are scanned.</span>
+            </div>
+            <Button
+              size="sm"
+              className="bg-emerald-600 hover:bg-emerald-700 text-white"
+              disabled={loadTargets.length === 0}
+              onClick={openLoadModal}
+            >
+              <Truck className="h-4 w-4 mr-1.5" /> Load Into Vehicle ({loadTargets.length})
+            </Button>
+          </div>
+          <div className="rounded-md border border-emerald-200 bg-white overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-emerald-50/70 border-b border-emerald-200">
+                <tr>
+                  <th className="px-3 py-2 w-9">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-emerald-600 cursor-pointer align-middle"
+                      checked={allSelected}
+                      onChange={toggleSelectAll}
+                      aria-label="Select all batches"
+                      title="Select all"
+                    />
+                  </th>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-emerald-800">Dispatch ID</th>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-emerald-800">Batch ID</th>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-emerald-800">Item Name</th>
+                  <th className="text-right px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-emerald-800">Qty</th>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-emerald-800">Meals</th>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-emerald-800">Status</th>
+                  <th className="text-right px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-emerald-800">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dispatchListRows.map((b, i) => {
+                  const loadable = b.status === "Packaging Done";
+                  return (
+                  <tr key={b.id} className={`border-t border-emerald-100 ${i % 2 ? "bg-emerald-50/30" : ""} ${selectedLoadIds.has(b.id) ? "bg-emerald-100/40" : ""}`}>
+                    <td className="px-3 py-2 text-center">
+                      {loadable && (
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 accent-emerald-600 cursor-pointer align-middle"
+                          checked={selectedLoadIds.has(b.id)}
+                          onChange={() => toggleSelectOne(b.id)}
+                          aria-label={`Select ${b.batch}`}
+                        />
+                      )}
+                    </td>
+                    <td className="px-3 py-2">
+                      <button
+                        type="button"
+                        onClick={() => navigate("/dispatch-monitoring")}
+                        className="font-mono text-xs font-semibold text-emerald-700 hover:underline"
+                        title="Open in Dispatch Monitoring"
+                      >
+                        {b.dispatchId ?? `DSP-${b.batch}`}
+                      </button>
+                    </td>
+                    <td className="px-3 py-2">
+                      <button
+                        type="button"
+                        onClick={() => navigate("/packaging")}
+                        className="font-mono text-xs font-semibold text-primary hover:underline"
+                        title="Open in Packaging"
+                      >
+                        {b.batch}
+                      </button>
+                    </td>
+                    <td className="px-3 py-2 font-medium">{b.item}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-xs">{b.qty > 0 ? b.qty.toLocaleString() : "—"}</td>
+                    {/* Meals — clickable → Order Details modal (meals + count) */}
+                    <td className="px-3 py-2">
+                      <button
+                        type="button"
+                        onClick={() => setMealsBatch(b)}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-sky-300 bg-sky-50 px-2 py-0.5 text-[11px] font-semibold text-sky-700 hover:bg-sky-100"
+                        title="View order meals"
+                      >
+                        <Eye className="h-3 w-3" /> 1 meal · {b.qty > 0 ? b.qty : "—"}
+                      </button>
+                    </td>
+                    <td className="px-3 py-2">
+                      {loadable ? (
+                        <span className="inline-flex items-center rounded-full border border-teal-300 bg-teal-50 px-2 py-0.5 text-[10px] font-semibold text-teal-700 whitespace-nowrap">Ready To Dispatch</span>
+                      ) : (
+                        <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap ${b.status === "Received At Airport" ? "border-emerald-300 bg-emerald-50 text-emerald-700" : "border-sky-300 bg-sky-50 text-sky-700"}`}>
+                          {b.status === "Received At Airport" ? "Dispatched" : "Forwarded To Airport"}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <button
+                        type="button"
+                        title="View"
+                        onClick={() => setViewPkgBatch(b)}
+                        className="inline-flex items-center justify-center h-7 w-7 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
+                      >
+                        <Eye className="h-4 w-4" />
+                      </button>
+                    </td>
+                  </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── Ready-to-load batch detail (View) ───────────────────────────────── */}
+      {viewPkgBatch && (
+        <Dialog open onOpenChange={(o) => { if (!o) setViewPkgBatch(null); }}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>Packaged Batch — {viewPkgBatch.batch}</DialogTitle>
+            </DialogHeader>
+            <div className="grid grid-cols-2 gap-3 text-sm py-1">
+              <div><div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Dispatch ID</div><div className="font-mono text-xs">{viewPkgBatch.dispatchId ?? `DSP-${viewPkgBatch.batch}`}</div></div>
+              <div><div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Batch ID</div><div className="font-mono text-xs">{viewPkgBatch.batch}</div></div>
+              <div><div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Item</div><div className="font-medium">{viewPkgBatch.item}</div></div>
+              <div><div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Qty</div><div className="tabular-nums">{viewPkgBatch.qty > 0 ? viewPkgBatch.qty.toLocaleString() : "—"}</div></div>
+              <div><div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Standard / Measured</div><div className="text-xs">{viewPkgBatch.standardTemp} · <span className="text-green-600 font-medium">{viewPkgBatch.measuredTemp}°C</span></div></div>
+              <div><div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Taste</div><div className="text-xs">{viewPkgBatch.taste || "—"}</div></div>
+              <div className="col-span-2"><div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Packaged At</div><div className="text-xs">{viewPkgBatch.packagedAt || "—"}</div></div>
+            </div>
+            <DialogFooter className="gap-2">
+              <Button variant="outline" onClick={() => navigate("/packaging")}>Full trail in Packaging</Button>
+              <Button variant="outline" onClick={() => setViewPkgBatch(null)}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {/* ── Order Details (from a packaged batch's Meals cell) ─────────────────── */}
+      {mealsBatch && (
+        <Dialog open onOpenChange={(v) => !v && setMealsBatch(null)}>
+          <DialogContent className="w-full max-w-full sm:max-w-lg">
+            <DialogHeader>
+              <DialogTitle>Order Details — {mealsBatch.batch}</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 text-sm">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                <div><span className="text-muted-foreground">Order:</span><span className="font-semibold ml-1">{mealsBatch.batch}</span></div>
+                <div><span className="text-muted-foreground">Dispatch Ref:</span><span className="font-semibold ml-1">{mealsBatch.dispatchId ?? `DSP-${mealsBatch.batch}`}</span></div>
+                <div><span className="text-muted-foreground">Item:</span><span className="font-semibold ml-1">{mealsBatch.item}</span></div>
+                <div><span className="text-muted-foreground">Date:</span><span className="font-semibold ml-1">{mealsBatch.date}</span></div>
+              </div>
+              <div className="pt-2 border-t border-border flex gap-3 flex-wrap">
+                <div>
+                  <span className="text-muted-foreground">Packaging:</span>
+                  <span className="ml-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">{mealsBatch.status}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">QC:</span>
+                  <span className="ml-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">QC Done</span>
+                </div>
+              </div>
+              <div>
+                <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-1">Meals (1)</div>
+                <table className="w-full text-xs border border-slate-200 rounded-md overflow-hidden">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr>
+                      <th className="p-2 text-left font-semibold">Production</th>
+                      <th className="p-2 text-left font-semibold">Meal</th>
+                      <th className="p-2 text-left font-semibold">Type</th>
+                      <th className="p-2 text-right font-semibold">Qty</th>
+                      <th className="p-2 text-left font-semibold">Warehouse</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="border-t border-slate-100">
+                      <td className="p-2 font-mono text-primary">{mealsBatch.batch}</td>
+                      <td className="p-2">{mealsBatch.item}</td>
+                      <td className="p-2"><span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${MEAL_TYPE_BADGE[mealTypeForItem(mealsBatch.item)] ?? "bg-muted text-foreground"}`}>{mealTypeForItem(mealsBatch.item)}</span></td>
+                      <td className="p-2 text-right tabular-nums font-medium">{mealsBatch.qty > 0 ? mealsBatch.qty : "—"}</td>
+                      <td className="p-2 text-muted-foreground">{warehouseForItem(mealsBatch.item)}</td>
+                    </tr>
+                    <tr className="border-t-2 border-slate-300 bg-slate-50/80">
+                      <td className="p-2 font-bold" colSpan={3}>Total</td>
+                      <td className="p-2 text-right font-bold tabular-nums">{mealsBatch.qty > 0 ? mealsBatch.qty : "—"}</td>
+                      <td></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setMealsBatch(null)}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+
+      {/* ── Catering Point Dispatch Entry — cold-chain capture + scan-to-load ──── */}
+      <Dialog open={cpdOpen} onOpenChange={(v) => !v && setCpdOpen(false)}>
+        <DialogContent className="w-full max-w-full sm:max-w-3xl max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
+          {/* Header */}
+          <div className="bg-gradient-to-r from-indigo-700 to-violet-600 text-white px-6 pt-5 pb-4 shrink-0 flex items-center justify-between gap-3">
+            <div>
+              <DialogTitle className="text-base font-semibold flex items-center gap-2 text-white">
+                <PlaneLanding className="h-4 w-4" /> Catering Point Dispatch Entry
+              </DialogTitle>
+              <p className="text-indigo-200 text-xs mt-0.5">Baunia Central Kitchen</p>
+            </div>
+            <span className="rounded-full bg-white/15 px-3 py-1 text-xs font-semibold whitespace-nowrap">Dispatch No: {cpdDispatchNo}</span>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
+            {/* Cold-chain banner */}
+            <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-700 flex items-center gap-2">
+              <ThermometerSun className="h-4 w-4 shrink-0" /> Max. Temp. Limit: +8°C — Cold chain integrity must be maintained throughout dispatch
+            </div>
+
+            {/* Vehicle Details */}
+            <div>
+              <div className="text-xs font-bold uppercase tracking-wider text-indigo-700 mb-2 border-b pb-1">Vehicle Details</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Vehicle No <span className="text-destructive">*</span></label>
+                  <Input value={cpdVehicle} onChange={(e) => setCpdVehicle(e.target.value)} placeholder="e.g. HiLoader-02" className="mt-1 h-9" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Vehicle Clean <span className="text-destructive">*</span></label>
+                  <div className="mt-1 grid grid-cols-2 gap-2">
+                    {(["Yes", "No"] as const).map((v) => (
+                      <button
+                        key={v} type="button" onClick={() => setCpdVehicleClean(v)}
+                        className={`h-9 rounded-md border text-sm font-medium transition-colors ${cpdVehicleClean === v ? "border-indigo-500 bg-indigo-50 text-indigo-700" : "border-input hover:bg-muted/40"}`}
+                      >
+                        {v}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Batches to load + scan — right under Vehicle Details */}
+            <div>
+              <div className="flex items-center justify-between mb-2 border-b pb-1">
+                <span className="text-xs font-bold uppercase tracking-wider text-indigo-700">Batches to Load</span>
+                <span className="text-xs font-semibold">Loaded <span className="text-emerald-600">{loadedCount}</span> / {loadTargets.length}</span>
+              </div>
+              {loadTargets.length === 0 ? (
+                <div className="text-center text-sm text-muted-foreground py-6">No batches selected to load.</div>
+              ) : (
+                <div className="space-y-2">
+                  {loadTargets.map((b) => {
+                    const loaded = loadedBatchIds.has(b.id);
+                    return (
+                      <div key={b.id} className={`flex items-center justify-between rounded-md border px-3 py-2 ${loaded ? "border-emerald-300 bg-emerald-50" : "border-border bg-card"}`}>
+                        <div className="min-w-0">
+                          <div className="font-medium text-sm truncate">{b.item}</div>
+                          <div className="font-mono text-[10px] text-muted-foreground">{b.batch} · {b.dispatchId ?? `DSP-${b.batch}`} · Qty {b.qty > 0 ? b.qty : "—"}</div>
+                        </div>
+                        {loaded ? (
+                          <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 shrink-0"><CheckCircle2 className="h-3.5 w-3.5" /> Loaded</span>
+                        ) : (
+                          <Button size="sm" variant="outline" className="shrink-0" onClick={() => setScanLabelBatch(b)}>
+                            <ScanLine className="h-3.5 w-3.5 mr-1" /> Scan
+                          </Button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {/* Product Core Temperature */}
+            <div>
+              <div className="text-xs font-bold uppercase tracking-wider text-indigo-700 mb-2 border-b pb-1">Product Core Temperature</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Chilled Temp (°C)</label>
+                  <Input value={cpdChilled} onChange={(e) => setCpdChilled(e.target.value)} placeholder="e.g. 3.0" className="mt-1 h-9 tabular-nums" />
+                  <p className="text-[10px] text-sky-600 mt-0.5">Standard: 1°C – 4°C for chilled products</p>
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Frozen Temp (°C)</label>
+                  <Input value={cpdFrozen} onChange={(e) => setCpdFrozen(e.target.value)} placeholder="e.g. -10.0" className="mt-1 h-9 tabular-nums" />
+                  <p className="text-[10px] text-sky-600 mt-0.5">Standard: -12°C – -8°C for frozen items</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Loading Times & Vehicle Temperature */}
+            <div>
+              <div className="text-xs font-bold uppercase tracking-wider text-indigo-700 mb-2 border-b pb-1">Loading Times &amp; Vehicle Temperature</div>
+              <div className="flex items-center gap-3 flex-wrap mb-3">
+                {cpdLoadStartIso ? (
+                  <span className="inline-flex items-center gap-1.5 text-sm font-semibold text-indigo-700">
+                    <Clock className="h-4 w-4 animate-pulse" /> Loading… {fmtElapsed(cpdLoadStartIso)}
+                    <span className="text-[10px] text-muted-foreground font-normal">(started {cpdLoadStartTime} · auto-stops when all batches scanned)</span>
+                  </span>
+                ) : cpdLoadEndTime ? (
+                  <div className="text-sm space-y-0.5">
+                    <div className="inline-flex items-center gap-1.5 font-semibold text-emerald-600"><CheckCircle2 className="h-4 w-4" /> Loading completed</div>
+                    <div className="text-xs text-muted-foreground">Loading Started at: <span className="font-medium text-foreground tabular-nums">{cpdLoadStartTime || "—"}</span></div>
+                    <div className="text-xs text-muted-foreground">Loading Completed at: <span className="font-medium text-foreground tabular-nums">{cpdLoadEndTime}</span></div>
+                    <div className="text-xs text-muted-foreground">Total Loading Time: <span className="font-medium text-foreground tabular-nums">{fmtDuration(cpdLoadDurationSec)}</span></div>
+                  </div>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Clock className="h-3.5 w-3.5" /> Timer starts automatically on the first scan &amp; load.
+                  </span>
+                )}
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Veh. Temp Begin (°C) <span className="text-destructive">*</span></label>
+                  <Input value={cpdVehTempBegin} onChange={(e) => setCpdVehTempBegin(e.target.value)} placeholder="e.g. 5.0" className="mt-1 h-9 tabular-nums" />
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Veh. Temp End (°C) <span className="text-destructive">*</span></label>
+                  <Input value={cpdVehTempEnd} onChange={(e) => setCpdVehTempEnd(e.target.value)} placeholder="e.g. 6.0" className="mt-1 h-9 tabular-nums" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Footer */}
+          <div className="px-6 py-4 border-t shrink-0 flex items-center justify-between gap-2">
+            <p className="text-xs text-muted-foreground">Scan every batch into the vehicle, then forward to airport.</p>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setCpdOpen(false)}>Cancel</Button>
+              <Button
+                className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                disabled={loadTargets.length === 0 || loadedCount < loadTargets.length}
+                onClick={forwardToAirport}
+              >
+                <Truck className="h-4 w-4 mr-1.5" /> Forward to Airport
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Per-batch label popup — Scan shows the label; Scan & Load marks it loaded */}
+      {scanLabelBatch && (
+        <Dialog open onOpenChange={(o) => { if (!o) setScanLabelBatch(null); }}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Printer className="h-4 w-4" /> Scan Label — {scanLabelBatch.batch}
+              </DialogTitle>
+            </DialogHeader>
+            {(() => {
+              const code = `LBL-${scanLabelBatch.batch}`;
+              return (
+                <div className="rounded-lg border-2 border-dashed border-border bg-card p-3 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">USBA Catering · Meal Label</span>
+                    <span className="text-[10px] font-bold text-amber-600">READY TO LOAD</span>
+                  </div>
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="font-semibold text-sm">{scanLabelBatch.item}</span>
+                    <span className="text-xs tabular-nums text-muted-foreground shrink-0">Qty {scanLabelBatch.qty > 0 ? scanLabelBatch.qty : "—"}</span>
+                  </div>
+                  <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+                    <span>Batch <b className="text-foreground font-mono">{scanLabelBatch.batch}</b></span>
+                    <span>Dispatch <b className="text-foreground font-mono">{scanLabelBatch.dispatchId ?? `DSP-${scanLabelBatch.batch}`}</b></span>
+                  </div>
+                  <div className="mt-1">
+                    <div className="flex items-end gap-[1px] h-8 w-full overflow-hidden" aria-hidden>
+                      {code.split("").flatMap((ch, i) =>
+                        [0, 1, 2, 3].map((k) => (
+                          <span key={`${i}-${k}`} className="bg-slate-900" style={{ width: ((ch.charCodeAt(0) >> k) & 1) ? 3 : 1, height: "100%" }} />
+                        )),
+                      )}
+                    </div>
+                    <div className="text-center font-mono text-[11px] tracking-widest mt-1">{code}</div>
+                  </div>
+                </div>
+              );
+            })()}
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setScanLabelBatch(null)}>Cancel</Button>
+              <Button className="bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => confirmScan(scanLabelBatch)}>
+                <ScanLine className="h-4 w-4 mr-1.5" /> Scan &amp; Load
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+
       {/* ── Filter Bar ──────────────────────────────────────────────────────── */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 py-3 mb-4 flex-wrap">
         <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap w-full sm:w-auto">
@@ -2173,7 +2699,7 @@ export default function Dispatch() {
                 <th className="p-3 text-left font-semibold">Dep Time</th>
                 <th className="p-3 text-center font-semibold">Meals</th>
                 <th className="p-3 text-left font-semibold">Status</th>
-                <th className="p-3 text-left font-semibold">Food Safety & QC</th>
+                <th className="p-3 text-left font-semibold">Loading Status</th>
                 <th className="p-3 text-left font-semibold">Actions</th>
               </tr>
             </thead>
@@ -2366,7 +2892,7 @@ export default function Dispatch() {
                               <Button size="sm"
                                 className="h-7 px-3 text-xs shrink-0 bg-violet-600 hover:bg-violet-700 text-white border-0"
                                 onClick={() => handleInitiateQC(flightGroup.flight)}>
-                                <ShieldCheck className="h-3 w-3 mr-1" /> Initiate QC
+                                <ShieldCheck className="h-3 w-3 mr-1" /> Vehicle Load
                               </Button>
                             ) : (
                               <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600 border border-slate-200">Pending</span>

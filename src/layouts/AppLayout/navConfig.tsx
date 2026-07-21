@@ -190,6 +190,7 @@ export const NAV_MODULES: NavModule[] = [
     icon: I(PackageCheck),
     children: [
       { key: '/packaging-dispatch-overview', label: 'Dispatch Dashboard', icon: I(LayoutDashboard) },
+      { key: '/packaging',                   label: 'Packaging', icon: I(Package) },
       { key: '/dispatch',                    label: 'Dispatch', icon: I(PackageCheck) },
       { key: '/dispatch-monitoring',         label: 'Dispatch Monitoring', icon: I(Truck) },
     ],

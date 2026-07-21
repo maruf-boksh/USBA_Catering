@@ -48,12 +48,18 @@ const FOOD_ITEMS = [
   "Vegetable Stir Fry",
 ];
 
-type ItemConfig = { standardTemp: number };
+// standardTemp = minimum safe temperature; thresholdTemp = maximum sensible
+// reading. A measured temp is only logical within [standardTemp, thresholdTemp].
+type ItemConfig = { standardTemp: number; thresholdTemp: number };
 
 type CookingRecord = (typeof cookingTempLogs)[number] & {
   date: string;
   failReason?: string;
   checkedAt?: string;
+  /** Sensory taste result recorded at sign-off (e.g. Good / Average / free-text). */
+  taste?: string;
+  /** Max sensible reading for the item (from HACCP config) at sign-off time. */
+  thresholdTemp?: number;
 };
 type T = CookingRecord;
 
@@ -67,18 +73,24 @@ export default function CookingTemp() {
 
   // Item configuration: item name → standard temp only
   const [itemConfigs, setItemConfigs] = useState<Record<string, ItemConfig>>({
-    "Chicken Biryani": { standardTemp: 75 },
-    "Veg Pulao": { standardTemp: 70 },
-    "Grilled Salmon": { standardTemp: 63 },
-    "Continental Breakfast": { standardTemp: 65 },
-    "Hindu Meal Special": { standardTemp: 75 },
-    "Heavy Snack Box": { standardTemp: 70 },
+    "Chicken Biryani": { standardTemp: 75, thresholdTemp: 95 },
+    "Veg Pulao": { standardTemp: 70, thresholdTemp: 90 },
+    "Grilled Salmon": { standardTemp: 63, thresholdTemp: 85 },
+    "Continental Breakfast": { standardTemp: 65, thresholdTemp: 85 },
+    "Hindu Meal Special": { standardTemp: 75, thresholdTemp: 95 },
+    "Heavy Snack Box": { standardTemp: 70, thresholdTemp: 90 },
   });
 
   // HACCP config modal state
   const [newRecordOpen, setNewRecordOpen] = useState(false);
   const [newRecordItem, setNewRecordItem] = useState("");
   const [newRecordStandardTemp, setNewRecordStandardTemp] = useState<number | "">("");
+  const [newRecordThresholdTemp, setNewRecordThresholdTemp] = useState<number | "">("");
+  // When true, the Item field is a free-text input for adding a brand-new item
+  // (not in the predefined list) rather than the dropdown.
+  const [customItemMode, setCustomItemMode] = useState(false);
+  // Item whose full HACCP standard is being viewed in the config dialog.
+  const [viewConfigItem, setViewConfigItem] = useState<string | null>(null);
 
   // Filters
   const [filterDate, setFilterDate] = useState("");
@@ -93,9 +105,14 @@ export default function CookingTemp() {
   const [qcAllOpen, setQcAllOpen] = useState(false); // bulk "record test for all pending QC"
   const [qcTarget, setQcTarget] = useState<WfProductionEntry | null>(null);
   const [qcTemp, setQcTemp] = useState(75);
+  const [qcThreshold, setQcThreshold] = useState(95); // max sensible reading for the item
   const [qcMeasured, setQcMeasured] = useState(0);
   const [qcCookedBy, setQcCookedBy] = useState("");
   const [qcBatchNo, setQcBatchNo] = useState("");
+  // Sensory taste parameter — a QC dimension independent of temperature (a batch
+  // can be at temp yet off-taste, or tasty yet fail another check).
+  const [qcTaste, setQcTaste] = useState<"" | "Good" | "Average" | "Not Good" | "Other">("");
+  const [qcTasteOther, setQcTasteOther] = useState(""); // free-text when Taste = "Other"
   // Per-batch inputs for the combined "Record Test — All" form (keyed by entry id).
   const [qcAllRows, setQcAllRows] = useState<Record<string, { measured: number | ""; cookedBy: string }>>({});
 
@@ -124,9 +141,12 @@ export default function CookingTemp() {
     const config = itemConfigs[itemName];
     setQcTarget(entry);
     setQcTemp(config?.standardTemp ?? 75);
+    setQcThreshold(config?.thresholdTemp ?? (config?.standardTemp ?? 75) + 20);
     setQcMeasured(0);
     setQcCookedBy("");
     setQcBatchNo(entry.id);
+    setQcTaste("");
+    setQcTasteOther("");
     setFailReason("");
     setRecookConfirmOpen(false);
     setQcOpen(true);
@@ -134,7 +154,12 @@ export default function CookingTemp() {
 
   const signOff = (passed: boolean) => {
     if (!qcTarget) return;
-    if (!passed && !failReason.trim()) { toast.error("Please enter a reason for rejection."); return; }
+    // Temperature-accepted re-cooks are driven by the sensory/taste result, which
+    // has no separate justification field — fall back to the taste as the reason.
+    const tasteNote = qcTaste === "Other" ? qcTasteOther.trim() : qcTaste;
+    const effectiveFailReason =
+      failReason.trim() || (tasteNote ? `Sensory/taste not acceptable — ${tasteNote}` : "");
+    if (!passed && !effectiveFailReason) { toast.error("Please enter a reason for rejection."); return; }
     const now = new Date();
     const dateStr = now.toLocaleDateString("en-GB");
     const timeStr = now.toLocaleTimeString("en-GB");
@@ -155,7 +180,9 @@ export default function CookingTemp() {
         sensoryPass: passed,
         checkedBy: checkedByFull,
         date: now.toISOString().slice(0, 10),
-        failReason: passed ? undefined : failReason.trim(),
+        failReason: passed ? undefined : effectiveFailReason,
+        taste: tasteNote || undefined,
+        thresholdTemp: qcThreshold,
         checkedAt: stamp,
       } as T,
       ...curr,
@@ -292,13 +319,19 @@ export default function CookingTemp() {
   const saveItemConfig = () => {
     if (!newRecordItem) { toast.error("Please select a food item."); return; }
     if (newRecordStandardTemp === "" || isNaN(Number(newRecordStandardTemp))) { toast.error("Please enter a standard temperature."); return; }
+    if (newRecordThresholdTemp === "" || isNaN(Number(newRecordThresholdTemp))) { toast.error("Please enter a threshold temperature."); return; }
+    if (Number(newRecordThresholdTemp) <= Number(newRecordStandardTemp)) {
+      toast.error("Threshold temperature must be higher than the standard temperature."); return;
+    }
     setItemConfigs(prev => ({
       ...prev,
-      [newRecordItem]: { standardTemp: Number(newRecordStandardTemp) },
+      [newRecordItem]: { standardTemp: Number(newRecordStandardTemp), thresholdTemp: Number(newRecordThresholdTemp) },
     }));
     setNewRecordOpen(false);
     setNewRecordItem("");
     setNewRecordStandardTemp("");
+    setNewRecordThresholdTemp("");
+    setCustomItemMode(false);
     toast.success(`Configuration saved for ${newRecordItem}.`);
   };
 
@@ -307,6 +340,7 @@ export default function CookingTemp() {
     const config = itemConfigs[itemName];
     setQcTarget(entry);
     setQcTemp(config?.standardTemp ?? 75);
+    setQcThreshold(config?.thresholdTemp ?? (config?.standardTemp ?? 75) + 20);
     setQcMeasured(0);
     setQcCookedBy("");
     setQcBatchNo(entry.id);
@@ -374,11 +408,28 @@ export default function CookingTemp() {
         {r.measuredTemp}°C
       </span>
     ) },
-    { key: "cookedBy", header: "Cooked By" },
     { key: "sensoryPass", header: "Sensory", render: (r) => (
-      <StatusBadge status={r.sensoryPass ? "Pass" : "Fail"} />
+      // Sensory reflects the temperature / HACCP result (Pass when at/above standard).
+      <StatusBadge status={r.measuredTemp >= r.standardTempMin ? "Pass" : "Fail"} />
     ) },
+    { key: "taste", header: "Taste", render: (r) => {
+      // A batch that met temperature but was still sent back failed on taste.
+      const tasteFailed = !r.sensoryPass && r.measuredTemp >= r.standardTempMin;
+      if (tasteFailed) {
+        return <StatusBadge status="Fail" />;
+      }
+      return r.taste
+        ? <span className="text-xs">{r.taste}</span>
+        : <span className="text-muted-foreground text-xs">—</span>;
+    } },
+    { key: "cookedBy", header: "Cooked By" },
     { key: "checkedBy", header: "Checked By (Sup-Hygiene)" },
+    { key: "status", header: "Status", render: (r) => (
+      // Overall result — Passed only when both temperature and taste passed.
+      <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${r.sensoryPass ? "border-emerald-300 bg-emerald-50 text-emerald-700" : "border-rose-300 bg-rose-50 text-rose-700"}`}>
+        {r.sensoryPass ? "Passed" : "Failed"}
+      </span>
+    ) },
   ];
 
   const uniqueItems = Array.from(new Set(records.map(r => r.item))).sort();
@@ -417,28 +468,55 @@ export default function CookingTemp() {
 
               {/* Add item form */}
               <div className="rounded-md border border-border bg-muted/20 p-4 space-y-3">
-                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Add / Update Item</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Add / Update Item</p>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs"
+                    onClick={() => {
+                      setCustomItemMode((m) => !m);
+                      setNewRecordItem("");
+                      setNewRecordStandardTemp("");
+                      setNewRecordThresholdTemp("");
+                    }}
+                  >
+                    <Plus className="h-3 w-3 mr-1" /> {customItemMode ? "From List" : "Add New"}
+                  </Button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <Label className="text-xs">Item</Label>
-                    <select
-                      value={newRecordItem}
-                      onChange={(e) => {
-                        const item = e.target.value;
-                        setNewRecordItem(item);
-                        if (itemConfigs[item]) {
-                          setNewRecordStandardTemp(itemConfigs[item].standardTemp);
-                        } else {
-                          setNewRecordStandardTemp("");
-                        }
-                      }}
-                      className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    >
-                      <option value="">— Select item —</option>
-                      {FOOD_ITEMS.map(item => (
-                        <option key={item} value={item}>{item}</option>
-                      ))}
-                    </select>
+                    {customItemMode ? (
+                      <Input
+                        value={newRecordItem}
+                        onChange={(e) => setNewRecordItem(e.target.value)}
+                        placeholder="New item name"
+                        className="mt-1"
+                      />
+                    ) : (
+                      <select
+                        value={newRecordItem}
+                        onChange={(e) => {
+                          const item = e.target.value;
+                          setNewRecordItem(item);
+                          if (itemConfigs[item]) {
+                            setNewRecordStandardTemp(itemConfigs[item].standardTemp);
+                            setNewRecordThresholdTemp(itemConfigs[item].thresholdTemp);
+                          } else {
+                            setNewRecordStandardTemp("");
+                            setNewRecordThresholdTemp("");
+                          }
+                        }}
+                        className="mt-1 w-full h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      >
+                        <option value="">— Select item —</option>
+                        {FOOD_ITEMS.map(item => (
+                          <option key={item} value={item}>{item}</option>
+                        ))}
+                      </select>
+                    )}
                   </div>
                   <div>
                     <Label className="text-xs">Standard Temp (°C)</Label>
@@ -446,13 +524,23 @@ export default function CookingTemp() {
                       type="number"
                       value={newRecordStandardTemp}
                       onChange={(e) => setNewRecordStandardTemp(Number(e.target.value))}
-                      placeholder="e.g. 75"
+                      placeholder="min e.g. 75"
                       className="mt-1"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs">Threshold Temp (°C)</Label>
+                    <Input
+                      type="number"
+                      value={newRecordThresholdTemp}
+                      onChange={(e) => setNewRecordThresholdTemp(Number(e.target.value))}
+                      placeholder="max e.g. 95"
+                      className={`mt-1 ${newRecordThresholdTemp !== "" && newRecordStandardTemp !== "" && Number(newRecordThresholdTemp) <= Number(newRecordStandardTemp) ? "border-destructive focus-visible:ring-destructive" : ""}`}
                     />
                   </div>
                 </div>
                 <p className="text-[11px] text-amber-600 dark:text-amber-400 leading-relaxed">
-                  Ref: HACCP minimum internal temperatures — 75°C poultry, 63°C beef/pork, 70°C fish, 82°C reheated foods.
+                  Ref: HACCP minimum internal temperatures — 75°C poultry, 63°C beef/pork, 70°C fish, 82°C reheated foods. The <span className="font-semibold">threshold</span> is the maximum sensible reading — a measured temp must fall within <span className="font-semibold">standard → threshold</span>.
                 </p>
                 <div className="flex justify-end">
                   <Button size="sm" onClick={saveItemConfig}><Plus className="h-3.5 w-3.5 mr-1" /> Add to List</Button>
@@ -473,6 +561,7 @@ export default function CookingTemp() {
                         <tr className="bg-muted/40 border-b border-border">
                           <th className="text-left px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Item</th>
                           <th className="text-center px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Standard Temp</th>
+                          <th className="text-center px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Threshold Temp</th>
                           <th className="text-center px-3 py-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Action</th>
                         </tr>
                       </thead>
@@ -481,20 +570,31 @@ export default function CookingTemp() {
                           <tr key={item} className={idx % 2 === 0 ? "bg-background" : "bg-muted/20"}>
                             <td className="px-3 py-2 font-medium">{item}</td>
                             <td className="px-3 py-2 text-center tabular-nums">≥{cfg.standardTemp}°C</td>
+                            <td className="px-3 py-2 text-center tabular-nums">≤{cfg.thresholdTemp}°C</td>
                             <td className="px-3 py-2 text-center">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  const updated = { ...itemConfigs };
-                                  delete updated[item];
-                                  setItemConfigs(updated);
-                                  toast.success(`Removed configuration for ${item}.`);
-                                }}
-                                className="inline-flex items-center justify-center h-7 w-7 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
-                                title={`Remove ${item}`}
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
+                              <div className="inline-flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setViewConfigItem(item)}
+                                  className="inline-flex items-center justify-center h-7 w-7 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
+                                  title={`View ${item}`}
+                                >
+                                  <Eye className="h-3.5 w-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const updated = { ...itemConfigs };
+                                    delete updated[item];
+                                    setItemConfigs(updated);
+                                    toast.success(`Removed configuration for ${item}.`);
+                                  }}
+                                  className="inline-flex items-center justify-center h-7 w-7 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                                  title={`Remove ${item}`}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ))}
@@ -511,6 +611,44 @@ export default function CookingTemp() {
           </Dialog>
         }
       />
+
+      {/* HACCP Standard — per-item detail view */}
+      {viewConfigItem && itemConfigs[viewConfigItem] && (
+        <Dialog open onOpenChange={(o) => { if (!o) setViewConfigItem(null); }}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>HACCP Standard — {viewConfigItem}</DialogTitle>
+              <DialogDescription>Configured cooking-temperature range for this food item.</DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3 py-1 text-sm">
+              <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Item</div>
+                <div className="font-medium">{viewConfigItem}</div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-md border border-border bg-muted/30 px-3 py-2.5 text-center">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Standard (min)</div>
+                  <div className="text-xl font-bold tabular-nums text-emerald-700">≥{itemConfigs[viewConfigItem].standardTemp}°C</div>
+                  <div className="text-[10px] text-muted-foreground">HACCP minimum safe</div>
+                </div>
+                <div className="rounded-md border border-border bg-muted/30 px-3 py-2.5 text-center">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Threshold (max)</div>
+                  <div className="text-xl font-bold tabular-nums text-amber-700">≤{itemConfigs[viewConfigItem].thresholdTemp}°C</div>
+                  <div className="text-[10px] text-muted-foreground">Maximum sensible</div>
+                </div>
+              </div>
+              <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Acceptable Range</div>
+                <div className="text-sm font-medium tabular-nums">{itemConfigs[viewConfigItem].standardTemp}°C – {itemConfigs[viewConfigItem].thresholdTemp}°C</div>
+                <div className="text-[10px] text-muted-foreground mt-0.5">A measured reading outside this range is flagged as illogical.</div>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setViewConfigItem(null)}>Close</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 mb-6">
         <KpiCard label="Tests Today" value={records.length} icon={ClipboardCheck} tone="navy" />
@@ -800,14 +938,39 @@ export default function CookingTemp() {
                   <div>{viewRecord.standardTemp}</div>
                 </div>
                 <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Threshold Temp</div>
+                  <div className="tabular-nums">{viewRecord.thresholdTemp != null ? `≤${viewRecord.thresholdTemp}°C` : "—"}</div>
+                </div>
+                <div>
                   <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Measured Temp</div>
                   <div className={viewRecord.measuredTemp >= viewRecord.standardTempMin ? "text-green-600 font-semibold" : "text-red-600 font-semibold"}>
                     {viewRecord.measuredTemp}°C
                   </div>
+                  {viewRecord.thresholdTemp != null && (
+                    <div className={`text-[10px] mt-0.5 font-medium ${viewRecord.measuredTemp > viewRecord.thresholdTemp ? "text-red-600" : "text-muted-foreground"}`}>
+                      {viewRecord.measuredTemp > viewRecord.thresholdTemp
+                        ? `${viewRecord.measuredTemp - viewRecord.thresholdTemp}°C above threshold`
+                        : `${viewRecord.thresholdTemp - viewRecord.measuredTemp}°C below threshold`}
+                    </div>
+                  )}
                 </div>
                 <div>
                   <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Sensory Result</div>
-                  <StatusBadge status={viewRecord.sensoryPass ? "Pass" : "Fail"} />
+                  <StatusBadge status={viewRecord.measuredTemp >= viewRecord.standardTempMin ? "Pass" : "Fail"} />
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Taste</div>
+                  {!viewRecord.sensoryPass && viewRecord.measuredTemp >= viewRecord.standardTempMin ? (
+                    <StatusBadge status="Fail" />
+                  ) : (
+                    <div className={viewRecord.taste ? "font-medium" : "text-muted-foreground"}>{viewRecord.taste || "—"}</div>
+                  )}
+                </div>
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Status</div>
+                  <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold ${viewRecord.sensoryPass ? "border-emerald-300 bg-emerald-50 text-emerald-700" : "border-rose-300 bg-rose-50 text-rose-700"}`}>
+                    {viewRecord.sensoryPass ? "Passed" : "Failed"}
+                  </span>
                 </div>
                 <div>
                   <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Cooked By</div>
@@ -862,7 +1025,7 @@ export default function CookingTemp() {
 
           <div className="space-y-3">
             {/* Auto-filled fields */}
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-3 gap-2">
               <div className="rounded-md border border-border/50 bg-muted/20 px-3 py-2">
                 <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Item</div>
                 <div className="text-sm font-medium truncate">{qcTarget?.outputItemName ?? qcTarget?.bom ?? "—"}</div>
@@ -870,6 +1033,10 @@ export default function CookingTemp() {
               <div className="rounded-md border border-border/50 bg-muted/20 px-3 py-2">
                 <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Standard °C</div>
                 <div className="text-sm font-medium tabular-nums">≥{qcTemp}°C</div>
+              </div>
+              <div className="rounded-md border border-border/50 bg-muted/20 px-3 py-2">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Threshold °C</div>
+                <div className="text-sm font-medium tabular-nums">≤{qcThreshold}°C</div>
               </div>
             </div>
 
@@ -904,7 +1071,62 @@ export default function CookingTemp() {
                       : `✗ ${qcTemp - qcMeasured}°C below standard`}
                   </p>
                 )}
+                {qcMeasured > 0 && (
+                  <p className={`text-[10px] mt-0.5 font-medium ${qcMeasured > qcThreshold ? "text-destructive" : "text-muted-foreground"}`}>
+                    {qcMeasured > qcThreshold
+                      ? `⚠ ${qcMeasured - qcThreshold}°C above threshold (≤${qcThreshold}°C)`
+                      : `${qcThreshold - qcMeasured}°C below threshold (≤${qcThreshold}°C)`}
+                  </p>
+                )}
               </div>
+              {/* Temperature justification — appears right below Measured °C when
+                  the reading is below the HACCP standard. */}
+              {qcMeasured > 0 && qcMeasured < qcTemp && (
+                <div className="col-span-2">
+                  <Label className="text-xs uppercase tracking-wider text-destructive">
+                    Justification — temp below HACCP standard <span className="text-destructive">*</span>
+                  </Label>
+                  <Textarea
+                    value={failReason}
+                    onChange={(e) => setFailReason(e.target.value)}
+                    placeholder="Explain why the temperature is below standard (e.g. sensor issue, re-heat required)..."
+                    className="mt-1 resize-none border-destructive/40 focus-visible:ring-destructive/40"
+                    rows={3}
+                  />
+                </div>
+              )}
+              {/* Taste — optional sensory QC parameter, independent of temperature.
+                  Disabled when the temperature test fails (batch is sent back anyway). */}
+              <div className="col-span-2">
+                <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+                  Taste
+                </Label>
+                <select
+                  value={qcTaste}
+                  onChange={(e) => setQcTaste(e.target.value as typeof qcTaste)}
+                  disabled={qcMeasured > 0 && qcMeasured < qcTemp}
+                  className={`mt-1 w-full h-9 rounded-md border bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 disabled:cursor-not-allowed ${qcTaste === "Not Good" ? "border-destructive focus-visible:ring-destructive" : "border-input"}`}
+                >
+                  <option value="">— Select taste result —</option>
+                  <option value="Good">Good</option>
+                  <option value="Average">Average</option>
+                  <option value="Not Good">Not Good (off-taste)</option>
+                  <option value="Other">Other</option>
+                </select>
+                {qcTaste === "Other" && !(qcMeasured > 0 && qcMeasured < qcTemp) ? (
+                  <Input
+                    value={qcTasteOther}
+                    onChange={(e) => setQcTasteOther(e.target.value)}
+                    placeholder="Specify the taste / sensory observation…"
+                    className="mt-2"
+                  />
+                ) : qcTaste && !(qcMeasured > 0 && qcMeasured < qcTemp) ? (
+                  <p className={`text-[10px] mt-0.5 font-medium ${qcTaste === "Not Good" ? "text-destructive" : "text-green-600"}`}>
+                    {qcTaste === "Not Good" ? "✗ Off-taste — send back if required" : `✓ Taste acceptable (${qcTaste})`}
+                  </p>
+                ) : null}
+              </div>
+              {/* Cooked By */}
               <div className="col-span-2">
                 <Label className="text-xs uppercase tracking-wider text-muted-foreground">
                   Cooked By <span className="text-destructive">*</span>
@@ -920,20 +1142,6 @@ export default function CookingTemp() {
                   ))}
                 </select>
               </div>
-              {qcMeasured > 0 && qcMeasured < qcTemp && (
-                <div className="col-span-2">
-                  <Label className="text-xs uppercase tracking-wider text-destructive">
-                    Justification — temp below HACCP standard <span className="text-destructive">*</span>
-                  </Label>
-                  <Textarea
-                    value={failReason}
-                    onChange={(e) => setFailReason(e.target.value)}
-                    placeholder="Explain why the temperature is below standard (e.g. sensor issue, re-heat required)..."
-                    className="mt-1 resize-none border-destructive/40 focus-visible:ring-destructive/40"
-                    rows={3}
-                  />
-                </div>
-              )}
             </div>
           </div>
 
@@ -947,6 +1155,7 @@ export default function CookingTemp() {
                 if (qcMeasured > 0 && qcMeasured < qcTemp && !failReason.trim()) {
                   toast.error("Justification is required when temperature is below standard."); return;
                 }
+                if (qcTaste === "Other" && !qcTasteOther.trim()) { toast.error("Please specify the taste observation."); return; }
                 setRecookConfirmOpen(true);
               }}
             >
@@ -954,7 +1163,10 @@ export default function CookingTemp() {
             </Button>
             <Button
               className="bg-success text-success-foreground hover:bg-success/90"
-              onClick={() => signOff(true)}
+              onClick={() => {
+                if (qcTaste === "Other" && !qcTasteOther.trim()) { toast.error("Please specify the taste observation."); return; }
+                signOff(true);
+              }}
               disabled={qcMeasured > 0 && qcMeasured < qcTemp}
             >
               <Check className="h-4 w-4 mr-1.5" /> Pass and Complete
@@ -987,12 +1199,29 @@ export default function CookingTemp() {
                 <div className="text-xl font-bold tabular-nums">≥{qcTemp}°C</div>
                 <div className="text-[10px] text-muted-foreground">HACCP minimum</div>
               </div>
-              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-center">
+              {/* Temp card reflects the actual reading — red only when it truly failed. */}
+              <div className={`rounded-md border px-3 py-2.5 text-center ${qcMeasured > 0 && qcMeasured < qcTemp ? "border-destructive/40 bg-destructive/10" : "border-emerald-300 bg-emerald-50"}`}>
                 <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-1">Measured</div>
-                <div className="text-xl font-bold text-destructive tabular-nums">{qcMeasured}°C</div>
-                <div className="text-[10px] text-destructive font-medium">{qcTemp - qcMeasured}°C below standard</div>
+                <div className={`text-xl font-bold tabular-nums ${qcMeasured > 0 && qcMeasured < qcTemp ? "text-destructive" : "text-emerald-700"}`}>{qcMeasured}°C</div>
+                <div className={`text-[10px] font-medium ${qcMeasured > 0 && qcMeasured < qcTemp ? "text-destructive" : "text-emerald-600"}`}>
+                  {qcMeasured > 0 && qcMeasured < qcTemp
+                    ? `${qcTemp - qcMeasured}°C below standard`
+                    : qcMeasured >= qcTemp ? `Meets standard (+${qcMeasured - qcTemp}°C)` : "Temperature accepted"}
+                </div>
               </div>
             </div>
+            {/* Temperature is acceptable — this re-cook is driven by the sensory/taste result. */}
+            {!(qcMeasured > 0 && qcMeasured < qcTemp) && (
+              <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Sensory / Taste — reason for re-cook</div>
+                <div className="text-sm font-semibold text-destructive">
+                  {qcTaste === "Other" ? (qcTasteOther.trim() || "Other") : (qcTaste || "Not acceptable")}
+                </div>
+                <div className="text-[10px] text-muted-foreground mt-1">
+                  Temperature met the HACCP standard; the batch is being returned for taste / sensory quality.
+                </div>
+              </div>
+            )}
             {failReason && (
               <div className="rounded-md border border-border bg-muted/20 px-3 py-2">
                 <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-0.5">Justification</div>

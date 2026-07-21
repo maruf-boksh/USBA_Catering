@@ -271,10 +271,45 @@ function dispatchEntryToTransfer(e: DispatchEntry): Transfer {
   };
 }
 
+// Consumable-return meal lines are physical trays coming back from the flight —
+// they belong to the store's Return List (not consumable stock). Project each
+// consumable return that has meal lines into a Return-kind Transfer so it lists
+// here with a "TRF-" Return ID and can be flashed/deep-linked from the return log.
+type ConsumableReturnLite = {
+  id: string; date: string; flight: string; sector: string; returnedBy: string;
+  lines: { itemId: string; itemName: string; qty: number; uom: string; lineType?: "item" | "meal" }[];
+};
+function consumableReturnToTransfer(r: ConsumableReturnLite): Transfer | null {
+  const mealLines = r.lines.filter((l) => (l.lineType ?? "item") === "meal");
+  if (mealLines.length === 0) return null;
+  return {
+    id: `TRF-${r.id}`,                       // e.g. TRF-CR-7015
+    date: r.date,
+    trRef: `Meal Return ${r.id}`,
+    from: `${r.flight}${r.sector ? ` · ${r.sector}` : ""}`,
+    to: "Cold Kitchen",
+    issuedBy: r.returnedBy || "—",
+    receivedBy: "—",
+    lines: mealLines.map((l, i) => ({
+      id: `TRF-${r.id}-L${i + 1}`,
+      item: l.itemName,
+      uom: l.uom || "Pcs",
+      requestedQty: Number(l.qty) || 0,
+      transferredQty: Number(l.qty) || 0,
+    })),
+    status: "Completed",
+    kind: "Return",
+    officeId: "OFF-001",
+    warehouseId: "WH-001",
+  };
+}
+
 export default function TransferPage() {
   useArrivalFlash();
   const { transferNotes, applyStockDeltas } = useWorkflow();
   const [rows, setRows] = usePersistedState<Transfer[]>("transfer-rows", SEED);
+  // Meal-type consumable returns — bridged into the Return List (read-only).
+  const [consumableReturns] = usePersistedState<ConsumableReturnLite[]>("consumable-returns", []);
   // Same persisted store the Dispatch page uses — so writing "Returned" back onto
   // a dispatch record is reflected there too (read on its next mount).
   const [, setDispatchRecords] = usePersistedState<DispatchRecord[]>("dispatch-records", DISPATCH_RECORDS);
@@ -329,9 +364,14 @@ export default function TransferPage() {
   const bridged: Transfer[] = transferNotes
     .filter((n) => n.grnRef !== "Dispatch")
     .map(wfTransferNoteToTransfer);
+  // Meal-type consumable returns projected as Return-kind transfers for the Return List.
+  const mealReturnTransfers: Transfer[] = consumableReturns
+    .map(consumableReturnToTransfer)
+    .filter((t): t is Transfer => t !== null);
   const localIds = new Set(rows.map((r) => r.id));
   const combined = [
     ...bridged.filter((b) => !localIds.has(b.id)),
+    ...mealReturnTransfers.filter((b) => !localIds.has(b.id)),
     ...rows,
   ];
 
@@ -850,8 +890,12 @@ function TransferTabs({
   const location = useLocation();
   // A dispatch row's "Receive Items" shortcut lands here asking to open the
   // Transfer In Transit tab and blink the rows waiting to be received.
-  const wantReceive = (location.state as { receiveInTransit?: boolean } | null)?.receiveInTransit === true;
-  const [tab, setTab] = useState(wantReceive ? "transit" : "out");
+  const navState = location.state as { receiveInTransit?: boolean; openReturnList?: boolean } | null;
+  const wantReceive = navState?.receiveInTransit === true;
+  // A meal-return "Restocked QTY" link (Consumable Returns → View) lands here
+  // asking to open the Return List so its bridged TRF row can be flashed.
+  const wantReturnList = navState?.openReturnList === true;
+  const [tab, setTab] = useState(wantReceive ? "transit" : wantReturnList ? "return" : "out");
   // Opening the target tab is what each blink nudges toward — clear it then.
   const changeTab = (v: string) => {
     setTab(v);
@@ -1100,7 +1144,14 @@ function TransferList({
       header: "TRF #",
       render: (r) => (
         <div className="flex items-center gap-1.5">
-          <span>{r.id}</span>
+          <button
+            type="button"
+            onClick={() => setViewT(r)}
+            className="font-mono text-xs text-primary hover:underline focus:outline-none focus:underline"
+            title="View transfer details"
+          >
+            {r.id}
+          </button>
           {r.kind === "Return" && (
             <Badge variant="outline" className="h-5 px-1.5 text-[10px] border-navy/30 bg-navy/5 text-navy gap-1">
               <Undo2 className="h-3 w-3" /> Return

@@ -23,7 +23,7 @@ import {
   Check, X as XIcon, Clock, ShieldCheck, Search,
   FileText, FileSearch, ShoppingCart, Truck, ArrowLeftRight, ArrowLeft, Layers, UserCog, Users,
   ClipboardCheck, SlidersHorizontal, History, Eye, User as UserIcon, Calendar, Hash,
-  PackageCheck, AlertTriangle, CheckCircle2, Share2, Plane, MailQuestion, PlaneLanding, PlaneTakeoff,
+  PackageCheck, Package, AlertTriangle, CheckCircle2, Share2, Plane, MailQuestion, PlaneLanding, PlaneTakeoff,
   BadgeDollarSign, Wrench, MessageSquare, CornerUpLeft, LayoutGrid, Timer, Trash2, Undo2, Gavel,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -32,6 +32,7 @@ import {
   useWorkflow,
   type WfDemandRequest, type WfDemandStatus, type WfDispatchApproval,
 } from "@/lib/workflow-store";
+import { mergePassedBatches, type PackagingBatch } from "@/lib/packaging-batches";
 import { inventory, warehouses, consumableItems, type ConsumableItem } from "@/lib/sample-data";
 import { getItemStock } from "@/lib/inventory-stock";
 import { roundQty } from "@/lib/num";
@@ -66,6 +67,7 @@ type Category =
   | "Transfer Request"
   | "Stock Adjustment"
   | "Production Order"
+  | "Packaging"
   | "Bill of Materials"
   | "User Account"
   | "Dispatch"
@@ -117,6 +119,9 @@ type ReturnApprovalRecord = {
   processedBy?: string;
   processedAt?: string;
   declineReason?: string;
+  // Reusable QTY saved by the approver (still Pending). Once set, the pending-list
+  // Approve/Reject buttons unlock so the return can be approved from the list too.
+  reusableConfigured?: boolean;
   lines: {
     itemId: string;
     itemName: string;
@@ -140,6 +145,7 @@ const CATEGORIES: { key: Category; label: string; icon: typeof FileText }[] = [
   { key: "Transfer Request",     label: "Transfer Requests",  icon: ArrowLeftRight  },
   { key: "Stock Adjustment",     label: "Stock Adj.",         icon: SlidersHorizontal },
   { key: "Production Order",     label: "Production",         icon: ClipboardCheck  },
+  { key: "Packaging",            label: "Packaging",          icon: Package         },
   { key: "Bill of Materials",    label: "BOM",                icon: Layers          },
   { key: "User Account",         label: "Users",              icon: UserCog         },
   { key: "Dispatch",             label: "Dispatch",           icon: Truck           },
@@ -162,6 +168,7 @@ const APPROVAL_SECTIONS: { label: string; keys: Category[] }[] = [
   { label: "Procurement Approval",    keys: ["Request for Quotation", "Quotation", "Purchase Requisition", "Purchase Order", "Goods Receipt", "Purchase Return"] },
   { label: "Inventory Approval",      keys: ["Demand Request", "Transfer Request", "Stock Adjustment"] },
   { label: "Production Approval",     keys: ["Production Order", "Bill of Materials"] },
+  { label: "Packaging Approval",      keys: ["Packaging"] },
   { label: "Administration Approval", keys: ["User Account"] },
   { label: "Asset Management Approval", keys: ["Maintenance"] },
   { label: "Consumable Returns Approval", keys: ["Return Items"] },
@@ -355,6 +362,7 @@ const APPROVAL_CHAINS: Partial<Record<Category, { role: string; name: string }[]
   "Transfer Request":      [{ role: "Store In-Charge", name: "S. Ahmed" }, { role: "Inventory Manager", name: "T. Islam" }],
   "Stock Adjustment":      [{ role: "Store In-Charge", name: "S. Ahmed" }, { role: "Inventory Manager", name: "T. Islam" }],
   "Production Order":      [{ role: "Production In-Charge", name: "M. Alam" }, { role: "GM / Admin", name: "R. Hossain" }],
+  "Packaging":             [{ role: "Packaging In-Charge", name: "M. Alam" }, { role: "GM / Admin", name: "R. Hossain" }],
   "Bill of Materials":     [{ role: "Head Chef", name: "M. Alam" }, { role: "Production Head", name: "R. Hossain" }],
   "User Account":          [{ role: "HR", name: "HR Team" }, { role: "Admin", name: "R. Hossain" }],
   "Maintenance":           [{ role: "Asset In-Charge", name: "K. Uddin" }, { role: "GM / Admin", name: "R. Hossain" }],
@@ -532,6 +540,13 @@ export default function ApprovalManagementPage() {
   const [productionDecisions, setProductionDecisions] = useState<
     Record<string, { status: ApprovalStatus; by: string; at: string; reason?: string }>
   >({});
+  // Packaging batches — passed QC (temp + taste), awaiting packaging approval.
+  const [packagingBatches, setPackagingBatches] = usePersistedState<PackagingBatch[]>("packaging-batches", []);
+  useEffect(() => {
+    const qtyFor = (id: string) => productionEntries.find((e) => e.id === id)?.producedQty ?? 0;
+    setPackagingBatches((prev) => mergePassedBatches(prev, qtyFor));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [activeTab, setActiveTab] = useState<Category | "all">(
     searchParams.get("tab") === "dispatch" ? "Dispatch" : "all"
   );
@@ -1005,6 +1020,72 @@ export default function ApprovalManagementPage() {
       });
   }, [productionEntries, productionDecisions]);
 
+  // Project packaging batches (passed temp + taste QC) into the approval queue.
+  // Approving here unlocks the batch on the Packaging page for print/scan.
+  const packagingItems: ApprovalItem[] = useMemo(() => {
+    return packagingBatches.map((b) => {
+      const status: ApprovalStatus =
+        b.status === "Pending Approval" ? "Pending"
+        : b.status === "Rejected"       ? "Rejected"
+        : "Approved";
+      return {
+        id: `PKG-AP-${b.id}`,
+        category: "Packaging" as Category,
+        refId: b.id,
+        title: `${b.item} — packaging (${b.batch})`,
+        requestedBy: "Food Safety & QC",
+        requestedAt: b.date,
+        summary: `${b.qty > 0 ? b.qty.toLocaleString() + " portions · " : ""}Passed temp ${b.measuredTemp}°C (std ${b.standardTemp})${b.taste ? " · Taste " + b.taste : ""}`,
+        itemsCount: 1,
+        status,
+        processedBy: b.approvedBy,
+        processedAt: b.approvedAt,
+        lines: [{ name: b.item, qty: b.qty, uom: "portions", note: `Batch ${b.batch}` }],
+        fields: [
+          { label: "Batch", value: b.batch },
+          { label: "Standard Temp", value: b.standardTemp },
+          { label: "Threshold Temp", value: b.thresholdTemp != null ? `≤${b.thresholdTemp}°C` : "—" },
+          { label: "Measured Temp", value: `${b.measuredTemp}°C` },
+          { label: "Taste", value: b.taste || "—" },
+          { label: "Cooked By", value: b.cookedBy },
+          { label: "QC Checked By", value: b.checkedBy },
+          { label: "Packaging Status", value: b.status },
+        ],
+      };
+    });
+  }, [packagingBatches]);
+
+  // Batches forwarded to airport → Dispatch approval. Approving unlocks them for
+  // airport receive in Dispatch Monitoring.
+  const dispatchForwardItems: ApprovalItem[] = useMemo(() => {
+    return packagingBatches
+      .filter((b) => b.status === "Forwarded To Airport" || b.status === "Airport Approved" || b.status === "Received At Airport")
+      .map((b) => {
+        const status: ApprovalStatus = b.status === "Forwarded To Airport" ? "Pending" : "Approved";
+        return {
+          id: `DSPF-AP-${b.id}`,
+          category: "Dispatch" as Category,
+          refId: b.id,
+          title: `${b.item} — dispatch to airport (${b.batch})`,
+          requestedBy: "Catering Point",
+          requestedAt: b.dispatchedAt ?? b.date,
+          summary: `${b.qty > 0 ? b.qty.toLocaleString() + " portions · " : ""}Loaded onto ${b.vehicleNo ?? "vehicle"} · ${b.dispatchId ?? "DSP-" + b.batch}`,
+          itemsCount: 1,
+          status,
+          processedBy: b.airportApprovedBy,
+          processedAt: b.airportApprovedAt,
+          lines: [{ name: b.item, qty: b.qty, uom: "portions", note: `Batch ${b.batch}` }],
+          fields: [
+            { label: "Batch", value: b.batch },
+            { label: "Dispatch ID", value: b.dispatchId ?? `DSP-${b.batch}` },
+            { label: "Vehicle No", value: b.vehicleNo ?? "—" },
+            { label: "Forwarded At", value: b.dispatchedAt ?? "—" },
+            { label: "Status", value: b.status },
+          ],
+        };
+      });
+  }, [packagingBatches]);
+
   // Project maintenance approvals that have been submitted (not "Logged") into the queue.
   const maintenanceItems: ApprovalItem[] = useMemo(() => {
     return maintenanceApprovals
@@ -1258,7 +1339,7 @@ export default function ApprovalManagementPage() {
   })), [directReceipts]);
 
   const allItems = useMemo(() => {
-    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...prItems, ...stockAdjItems, ...wfPoItems, ...wfPoCloseItems, ...productionItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...hygieneAppealItems, ...hygieneDailyItems, ...wastageItems, ...delayApprovalItems, ...directReceiptItems, ...items];
+    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...prItems, ...stockAdjItems, ...wfPoItems, ...wfPoCloseItems, ...productionItems, ...packagingItems, ...dispatchForwardItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...hygieneAppealItems, ...hygieneDailyItems, ...wastageItems, ...delayApprovalItems, ...directReceiptItems, ...items];
     // Overlay "Reviewed" (returned for correction) onto still-pending requests.
     return base.map((it) => {
       const rv = reviews[reviewKey(it.category, it.refId)];
@@ -1267,7 +1348,7 @@ export default function ApprovalManagementPage() {
       }
       return it;
     });
-  }, [flightOrderItems, demandItems, rfqItems, quotationItems, prItems, stockAdjItems, wfPoItems, wfPoCloseItems, productionItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, hygieneAppealItems, hygieneDailyItems, wastageItems, delayApprovalItems, directReceiptItems, items, reviews]);
+  }, [flightOrderItems, demandItems, rfqItems, quotationItems, prItems, stockAdjItems, wfPoItems, wfPoCloseItems, productionItems, packagingItems, dispatchForwardItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, hygieneAppealItems, hygieneDailyItems, wastageItems, delayApprovalItems, directReceiptItems, items, reviews]);
 
   const counts = useMemo(() => {
     const pendingByCat = new Map<Category, number>();
@@ -1432,14 +1513,15 @@ export default function ApprovalManagementPage() {
         return;
       }
     }
+    // Save the Reusable QTY onto the lines but KEEP the request Pending — this
+    // just configures the quantities. The actual approval (which credits stock)
+    // happens from the pending list or the modal's Approve button afterwards.
     setReturnApprovals((prev) =>
       prev.map((r) =>
         r.id === detailItem.refId
           ? {
               ...r,
-              status: "Approved",
-              processedBy: `${role} (GM/Admin)`,
-              processedAt: stamp(),
+              reusableConfigured: true,
               lines: r.lines.map((l, i) => ({
                 ...l,
                 reusableQty: Number(returnLineQtys[i]) || 0,
@@ -1449,27 +1531,18 @@ export default function ApprovalManagementPage() {
           : r,
       ),
     );
-    // Add reusable qty back to consumable inventory stock
-    setConsumableInventory((prev) => {
-      const updated = [...prev];
-      for (let i = 0; i < ra.lines.length; i++) {
-        if (ra.lines[i].lineType !== "item") continue;
-        const rq = Number(returnLineQtys[i]) || 0;
-        if (rq <= 0) continue;
-        const idx = updated.findIndex((it) => it.id === ra.lines[i].itemId);
-        if (idx === -1) continue;
-        const item = updated[idx];
-        const newStock = item.stock + rq;
-        updated[idx] = {
-          ...item,
-          stock: newStock,
-          status: newStock < item.reorder * 0.5 ? "Critical" : newStock < item.reorder ? "Low" : "OK",
-        };
-      }
-      return updated;
-    });
-    toast.success(`${detailItem.refId} — Return items approved. Reusable quantities saved.`);
+    toast.success(`${detailItem.refId} — Reusable quantities saved. Approve or Reject from the list.`);
     setReturnItemsSaved(true);
+  };
+
+  // A Return Items request needs its Reusable QTY configured (via View) before it
+  // can be approved/rejected from the pending list. Configuring is an explicit
+  // Save in the detail modal (which keeps it Pending).
+  const returnItemsNeedsReusableConfig = (it: ApprovalItem): boolean => {
+    if (it.category !== "Return Items") return false;
+    const ra = returnApprovals.find((r) => r.id === it.refId);
+    if (!ra) return false;
+    return !ra.reusableConfigured;
   };
 
   const approve = (it: ApprovalItem, opts: { silent?: boolean } = {}) => {
@@ -1557,6 +1630,30 @@ export default function ApprovalManagementPage() {
       if (!silent) toast.success(`${it.refId} approved — released to production.`);
       return;
     }
+    if (it.category === "Packaging" && it.id.startsWith("PKG-AP-")) {
+      // Unlock the batch on the Packaging page (Pending Approval → Approved).
+      setPackagingBatches((prev) =>
+        prev.map((b) =>
+          b.id === it.refId
+            ? { ...b, status: "Approved" as PackagingBatch["status"], approvedBy: `${role} (GM/Admin)`, approvedAt: stamp() }
+            : b,
+        ),
+      );
+      if (!silent) toast.success(`${it.refId} approved — sent to Packaging.`);
+      return;
+    }
+    if (it.category === "Dispatch" && it.id.startsWith("DSPF-AP-")) {
+      // Forwarded batch approved → unlock for airport receive in Dispatch Monitoring.
+      setPackagingBatches((prev) =>
+        prev.map((b) =>
+          b.id === it.refId
+            ? { ...b, status: "Airport Approved" as PackagingBatch["status"], airportApprovedBy: `${role} (GM/Admin)`, airportApprovedAt: stamp() }
+            : b,
+        ),
+      );
+      if (!silent) toast.success(`${it.refId} approved — sent to Dispatch Monitoring for airport receive.`);
+      return;
+    }
     if (it.id.startsWith("WFPO-CLOSE-")) {
       updatePurchaseOrder(it.refId, { status: "Closed", closeRequestedFrom: undefined });
       if (!silent) toast.success(`${it.refId} close approved — PO closed, no further receipts.`);
@@ -1577,13 +1674,36 @@ export default function ApprovalManagementPage() {
       return;
     }
     if (it.category === "Return Items") {
+      const ra = returnApprovals.find((r) => r.id === it.refId);
       setReturnApprovals((prev) =>
-        prev.map((ra) =>
-          ra.id === it.refId
-            ? { ...ra, status: "Approved", processedBy: `${role} (GM/Admin)`, processedAt: stamp() }
-            : ra,
+        prev.map((r) =>
+          r.id === it.refId
+            ? { ...r, status: "Approved", processedBy: `${role} (GM/Admin)`, processedAt: stamp() }
+            : r,
         ),
       );
+      // Credit the saved reusable qty of each returned item line back to consumable
+      // stock (moved here from Save so it lands on actual approval, not configuring).
+      if (ra) {
+        setConsumableInventory((prev) => {
+          const updated = [...prev];
+          for (const l of ra.lines) {
+            if (l.lineType !== "item") continue;
+            const rq = Number(l.reusableQty) || 0;
+            if (rq <= 0) continue;
+            const idx = updated.findIndex((x) => x.id === l.itemId);
+            if (idx === -1) continue;
+            const item = updated[idx];
+            const newStock = item.stock + rq;
+            updated[idx] = {
+              ...item,
+              stock: newStock,
+              status: newStock < item.reorder * 0.5 ? "Critical" : newStock < item.reorder ? "Low" : "OK",
+            };
+          }
+          return updated;
+        });
+      }
       if (!silent) toast.success(`${it.refId} — Return items approved for Airport Store.`);
       return;
     }
@@ -1870,6 +1990,15 @@ export default function ApprovalManagementPage() {
         ...p,
         [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
+    } else if (it.category === "Packaging" && it.id.startsWith("PKG-AP-")) {
+      setPackagingBatches((prev) =>
+        prev.map((b) => (b.id === it.refId ? { ...b, status: "Rejected" as PackagingBatch["status"] } : b)),
+      );
+    } else if (it.category === "Dispatch" && it.id.startsWith("DSPF-AP-")) {
+      // Dispatch declined — send the batch back to Ready to Load.
+      setPackagingBatches((prev) =>
+        prev.map((b) => (b.id === it.refId ? { ...b, status: "Packaging Done" as PackagingBatch["status"], vehicleNo: undefined, dispatchedAt: undefined } : b)),
+      );
     } else if (it.id.startsWith("WFPO-CLOSE-")) {
       // Close request declined — revert the PO to its pre-request status.
       const prior = wfPurchaseOrders.find(p => p.id === it.refId)?.closeRequestedFrom ?? "Approved";
@@ -2164,6 +2293,14 @@ export default function ApprovalManagementPage() {
         ...p,
         [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
       }));
+    } else if (detailItem.category === "Packaging" && detailItem.id.startsWith("PKG-AP-")) {
+      setPackagingBatches((prev) =>
+        prev.map((b) => (b.id === detailItem.refId ? { ...b, status: "Rejected" as PackagingBatch["status"] } : b)),
+      );
+    } else if (detailItem.category === "Dispatch" && detailItem.id.startsWith("DSPF-AP-")) {
+      setPackagingBatches((prev) =>
+        prev.map((b) => (b.id === detailItem.refId ? { ...b, status: "Packaging Done" as PackagingBatch["status"], vehicleNo: undefined, dispatchedAt: undefined } : b)),
+      );
     } else if (detailItem.id.startsWith("WFPO-CLOSE-")) {
       const prior = wfPurchaseOrders.find(p => p.id === detailItem.refId)?.closeRequestedFrom ?? "Approved";
       updatePurchaseOrder(detailItem.refId, { status: prior, closeRequestedFrom: undefined });
@@ -3240,6 +3377,8 @@ export default function ApprovalManagementPage() {
                                   size="sm"
                                   className="h-7 px-2 text-[11px] bg-success text-success-foreground hover:bg-success/90"
                                   onClick={() => approve(it)}
+                                  disabled={returnItemsNeedsReusableConfig(it)}
+                                  title={returnItemsNeedsReusableConfig(it) ? "Configure Reusable QTY in View first" : undefined}
                                 >
                                   <Check className="h-3 w-3 mr-1" /> Approve
                                 </Button>
@@ -3248,6 +3387,8 @@ export default function ApprovalManagementPage() {
                                   variant="outline"
                                   className="h-7 px-2 text-[11px] border-destructive/40 text-destructive hover:bg-destructive/10"
                                   onClick={() => openReject(it)}
+                                  disabled={returnItemsNeedsReusableConfig(it)}
+                                  title={returnItemsNeedsReusableConfig(it) ? "Configure Reusable QTY in View first" : undefined}
                                 >
                                   <XIcon className="h-3 w-3 mr-1" /> Reject
                                 </Button>
@@ -3672,11 +3813,14 @@ export default function ApprovalManagementPage() {
                 const ra = returnApprovals.find((r) => r.id === detailItem.refId);
                 if (!ra || ra.lines.length === 0) return null;
                 const isPending = ra.status === "Pending";
+                // Editable only while Pending AND not yet saved — after Save the
+                // reusable quantities lock and display read-only (still Pending).
+                const editable = isPending && !returnItemsSaved;
                 return (
                   <div>
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">
                       Returned Items — {ra.flight} ({ra.lines.length} line{ra.lines.length === 1 ? "" : "s"})
-                      {isPending && <span className="ml-2 normal-case text-indigo-600">Enter Reusable QTY below</span>}
+                      {editable && <span className="ml-2 normal-case text-indigo-600">Enter Reusable QTY below</span>}
                     </div>
                     <div className="rounded-md border border-border overflow-hidden">
                       <table className="w-full text-sm">
@@ -3707,7 +3851,7 @@ export default function ApprovalManagementPage() {
                               </td>
                               {/* Reusable QTY */}
                               <td className="px-3 py-2 text-center">
-                                {isPending ? (
+                                {editable ? (
                                   <div className="flex items-center justify-center gap-1.5">
                                     <Input
                                       type="number"
@@ -3715,7 +3859,19 @@ export default function ApprovalManagementPage() {
                                       max={l.returnQty}
                                       placeholder="0"
                                       value={returnLineQtys[idx] ?? ""}
-                                      onChange={(e) => setReturnLineQtys((prev) => ({ ...prev, [idx]: e.target.value }))}
+                                      onChange={(e) => {
+                                        const raw = e.target.value;
+                                        if (raw === "") {
+                                          setReturnLineQtys((prev) => ({ ...prev, [idx]: "" }));
+                                          return;
+                                        }
+                                        // Reusable QTY can never exceed the Return QTY — clamp on entry.
+                                        let n = Number(raw);
+                                        if (isNaN(n)) return;
+                                        if (n < 0) n = 0;
+                                        if (n > l.returnQty) n = l.returnQty;
+                                        setReturnLineQtys((prev) => ({ ...prev, [idx]: String(n) }));
+                                      }}
                                       className="h-7 w-20 text-center text-xs tabular-nums"
                                     />
                                     <span className="text-[10px] text-muted-foreground">{l.uom}</span>
@@ -3731,7 +3887,7 @@ export default function ApprovalManagementPage() {
                               </td>
                               {/* Wastage — auto-computed */}
                               <td className="px-3 py-2 text-center">
-                                {isPending ? (() => {
+                                {editable ? (() => {
                                   const hasInput = returnLineQtys[idx] !== "" && returnLineQtys[idx] !== undefined;
                                   if (!hasInput) return <span className="text-[10px] text-muted-foreground">—</span>;
                                   const wastage = l.returnQty - (Number(returnLineQtys[idx]) || 0);
@@ -4061,7 +4217,7 @@ export default function ApprovalManagementPage() {
               </div>
             ) : (
               <>
-                {detailItem?.status === "Pending" && detailItem.category === "Return Items" && !returnItemsSaved ? (
+                {detailItem?.status === "Pending" && detailItem.category === "Return Items" ? (
                   <>
                     <Button
                       variant="outline"
@@ -4071,10 +4227,21 @@ export default function ApprovalManagementPage() {
                       <XIcon className="h-4 w-4 mr-1.5" /> Decline
                     </Button>
                     <Button
-                      className="bg-success text-success-foreground hover:bg-success/90"
+                      variant="outline"
+                      className="border-success/40 text-success hover:bg-success/10 disabled:opacity-60"
                       onClick={saveReturnItems}
+                      disabled={returnItemsSaved}
                     >
-                      <Check className="h-4 w-4 mr-1.5" /> Save
+                      <Check className="h-4 w-4 mr-1.5" /> {returnItemsSaved ? "Saved" : "Save"}
+                    </Button>
+                    {/* Approve from inside the modal — unlocked once Reusable QTY is saved. */}
+                    <Button
+                      className="bg-success text-success-foreground hover:bg-success/90"
+                      onClick={() => { if (detailItem) { approve(detailItem); setDetailOpen(false); } }}
+                      disabled={!returnItemsSaved}
+                      title={!returnItemsSaved ? "Save the Reusable QTY first" : undefined}
+                    >
+                      <Check className="h-4 w-4 mr-1.5" /> Approve
                     </Button>
                   </>
                 ) : detailItem?.status === "Pending" ? (

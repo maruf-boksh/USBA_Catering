@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -29,6 +29,7 @@ import {
 } from "@/lib/sample-data";
 import { getFlightOrders } from "@/lib/flight-orders-store";
 import { INITIAL_RECORDS as DISPATCH_SEED_RECORDS, INITIAL_PACKAGING_ROWS, type PackagingRow } from "@/routes/dispatch";
+import { type PackagingBatch } from "@/lib/packaging-batches";
 import { useRole } from "@/lib/roles";
 import { useWorkflow } from "@/lib/workflow-store";
 import { useDispatchMonitoringSettings } from "@/lib/dispatch-monitoring-settings";
@@ -601,6 +602,45 @@ export default function DispatchMonitoring() {
   const [dispatchPackagingRows] = usePersistedState<PackagingRow[]>("dispatch-packaging-rows", INITIAL_PACKAGING_ROWS);
   const [scannedRowIds, setScannedRowIds] = useState<Set<string>>(new Set());
   const [activeScanRowId, setActiveScanRowId] = useState<string | null>(null);
+  // Forwarded batches approved for airport receive (from the Packaging → Dispatch flow).
+  const [airportBatches, setAirportBatches] = usePersistedState<PackagingBatch[]>("packaging-batches", []);
+  const receiveBatch = (b: PackagingBatch) => {
+    const now = new Date().toISOString().slice(0, 16).replace("T", " ");
+    setAirportBatches((prev) =>
+      prev.map((x) => (x.id === b.id ? { ...x, status: "Received At Airport" as PackagingBatch["status"], receivedAt: now } : x)),
+    );
+    toast.success(`${b.item} scanned & received at the airport store.`);
+  };
+  // Batches ready for airport receive — forwarded from Dispatch (and dispatch-approved).
+  const airportApprovedBatches = airportBatches.filter((b) => b.status === "Forwarded To Airport" || b.status === "Airport Approved");
+  const airportReceivedBatches = airportBatches.filter((b) => b.status === "Received At Airport");
+  // Forwarded-batch Scan (label) & View modals.
+  const [scanBatch, setScanBatch] = useState<PackagingBatch | null>(null);
+  const [viewBatch, setViewBatch] = useState<PackagingBatch | null>(null);
+  // Airport Receive (batch) — unload & scan session with its own timer.
+  const [batchReceiveOpen, setBatchReceiveOpen] = useState(false);
+  const [batchSessionIds, setBatchSessionIds] = useState<string[]>([]);
+  const [batchScannedIds, setBatchScannedIds] = useState<Set<string>>(new Set());
+  const [batchUnloadStartIso, setBatchUnloadStartIso] = useState("");
+  const [batchUnloadEndTime, setBatchUnloadEndTime] = useState("");
+  const [batchUnloadTick, setBatchUnloadTick] = useState(0);
+  const [batchUnloadDurationSec, setBatchUnloadDurationSec] = useState(0);
+  const openBatchReceive = () => {
+    setBatchSessionIds(airportApprovedBatches.map((b) => b.id));
+    setBatchScannedIds(new Set());
+    setBatchUnloadStartIso("");
+    setBatchUnloadEndTime("");
+    setBatchUnloadDurationSec(0);
+    setBatchReceiveOpen(true);
+  };
+  // Confirm a scan from the label popup: first scan starts the unloading timer,
+  // the batch is received, and the auto-stop effect ends the timer once all are done.
+  const confirmBatchScan = (b: PackagingBatch) => {
+    if (batchScannedIds.size === 0 && !batchUnloadEndTime) setBatchUnloadStartIso(new Date().toISOString());
+    setBatchScannedIds((prev) => new Set(prev).add(b.id));
+    receiveBatch(b);
+    setScanBatch(null);
+  };
   const [orderDetailFlight, setOrderDetailFlight] = useState<string | null>(null);
   // Order Details opens in scan mode (scan icons shown) only from ⋯ → Scan Items;
   // the Meals-column / View action opens it read-only.
@@ -835,6 +875,40 @@ export default function DispatchMonitoring() {
     const id = setInterval(() => setUnloadTimerTick((t) => t + 1), 1000);
     return () => clearInterval(id);
   }, [unloadStartIso]);
+
+  // Auto-stop the airport-receive (unloading) timer once every dispatched batch
+  // has been scanned/received.
+  useEffect(() => {
+    if (unloadStartIso && !unloadEndTime && allRowsScanned) {
+      const now = new Date();
+      const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      setUnloadEndTime(hhmm);
+      setUnloadStartIso("");
+      toast.success("All batches scanned — unloading timer stopped.");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allRowsScanned, unloadStartIso, unloadEndTime]);
+
+  // Batch airport-receive unloading timer tick — re-renders every second while running.
+  useEffect(() => {
+    if (!batchUnloadStartIso) return;
+    const id = setInterval(() => setBatchUnloadTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [batchUnloadStartIso]);
+
+  // Auto-stop the batch unloading timer once every session batch is scanned.
+  useEffect(() => {
+    const allScanned = batchSessionIds.length > 0 && batchSessionIds.every((id) => batchScannedIds.has(id));
+    if (batchUnloadStartIso && !batchUnloadEndTime && allScanned) {
+      const now = new Date();
+      const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      setBatchUnloadDurationSec(Math.floor((Date.now() - new Date(batchUnloadStartIso).getTime()) / 1000));
+      setBatchUnloadEndTime(hhmm);
+      setBatchUnloadStartIso("");
+      toast.success("All batches scanned — unloading completed.");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batchSessionIds, batchScannedIds, batchUnloadStartIso, batchUnloadEndTime]);
 
 
   function startLoading(entryId: string) {
@@ -1409,19 +1483,262 @@ export default function DispatchMonitoring() {
         </div>
       )}
 
-      {/* ── Add Dispatch Entry Button + Empty State ──────────────────────────── */}
-      <div className="mb-6">
-        <div className="flex items-center justify-end mb-4">
-          <Button className="bg-indigo-600 hover:bg-indigo-700 text-white shadow-md" onClick={openNew}>
-            <Plus className="h-4 w-4 mr-1.5" /> Add Dispatch Entry
-          </Button>
+      {/* ── Airport Receive — forwarded & dispatch-approved batches ─────────── */}
+      {(airportApprovedBatches.length > 0 || airportReceivedBatches.length > 0) && (
+        <div className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-4 mb-6">
+          <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
+            <div className="flex items-center gap-2 flex-wrap">
+              <Package className="h-4 w-4 text-indigo-600" />
+              <span className="text-sm font-semibold text-indigo-800">Airport Receive — Forwarded Batches</span>
+              <span className="text-[11px] text-indigo-700">Forwarded from Dispatch. Receive &amp; scan each into the airport store.</span>
+            </div>
+            {airportApprovedBatches.length > 0 && (
+              <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700 text-white border-0" onClick={openBatchReceive}>
+                <PlaneLanding className="h-3.5 w-3.5 mr-1" /> Airport Receive
+              </Button>
+            )}
+          </div>
+          <div className="rounded-md border border-indigo-200 bg-white overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-indigo-50/70 border-b border-indigo-200">
+                <tr>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">Dispatch ID</th>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">Batch ID</th>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">Item</th>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">Dispatch Date &amp; Time</th>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">From</th>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">To</th>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">Status</th>
+                  <th className="text-right px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {airportApprovedBatches.map((b, i) => (
+                  <tr key={b.id} className={`border-t border-indigo-100 ${i % 2 ? "bg-indigo-50/30" : ""}`}>
+                    <td className="px-3 py-2 font-mono text-xs text-indigo-700">{b.dispatchId ?? `DSP-${b.batch}`}</td>
+                    <td className="px-3 py-2 font-mono text-xs">{b.batch}</td>
+                    <td className="px-3 py-2 font-medium">{b.item}</td>
+                    <td className="px-3 py-2 text-xs whitespace-nowrap">{b.dispatchedAt ?? "—"}</td>
+                    <td className="px-3 py-2 text-xs text-muted-foreground whitespace-nowrap">{doc.originLabel} Point</td>
+                    <td className="px-3 py-2 text-xs font-medium whitespace-nowrap">{doc.destinationLabel}</td>
+                    <td className="px-3 py-2">
+                      <span className="inline-flex items-center rounded-full border border-sky-300 bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-700 whitespace-nowrap">{b.status}</span>
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <div className="flex items-center justify-end gap-1">
+                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-slate-500 hover:text-slate-700 hover:bg-slate-50" onClick={() => setViewBatch(b)} title="View">
+                          <Eye className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {airportReceivedBatches.map((b) => (
+                  <tr key={b.id} className="border-t border-indigo-100 bg-emerald-50/40">
+                    <td className="px-3 py-2 font-mono text-xs text-indigo-700">{b.dispatchId ?? `DSP-${b.batch}`}</td>
+                    <td className="px-3 py-2 font-mono text-xs">{b.batch}</td>
+                    <td className="px-3 py-2 font-medium">{b.item}</td>
+                    <td className="px-3 py-2 text-xs whitespace-nowrap">{b.dispatchedAt ?? "—"}</td>
+                    <td className="px-3 py-2 text-xs text-muted-foreground whitespace-nowrap">{doc.originLabel} Point</td>
+                    <td className="px-3 py-2 text-xs font-medium whitespace-nowrap">{doc.destinationLabel}</td>
+                    <td className="px-3 py-2">
+                      <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 whitespace-nowrap">Received by Airport</span>
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <div className="flex items-center justify-end gap-1">
+                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-slate-500 hover:text-slate-700 hover:bg-slate-50" onClick={() => setViewBatch(b)} title="View">
+                          <Eye className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          size="sm"
+                          className="no-brand h-6 px-2.5 text-[10px] bg-[#CD7F32] hover:bg-[#b06e2b] text-white border-0 shadow-sm"
+                          onClick={() => navigate("/transfer", { state: { receiveInTransit: true } })}
+                          title="Receive these items into store on the Transfer In Transit tab"
+                        >
+                          <Truck className="h-3 w-3 mr-1" /> Receive In Store
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
+      )}
 
+      {/* Airport Receive — unload & scan forwarded batches (with unloading timer) */}
+      <Dialog open={batchReceiveOpen} onOpenChange={(v) => !v && setBatchReceiveOpen(false)}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base"><PlaneLanding className="h-4 w-4" /> Airport Receive — Unload &amp; Scan</DialogTitle>
+            <DialogDescription>Scan each forwarded batch to receive it. The unloading timer starts on the first scan and stops once all batches are scanned.</DialogDescription>
+          </DialogHeader>
+
+          {/* Time of Unloading */}
+          <div className="rounded-lg border border-indigo-200 bg-indigo-50/50 px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2 text-sm font-medium text-indigo-800">
+              <Timer className="h-4 w-4" /> Time of Unloading
+            </div>
+            <div className="text-sm">
+              {batchUnloadEndTime ? (
+                <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-700">
+                  <CheckCircle2 className="h-4 w-4" /> Unloading Completed · {formatDuration(batchUnloadDurationSec)}
+                </span>
+              ) : batchUnloadStartIso ? (
+                <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-indigo-700 tabular-nums">
+                  <Timer className="h-4 w-4" /> {batchUnloadTick >= 0 && formatElapsed(batchUnloadStartIso)}
+                </span>
+              ) : (
+                <span className="text-muted-foreground text-xs">Scan the first batch to start the timer.</span>
+              )}
+            </div>
+          </div>
+
+          {/* Batch list */}
+          <div className="rounded-md border border-border overflow-hidden mt-2">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/50 border-b">
+                <tr>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Dispatch ID</th>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Batch ID</th>
+                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Item</th>
+                  <th className="text-right px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Scan</th>
+                </tr>
+              </thead>
+              <tbody>
+                {batchSessionIds.length === 0 ? (
+                  <tr><td colSpan={4} className="px-3 py-6 text-center text-sm text-muted-foreground">No forwarded batches to receive.</td></tr>
+                ) : batchSessionIds.map((id) => {
+                  const b = airportBatches.find((x) => x.id === id);
+                  if (!b) return null;
+                  const scanned = batchScannedIds.has(id);
+                  return (
+                    <tr key={id} className={`border-t ${scanned ? "bg-emerald-50/40" : ""}`}>
+                      <td className="px-3 py-2 font-mono text-xs text-indigo-700">{b.dispatchId ?? `DSP-${b.batch}`}</td>
+                      <td className="px-3 py-2 font-mono text-xs">{b.batch}</td>
+                      <td className="px-3 py-2 font-medium">{b.item}</td>
+                      <td className="px-3 py-2 text-right">
+                        {scanned ? (
+                          <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600"><CheckCircle2 className="h-3.5 w-3.5" /> Scanned</span>
+                        ) : (
+                          <Button size="sm" onClick={() => setScanBatch(b)}>
+                            <ScanLine className="h-3.5 w-3.5 mr-1" /> Scan
+                          </Button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="text-xs text-muted-foreground mt-1">
+            {batchScannedIds.size}/{batchSessionIds.length} scanned{batchUnloadEndTime ? " · unloading completed" : ""}.
+          </div>
+
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBatchReceiveOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Scan label → receive a forwarded batch into the airport store */}
+      <Dialog open={!!scanBatch} onOpenChange={(v) => !v && setScanBatch(null)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base"><ScanLine className="h-4 w-4" /> Scan Label — Airport Receive</DialogTitle>
+            <DialogDescription>Scan the batch label to receive it into the airport store.</DialogDescription>
+          </DialogHeader>
+          {scanBatch && (
+            <div className="rounded-lg border-2 border-dashed border-indigo-300 bg-indigo-50/40 p-4 flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">USBA Catering · Meal Label</span>
+                <span className="text-[10px] font-bold text-indigo-600">FORWARDED</span>
+              </div>
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="font-semibold text-sm">{scanBatch.item}</span>
+                <span className="text-xs tabular-nums text-muted-foreground shrink-0">Qty {scanBatch.qty > 0 ? scanBatch.qty : "—"}</span>
+              </div>
+              <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+                <span>Dispatch <b className="text-foreground font-mono">{scanBatch.dispatchId ?? `DSP-${scanBatch.batch}`}</b></span>
+                <span>Batch <b className="text-foreground font-mono">{scanBatch.batch}</b></span>
+              </div>
+              <div className="mt-1">
+                <div className="flex items-end gap-[1px] h-8 w-full overflow-hidden" aria-hidden>
+                  {`LBL-${scanBatch.batch}`.split("").flatMap((ch, i) =>
+                    [0, 1, 2, 3].map((k) => (
+                      <span key={`${i}-${k}`} className="bg-slate-900" style={{ width: ((ch.charCodeAt(0) >> k) & 1) ? 3 : 1, height: "100%" }} />
+                    )),
+                  )}
+                </div>
+                <div className="text-center font-mono text-[11px] tracking-widest mt-1">LBL-{scanBatch.batch}</div>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setScanBatch(null)}>Cancel</Button>
+            <Button onClick={() => { if (scanBatch) confirmBatchScan(scanBatch); }}>
+              <ScanLine className="h-4 w-4 mr-1.5" /> Scan
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* View — forwarded batch dispatch detail */}
+      <Dialog open={!!viewBatch} onOpenChange={(v) => !v && setViewBatch(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Forwarded Batch — {viewBatch?.batch}</DialogTitle>
+            <DialogDescription>Dispatch → airport receive detail.</DialogDescription>
+          </DialogHeader>
+          {viewBatch && (
+            <div className="grid grid-cols-2 gap-x-4 gap-y-3 py-1 text-sm">
+              {([
+                ["Dispatch ID", viewBatch.dispatchId ?? `DSP-${viewBatch.batch}`, true],
+                ["Batch ID", viewBatch.batch, true],
+                ["Item", viewBatch.item, false],
+                ["Qty", viewBatch.qty > 0 ? String(viewBatch.qty) : "—", false],
+                ["Dispatch Date & Time", viewBatch.dispatchedAt ?? "—", false],
+                ["Vehicle", viewBatch.vehicleNo ?? "—", false],
+                ["From", `${doc.originLabel} Point`, false],
+                ["To", doc.destinationLabel, false],
+                ["Standard Temp", viewBatch.standardTemp, false],
+                ["Measured Temp", `${viewBatch.measuredTemp}°C`, false],
+                ["Taste", viewBatch.taste || "—", false],
+                ["Cooked By", viewBatch.cookedBy, false],
+                ["Checked By", viewBatch.checkedBy, false],
+              ] as [string, string, boolean][]).map(([label, value, mono]) => (
+                <div key={label}>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">{label}</div>
+                  <div className={mono ? "font-mono text-sm" : "font-medium"}>{value}</div>
+                </div>
+              ))}
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Status</div>
+                <span className="inline-flex items-center rounded-full border border-sky-300 bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-700 whitespace-nowrap">{viewBatch.status === "Received At Airport" ? "Received by Airport" : viewBatch.status}</span>
+              </div>
+              {viewBatch.receivedAt && (
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Received At</div>
+                  <div className="font-medium">{viewBatch.receivedAt}</div>
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setViewBatch(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Empty State ──────────────────────────────────────────────────────── */}
+      <div className="mb-6">
         {entries.length === 0 && (
           <div className="rounded-xl border-2 border-dashed border-slate-200 bg-slate-50/60 py-20 text-center">
             <Truck className="h-10 w-10 text-slate-300 mx-auto mb-3" />
             <p className="text-sm text-muted-foreground">No dispatch entries for today.</p>
-            <p className="text-xs text-muted-foreground mt-1">Click <strong>+ Add Dispatch Entry</strong> above to begin.</p>
           </div>
         )}
       </div>
@@ -3371,6 +3688,9 @@ export function GalleyPlanningModal({
   // Starts UNSELECTED — the beverage/amenity/equipment (loading) tabs only appear
   // once an aircraft type is chosen, so their per-aircraft standard is applied.
   const [aircraftType, setAircraftType] = useState("");
+  // The specific aircraft (registration / tail) of the chosen type — a second,
+  // cascading "model" dropdown that only appears once a type is selected.
+  const [aircraftModel, setAircraftModel] = useState("");
   const [aircraftTypes, setAircraftTypes] = useState(() => {
     const list = galleyAircraftTypes();
     return flight?.aircraft && !list.includes(flight.aircraft)
@@ -3380,6 +3700,12 @@ export function GalleyPlanningModal({
   const [aircraftRows, setAircraftRows] = usePersistedState<Aircraft[]>("config-aircraft-rows", AIRCRAFT_SEED);
   const [airlineList] = usePersistedState<Airline[]>("config-airline-rows", AIRLINE_SEED);
   const [showAddAircraft, setShowAddAircraft] = useState(false);
+  // Registrations (specific aircraft) that belong to the selected type — these
+  // populate the dependent "model" dropdown once a type is chosen.
+  const modelsForType = useMemo(
+    () => aircraftRows.filter((a) => a.type === aircraftType && a.status === "Active"),
+    [aircraftRows, aircraftType],
+  );
 
   // Re-derive the whole loading sheet from a load + aircraft type — buildInitialGalley
   // pulls THAT aircraft's Loading Standard (loadStandardsForAircraft) for the
@@ -3401,6 +3727,9 @@ export function GalleyPlanningModal({
   // type's loading standard (meals still flow from Dispatch inside buildInitialGalley).
   const applyAircraft = (type: string) => {
     setAircraftType(type);
+    // Reset the dependent model; auto-pick when the type has exactly one aircraft.
+    const models = aircraftRows.filter((a) => a.type === type && a.status === "Active");
+    setAircraftModel(models.length === 1 ? models[0].registration : "");
     rebuildPlan(planPax, planCrew, type);
   };
   const onAircraftCreated = (a: Aircraft) => {
@@ -3409,6 +3738,7 @@ export function GalleyPlanningModal({
       prev.includes(a.type) ? prev : [...prev, a.type].sort((x, y) => x.localeCompare(y)),
     );
     applyAircraft(a.type);
+    setAircraftModel(a.registration);
     setShowAddAircraft(false);
     toast.success(`Aircraft "${a.registration}" added — plan set to the ${a.type} loading standard.`);
   };
@@ -3559,6 +3889,26 @@ export function GalleyPlanningModal({
                     ))}
                   </select>
                 </span>
+                {/* Dependent model — the specific aircraft (registration) of the
+                    selected type. Only shown once a type with registered aircraft
+                    is chosen. Informational; the loading standard keys off type. */}
+                {aircraftType && modelsForType.length > 0 && (
+                  <span className="flex items-center gap-1">
+                    <select
+                      value={aircraftModel}
+                      onChange={(e) => setAircraftModel(e.target.value)}
+                      title="Aircraft model — the specific aircraft of this type"
+                      className="bg-slate-100 text-slate-700 text-xs rounded-full pl-2 pr-1 py-0.5 border border-slate-300 focus:outline-none focus:ring-1 focus:ring-ring cursor-pointer max-w-[170px]"
+                    >
+                      <option value="" className="text-slate-800">Select model…</option>
+                      {modelsForType.map((a) => (
+                        <option key={a.id} value={a.registration} className="text-slate-800">
+                          {a.registration}
+                        </option>
+                      ))}
+                    </select>
+                  </span>
+                )}
                 <span className="text-slate-600">PAX: {planPax}</span>
                 <span className="text-slate-600">Crew: {planCrew}</span>
               </div>

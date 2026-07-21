@@ -1,4 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { flagArrival } from "@/lib/arrival-flash";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
@@ -14,7 +16,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  Plus, ArrowLeft, Save, Undo2, PackageCheck, Recycle, Trash2, X, Clock, Eye, Search,
+  Plus, ArrowLeft, Save, Undo2, PackageCheck, Recycle, Trash2, X, Clock, Eye, Search, ExternalLink,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -189,7 +191,7 @@ export default function ConsumableReturnsPage() {
         }
       />
 
-      {view === "list" && <ReturnList returns={returns} />}
+      {view === "list" && <ReturnList returns={returns} returnApprovals={returnApprovals} />}
       {view === "create" && (
         <ReturnCreate
           nextId={nextId}
@@ -207,12 +209,37 @@ export default function ConsumableReturnsPage() {
 
 function ReturnList({
   returns,
+  returnApprovals,
 }: {
   returns: ConsumableReturn[];
+  returnApprovals: ReturnApprovalRecord[];
 }) {
+  const navigate = useNavigate();
   const [viewRecord, setViewRecord] = useState<ConsumableReturn | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Approval record backing a return — carries the approver-set Reusable QTY and
+  // the Pending/Approved status shown in the list and the detail modal.
+  const approvalFor = (r: ConsumableReturn): ReturnApprovalRecord | undefined =>
+    returnApprovals.find((a) => a.id === r.approvalId || a.returnId === r.id);
+  // The approval record for the currently-open detail modal.
+  const viewApproval = viewRecord ? approvalFor(viewRecord) : undefined;
+
+  // Jump to Stock Overview and flag the restocked item so its whole row blinks
+  // there (reuses the arrival-flash row highlight → "inv-alerts" container).
+  const goToStock = (itemId: string) => {
+    flagArrival({ target: "inv-alerts", ids: [itemId] });
+    setViewRecord(null);
+    navigate("/inventory");
+  };
+  // Meal-type returns are physical trays — they live in the Transfer Return List
+  // as a "TRF-" row. Open that list and blink the bridged return row.
+  const goToReturnList = (returnId: string) => {
+    flagArrival({ target: "transfer-list", ids: [`TRF-${returnId}`] });
+    setViewRecord(null);
+    navigate("/transfer", { state: { openReturnList: true } });
+  };
 
   useEffect(() => {
     const id = sessionStorage.getItem("highlight-return-id");
@@ -224,17 +251,13 @@ function ReturnList({
     return () => { if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current); };
   }, []);
   const [searchItem, setSearchItem] = useState("");
-  const [filterReusable, setFilterReusable] = useState<"all" | "yes" | "no">("all");
+  const [filterStatus, setFilterStatus] = useState<"all" | "Pending" | "Approved">("all");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
 
   const filteredReturns = returns
     .map((r) => {
       const matchedLines = r.lines.filter((l) => {
-        if (filterReusable !== "all") {
-          const want = filterReusable === "yes";
-          if (l.reusable !== want) return false;
-        }
         if (searchItem.trim()) {
           const q = searchItem.trim().toLowerCase();
           if (!l.itemName.toLowerCase().includes(q)) return false;
@@ -246,6 +269,10 @@ function ReturnList({
     .filter((r) => {
       if (dateFrom && r.date < dateFrom) return false;
       if (dateTo && r.date > dateTo) return false;
+      if (filterStatus !== "all") {
+        const st = approvalFor(r)?.status ?? "Pending";
+        if (st !== filterStatus) return false;
+      }
       if (r.lines.length === 0) return false;
       return true;
     });
@@ -306,12 +333,21 @@ function ReturnList({
                       <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider">Type</TableHead>
                       <TableHead className="text-xs uppercase tracking-wider text-right">Return QTY</TableHead>
-                      <TableHead className="text-xs uppercase tracking-wider text-right">Restocked</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Reusable QTY</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Restocked QTY</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Wastage QTY</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {viewRecord.lines.map((l, i) => {
-                      const restocked = l.lineType !== "meal" && l.reusable;
+                      const lt = l.lineType ?? "item";
+                      // Approver-set reusable qty comes from the linked approval record.
+                      const appLine = viewApproval?.lines.find(
+                        (al) => al.itemId === l.itemId && (al.lineType ?? "item") === lt,
+                      );
+                      const reusableQty = appLine?.reusableQty ?? 0;
+                      const restockedQty = reusableQty; // shown for every returned line
+                      const wastageQty = Math.max(0, l.qty - reusableQty);
                       return (
                         <TableRow key={i} className="hover:bg-muted/30">
                           <TableCell>
@@ -323,14 +359,41 @@ function ReturnList({
                               {l.lineType === "meal" ? "Meal" : "Item"}
                             </Badge>
                           </TableCell>
+                          {/* Return QTY */}
                           <TableCell className="text-right tabular-nums font-semibold text-xs whitespace-nowrap">
                             {l.qty} {l.uom}
                           </TableCell>
+                          {/* Reusable QTY */}
                           <TableCell className="text-right tabular-nums text-xs whitespace-nowrap">
-                            {restocked ? (
-                              <span className="text-success font-semibold">{l.qty} {l.uom}</span>
+                            {reusableQty > 0 ? (
+                              <span className="text-emerald-700 font-semibold">{reusableQty} {l.uom}</span>
                             ) : (
-                              <span className="text-muted-foreground text-[10px]">{l.lineType === "meal" ? "—" : "Wastage"}</span>
+                              <span className="text-muted-foreground text-[10px]">—</span>
+                            )}
+                          </TableCell>
+                          {/* Restocked QTY — clickable. Item lines → Stock Overview;
+                              meal lines → Transfer Return List. Target row blinks. */}
+                          <TableCell className="text-right tabular-nums text-xs whitespace-nowrap">
+                            {restockedQty > 0 ? (
+                              <button
+                                type="button"
+                                onClick={() => (lt === "meal" ? goToReturnList(viewRecord.id) : goToStock(l.itemId))}
+                                title={lt === "meal" ? "View in Transfer Return List" : "View in Stock Overview"}
+                                className="inline-flex items-center gap-1 text-sky-700 font-semibold underline decoration-dotted decoration-sky-300 underline-offset-2 hover:text-sky-900 transition-colors"
+                              >
+                                {restockedQty} {l.uom}
+                                <ExternalLink className="h-3 w-3" />
+                              </button>
+                            ) : (
+                              <span className="text-muted-foreground text-[10px]">—</span>
+                            )}
+                          </TableCell>
+                          {/* Wastage QTY */}
+                          <TableCell className="text-right tabular-nums text-xs whitespace-nowrap">
+                            {wastageQty > 0 ? (
+                              <span className="text-rose-600 font-semibold">{wastageQty} {l.uom}</span>
+                            ) : (
+                              <span className="text-muted-foreground text-[10px]">—</span>
                             )}
                           </TableCell>
                         </TableRow>
@@ -365,15 +428,15 @@ function ReturnList({
           <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="h-8 text-xs tabular-nums" />
         </div>
         <div className="flex flex-col gap-1 min-w-[120px]">
-          <span className="text-xs text-muted-foreground uppercase tracking-wider">Reusable</span>
+          <span className="text-xs text-muted-foreground uppercase tracking-wider">Status</span>
           <select
-            value={filterReusable}
-            onChange={(e) => setFilterReusable(e.target.value as "all" | "yes" | "no")}
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value as "all" | "Pending" | "Approved")}
             className={cn(selectCls, "h-8 text-xs")}
           >
             <option value="all">All</option>
-            <option value="yes">Yes</option>
-            <option value="no">No</option>
+            <option value="Pending">Pending</option>
+            <option value="Approved">Approved</option>
           </select>
         </div>
         <div className="flex flex-col gap-1 flex-1 min-w-[180px]">
@@ -388,10 +451,10 @@ function ReturnList({
             />
           </div>
         </div>
-        {(dateFrom || dateTo || filterReusable !== "all" || searchItem) && (
+        {(dateFrom || dateTo || filterStatus !== "all" || searchItem) && (
           <button
             type="button"
-            onClick={() => { setDateFrom(""); setDateTo(""); setFilterReusable("all"); setSearchItem(""); }}
+            onClick={() => { setDateFrom(""); setDateTo(""); setFilterStatus("all"); setSearchItem(""); }}
             className="h-8 px-3 text-xs text-muted-foreground hover:text-foreground border border-border rounded-md transition-colors self-end"
           >
             Clear
@@ -410,13 +473,14 @@ function ReturnList({
               <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Issued QTY</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Return QTY</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">Status</TableHead>
               <TableHead className="text-xs uppercase tracking-wider text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {filteredReturns.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-8">
+                <TableCell colSpan={9} className="text-center text-sm text-muted-foreground py-8">
                   {returns.length === 0 ? "No consumable returns logged yet." : "No records match the current filters."}
                 </TableCell>
               </TableRow>
@@ -468,6 +532,22 @@ function ReturnList({
                       {/* Return QTY — always shown */}
                       <TableCell className="tabular-nums text-xs font-semibold whitespace-nowrap">
                         {l.qty} {l.uom}
+                      </TableCell>
+
+                      {/* Status — only first line (Pending before approval, Approved after) */}
+                      <TableCell>
+                        {li === 0 && (() => {
+                          const st = approvalFor(r)?.status ?? "Pending";
+                          const tone =
+                            st === "Approved" ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                            : st === "Declined" ? "border-rose-300 bg-rose-50 text-rose-700"
+                            : "border-amber-300 bg-amber-50 text-amber-700";
+                          return (
+                            <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold", tone)}>
+                              {st}
+                            </span>
+                          );
+                        })()}
                       </TableCell>
 
                       {/* Actions — only first line */}
@@ -532,7 +612,6 @@ function ReturnCreate({
   const today = new Date().toISOString().slice(0, 10);
   const isEdit = !!editRecord;
 
-  const [scheduledTime, setScheduledTime] = useState(editRecord?.scheduledTime ?? "");
   const [flight, setFlight] = useState(editRecord?.flight ?? "");
   const [lines, setLines] = useState<DraftLine[]>(
     editRecord
@@ -547,7 +626,9 @@ function ReturnCreate({
         }))
       : [emptyLine()],
   );
-  const flightsAtTime = FLIGHT_SCHEDULES.filter((f) => f.time === scheduledTime);
+  // Scheduled time is no longer chosen by the handler — for the (system) date,
+  // every flight on the schedule is offered directly. The time is derived from
+  // whichever flight is picked (kept on the saved record for the list/detail view).
   const selectedSchedule = FLIGHT_SCHEDULES.find((f) => f.flight === flight);
 
   // Items/meals ISSUED to the selected flight — the options the return-line
@@ -575,11 +656,6 @@ function ReturnCreate({
       }));
     return [...items, ...meals];
   }, [flight, usageLog, inventoryItems]);
-
-  const handleTimeChange = (time: string) => {
-    setScheduledTime(time);
-    setFlight("");
-  };
 
   // Selecting a flight auto-populates lines from issued consumable usage + meal
   // orders for that flight; falls back to a single empty line if none found.
@@ -627,7 +703,6 @@ function ReturnCreate({
   };
 
   const save = () => {
-    if (!scheduledTime) { toast.error("Select a scheduled time."); return; }
     if (!flight) { toast.error("Select a flight."); return; }
     if (lines.length === 0) { toast.error("Add at least one item."); return; }
 
@@ -641,7 +716,7 @@ function ReturnCreate({
       }
       const q = Number(l.qty);
       if (isNaN(q) || q < 0) { toast.error(`Line ${i + 1}: invalid return quantity.`); return; }
-      if (!l.reusable && !l.nonReusableReason?.trim()) { toast.error(`Line ${i + 1}: justification required when not reusable.`); return; }
+      // Reusability is decided later in Approval — not captured at return-log time.
     }
 
     const returnLines: ReturnLine[] = lines.map((l) => {
@@ -675,7 +750,7 @@ function ReturnCreate({
     onSave({
       id: recordId,
       date: isEdit ? editRecord!.date : today,
-      scheduledTime,
+      scheduledTime: isEdit ? editRecord!.scheduledTime : (selectedSchedule?.time ?? ""),
       flight,
       sector: selectedSchedule?.sector ?? "",
       returnedBy: isEdit ? editRecord!.returnedBy : CURRENT_USER,
@@ -702,7 +777,7 @@ function ReturnCreate({
           </div>
 
           {/* Header fields */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-x-6 gap-y-4 mb-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-x-6 gap-y-4 mb-6">
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Return ID</Label>
               <Input value={isEdit ? editRecord!.id : nextId} disabled className="mt-1 font-mono" />
@@ -712,30 +787,14 @@ function ReturnCreate({
               <Input value={isEdit ? editRecord!.date : today} disabled className="mt-1 tabular-nums" />
             </div>
             <div>
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground flex items-center gap-1">
-                <Clock className="h-3 w-3" /> Scheduled Time *
-              </Label>
-              <select
-                value={scheduledTime}
-                onChange={(e) => handleTimeChange(e.target.value)}
-                className={selectCls}
-              >
-                <option value="">Select time…</option>
-                {SCHEDULE_TIMES.map((t) => (
-                  <option key={t} value={t}>{t}</option>
-                ))}
-              </select>
-            </div>
-            <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Flight *</Label>
               <select
                 value={flight}
                 onChange={(e) => handleFlightChange(e.target.value)}
                 className={selectCls}
-                disabled={!scheduledTime}
               >
                 <option value="">Select flight…</option>
-                {flightsAtTime.map((f) => (
+                {FLIGHT_SCHEDULES.map((f) => (
                   <option key={f.flight} value={f.flight}>
                     {f.flight} — {f.sector}
                   </option>
@@ -785,7 +844,7 @@ function ReturnCreate({
                         <X className="h-4 w-4" />
                       </button>
                     )}
-                    <div className="grid grid-cols-1 md:grid-cols-5 gap-x-6 gap-y-3 mt-5">
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-x-6 gap-y-3 mt-5">
                       {/* Issued-item selector (DDL of what was issued to the flight) */}
                       <div className="md:col-span-2">
                         <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item *</Label>
@@ -835,38 +894,6 @@ function ReturnCreate({
                           />
                           <span className="text-xs text-muted-foreground whitespace-nowrap">{uomLabel}</span>
                         </div>
-                      </div>
-                      {/* Reusable */}
-                      <div className={cn(line.reusable === false ? "md:col-span-2" : "")}>
-                        <Label className="text-xs uppercase tracking-wider text-muted-foreground">Reusable</Label>
-                        <div className="mt-2 flex items-center gap-4">
-                          <label className="flex items-center gap-1.5 cursor-pointer text-sm">
-                            <input
-                              type="radio"
-                              name={`reusable-${idx}`}
-                              checked={line.reusable === true}
-                              onChange={() => updateLine(idx, { reusable: true, nonReusableReason: "" })}
-                            />
-                            Yes
-                          </label>
-                          <label className="flex items-center gap-1.5 cursor-pointer text-sm">
-                            <input
-                              type="radio"
-                              name={`reusable-${idx}`}
-                              checked={line.reusable === false}
-                              onChange={() => updateLine(idx, { reusable: false })}
-                            />
-                            No
-                          </label>
-                        </div>
-                        {line.reusable === false && (
-                          <Input
-                            className="mt-2 text-xs"
-                            placeholder="Justification (required)"
-                            value={line.nonReusableReason ?? ""}
-                            onChange={(e) => updateLine(idx, { nonReusableReason: e.target.value })}
-                          />
-                        )}
                       </div>
                     </div>
                   </div>

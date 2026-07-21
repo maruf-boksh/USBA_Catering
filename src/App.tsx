@@ -36,6 +36,7 @@ import PersonalHygieneMonitoringPage from "@/routes/personal-hygiene-monitoring"
 import CookingTempPage from "@/routes/cooking-temp";
 import DispatchMonitoringPage from "@/routes/dispatch-monitoring";
 import DispatchPage from "@/routes/dispatch";
+import PackagingPage from "@/routes/packaging";
 import ConsumableUsagePage from "@/routes/consumable-usage";
 import ConsumableAllocationPage from "@/routes/consumable-allocation";
 import ConsumableReturnsPage from "@/routes/consumable-returns";
@@ -129,6 +130,7 @@ export function App() {
             <Route path="/personal-hygiene-monitoring" element={<PersonalHygieneMonitoringPage />} />
             <Route path="/cooking-temp" element={<CookingTempPage />} />
             <Route path="/dispatch-monitoring" element={<DispatchMonitoringPage />} />
+            <Route path="/packaging" element={<PackagingPage />} />
             <Route path="/dispatch" element={<DispatchPage />} />
             <Route path="/consumable-usage" element={<ConsumableUsagePage />} />
             <Route path="/consumable-allocation" element={<ConsumableAllocationPage />} />

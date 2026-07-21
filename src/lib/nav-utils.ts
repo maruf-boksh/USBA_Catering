@@ -70,6 +70,7 @@ const PATH_META: Record<string, PathMeta> = {
   "/accounts-overview":             { label: "Accounts Dashboard",     parent: "Accounts" },
   "/food-safety-overview":          { label: "Food Safety Dashboard",  parent: "Food Safety & QC" },
   "/packaging-dispatch-overview":   { label: "Dispatch Dashboard",     parent: "Packaging & Dispatch" },
+  "/packaging":                     { label: "Packaging",              parent: "Packaging & Dispatch" },
   "/airline-consumables-overview":  { label: "Consumables Dashboard",  parent: "Airline Consumables" },
   "/airline-equipments-overview":   { label: "Equipments Dashboard",   parent: "Airline Equipments" },
   "/maintenance-overview":          { label: "Maintenance Dashboard",  parent: "Maintenance & Assets" },
