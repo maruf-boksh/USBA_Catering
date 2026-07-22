@@ -31,8 +31,10 @@ import {
   nextPermAuditId, formatTimestamp,
 } from "../types/permissions.types";
 import type { Role } from "@/features/system-admin/role-setup/types/roleSetup.types";
+import { usePersistedState } from "@/lib/use-persisted-state";
+import { LocationAccessSelector, EMPTY_ACCESS, type LocationAccess } from "../components/LocationAccessSelector";
 
-const ACTOR = "GM/Admin";
+const ACTOR = "Business Analyst";
 const clone = (m: RolePermissionMap): RolePermissionMap => JSON.parse(JSON.stringify(m));
 const initials = (name: string) => name.split(/[\s/]+/).filter(Boolean).slice(0, 2).map(w => w[0]).join("").toUpperCase();
 
@@ -62,6 +64,10 @@ export default function RolePermissionEditorPage() {
   const pushAudit = usePermissionAuditStore(s => s.push);
 
   const [view, setView] = useState<"list" | "editor">("list");
+
+  // Per-role Office & Warehouse access (persisted). A role may span multiple
+  // offices and warehouses; empty = organization-wide (all locations).
+  const [roleLocations, setRoleLocations] = usePersistedState<Record<string, LocationAccess>>("role-location-access", {});
   const [editRoleId, setEditRoleId] = useState<string | null>(null);
   const [readOnly, setReadOnly] = useState(false);
 
@@ -135,7 +141,7 @@ export default function RolePermissionEditorPage() {
   function applyGrant(key: string, granted: boolean, perm?: Permission) {
     setWorking(prev => {
       const next = { ...prev };
-      if (granted) next[key] = perm?.scopeable ? { granted: true, scope: perm.defaultScope ?? "department" } : { granted: true };
+      if (granted) next[key] = perm?.scopeable ? { granted: true, scope: perm.defaultScope ?? "office" } : { granted: true };
       else delete next[key];
       return next;
     });
@@ -160,7 +166,7 @@ export default function RolePermissionEditorPage() {
     setWorking(prev => {
       const next = { ...prev };
       for (const p of perms) {
-        if (granted) { next[p.key] = p.scopeable ? { granted: true, scope: p.defaultScope ?? "department" } : { granted: true }; if (p.sensitive) sensitiveCount++; }
+        if (granted) { next[p.key] = p.scopeable ? { granted: true, scope: p.defaultScope ?? "office" } : { granted: true }; if (p.sensitive) sensitiveCount++; }
         else delete next[p.key];
       }
       return next;
@@ -187,7 +193,7 @@ export default function RolePermissionEditorPage() {
     setWorking(prev => {
       const next = { ...prev };
       for (const p of perms) {
-        if (granted) { next[p.key] = p.scopeable ? { granted: true, scope: p.defaultScope ?? "department" } : { granted: true }; if (p.sensitive) sensitiveCount++; }
+        if (granted) { next[p.key] = p.scopeable ? { granted: true, scope: p.defaultScope ?? "office" } : { granted: true }; if (p.sensitive) sensitiveCount++; }
         else delete next[p.key];
       }
       return next;
@@ -218,7 +224,7 @@ export default function RolePermissionEditorPage() {
       for (const p of sub.permissions) {
         const include = preset.include === undefined ? true : preset.include.includes(p.key);
         if (include) {
-          const scope = preset.scopeOverrides?.[p.key] ?? preset.scope ?? p.defaultScope ?? "department";
+          const scope = preset.scopeOverrides?.[p.key] ?? preset.scope ?? p.defaultScope ?? "office";
           next[p.key] = p.scopeable ? { granted: true, scope } : { granted: true };
           if (p.sensitive) sensitiveCount++;
         } else {
@@ -239,7 +245,7 @@ export default function RolePermissionEditorPage() {
       const next = { ...prev };
       for (const k of Object.keys(next)) {
         const p = byKey.get(k);
-        if (p?.scopeable && next[k].granted) next[k] = { granted: true, scope: p.defaultScope ?? "department" };
+        if (p?.scopeable && next[k].granted) next[k] = { granted: true, scope: p.defaultScope ?? "office" };
       }
       return next;
     });
@@ -538,6 +544,16 @@ export default function RolePermissionEditorPage() {
         </div>
       )}
 
+      <Card className="mb-3">
+        <CardContent className="py-3">
+          <LocationAccessSelector
+            value={roleLocations[editRole.id] ?? EMPTY_ACCESS}
+            onChange={(v) => setRoleLocations(prev => ({ ...prev, [editRole.id]: v }))}
+            disabled={readOnly}
+          />
+        </CardContent>
+      </Card>
+
       <div className="grid grid-cols-1 lg:grid-cols-[260px_1fr_240px] gap-3">
         {/* LEFT — module / page tree */}
         <Card className="h-fit lg:sticky lg:top-3">
@@ -694,9 +710,9 @@ export default function RolePermissionEditorPage() {
                                 <div className="text-[11px] text-muted-foreground mt-0.5">{p.impactDescription}</div>
                               </div>
                               {p.scopeable && g?.granted && (
-                                <Select value={g.scope ?? "department"} onValueChange={v => setScope(p, v as PermissionScope)} disabled={readOnly}>
+                                <Select value={g.scope ?? "office"} onValueChange={v => setScope(p, v as PermissionScope)} disabled={readOnly}>
                                   <SelectTrigger className="h-7 w-[130px] text-xs shrink-0"
-                                    style={{ color: SCOPE_STYLE[g.scope ?? "department"].color }}>
+                                    style={{ color: SCOPE_STYLE[g.scope ?? "office"].color }}>
                                     <SelectValue />
                                   </SelectTrigger>
                                   <SelectContent>{SCOPE_ORDER.map(s => <SelectItem key={s} value={s} className="text-xs">{SCOPE_LABELS[s]}</SelectItem>)}</SelectContent>

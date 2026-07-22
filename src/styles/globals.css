@@ -1973,6 +1973,30 @@ html[data-theme="dark"] .ant-drawer .ant-drawer-header {
   transition: border-color 0.12s ease !important;
 }
 
+/* ── h9-antd: size a single antd Select to match native h-9 (36px) inputs so
+      mixed rows (e.g. BOM Input Materials Setup) line up. ─────────────────── */
+.h9-antd.ant-select .ant-select-selector {
+  height: 36px !important;
+}
+.h9-antd.ant-select .ant-select-selection-item,
+.h9-antd.ant-select .ant-select-selection-placeholder {
+  line-height: 34px !important;
+}
+.h9-antd.ant-select .ant-select-selection-search-input {
+  height: 34px !important;
+}
+
+/* ── no-spinner: hide the up/down stepper on number inputs ─────────────── */
+.no-spinner::-webkit-outer-spin-button,
+.no-spinner::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.no-spinner {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
 /* ── Ant Design Tag ─────────────────────────────────────────── */
 .ant-tag {
   transition: opacity 0.12s ease;

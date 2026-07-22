@@ -1,32 +1,36 @@
 // ─── Domain Types ─────────────────────────────────────────────────────────────
 
-/** Hierarchical scopes, ordered from most-restrictive → most-permissive. */
-export type PermissionScope = 'own' | 'team' | 'department' | 'branch' | 'organization';
+/**
+ * Data-visibility scopes, mirroring the app's org architecture:
+ *   Company → Office → Warehouse (a single company).
+ * Ordered from most-restrictive → most-permissive:
+ *   own → warehouse → office → company
+ * `company` is the broadest — the whole organization (one company).
+ * See `offices` / `warehouses` in `@/lib/sample-data`.
+ */
+export type PermissionScope = 'own' | 'warehouse' | 'office' | 'company';
 
-export const SCOPE_ORDER: PermissionScope[] = ['own', 'team', 'department', 'branch', 'organization'];
+export const SCOPE_ORDER: PermissionScope[] = ['own', 'warehouse', 'office', 'company'];
 
 export const SCOPE_LABELS: Record<PermissionScope, string> = {
-  own:          'Own',
-  team:         'Team',
-  department:   'Department',
-  branch:       'Branch',
-  organization: 'Organization',
+  own:       'Own',
+  warehouse: 'Warehouse',
+  office:    'Office',
+  company:   'Company',
 };
 
 export const SCOPE_DESCRIPTIONS: Record<PermissionScope, string> = {
-  own:          'Only records the user owns or created.',
-  team:         'Records belonging to the user\'s direct team.',
-  department:   'All records within the user\'s department.',
-  branch:       'All records within the user\'s branch / location.',
-  organization: 'All records across the entire organization.',
+  own:       'Only records the user owns or created.',
+  warehouse: 'All records within the user\'s warehouse / store.',
+  office:    'All records within the user\'s office (every warehouse under it).',
+  company:   'All records across the company — every office & warehouse.',
 };
 
 export const SCOPE_STYLE: Record<PermissionScope, { color: string; bg: string; rank: number }> = {
-  own:          { color: '#9333ea', bg: '#faf5ff', rank: 1 },
-  team:         { color: '#0d9488', bg: '#f0fdfa', rank: 2 },
-  department:   { color: '#0369a1', bg: '#f0f9ff', rank: 3 },
-  branch:       { color: '#b45309', bg: '#fffbeb', rank: 4 },
-  organization: { color: '#b91c1c', bg: '#fef2f2', rank: 5 },
+  own:       { color: '#9333ea', bg: '#faf5ff', rank: 1 },
+  warehouse: { color: '#047857', bg: '#ecfdf5', rank: 2 },
+  office:    { color: '#0369a1', bg: '#f0f9ff', rank: 3 },
+  company:   { color: '#b91c1c', bg: '#fef2f2', rank: 4 },
 };
 
 /** Section keys group permissions inside a submodule. New sections can be added without breaking the editor. */

@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X, Zap, BarChart2, Send, Check, Paperclip, FileText, Eye, Ban, ClipboardList, Info, CalendarDays } from "lucide-react";
-import { receiveItems, activeItems, inventory } from "@/lib/sample-data";
+import { receiveItems, inventory, items as MASTER_ITEMS, itemCanPurchase, type ItemMaster } from "@/lib/sample-data";
 import { applyReceiptToPR, getPurchaseRequisitions, prReceived } from "@/lib/purchase-requisitions";
 import { roundQty } from "@/lib/num";
 import { usePersistedState } from "@/lib/use-persisted-state";
@@ -283,8 +283,15 @@ export default function ReceiveItem() {
   const dpRemoveLine = (id: string) => setDpLines(prev => prev.filter(l => l.id !== id));
   const dpUpdateLine = <K extends keyof FormLine>(id: string, field: K, value: FormLine[K]) =>
     setDpLines(prev => prev.map(l => l.id === id ? { ...l, [field]: value } : l));
-  // Item comes from the item master; UOM auto-fills from it (read-only).
-  const dpItemOptions = useMemo(() => activeItems.slice(0, 120), []);
+  // Item comes from the item master; UOM auto-fills from it (read-only). Read the
+  // persisted master (config-item-rows) so Item Configuration edits — including
+  // the "Can be Purchased" flag — take effect here. Only active, purchasable
+  // items are offered.
+  const [itemMaster] = usePersistedState<ItemMaster[]>("config-item-rows", MASTER_ITEMS);
+  const dpItemOptions = useMemo(
+    () => itemMaster.filter((i) => i.status === "Active" && itemCanPurchase(i)).slice(0, 120),
+    [itemMaster],
+  );
   const dpPickItem = (id: string, itemName: string) => {
     const it = dpItemOptions.find(i => i.name === itemName);
     // Picking a (new) item resets any manual rate override and auto-fills the

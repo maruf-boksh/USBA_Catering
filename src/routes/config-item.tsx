@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -19,6 +20,8 @@ import {
   Plus, ArrowLeft, Save, Tag, CheckCircle, XCircle,
   ChevronRight, ChevronDown, FolderTree,
   Boxes, Upload, Download, FileSpreadsheet, Trash2, AlertTriangle, Search,
+  Layers, Package, Sparkles, CalendarClock, ArrowDownUp, Check,
+  type LucideIcon,
 } from "lucide-react";
 import { KpiCard } from "@/components/common/KpiCard";
 import { cn } from "@/lib/utils";
@@ -31,7 +34,6 @@ import {
   ASSET_CATEGORIES,
   ASSET_SUB_CATEGORIES,
   ITEM_UOMS,
-  ALT_UOM_OPTIONS,
   activeOffices,
   offices as ALL_OFFICES,
   activeWarehousesByOffice,
@@ -45,6 +47,10 @@ import {
   clearAllocationOverride,
   setAllocationMethod,
   isBatchTrackedForMaster,
+  PRODUCIBLE_ITEM_TYPES,
+  itemCanPurchase,
+  itemCanProduce,
+  itemCanSell,
   setBatchTracked as persistBatchTracked,
   subscribeAllocationMethod,
   getAllocationVersion,
@@ -54,6 +60,8 @@ import {
   type Office,
   type Warehouse,
 } from "@/lib/sample-data";
+import { usePrimaryUoms, useAltUoms, addPrimaryUom, addAltUom } from "@/lib/custom-uoms";
+import { roundQty } from "@/lib/num";
 
 type ItemRow = ItemMaster;
 
@@ -65,8 +73,145 @@ const UOMS = ITEM_UOMS;
  *  the inline "add new" input. */
 const ADD_NEW = "__add_new__";
 
+/** Item-code prefix per item type — auto-populated in the Create form so codes
+ *  stay consistent (RM-…, PKG-…, FG-…). */
+const ITEM_TYPE_CODE_PREFIX: Record<string, string> = {
+  "Raw Material": "RM",
+  "Packaging": "PKG",
+  "Consumable": "CNS",
+  "Finished Good": "FG",
+  "Semi-Finished Good": "SFG",
+  "Asset": "AST",
+};
+
+/** Resolve the code prefix for an item type. Custom/unknown types derive one
+ *  from their name — word initials (e.g. "Cold Beverage" → "CB"), else the
+ *  first letters (e.g. "Spice" → "SPI"). */
+function codePrefixForType(type: string): string {
+  const known = ITEM_TYPE_CODE_PREFIX[type];
+  if (known) return known;
+  const words = type.trim().split(/\s+/).filter(Boolean);
+  if (words.length > 1) return words.map((w) => w[0]).join("").toUpperCase().slice(0, 4);
+  return type.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 3) || "ITM";
+}
+
+// ── Weight ↔ UOM link-up ─────────────────────────────────────────────────────
+// The serving-weight field is stored in grams (Menu Planning reads grams), but
+// its label and entry unit follow the Primary UOM: pick Kg and the field becomes
+// "Weight (Kg)" and you type in Kg. Only mass UOMs change the basis; every other
+// unit keeps grams. Storage stays grams so downstream math is untouched.
+const WEIGHT_UNIT_GRAMS: Record<string, { label: string; grams: number }> = {
+  kg: { label: "Kg", grams: 1000 },
+  gm: { label: "g", grams: 1 },
+  g: { label: "g", grams: 1 },
+  gram: { label: "g", grams: 1 },
+  grams: { label: "g", grams: 1 },
+};
+
+/** Display label for the weight field given the Primary UOM (e.g. "Kg", "g"). */
+function weightUnitLabel(uom: string): string {
+  return WEIGHT_UNIT_GRAMS[uom.trim().toLowerCase()]?.label ?? "g";
+}
+
+/** Grams per one unit of the weight field's entry unit (Kg → 1000, else 1). */
+function weightGramsPerUnit(uom: string): number {
+  return WEIGHT_UNIT_GRAMS[uom.trim().toLowerCase()]?.grams ?? 1;
+}
+
 const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+/** Selectable option card — a radio choice rendered as an icon + title + blurb.
+ *  Shared by the Stock Tracking and Allocation Method pickers. */
+function OptionCard({
+  icon: Icon, title, desc, active, onSelect,
+}: {
+  icon: LucideIcon;
+  title: string;
+  desc: string;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      onClick={onSelect}
+      className={cn(
+        "group relative flex flex-col gap-1.5 rounded-lg border p-3 text-left transition-all",
+        active
+          ? "border-primary ring-1 ring-primary bg-primary/5 shadow-sm"
+          : "border-input bg-background hover:border-primary/40 hover:bg-muted/40",
+      )}
+    >
+      <div className="flex items-center gap-2">
+        <span
+          className={cn(
+            "flex h-7 w-7 shrink-0 items-center justify-center rounded-md",
+            active ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground group-hover:text-foreground",
+          )}
+        >
+          <Icon className="h-4 w-4" />
+        </span>
+        <span className={cn("text-sm font-semibold", active ? "text-primary" : "text-foreground")}>{title}</span>
+        {active && <Check className="ml-auto h-4 w-4 shrink-0 text-primary" />}
+      </div>
+      <span className="text-[11px] leading-relaxed text-muted-foreground">{desc}</span>
+    </button>
+  );
+}
+
+const STOCK_TRACKING_OPTIONS = [
+  { value: true,  title: "Batch-Tracked", icon: Layers,  desc: "Each receipt is a discrete lot with its own expiry & cost. FIFO/FEFO controls which lot drains first." },
+  { value: false, title: "Single Item",   icon: Package, desc: "One pooled bucket — no batch numbers, no expiry, no FIFO/FEFO. Best for shelf-stable hardware." },
+] as const;
+
+const ALLOCATION_OPTIONS = [
+  { value: "Auto", title: "Auto", icon: Sparkles,      desc: "FEFO for perishables, FIFO for shelf-stable goods — picked from the item category." },
+  { value: "FEFO", title: "FEFO", icon: CalendarClock, desc: "Drains the lot with the earliest expiry first." },
+  { value: "FIFO", title: "FIFO", icon: ArrowDownUp,   desc: "Drains the earliest-received lot first." },
+] as const;
+
+/** Item capability checkboxes — "Can be Purchased" / "Can be Produced". These
+ *  govern where the item may be actioned: purchasable items appear in purchasing
+ *  pickers (Direct Receive / PR / PO); producible items can be a production
+ *  output. Shared by the Create and Edit forms. */
+function CapabilityChecks({
+  canPurchase, canProduce, canSell, onPurchase, onProduce, onSell,
+}: {
+  canPurchase: boolean;
+  canProduce: boolean;
+  canSell: boolean;
+  onPurchase: (v: boolean) => void;
+  onProduce: (v: boolean) => void;
+  onSell: (v: boolean) => void;
+}) {
+  return (
+    <div>
+      <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item Actions</Label>
+      <div className="mt-2 flex flex-wrap items-center gap-x-8 gap-y-3">
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <Checkbox checked={canProduce} onCheckedChange={(v) => onProduce(v === true)} />
+          <span className="text-sm font-medium">Can be Produced</span>
+        </label>
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <Checkbox checked={canPurchase} onCheckedChange={(v) => onPurchase(v === true)} />
+          <span className="text-sm font-medium">Can be Purchased</span>
+        </label>
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <Checkbox checked={canSell} onCheckedChange={(v) => onSell(v === true)} />
+          <span className="text-sm font-medium">Can be Sold</span>
+        </label>
+      </div>
+      <div className="mt-1.5 text-[11px] text-muted-foreground leading-relaxed">
+        <span className="font-semibold text-foreground">Can be Purchased</span> lets the item be received/ordered in Local Purchase (Direct Receive, PR, PO).
+        <span className="font-semibold text-foreground"> Can be Produced</span> lets it be chosen as a production output.
+        <span className="font-semibold text-foreground"> Can be Sold</span> lets it be sold as salvage on the Damaged Product Sales page.
+      </div>
+    </div>
+  );
+}
 
 
 export default function ConfigItemPage() {
@@ -587,11 +732,14 @@ function ItemProfileView({ row }: { row: ItemRow }) {
         <Field label="Category">{row.category}</Field>
         <Field label="Sub Category">{row.subCategory}</Field>
         <Field label="Primary UOM">{row.uom}</Field>
+        <Field label="Can be Produced">{itemCanProduce(row) ? "Yes" : "No"}</Field>
+        <Field label="Can be Purchased">{itemCanPurchase(row) ? "Yes" : "No"}</Field>
+        <Field label="Can be Sold">{itemCanSell(row) ? "Yes" : "No"}</Field>
       </Section>
 
       <Section title="Costing & Nutrition">
         <Field label="Cost Price">{row.costPrice != null ? `৳ ${row.costPrice}` : ""}</Field>
-        <Field label="Weight">{row.weightG ? `${row.weightG} g` : ""}</Field>
+        <Field label="Weight">{row.weightG ? `${roundQty(row.weightG / weightGramsPerUnit(row.uom ?? ""))} ${weightUnitLabel(row.uom ?? "")}` : ""}</Field>
         <Field label="Energy">{row.kcal ? `${row.kcal} kcal` : ""}</Field>
       </Section>
 
@@ -778,10 +926,19 @@ function ItemEditForm({
   const [uom, setUom] = useState<string>(row.uom ?? UOMS[0]);
   const [status, setStatus] = useState<string>(row.status ?? "Active");
   const [costPrice, setCostPrice] = useState(String(row.costPrice ?? ""));
-  const [weightG, setWeightG] = useState(String(row.weightG ?? ""));
+  // weightVal is shown/edited in the Primary UOM's basis (Kg / g); stored grams
+  // (row.weightG) are converted in for display and back out on save.
+  const [weightVal, setWeightVal] = useState(() =>
+    row.weightG == null ? "" : String(roundQty(row.weightG / weightGramsPerUnit(row.uom ?? UOMS[0]))),
+  );
   const [kcal, setKcal] = useState(String(row.kcal ?? ""));
   const [allocation, setAllocation] = useState<"Auto" | AllocationMethod>(getAllocationChoiceForMaster(row.id));
   const [batchTracked, setBatchTracked] = useState(isBatchTrackedForMaster(row.id));
+  // Capability flags — seed from the row's effective values (explicit flag, else
+  // the type-based default) so the checkboxes reflect the current behaviour.
+  const [canPurchase, setCanPurchase] = useState(itemCanPurchase(row));
+  const [canProduce, setCanProduce] = useState(itemCanProduce(row));
+  const [canSell, setCanSell] = useState(itemCanSell(row));
 
   const [categoryOptions, setCategoryOptions] = useState<string[]>(() => {
     const base = [...CATEGORIES] as string[];
@@ -797,6 +954,33 @@ function ItemEditForm({
   const [newCategory, setNewCategory] = useState("");
   const [addingSubCategory, setAddingSubCategory] = useState(false);
   const [newSubCategory, setNewSubCategory] = useState("");
+
+  // Primary UOM list — seed + any units added from the system. Include the row's
+  // own UOM in case it was a custom unit saved on another device/session.
+  const uomOptions = usePrimaryUoms();
+  const [addingUom, setAddingUom] = useState(false);
+  const [newUomLabel, setNewUomLabel] = useState("");
+  // Switch UOM and re-express the weight entry in the new unit's basis.
+  const handleUomChange = (next: string) => {
+    const oldG = weightGramsPerUnit(uom);
+    const newG = weightGramsPerUnit(next);
+    if (oldG !== newG) {
+      setWeightVal((v) => {
+        const n = parseFloat(v);
+        if (!v.trim() || Number.isNaN(n)) return v;
+        return String(roundQty((n * oldG) / newG));
+      });
+    }
+    setUom(next);
+  };
+  const commitNewUom = () => {
+    const added = addPrimaryUom(newUomLabel);
+    if (!added) { toast.error("Enter a UOM name."); return; }
+    handleUomChange(added);
+    toast.success(`UOM "${added}" added.`);
+    setNewUomLabel("");
+    setAddingUom(false);
+  };
 
   const commitNewCategory = () => {
     const val = newCategory.trim();
@@ -829,8 +1013,11 @@ function ItemEditForm({
       uom,
       status,
       costPrice: Number(costPrice) || 0,
-      weightG: Number(weightG) || 0,
+      weightG: (Number(weightVal) * weightGramsPerUnit(uom)) || 0,
       kcal: Number(kcal) || 0,
+      canPurchase,
+      canProduce,
+      canSell,
     });
   };
 
@@ -903,9 +1090,24 @@ function ItemEditForm({
         </div>
         <div>
           <Label className={lbl}>Primary UOM</Label>
-          <select value={uom} onChange={(e) => setUom(e.target.value)} className={selectCls}>
-            {UOMS.map((u) => <option key={u}>{u}</option>)}
+          <select
+            value={uom}
+            onChange={(e) => { e.target.value === ADD_NEW ? setAddingUom(true) : handleUomChange(e.target.value); }}
+            className={selectCls}
+          >
+            {uomOptions.map((u) => <option key={u}>{u}</option>)}
+            {uom && !uomOptions.some((u) => u.toLowerCase() === uom.toLowerCase()) && (
+              <option key={uom}>{uom}</option>
+            )}
+            <option value={ADD_NEW}>+ Add new UOM…</option>
           </select>
+          {addingUom && (
+            <div className="mt-2 flex items-center gap-2">
+              <Input autoFocus value={newUomLabel} onChange={(e) => setNewUomLabel(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewUom(); } }} placeholder="New UOM name (e.g. Can, Roll)" className="h-9" />
+              <Button type="button" size="sm" onClick={commitNewUom}>Add</Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => { setAddingUom(false); setNewUomLabel(""); }}>Cancel</Button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -915,8 +1117,11 @@ function ItemEditForm({
           <Input type="number" min={0} value={costPrice} onChange={(e) => setCostPrice(e.target.value)} className="mt-1" />
         </div>
         <div>
-          <Label className={lbl}>Weight (g)</Label>
-          <Input type="number" min={0} value={weightG} onChange={(e) => setWeightG(e.target.value)} placeholder="0" className="mt-1" />
+          <Label className={lbl}>Weight ({weightUnitLabel(uom)})</Label>
+          <Input type="number" min={0} step="any" value={weightVal} onChange={(e) => setWeightVal(e.target.value)} placeholder="0" className="mt-1" />
+          {weightUnitLabel(uom) !== "g" && Number(weightVal) > 0 && (
+            <div className="mt-1 text-[11px] text-muted-foreground">= {roundQty(Number(weightVal) * weightGramsPerUnit(uom))} g stored</div>
+          )}
         </div>
         <div>
           <Label className={lbl}>Kcal</Label>
@@ -949,6 +1154,17 @@ function ItemEditForm({
         </div>
       </div>
 
+      <div className="pt-4 border-t border-border">
+        <CapabilityChecks
+          canPurchase={canPurchase}
+          canProduce={canProduce}
+          canSell={canSell}
+          onPurchase={setCanPurchase}
+          onProduce={setCanProduce}
+          onSell={setCanSell}
+        />
+      </div>
+
       <div className="flex justify-end gap-2 pt-2 border-t border-border">
         <Button variant="outline" onClick={onClose}>Cancel</Button>
         <Button onClick={submit}>Save Changes</Button>
@@ -959,7 +1175,9 @@ function ItemEditForm({
 
 function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow) => void }) {
   const navigate = useNavigate();
-  const [code, setCode] = useState("");
+  // Code is seeded with the default item type's prefix; it auto-swaps when the
+  // type changes (see handleItemTypeChange).
+  const [code, setCode] = useState(() => `${codePrefixForType(ITEM_TYPES[0])}-`);
   const [name, setName] = useState("");
   const [itemType, setItemType] = useState<string>(ITEM_TYPES[0]);
   const [category, setCategory] = useState("");
@@ -978,6 +1196,52 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
   // "+ Add new…" option. Options seed from the master list and grow per session.
   const [categoryOptions, setCategoryOptions] = useState<string[]>([...CATEGORIES]);
   const [subCategoryOptions, setSubCategoryOptions] = useState<string[]>([...SUB_CATEGORIES]);
+
+  // Primary / Alt UOM lists — seed + any units the user added from the system.
+  // Persisted app-wide via the custom-uoms store so new units survive and appear
+  // in every UOM dropdown (Create, Edit, Alt UOM DDL).
+  const uomOptions = usePrimaryUoms();
+  const altUomOptions = useAltUoms();
+  const [addingUom, setAddingUom] = useState(false);
+  const [newUomLabel, setNewUomLabel] = useState("");
+  const [addingAltUomOption, setAddingAltUomOption] = useState(false);
+  const [newAltUomOption, setNewAltUomOption] = useState("");
+
+  // Switch the Primary UOM and re-express the weight entry in the new unit's
+  // basis so "0.5 Kg" becomes "500 g" (and back) rather than silently changing
+  // the stored grams.
+  const handleUomChange = (next: string) => {
+    const oldG = weightGramsPerUnit(uom);
+    const newG = weightGramsPerUnit(next);
+    if (oldG !== newG) {
+      setWeightVal((v) => {
+        const n = parseFloat(v);
+        if (!v.trim() || Number.isNaN(n)) return v;
+        return String(roundQty((n * oldG) / newG));
+      });
+    }
+    setUom(next);
+  };
+
+  const commitNewUom = () => {
+    const added = addPrimaryUom(newUomLabel);
+    if (!added) { toast.error("Enter a UOM name."); return; }
+    handleUomChange(added);
+    toast.success(`UOM "${added}" added.`);
+    setNewUomLabel("");
+    setAddingUom(false);
+  };
+  const commitNewAltUomOption = () => {
+    const added = addAltUom(newAltUomOption);
+    if (!added) { toast.error("Enter an alt UOM name."); return; }
+    if (added.toLowerCase() === uom.toLowerCase()) {
+      toast.error("Alt UOM cannot match the Primary UOM."); return;
+    }
+    setAltDraftUom(added);
+    toast.success(`Alt UOM "${added}" added.`);
+    setNewAltUomOption("");
+    setAddingAltUomOption(false);
+  };
 
   // "Asset" item type uses its own Category → Sub Category presets (Catering /
   // Electronic Devices). "+ Add new" extends this map so new categories and
@@ -998,7 +1262,18 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
 
   const handleItemTypeChange = (next: string) => {
     if (next === ADD_NEW) { setAddingItemType(true); return; }
+    const oldPrefix = codePrefixForType(itemType);
+    const newPrefix = codePrefixForType(next);
     setItemType(next);
+    // Auto-populate the code's type prefix. Swap it only when the field is empty
+    // or still carries the previous type's auto prefix — never clobber a code the
+    // user has fully typed.
+    setCode((c) => {
+      const t = c.trim();
+      if (!t || t === oldPrefix || t === `${oldPrefix}-`) return `${newPrefix}-`;
+      if (t.startsWith(`${oldPrefix}-`)) return `${newPrefix}-${t.slice(oldPrefix.length + 1)}`;
+      return c;
+    });
     // Asset uses a different Category/Sub Category preset — reset the selection on switch.
     if ((next === "Asset") !== isAsset) {
       setCategory("");
@@ -1063,17 +1338,16 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
     [code],
   );
 
-  // Serving info — flows to Menu Planning meal items.
-  const [weightG, setWeightG] = useState("");
+  // Serving info — flows to Menu Planning meal items. weightVal is entered in the
+  // Primary UOM's basis (Kg / g) and converted to grams (weightG) on save.
+  const [weightVal, setWeightVal] = useState("");
   const [kcal, setKcal] = useState("");
 
   // Stock & storage
   const [reorderLevel, setReorderLevel] = useState("0");
   const [thresholdPct, setThresholdPct] = useState("20");
-  const [expiryDate, setExpiryDate] = useState("");
   const [officeId, setOfficeId] = useState("");
   const [warehouseId, setWarehouseId] = useState("");
-  const [binLocation, setBinLocation] = useState("");
 
   // Office / Warehouse — "Other" reveals a dynamic text entry to add a new
   // office, and (once an office is selected) a matching dynamic entry for its
@@ -1159,6 +1433,21 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
   const [allocationChoice, setAllocationChoice] = useState<"Auto" | AllocationMethod>("Auto");
   const [batchTrackedChoice, setBatchTrackedChoice] = useState<boolean>(true);
 
+  // Capability flags — default from the item type (purchasable unless Asset;
+  // producible for Finished/Semi-Finished Goods). We keep tracking the type-based
+  // default until the user manually ticks a box (`capsTouched`), after which their
+  // explicit choice sticks even if the item type changes.
+  const [canPurchase, setCanPurchase] = useState(true);
+  const [canProduce, setCanProduce] = useState(false);
+  const [canSell, setCanSell] = useState(true);
+  const [capsTouched, setCapsTouched] = useState(false);
+  useEffect(() => {
+    if (capsTouched) return;
+    setCanPurchase(itemType !== "Asset");
+    setCanProduce(PRODUCIBLE_ITEM_TYPES.includes(itemType as ItemRow["itemType"]));
+    setCanSell(itemType !== "Asset");
+  }, [itemType, capsTouched]);
+
   // ALT UOMs — repeatable rows. Each row has its own draft state until added.
   const [altUoms, setAltUoms] = useState<AltUom[]>([]);
   const [altDraftUom, setAltDraftUom] = useState("");
@@ -1215,17 +1504,18 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
       itemType: itemTypeTyped,
       category, subCategory, uom,
       status: fgWithoutBom ? "Inactive" : "Active",
-      weightG: Number(weightG) || undefined,
+      weightG: (Number(weightVal) * weightGramsPerUnit(uom)) || undefined,
       kcal: Number(kcal) || undefined,
       reorderLevel: reorder,
       thresholdPct: threshold,
-      expiryDate: expiryDate || undefined,
       officeId: officeId || undefined,
       warehouseId: warehouseId || undefined,
-      binLocation: binLocation.trim() || undefined,
       allocationMethod: allocationChoice === "Auto" ? undefined : allocationChoice,
       batchTracked: batchTrackedChoice,
       altUoms: altUoms.length > 0 ? altUoms : undefined,
+      canPurchase,
+      canProduce,
+      canSell,
     });
 
     if (fgWithoutBom) {
@@ -1253,6 +1543,9 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item Code <span className="text-destructive">*</span></Label>
             <Input value={code} onChange={(e) => setCode(e.target.value)} className="mt-1" placeholder="e.g. RM-RICE-BSMT" />
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              Prefix <span className="font-mono font-semibold text-foreground">{codePrefixForType(itemType)}-</span> is set automatically from the Item Type — complete the rest.
+            </div>
           </div>
           <div className="md:col-span-2">
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Item Name <span className="text-destructive">*</span></Label>
@@ -1362,22 +1655,58 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Primary UOM</Label>
-            <select value={uom} onChange={(e) => setUom(e.target.value)} className={selectCls}>
-              {UOMS.map((u) => <option key={u}>{u}</option>)}
+            <select
+              value={uom}
+              onChange={(e) => { e.target.value === ADD_NEW ? setAddingUom(true) : handleUomChange(e.target.value); }}
+              className={selectCls}
+            >
+              {uomOptions.map((u) => <option key={u}>{u}</option>)}
+              <option value={ADD_NEW}>+ Add new UOM…</option>
             </select>
+            {addingUom && (
+              <div className="mt-2 flex items-center gap-2">
+                <Input
+                  autoFocus
+                  value={newUomLabel}
+                  onChange={(e) => setNewUomLabel(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewUom(); } }}
+                  placeholder="New UOM name (e.g. Can, Roll)"
+                  className="h-9"
+                />
+                <Button type="button" size="sm" onClick={commitNewUom}>Add</Button>
+                <Button type="button" size="sm" variant="outline" onClick={() => { setAddingUom(false); setNewUomLabel(""); }}>Cancel</Button>
+              </div>
+            )}
             <div className="mt-1 text-[11px] text-muted-foreground">
               Stock is always kept in this unit. Add ALT UOMs below for transactions in other units.
             </div>
           </div>
           <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Weight (g)</Label>
-            <Input type="number" min={0} value={weightG} onChange={(e) => setWeightG(e.target.value)} placeholder="0" className="mt-1" />
-            <div className="mt-1 text-[11px] text-muted-foreground">Default serving weight used in Menu Planning.</div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Weight ({weightUnitLabel(uom)})</Label>
+            <Input type="number" min={0} step="any" value={weightVal} onChange={(e) => setWeightVal(e.target.value)} placeholder="0" className="mt-1" />
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              Default serving weight used in Menu Planning.
+              {weightUnitLabel(uom) !== "g" && Number(weightVal) > 0 && (
+                <> = {roundQty(Number(weightVal) * weightGramsPerUnit(uom))} g</>
+              )}
+            </div>
           </div>
           <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Kcal</Label>
             <Input type="number" min={0} value={kcal} onChange={(e) => setKcal(e.target.value)} placeholder="0" className="mt-1" />
             <div className="mt-1 text-[11px] text-muted-foreground">Default energy per serving used in Menu Planning.</div>
+          </div>
+
+          {/* ── Item capabilities ──────────────────────────────────────── */}
+          <div className="md:col-span-2 mt-2 pt-4 border-t border-border">
+            <CapabilityChecks
+              canPurchase={canPurchase}
+              canProduce={canProduce}
+              canSell={canSell}
+              onPurchase={(v) => { setCapsTouched(true); setCanPurchase(v); }}
+              onProduce={(v) => { setCapsTouched(true); setCanProduce(v); }}
+              onSell={(v) => { setCapsTouched(true); setCanSell(v); }}
+            />
           </div>
 
           {/* ── ALT UOMs ───────────────────────────────────────────────── */}
@@ -1438,18 +1767,33 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
                 <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Alt UOM Label</Label>
                 <select
                   value={altDraftUom}
-                  onChange={(e) => setAltDraftUom(e.target.value)}
+                  onChange={(e) => { e.target.value === ADD_NEW ? setAddingAltUomOption(true) : setAltDraftUom(e.target.value); }}
                   className={selectCls}
                 >
                   <option value="">Select alt UOM…</option>
-                  {ALT_UOM_OPTIONS.filter(
+                  {altUomOptions.filter(
                     (opt) =>
                       opt.toLowerCase() !== uom.toLowerCase() &&
                       !altUoms.some((a) => a.uom.toLowerCase() === opt.toLowerCase()),
                   ).map((opt) => (
                     <option key={opt} value={opt}>{opt}</option>
                   ))}
+                  <option value={ADD_NEW}>+ Add new alt UOM…</option>
                 </select>
+                {addingAltUomOption && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <Input
+                      autoFocus
+                      value={newAltUomOption}
+                      onChange={(e) => setNewAltUomOption(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewAltUomOption(); } }}
+                      placeholder="New alt UOM (e.g. Jar, Roll)"
+                      className="h-9"
+                    />
+                    <Button type="button" size="sm" onClick={commitNewAltUomOption}>Add</Button>
+                    <Button type="button" size="sm" variant="outline" onClick={() => { setAddingAltUomOption(false); setNewAltUomOption(""); }}>Cancel</Button>
+                  </div>
+                )}
               </div>
               <div>
                 <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
@@ -1478,12 +1822,12 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
           </div>
 
           <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Reorder Level</Label>
-            <Input type="number" min={0} value={reorderLevel} onChange={(e) => setReorderLevel(e.target.value)} className="mt-1 tabular-nums" />
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Expiry Date</Label>
-            <Input type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} className="mt-1 tabular-nums" />
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Reorder Level ({uom})</Label>
+            <div className="relative mt-1">
+              <Input type="number" min={0} value={reorderLevel} onChange={(e) => setReorderLevel(e.target.value)} className="tabular-nums pr-16" />
+              <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs font-medium text-muted-foreground">{uom}</span>
+            </div>
+            <div className="mt-1 text-[11px] text-muted-foreground">Trigger point in the item's stock unit ({uom}).</div>
           </div>
 
           <div className="md:col-span-2">
@@ -1566,51 +1910,18 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
           </div>
 
           <div className="md:col-span-2">
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Bin Location</Label>
-            <Input
-              value={binLocation}
-              onChange={(e) => setBinLocation(e.target.value)}
-              className="mt-1 font-mono"
-              placeholder="e.g. A1-R3-S2  (aisle-rack-shelf)"
-            />
-            <div className="mt-1 text-[11px] text-muted-foreground">
-              Bin/rack/shelf within the selected warehouse. Used as the picking location across Inventory, Airline Consumables, and FEFO/FIFO lookups.
-            </div>
-          </div>
-
-          <div className="md:col-span-2">
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Stock Tracking</Label>
-            <div
-              className="mt-1 inline-flex items-center rounded-md border border-input bg-background p-0.5 shadow-sm"
-              role="group"
-              aria-label="Stock tracking mode"
-            >
-              {([
-                { label: "Batch-Tracked",  value: true  },
-                { label: "Single Item",    value: false },
-              ] as const).map((opt) => {
-                const active = batchTrackedChoice === opt.value;
-                return (
-                  <button
-                    key={String(opt.value)}
-                    type="button"
-                    onClick={() => setBatchTrackedChoice(opt.value)}
-                    className={cn(
-                      "px-3 py-1 text-xs font-semibold rounded-sm transition-colors",
-                      active
-                        ? "bg-primary/10 text-primary"
-                        : "text-muted-foreground hover:text-foreground",
-                    )}
-                  >
-                    {opt.label}
-                  </button>
-                );
-              })}
-            </div>
-            <div className="mt-1 text-[11px] text-muted-foreground leading-relaxed">
-              <span className="font-semibold text-foreground">Batch-Tracked</span> means each receipt creates a discrete batch lot with its own expiry and cost. FIFO/FEFO controls which lot is drained first.
-              <br />
-              <span className="font-semibold text-foreground">Single Item</span> means stock is one pooled bucket — no batch numbers, no expiry, no FIFO/FEFO. Use for shelf-stable hardware (tape, caps, labels, etc.).
+            <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3" role="radiogroup" aria-label="Stock tracking mode">
+              {STOCK_TRACKING_OPTIONS.map((opt) => (
+                <OptionCard
+                  key={String(opt.value)}
+                  icon={opt.icon}
+                  title={opt.title}
+                  desc={opt.desc}
+                  active={batchTrackedChoice === opt.value}
+                  onSelect={() => setBatchTrackedChoice(opt.value)}
+                />
+              ))}
             </div>
           </div>
 
@@ -1625,35 +1936,22 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
             </Label>
             <div
               className={cn(
-                "mt-1 inline-flex items-center rounded-md border border-input bg-background p-0.5 shadow-sm",
+                "mt-2 grid grid-cols-1 sm:grid-cols-3 gap-3",
                 !batchTrackedChoice && "opacity-50 pointer-events-none",
               )}
-              role="group"
+              role="radiogroup"
               aria-label="Allocation method"
             >
-              {(["Auto", "FEFO", "FIFO"] as const).map((m) => {
-                const active = allocationChoice === m;
-                return (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => setAllocationChoice(m)}
-                    className={cn(
-                      "px-3 py-1 text-xs font-semibold rounded-sm transition-colors",
-                      active
-                        ? "bg-primary/10 text-primary"
-                        : "text-muted-foreground hover:text-foreground",
-                    )}
-                  >
-                    {m}
-                  </button>
-                );
-              })}
-            </div>
-            <div className="mt-1 text-[11px] text-muted-foreground leading-relaxed">
-              <span className="font-semibold text-foreground">Auto</span> picks FEFO for perishables (Protein, Dairy, Vegetable, Bakery, Meal, Beverage; Fresh/Frozen) and FIFO for shelf-stable goods (Packaging, Consumables, Dry).
-              <br />
-              <span className="font-semibold text-foreground">FEFO</span> drains the lot with the earliest expiry first; <span className="font-semibold text-foreground">FIFO</span> drains the earliest-received lot.
+              {ALLOCATION_OPTIONS.map((opt) => (
+                <OptionCard
+                  key={opt.value}
+                  icon={opt.icon}
+                  title={opt.title}
+                  desc={opt.desc}
+                  active={allocationChoice === opt.value}
+                  onSelect={() => setAllocationChoice(opt.value)}
+                />
+              ))}
             </div>
           </div>
         </div>

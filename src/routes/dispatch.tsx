@@ -14,7 +14,7 @@ import { flights, meals, activeWarehouses, activeOffices, activeWarehousesByOffi
 import {
   dayFromDate, parseMealQty, resolveCrewDish, resolveSpecialDish,
 } from "@/lib/meal-planning-data";
-import { useFlightOrders, getFlightOrders, getOrderAmendments, type FlightOrder } from "@/lib/flight-orders-store";
+import { useFlightOrders, getFlightOrders, updateFlightOrdersWhere, getOrderAmendments, type FlightOrder } from "@/lib/flight-orders-store";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import {
@@ -1579,6 +1579,21 @@ export default function Dispatch() {
     );
     if (dispatchingRecord) {
       const execName = "M. Karim";
+      // Auto-advance the matching flight orders in Order Management to
+      // "Dispatched". Status there is event-driven, and dispatching here IS the
+      // event — so this closes the loop without any manual status change. Match
+      // by flight number + service date; never regress an already-Completed order.
+      const dispatchedCount = updateFlightOrdersWhere(
+        (o) =>
+          dispatchingRecord.flightNos.includes(o.flight) &&
+          o.date === dispatchingRecord.date &&
+          o.status !== "Completed" &&
+          o.status !== "Dispatched",
+        { status: "Dispatched" },
+      );
+      if (dispatchedCount > 0) {
+        toast.success(`${dispatchedCount} flight order leg${dispatchedCount === 1 ? "" : "s"} marked Dispatched in Order Management.`);
+      }
       const newEntries: DispatchedFlightEntry[] = dispatchingRecord.flightNos.map((flight) => ({
         id: `DE-${Date.now()}-${flight}`,
         flight,

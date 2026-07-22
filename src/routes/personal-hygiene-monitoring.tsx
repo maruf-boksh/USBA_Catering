@@ -123,7 +123,7 @@ const SEED_RECORD: PersonalHygieneRecord = {
   status: "approved",
   verifiedBy: "Senior Executive",
   verifiedAt: "2026-07-01 08:30",
-  approvedBy: "GM/Admin",
+  approvedBy: "Business Analyst",
   approvedAt: "2026-07-01 09:15",
 };
 
@@ -271,7 +271,7 @@ export function PHSignOffPanel({ rec }: { rec: PersonalHygieneRecord }) {
         )}
       </div>
       <div className={`rounded-md border p-3 ${rec.approvedBy ? "border-emerald-200 bg-emerald-50/40" : "border-border bg-muted/20"}`}>
-        <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1.5">Authorised By (GM/Admin)</p>
+        <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-1.5">Authorised By (Business Analyst)</p>
         {rec.approvedBy ? (
           <>
             <p className="font-semibold text-emerald-800">{rec.approvedBy}</p>

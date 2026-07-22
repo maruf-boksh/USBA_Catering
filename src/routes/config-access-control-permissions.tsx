@@ -54,7 +54,7 @@ export default function ConfigAccessControlPermissionsPage() {
 
   const backToRoles = () => navigate("/config-access-control");
 
-  // Only GM/Admin (acting role) can manage access control.
+  // Only Business Analyst (acting role) can manage access control.
   if (activeRole !== ADMIN_ROLE) {
     return (
       <>
@@ -63,7 +63,7 @@ export default function ConfigAccessControlPermissionsPage() {
           <CardContent className="py-12 text-center">
             <Lock className="h-8 w-8 mx-auto text-muted-foreground mb-3" />
             <div className="text-sm font-semibold text-foreground">Restricted</div>
-            <p className="text-xs text-muted-foreground mt-1">Only <strong>GM/Admin</strong> can manage access control.</p>
+            <p className="text-xs text-muted-foreground mt-1">Only <strong>Business Analyst</strong> can manage access control.</p>
           </CardContent>
         </Card>
       </>
@@ -153,7 +153,7 @@ export default function ConfigAccessControlPermissionsPage() {
         subtitle="Manage view / create / edit / delete down to each KPI card, column, field, action and section."
         actions={
           <div className="flex items-center gap-3 flex-wrap">
-            <label className="flex items-center gap-2 text-sm" title={isRoot ? "GM/Admin is the root administrator and is always full-access" : "Give this role full access to everything, like GM/Admin"}>
+            <label className="flex items-center gap-2 text-sm" title={isRoot ? "Business Analyst is the root administrator and is always full-access" : "Give this role full access to everything, like Business Analyst"}>
               <Switch checked={isAdmin} disabled={isRoot} onCheckedChange={onToggleAdmin} />
               <span className="whitespace-nowrap">Administrator <span className="text-muted-foreground">(full access)</span></span>
             </label>
@@ -174,7 +174,7 @@ export default function ConfigAccessControlPermissionsPage() {
             <div className="text-sm font-semibold text-foreground">{role} — Full access (Administrator)</div>
             <p className="text-xs text-muted-foreground mt-1 max-w-md mx-auto">
               {isRoot
-                ? "GM/Admin is the root administrator and always has every permission on every module, page and element."
+                ? "Business Analyst is the root administrator and always has every permission on every module, page and element."
                 : "This role has every permission on every module, page and element. Turn off the Administrator toggle above to manage granular permissions."}
             </p>
             <Button className="mt-4" variant="outline" onClick={backToRoles}>Back to roles</Button>

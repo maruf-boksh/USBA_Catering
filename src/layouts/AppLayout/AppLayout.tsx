@@ -444,7 +444,7 @@ export function AppLayout({ children, currentUser, onSignOut }: AppLayoutProps) 
                 <Lock style={{ width: 32, height: 32, color: 'var(--color-muted-foreground)', margin: '0 auto 12px' }} />
                 <div style={{ fontWeight: 600, color: 'var(--color-foreground)' }}>Access restricted</div>
                 <p style={{ fontSize: 13, color: 'var(--color-muted-foreground)', marginTop: 6 }}>
-                  Your role (<strong>{role}</strong>) doesn’t have view access to this page. Ask a GM/Admin to grant it in
+                  Your role (<strong>{role}</strong>) doesn’t have view access to this page. Ask a Business Analyst to grant it in
                   Configuration → User Access Control.
                 </p>
               </div>

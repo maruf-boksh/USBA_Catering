@@ -82,7 +82,7 @@ function buildPresets(subKey: string, perms: Permission[]): PermissionPreset[] {
       label: 'Read Only',
       description: 'Page access, all KPI cards, table columns and page sections. No forms or actions.',
       tone: 'info',
-      scope: 'department',
+      scope: 'office',
       include: readOnlyKeys,
     },
     {
@@ -90,15 +90,15 @@ function buildPresets(subKey: string, perms: Permission[]): PermissionPreset[] {
       label: 'Operator',
       description: 'Read-only plus form fields and non-destructive action buttons.',
       tone: 'success',
-      scope: 'department',
+      scope: 'office',
       include: [...readOnlyKeys, ...nonStructural],
     },
     {
       key: `${subKey}.full`,
       label: 'Full Access',
-      description: 'Every permission on this page granted at organization scope.',
+      description: 'Every permission on this page granted at company scope.',
       tone: 'warning',
-      scope: 'organization',
+      scope: 'company',
       // include omitted → grant everything
     },
   ];
@@ -143,7 +143,7 @@ function buildSubmodule(route: string, label: string, moduleKey: string): Submod
       destructive,
       required: false,
       sensitive,
-      defaultScope: scopeable ? 'department' : null,
+      defaultScope: scopeable ? 'office' : null,
       impactDescription:
         section === 'tiles'          ? `Shows the "${el.label}" KPI card and its underlying metric within scope.`
         : section === 'columns'      ? `Shows the "${el.label}" column in this page's tables.`

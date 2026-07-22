@@ -3,7 +3,7 @@
  *
  * Seeds sensible defaults per built-in role by walking the generated
  * PERMISSION_CATALOG and granting whole modules at a chosen depth:
- *   • 'full'     — every permission (used for GM/Admin and a role's own modules)
+ *   • 'full'     — every permission (used for Business Analyst and a role's own modules)
  *   • 'operator' — page + KPIs + columns + form fields + sections + safe actions
  *   • 'read'     — page + KPIs + columns + sections only (view-only)
  *
@@ -67,58 +67,58 @@ const MAINTENANCE = roleId(7);
 const REPORTS     = roleId(8);
 
 export const INITIAL_ROLE_PERMISSIONS: RolePermissionsByRole = {
-  // GM/Admin — everything, organization scope.
-  [GM_ADMIN]: grantModules('all', 'full', 'organization'),
+  // Business Analyst — everything, organization scope.
+  [GM_ADMIN]: grantModules('all', 'full', 'company'),
 
   // Menu Planner — owns menu/operations, reads production.
   [MENU_PLAN]: merge(
-    grantModules(['dashboard'], 'read', 'organization'),
-    grantModules(['operations'], 'operator', 'department'),
-    grantModules(['production'], 'read', 'department'),
+    grantModules(['dashboard'], 'read', 'company'),
+    grantModules(['operations'], 'operator', 'office'),
+    grantModules(['production'], 'read', 'office'),
   ),
 
   // Production — owns kitchen production, reads QC & inventory.
   [PRODUCTION]: merge(
-    grantModules(['dashboard'], 'read', 'organization'),
-    grantModules(['production'], 'operator', 'department'),
-    grantModules(['qc', 'inventory'], 'read', 'department'),
+    grantModules(['dashboard'], 'read', 'company'),
+    grantModules(['production'], 'operator', 'office'),
+    grantModules(['qc', 'inventory'], 'read', 'office'),
   ),
 
   // Packaging & Dispatch — owns dispatch, reads production & QC.
   [DISPATCH]: merge(
-    grantModules(['dashboard'], 'read', 'organization'),
-    grantModules(['dispatch'], 'operator', 'department'),
-    grantModules(['production', 'qc'], 'read', 'department'),
+    grantModules(['dashboard'], 'read', 'company'),
+    grantModules(['dispatch'], 'operator', 'office'),
+    grantModules(['production', 'qc'], 'read', 'office'),
   ),
 
   // Store & Inventory — owns inventory.
   [STORE_INV]: merge(
-    grantModules(['dashboard'], 'read', 'organization'),
-    grantModules(['inventory'], 'operator', 'department'),
+    grantModules(['dashboard'], 'read', 'company'),
+    grantModules(['inventory'], 'operator', 'office'),
   ),
 
   // Procurement — owns supply + reads accounts (inherits Store & Inventory via parentRoleId).
   [PROCUREMENT]: merge(
-    grantModules(['dashboard'], 'read', 'organization'),
-    grantModules(['supply'], 'operator', 'department'),
-    grantModules(['accounts'], 'read', 'branch'),
+    grantModules(['dashboard'], 'read', 'company'),
+    grantModules(['supply'], 'operator', 'office'),
+    grantModules(['accounts'], 'read', 'company'),
   ),
 
   // Food Safety & QC — owns QC.
   [QC]: merge(
-    grantModules(['dashboard'], 'read', 'organization'),
-    grantModules(['qc'], 'operator', 'department'),
+    grantModules(['dashboard'], 'read', 'company'),
+    grantModules(['qc'], 'operator', 'office'),
   ),
 
   // Maintenance & Asset — owns fleet / equipment.
   [MAINTENANCE]: merge(
-    grantModules(['dashboard'], 'read', 'organization'),
-    grantModules(['fleet-operations', 'airline-consumables'], 'operator', 'department'),
+    grantModules(['dashboard'], 'read', 'company'),
+    grantModules(['fleet-operations', 'airline-consumables'], 'operator', 'office'),
   ),
 
   // Reports & Analytics — read-only across reporting surfaces, org scope.
   [REPORTS]: merge(
-    grantModules(['dashboard', 'reports', 'accounts'], 'read', 'organization'),
+    grantModules(['dashboard', 'reports', 'accounts'], 'read', 'company'),
   ),
 };
 
@@ -131,6 +131,6 @@ function seedAudit(roleIdArg: string, action: PermissionAuditEntry['action'], ac
 export const INITIAL_PERMISSION_AUDIT: PermissionAuditEntry[] = [
   seedAudit(GM_ADMIN,    'role.reviewed',            'System',   '01 Jan 2025, 09:00 AM', { note: 'Seeded with full access across every module.' }),
   seedAudit(PRODUCTION,  'role.reviewed',            'System',   '05 Jan 2025, 09:30 AM', { note: 'Seeded with operator access to Production.' }),
-  seedAudit(PROCUREMENT, 'role.copied_from',         'GM/Admin', '01 May 2026, 11:05 AM', { note: 'Inheritance set from Store & Inventory.' }),
-  seedAudit(REPORTS,     'role.reviewed',            'GM/Admin', '06 May 2026, 10:00 AM', { note: 'Quarterly review — confirmed read-only across reporting surfaces.' }),
+  seedAudit(PROCUREMENT, 'role.copied_from',         'Business Analyst', '01 May 2026, 11:05 AM', { note: 'Inheritance set from Store & Inventory.' }),
+  seedAudit(REPORTS,     'role.reviewed',            'Business Analyst', '06 May 2026, 10:00 AM', { note: 'Quarterly review — confirmed read-only across reporting surfaces.' }),
 ];

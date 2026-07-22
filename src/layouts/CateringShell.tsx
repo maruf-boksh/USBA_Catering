@@ -15,7 +15,20 @@ export function CateringShell() {
   const navigate = useNavigate();
   const isShellBypassed = SHELL_BYPASS.includes(pathname);
 
-  const [role, setRole] = useState<Role>('GM/Admin');
+  const [role, setRole] = useState<Role>('Business Analyst');
+
+  // Bump on profile changes (e.g. a new avatar) so the top-bar reflects them
+  // immediately, without waiting for a navigation or reload.
+  const [, forceRefresh] = useState(0);
+  useEffect(() => {
+    const onUpdate = () => forceRefresh((n) => n + 1);
+    window.addEventListener('auth-user-updated', onUpdate);
+    window.addEventListener('storage', onUpdate);
+    return () => {
+      window.removeEventListener('auth-user-updated', onUpdate);
+      window.removeEventListener('storage', onUpdate);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isShellBypassed && !isAuthenticated()) navigate('/login');

@@ -22,14 +22,14 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Trash2, Plus, Eye, Clock, CheckCircle2, X as XIcon,
   AlertTriangle, Search, History, FileText, Package, Download,
-  Pencil, HandCoins,
+  Pencil, HandCoins, ArrowLeft, Building2, Warehouse as WarehouseIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { useRole } from "@/lib/roles";
 import { useWorkflow, type WfProductionEntry } from "@/lib/workflow-store";
 import { resolveProductionItem } from "@/lib/meal-recipe";
-import { inventory, consumableItems } from "@/lib/sample-data";
+import { inventory, consumableItems, activeItems, activeOffices, activeWarehousesByOffice, offices as ALL_OFFICES, warehouses as ALL_WAREHOUSES } from "@/lib/sample-data";
 
 // ── Shared types (exported so approval-management can consume them) ────────────
 
@@ -72,10 +72,10 @@ export type WastageSaleDetails = {
 // "Airport Store", "Return Item") so all branching / persisted data is untouched;
 // only what the user sees is renamed here.
 const WASTAGE_TYPE_LABELS: Record<WastageType, string> = {
-  "Production": "Production",
-  "Airport Store": "Galley Returns",
+  "Production": "Production Wastage",
+  "Airport Store": "Galley Return Wastage",
   "Return Item": "Return Item",
-  "Transfer": "Transfer",
+  "Transfer": "Transfer Wastage",
 };
 function wastageTypeLabel(t: WastageType | ""): string {
   return t ? WASTAGE_TYPE_LABELS[t] : "Unspecified";
@@ -131,6 +131,8 @@ export type WastageEntry = {
   preparedAt: string;
   status: WastageStatus;
   approvalSteps: WastageApprovalStep[];
+  officeId?: string;
+  warehouseId?: string;
   returnRef?: string;
   stockItemName?: string;
   previousStock?: number;
@@ -173,13 +175,10 @@ const DISPOSAL_METHODS = [
   "Animal Feed",
   "Third-party Disposal",
   "Destroy",
-  "Sell",
   "N/A",
   "Other (Specify)",
 ];
 
-const PAYMENT_MODES = ["Cash", "Bank Transfer", "Mobile Banking", "Cheque", "Other"];
-const MOBILE_PROVIDERS = ["Bkash", "Nagad", "Other"];
 
 const SECTIONS = [
   "Baunia Catering",
@@ -246,6 +245,8 @@ function StatusBadge({ status }: { status: WastageStatus }) {
 
 type FormState = {
   wastageType: WastageType | "";
+  officeId: string;
+  warehouseId: string;
   itemName: string;
   packageBatchSize: string;
   batchCode: string;
@@ -275,26 +276,12 @@ type FormState = {
   // Returned-transfer picker (Transfer type)
   selectedTransferReturnIds: string[];
   selectedTransferLineIdx: number;
-  // Salvage-sale fields (used when Disposal Method === "Sell")
-  saleBuyer: string;
-  saleQty: string;
-  saleUnitPrice: string;
-  salePaymentMode: string;
-  saleReference: string;
-  saleRemarks: string;
-  // Payment-mode specific fields
-  saleBankAccountNo: string;
-  saleMobileProvider: string;
-  saleMobileProviderOther: string;
-  saleMobileNo: string;
-  saleChequeNo: string;
-  saleChequeImage: string;
-  saleOtherMethod: string;
-  saleOtherDocument: string;
 };
 
 const emptyForm = (): FormState => ({
   wastageType: "",
+  officeId: "",
+  warehouseId: "",
   itemName: "",
   packageBatchSize: "",
   batchCode: "",
@@ -323,20 +310,6 @@ const emptyForm = (): FormState => ({
   recookBatchQtys: {},
   selectedTransferReturnIds: [],
   selectedTransferLineIdx: -1,
-  saleBuyer: "",
-  saleQty: "",
-  saleUnitPrice: "",
-  salePaymentMode: "",
-  saleReference: "",
-  saleRemarks: "",
-  saleBankAccountNo: "",
-  saleMobileProvider: "",
-  saleMobileProviderOther: "",
-  saleMobileNo: "",
-  saleChequeNo: "",
-  saleChequeImage: "",
-  saleOtherMethod: "",
-  saleOtherDocument: "",
 });
 
 // ── Main Component ────────────────────────────────────────────────────────────
@@ -352,6 +325,33 @@ export default function WastageManagementPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState<FormState>(emptyForm());
   const [editId, setEditId] = useState<string | null>(null);
+
+  // Item-picker cascade filters (Item Type → Category → Sub-category → Item).
+  const [itemTypeFilter, setItemTypeFilter] = useState("");
+  const [itemCatFilter, setItemCatFilter] = useState("");
+  const [itemSubFilter, setItemSubFilter] = useState("");
+  const itemTypeChoices = useMemo(() => Array.from(new Set(activeItems.map((i) => i.itemType))), []);
+  const itemCatChoices = useMemo(
+    () => Array.from(new Set(activeItems.filter((i) => !itemTypeFilter || i.itemType === itemTypeFilter).map((i) => i.category))).sort(),
+    [itemTypeFilter],
+  );
+  const itemSubChoices = useMemo(
+    () => Array.from(new Set(activeItems
+      .filter((i) => (!itemTypeFilter || i.itemType === itemTypeFilter) && (!itemCatFilter || i.category === itemCatFilter))
+      .map((i) => i.subCategory).filter(Boolean))).sort(),
+    [itemTypeFilter, itemCatFilter],
+  );
+  const itemChoices = useMemo(
+    () => activeItems.filter((i) =>
+      (!itemTypeFilter || i.itemType === itemTypeFilter) &&
+      (!itemCatFilter || i.category === itemCatFilter) &&
+      (!itemSubFilter || i.subCategory === itemSubFilter)),
+    [itemTypeFilter, itemCatFilter, itemSubFilter],
+  );
+
+  // Production Date (field 02) only shows for Production wastage, so fields after
+  // it shift down by one when it's hidden — keeps the numbering gap-free.
+  const fieldNo = (n: number) => String(form.wastageType === "Production" ? n : n - 1).padStart(2, "0");
 
   const [viewOpen, setViewOpen] = useState(false);
   const [viewEntry, setViewEntry] = useState<WastageEntry | null>(null);
@@ -477,79 +477,18 @@ export default function WastageManagementPage() {
       toast.error("Please specify the disposal reason."); return;
     }
     if (!form.rootCause.trim()) { toast.error("Root cause is required."); return; }
-    if (isAccountabilityType(form.wastageType) && !form.compensationJustification.trim()) {
-      toast.error("Compensation justification is required (Yes or No)."); return;
-    }
-    if (form.disposalMethod === "Sell") {
-      if (!form.saleBuyer.trim()) { toast.error("Buyer / party is required for a salvage sale."); return; }
-      if (!form.saleUnitPrice || isNaN(Number(form.saleUnitPrice)) || Number(form.saleUnitPrice) < 0) {
-        toast.error("Valid unit price is required for a salvage sale."); return;
-      }
-      if (!form.salePaymentMode) { toast.error("Select a payment mode."); return; }
-      if (form.salePaymentMode === "Bank Transfer" && !form.saleBankAccountNo.trim()) {
-        toast.error("Provide the bank A/C no."); return;
-      }
-      if (form.salePaymentMode === "Mobile Banking") {
-        if (!form.saleMobileProvider) { toast.error("Select a mobile banking provider."); return; }
-        if (form.saleMobileProvider === "Other" && !form.saleMobileProviderOther.trim()) {
-          toast.error("Specify the mobile banking provider."); return;
-        }
-        if (!form.saleMobileNo.trim()) { toast.error("Provide the mobile banking no."); return; }
-      }
-      if (form.salePaymentMode === "Cheque" && !form.saleChequeNo.trim() && !form.saleChequeImage.trim()) {
-        toast.error("Provide the cheque no or upload a cheque image."); return;
-      }
-      if (form.salePaymentMode === "Other" && !form.saleOtherMethod.trim()) {
-        toast.error("Provide the other payment method."); return;
-      }
-    }
+    if (!form.officeId) { toast.error("Office is required."); return; }
+    if (!form.warehouseId) { toast.error("Warehouse is required."); return; }
 
     const at = nowStamp();
     const sysDate = todayDate();   // 09. Disposal Date — system generated
     const sysTime = nowTime();     // 10. Disposal Time — system generated
-    const saleQtyNum = Number(form.saleQty) || Number(form.disposalQty) || 0;
-    const saleUnitPriceNum = Number(form.saleUnitPrice) || 0;
-    const saleDetails: WastageSaleDetails | undefined =
-      form.disposalMethod === "Sell"
-        ? {
-            buyer: form.saleBuyer.trim(),
-            saleQty: saleQtyNum,
-            unit: form.disposalQtyUnit,
-            unitPrice: saleUnitPriceNum,
-            totalValue: Math.round(saleQtyNum * saleUnitPriceNum * 100) / 100,
-            paymentMode: form.salePaymentMode,
-            reference: form.saleReference.trim() || "N/A",
-            remarks: form.saleRemarks.trim() || "N/A",
-            saleDate: sysDate,
-            ...(form.salePaymentMode === "Bank Transfer"
-              ? { bankAccountNo: form.saleBankAccountNo.trim() }
-              : {}),
-            ...(form.salePaymentMode === "Mobile Banking"
-              ? {
-                  mobileProvider: form.saleMobileProvider === "Other"
-                    ? (form.saleMobileProviderOther.trim() || "Other")
-                    : form.saleMobileProvider,
-                  mobileNo: form.saleMobileNo.trim(),
-                }
-              : {}),
-            ...(form.salePaymentMode === "Cheque"
-              ? {
-                  ...(form.saleChequeNo.trim() ? { chequeNo: form.saleChequeNo.trim() } : {}),
-                  ...(form.saleChequeImage.trim() ? { chequeImage: form.saleChequeImage.trim() } : {}),
-                }
-              : {}),
-            ...(form.salePaymentMode === "Other"
-              ? {
-                  otherMethod: form.saleOtherMethod.trim(),
-                  ...(form.saleOtherDocument.trim() ? { otherDocument: form.saleOtherDocument.trim() } : {}),
-                }
-              : {}),
-          }
-        : undefined;
     const newEntry: WastageEntry = {
       id: genId(entries),
       reportingDate: todayDate(),
       wastageType: form.wastageType as WastageType, // optional — may be "" (Unspecified); type-specific features just don't trigger
+      officeId: form.officeId,
+      warehouseId: form.warehouseId,
       itemName: form.itemName.trim(),
       packageBatchSize: form.packageBatchSize.trim() || "N/A",
       batchCode: form.batchCode.trim() || "N/A",
@@ -593,7 +532,6 @@ export default function WastageManagementPage() {
       ...(form.wastageType === "Transfer" && form.selectedTransferReturnIds.length
         ? { returnRef: form.selectedTransferReturnIds.join(", ") }
         : {}),
-      ...(saleDetails ? { saleDetails } : {}),
     };
 
     if (editId) {
@@ -645,6 +583,7 @@ export default function WastageManagementPage() {
 
   return (
     <>
+      {!createOpen && (<>
       <PageHeader
         title="Damaged Product Disposal"
         subtitle="Production & Galley Returns Wastage — Disposal Reports & Approval Tracking"
@@ -665,9 +604,9 @@ export default function WastageManagementPage() {
         <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as typeof activeTab)}>
           <TabsList className="h-8">
             <TabsTrigger value="all"           className="text-xs px-3 h-7">All</TabsTrigger>
-            <TabsTrigger value="Production"    className="text-xs px-3 h-7">Production</TabsTrigger>
-            <TabsTrigger value="Airport Store" className="text-xs px-3 h-7">Galley Returns</TabsTrigger>
-            <TabsTrigger value="Transfer"      className="text-xs px-3 h-7">Transfer</TabsTrigger>
+            <TabsTrigger value="Production"    className="text-xs px-3 h-7">Production Wastage</TabsTrigger>
+            <TabsTrigger value="Airport Store" className="text-xs px-3 h-7">Galley Return Wastage</TabsTrigger>
+            <TabsTrigger value="Transfer"      className="text-xs px-3 h-7">Transfer Wastage</TabsTrigger>
           </TabsList>
         </Tabs>
         <div className="flex items-center gap-2">
@@ -783,33 +722,35 @@ export default function WastageManagementPage() {
         </CardContent>
       </Card>
 
-      {/* ── Create Modal ──────────────────────────────────────────────────────── */}
-      <Dialog open={createOpen} onOpenChange={(o) => { setCreateOpen(o); if (!o) setEditId(null); }}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-base">
-              {editId ? <Pencil className="h-5 w-5 text-blue-500" /> : <Trash2 className="h-5 w-5 text-red-500" />}
-              {editId ? `Edit Wastage Report — ${editId}` : "New Wastage / Damaged Product Disposal"}
-            </DialogTitle>
-          </DialogHeader>
+      </>)}
 
-          <div className="space-y-6 py-2">
+      {/* ── Create / Edit Form — full page (formerly a modal) ──────────────────── */}
+      {createOpen && (
+      <>
+        <PageHeader
+          title={editId ? `Edit Wastage Report — ${editId}` : "New Wastage / Damaged Product Disposal"}
+          subtitle="Production, Galley Return & Transfer Wastage — Disposal Report"
+          icon={editId ? <Pencil className="h-5 w-5 text-primary" /> : <Trash2 className="h-5 w-5 text-primary" />}
+          actions={
+            <Button variant="outline" size="sm" onClick={() => { setCreateOpen(false); setEditId(null); }}>
+              <ArrowLeft className="h-4 w-4 mr-1.5" /> Back to list
+            </Button>
+          }
+        />
+        <div className="space-y-5 pb-4">
 
-            {/* Form header strip */}
-            <div className="flex items-center justify-between p-3 bg-muted/30 rounded-md border border-border text-xs text-muted-foreground">
-              <span><strong>Form No:</strong> USBA-FSH-WDD &nbsp;|&nbsp; <strong>Issue Date:</strong> 28.05.2023 &nbsp;|&nbsp; <strong>Rev. No:</strong> 00</span>
-              <span><strong>Reporting Date:</strong> {todayDate().split("-").reverse().join(".")}</span>
-            </div>
+          <Card>
+            <CardContent className="pt-6 space-y-6">
 
             {/* Type selector */}
             <div className="grid grid-cols-3 gap-4">
               <div>
-                <Label className="text-xs">Wastage Type</Label>
+                <Label className="text-xs">Wastage Type <span className="text-muted-foreground font-normal">(optional)</span></Label>
                 <Select
-                  value={form.wastageType}
+                  value={form.wastageType || "none"}
                   onValueChange={(v) => setForm({
                     ...form,
-                    wastageType: v as WastageType,
+                    wastageType: v === "none" ? "" : (v as WastageType),
                     stockItemName: "",
                     previousStock: "",
                     returnRef: "",
@@ -825,9 +766,30 @@ export default function WastageManagementPage() {
                 >
                   <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select type" /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="Production">Production</SelectItem>
-                    <SelectItem value="Airport Store">Galley Returns</SelectItem>
-                    <SelectItem value="Transfer">Transfer</SelectItem>
+                    <SelectItem value="none">None — general disposal (no type link)</SelectItem>
+                    <SelectItem value="Production">Production Wastage</SelectItem>
+                    <SelectItem value="Airport Store">Galley Return Wastage</SelectItem>
+                    <SelectItem value="Transfer">Transfer Wastage</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label className="text-xs flex items-center gap-1"><Building2 className="h-3 w-3" /> Office <span className="text-red-500">*</span></Label>
+                <Select value={form.officeId || undefined} onValueChange={(v) => setForm({ ...form, officeId: v, warehouseId: "" })}>
+                  <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select office" /></SelectTrigger>
+                  <SelectContent>
+                    {activeOffices.map((o) => <SelectItem key={o.id} value={o.id} className="text-sm">{o.code} — {o.name}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div>
+                <Label className="text-xs flex items-center gap-1"><WarehouseIcon className="h-3 w-3" /> Warehouse <span className="text-red-500">*</span></Label>
+                <Select value={form.warehouseId || undefined} onValueChange={(v) => setForm({ ...form, warehouseId: v })} disabled={!form.officeId}>
+                  <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder={form.officeId ? "Select warehouse" : "Select office first"} /></SelectTrigger>
+                  <SelectContent>
+                    {(form.officeId ? activeWarehousesByOffice(form.officeId) : []).map((w) => (
+                      <SelectItem key={w.id} value={w.id} className="text-sm">{w.code} — {w.name}</SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -1271,84 +1233,77 @@ export default function WastageManagementPage() {
               <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3">Disposal Details</h4>
               <div className="grid grid-cols-2 gap-4">
                 {!(form.wastageType === "Production" && form.selectedRecookBatchIds.length > 1) && (
-                <div>
-                  <Label className="text-xs">01. Name of RM / PM / FG <span className="text-red-500">*</span></Label>
-                  {isStockBackedType(form.wastageType) ? (
-                    <div className="relative">
-                      <Input
-                        className="mt-1 h-9 text-sm"
-                        value={form.itemName}
-                        onChange={(e) => {
-                          setForm({ ...form, itemName: e.target.value, stockItemName: e.target.value, previousStock: "" });
-                          setStockDropOpen(true);
-                        }}
-                        onFocus={() => setStockDropOpen(true)}
-                        onBlur={() => setTimeout(() => setStockDropOpen(false), 150)}
-                        placeholder="Type to search inventory items..."
-                      />
-                      {stockDropOpen && stockSuggestions.length > 0 && (
-                        <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-background border border-border rounded-md shadow-lg max-h-44 overflow-y-auto">
-                          {stockSuggestions.map((item, idx) => (
-                            <div
-                              key={idx}
-                              className="px-3 py-2 text-xs cursor-pointer hover:bg-muted/60 flex justify-between items-center"
-                              onMouseDown={(e) => e.preventDefault()}
-                              onClick={() => {
-                                setForm({ ...form, itemName: item.name, stockItemName: item.name, previousStock: String(item.stock ?? 0), disposalQtyUnit: item.uom ?? form.disposalQtyUnit });
-                                setStockDropOpen(false);
-                              }}
-                            >
-                              <span className="font-medium">{item.name}</span>
-                              <span className="text-muted-foreground tabular-nums">{item.stock ?? 0} {item.uom ?? ""}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {form.itemName.trim() && !stockDropOpen && !form.previousStock && (
-                        <p className="text-[11px] text-amber-600 mt-0.5">Not found in inventory — manual entry applied.</p>
-                      )}
+                <div className="col-span-2">
+                  <Label className="text-xs">01. Item <span className="text-red-500">*</span></Label>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-1">
+                    <div>
+                      <Label className="text-[11px] text-muted-foreground">Item Type</Label>
+                      <Select value={itemTypeFilter || "all"} onValueChange={(v) => { setItemTypeFilter(v === "all" ? "" : v); setItemCatFilter(""); setItemSubFilter(""); }}>
+                        <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All types</SelectItem>
+                          {itemTypeChoices.map((t) => <SelectItem key={t} value={t} className="text-sm">{t}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
                     </div>
-                  ) : (
-                    <Input
-                      className="mt-1 h-9 text-sm"
-                      value={form.itemName}
-                      onChange={(e) => setForm({ ...form, itemName: e.target.value })}
-                      placeholder="e.g. Chinigura Rice"
-                    />
+                    <div>
+                      <Label className="text-[11px] text-muted-foreground">Category</Label>
+                      <Select value={itemCatFilter || "all"} onValueChange={(v) => { setItemCatFilter(v === "all" ? "" : v); setItemSubFilter(""); }}>
+                        <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All categories</SelectItem>
+                          {itemCatChoices.map((c) => <SelectItem key={c} value={c} className="text-sm">{c}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div>
+                      <Label className="text-[11px] text-muted-foreground">Sub Category</Label>
+                      <Select value={itemSubFilter || "all"} onValueChange={(v) => setItemSubFilter(v === "all" ? "" : v)}>
+                        <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">All sub-categories</SelectItem>
+                          {itemSubChoices.map((s) => <SelectItem key={s} value={s} className="text-sm">{s}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div>
+                      <Label className="text-[11px] text-muted-foreground">Item <span className="text-red-500">*</span></Label>
+                      <Select
+                        value={activeItems.find((i) => i.name === form.itemName)?.id || undefined}
+                        onValueChange={(v) => {
+                          const it = activeItems.find((i) => i.id === v);
+                          if (!it) return;
+                          setForm({
+                            ...form,
+                            itemName: it.name,
+                            stockItemName: it.name,
+                            disposalQtyUnit: it.uom || form.disposalQtyUnit,
+                            previousStock: String(stockForItem(it.name, form.wastageType)),
+                          });
+                        }}
+                      >
+                        <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select item" /></SelectTrigger>
+                        <SelectContent>
+                          {itemChoices.length === 0
+                            ? <div className="px-2 py-3 text-xs text-muted-foreground text-center">No items match.</div>
+                            : itemChoices.map((i) => <SelectItem key={i.id} value={i.id} className="text-sm">{i.code} — {i.name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                  {form.itemName && (
+                    <div className="flex items-center gap-2 mt-1.5 flex-wrap text-[11px]">
+                      <span className="text-muted-foreground">Selected: <strong className="text-foreground">{form.itemName}</strong></span>
+                      <span className="inline-flex items-center gap-1 text-emerald-700 font-semibold tabular-nums bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                        Current stock: {stockForItem(form.itemName, form.wastageType)} {form.disposalQtyUnit}
+                      </span>
+                    </div>
                   )}
                 </div>
                 )}
-                {!(form.wastageType === "Production" && form.selectedRecookBatchIds.length > 1) && (
+                {form.wastageType === "Production" && (
                 <div>
-                  <Label className="text-xs">02. Package / Batch Size</Label>
-                  <div className="relative mt-1">
-                    <Input
-                      className={cn("h-9 text-sm", isStockBackedType(form.wastageType) && form.previousStock ? "pl-28" : "")}
-                      value={form.packageBatchSize}
-                      onChange={(e) => setForm({ ...form, packageBatchSize: e.target.value })}
-                      placeholder="e.g. 25 Kg"
-                    />
-                    {isStockBackedType(form.wastageType) && form.previousStock && (
-                      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-[11px] text-emerald-600 font-semibold tabular-nums bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 pointer-events-none">
-                        Stock: {form.previousStock} {form.disposalQtyUnit}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                )}
-                {!(form.wastageType === "Production" && form.selectedRecookBatchIds.length > 1) && (
-                <div>
-                  <Label className="text-xs">03. Batch Code</Label>
-                  <Input
-                    className="mt-1 h-9 text-sm"
-                    value={form.batchCode}
-                    onChange={(e) => setForm({ ...form, batchCode: e.target.value })}
-                    placeholder="N/A"
-                  />
-                </div>
-                )}
-                <div>
-                  <Label className="text-xs">04. Production Date</Label>
+                  <Label className="text-xs">02. Production Date</Label>
                   <Input
                     type="date"
                     className="mt-1 h-9 text-sm"
@@ -1356,8 +1311,9 @@ export default function WastageManagementPage() {
                     onChange={(e) => setForm({ ...form, productionDate: e.target.value })}
                   />
                 </div>
+                )}
                 <div>
-                  <Label className="text-xs">05. Disposal Quantity <span className="text-red-500">*</span></Label>
+                  <Label className="text-xs">{fieldNo(3)}. Disposal Quantity <span className="text-red-500">*</span></Label>
                   <div className="flex gap-2 mt-1">
                     <Input
                       type="number"
@@ -1367,14 +1323,17 @@ export default function WastageManagementPage() {
                       onChange={(e) => setForm({ ...form, disposalQty: e.target.value })}
                       placeholder="0"
                     />
-                    <Select value={form.disposalQtyUnit} onValueChange={(v) => setForm({ ...form, disposalQtyUnit: v })}>
-                      <SelectTrigger className="h-9 w-24 text-sm"><SelectValue /></SelectTrigger>
-                      <SelectContent>{UNITS.map((u) => <SelectItem key={u} value={u}>{u}</SelectItem>)}</SelectContent>
-                    </Select>
+                    <Input
+                      readOnly
+                      disabled
+                      className="h-9 w-24 text-sm bg-muted/40 cursor-not-allowed text-center font-medium"
+                      value={form.disposalQtyUnit || "—"}
+                      title="Unit is set by the selected item (Item Profile) and can't be changed."
+                    />
                   </div>
                 </div>
                 <div>
-                  <Label className="text-xs">06. Disposal Reason <span className="text-red-500">*</span></Label>
+                  <Label className="text-xs">{fieldNo(4)}. Disposal Reason <span className="text-red-500">*</span></Label>
                   <Select value={form.disposalReason} onValueChange={(v) => setForm({ ...form, disposalReason: v, disposalReasonCustom: "" })}>
                     <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select reason" /></SelectTrigger>
                     <SelectContent>{DISPOSAL_REASONS.map((r) => <SelectItem key={r} value={r}>{r}</SelectItem>)}</SelectContent>
@@ -1389,7 +1348,7 @@ export default function WastageManagementPage() {
                   )}
                 </div>
                 <div>
-                  <Label className="text-xs">07. Reprocessing Possibility</Label>
+                  <Label className="text-xs">{fieldNo(5)}. Reprocessing Possibility</Label>
                   <Select value={form.reprocessingPossibility} onValueChange={(v) => setForm({ ...form, reprocessingPossibility: v as "Yes" | "No" | "N/A" })}>
                     <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -1400,7 +1359,7 @@ export default function WastageManagementPage() {
                   </Select>
                 </div>
                 <div>
-                  <Label className="text-xs">08. Disposal Method</Label>
+                  <Label className="text-xs">{fieldNo(6)}. Disposal Method</Label>
                   <Select value={form.disposalMethod} onValueChange={(v) => setForm({ ...form, disposalMethod: v, disposalMethodCustom: "" })}>
                     <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select method" /></SelectTrigger>
                     <SelectContent>{DISPOSAL_METHODS.map((m) => <SelectItem key={m} value={m}>{m}</SelectItem>)}</SelectContent>
@@ -1415,7 +1374,7 @@ export default function WastageManagementPage() {
                   )}
                 </div>
                 <div>
-                  <Label className="text-xs">09. Disposal Date <span className="text-muted-foreground font-normal">(auto)</span></Label>
+                  <Label className="text-xs">{fieldNo(7)}. Disposal Date <span className="text-muted-foreground font-normal">(auto)</span></Label>
                   <Input
                     type="date"
                     readOnly
@@ -1426,7 +1385,7 @@ export default function WastageManagementPage() {
                   />
                 </div>
                 <div>
-                  <Label className="text-xs">10. Disposal Time <span className="text-muted-foreground font-normal">(auto)</span></Label>
+                  <Label className="text-xs">{fieldNo(8)}. Disposal Time <span className="text-muted-foreground font-normal">(auto)</span></Label>
                   <Input
                     type="time"
                     readOnly
@@ -1441,198 +1400,6 @@ export default function WastageManagementPage() {
                 <Clock className="h-3 w-3 shrink-0" /> Disposal date &amp; time are recorded automatically by the system.
               </p>
             </div>
-
-            {/* Selling Process — shown when Disposal Method is "Sell" */}
-            {form.disposalMethod === "Sell" && (
-              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-md space-y-3">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-emerald-700 flex items-center gap-1.5">
-                  <HandCoins className="h-3.5 w-3.5" /> Selling / Salvage Process
-                </h4>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <Label className="text-xs">Sold To (Buyer / Party) <span className="text-red-500">*</span></Label>
-                    <Input
-                      className="mt-1 h-9 text-sm"
-                      value={form.saleBuyer}
-                      onChange={(e) => setForm({ ...form, saleBuyer: e.target.value })}
-                      placeholder="e.g. Green Farms (animal feed)"
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs">Sale Quantity</Label>
-                    <div className="flex gap-2 mt-1">
-                      <Input
-                        type="number"
-                        min="0"
-                        className="h-9 text-sm flex-1"
-                        value={form.saleQty}
-                        onChange={(e) => setForm({ ...form, saleQty: e.target.value })}
-                        placeholder={form.disposalQty || "0"}
-                      />
-                      <span className="inline-flex items-center px-2 h-9 rounded-md border border-border bg-muted/40 text-xs text-muted-foreground">{form.disposalQtyUnit}</span>
-                    </div>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">Defaults to disposal quantity ({form.disposalQty || 0} {form.disposalQtyUnit}).</p>
-                  </div>
-                  <div>
-                    <Label className="text-xs">Unit Price (Tk.) <span className="text-red-500">*</span></Label>
-                    <Input
-                      type="number"
-                      min="0"
-                      className="mt-1 h-9 text-sm"
-                      value={form.saleUnitPrice}
-                      onChange={(e) => setForm({ ...form, saleUnitPrice: e.target.value })}
-                      placeholder="0.00"
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs">Payment Mode <span className="text-red-500">*</span></Label>
-                    <Select
-                      value={form.salePaymentMode}
-                      onValueChange={(v) => setForm({
-                        ...form,
-                        salePaymentMode: v,
-                        // reset mode-specific fields when the mode changes
-                        saleBankAccountNo: "",
-                        saleMobileProvider: "",
-                        saleMobileProviderOther: "",
-                        saleMobileNo: "",
-                        saleChequeNo: "",
-                        saleChequeImage: "",
-                        saleOtherMethod: "",
-                        saleOtherDocument: "",
-                      })}
-                    >
-                      <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select Payment Mode" /></SelectTrigger>
-                      <SelectContent>{PAYMENT_MODES.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}</SelectContent>
-                    </Select>
-                  </div>
-                  <div>
-                    <Label className="text-xs">Invoice / Reference No</Label>
-                    <Input
-                      className="mt-1 h-9 text-sm"
-                      value={form.saleReference}
-                      onChange={(e) => setForm({ ...form, saleReference: e.target.value })}
-                      placeholder="e.g. SAL-2026-0007"
-                    />
-                  </div>
-                  <div>
-                    <Label className="text-xs">Remarks</Label>
-                    <Input
-                      className="mt-1 h-9 text-sm"
-                      value={form.saleRemarks}
-                      onChange={(e) => setForm({ ...form, saleRemarks: e.target.value })}
-                      placeholder="Optional note"
-                    />
-                  </div>
-                </div>
-
-                {/* Payment-mode specific details */}
-                {form.salePaymentMode === "Bank Transfer" && (
-                  <div className="p-2.5 bg-white/70 border border-emerald-200 rounded-md">
-                    <Label className="text-xs">Bank A/C No <span className="text-red-500">*</span></Label>
-                    <Input
-                      className="mt-1 h-9 text-sm"
-                      value={form.saleBankAccountNo}
-                      onChange={(e) => setForm({ ...form, saleBankAccountNo: e.target.value })}
-                      placeholder="Provide account number"
-                    />
-                  </div>
-                )}
-
-                {form.salePaymentMode === "Mobile Banking" && (
-                  <div className="p-2.5 bg-white/70 border border-emerald-200 rounded-md grid grid-cols-2 gap-4">
-                    <div>
-                      <Label className="text-xs">Provider <span className="text-red-500">*</span></Label>
-                      <Select
-                        value={form.saleMobileProvider}
-                        onValueChange={(v) => setForm({ ...form, saleMobileProvider: v, saleMobileProviderOther: "" })}
-                      >
-                        <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select provider" /></SelectTrigger>
-                        <SelectContent>{MOBILE_PROVIDERS.map((p) => <SelectItem key={p} value={p}>{p}</SelectItem>)}</SelectContent>
-                      </Select>
-                      {form.saleMobileProvider === "Other" && (
-                        <Input
-                          className="mt-2 h-9 text-sm"
-                          value={form.saleMobileProviderOther}
-                          onChange={(e) => setForm({ ...form, saleMobileProviderOther: e.target.value })}
-                          placeholder="Specify provider"
-                        />
-                      )}
-                    </div>
-                    {form.saleMobileProvider && (
-                      <div>
-                        <Label className="text-xs">Mobile Banking No <span className="text-red-500">*</span></Label>
-                        <Input
-                          className="mt-1 h-9 text-sm"
-                          value={form.saleMobileNo}
-                          onChange={(e) => setForm({ ...form, saleMobileNo: e.target.value })}
-                          placeholder="Provide mobile banking no"
-                        />
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {form.salePaymentMode === "Cheque" && (
-                  <div className="p-2.5 bg-white/70 border border-emerald-200 rounded-md grid grid-cols-2 gap-4">
-                    <div>
-                      <Label className="text-xs">Cheque No</Label>
-                      <Input
-                        className="mt-1 h-9 text-sm"
-                        value={form.saleChequeNo}
-                        onChange={(e) => setForm({ ...form, saleChequeNo: e.target.value })}
-                        placeholder="Provide cheque no"
-                      />
-                    </div>
-                    <div>
-                      <Label className="text-xs">or Upload Cheque Image</Label>
-                      <Input
-                        type="file"
-                        accept="image/*"
-                        className="mt-1 h-9 text-sm file:text-xs file:mr-2"
-                        onChange={(e) => setForm({ ...form, saleChequeImage: e.target.files?.[0]?.name ?? "" })}
-                      />
-                      {form.saleChequeImage && (
-                        <p className="text-[10px] text-emerald-700 mt-0.5 truncate">Attached: {form.saleChequeImage}</p>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {form.salePaymentMode === "Other" && (
-                  <div className="p-2.5 bg-white/70 border border-emerald-200 rounded-md grid grid-cols-2 gap-4">
-                    <div>
-                      <Label className="text-xs">Other Payment Method <span className="text-red-500">*</span></Label>
-                      <Input
-                        className="mt-1 h-9 text-sm"
-                        value={form.saleOtherMethod}
-                        onChange={(e) => setForm({ ...form, saleOtherMethod: e.target.value })}
-                        placeholder="Provide payment method"
-                      />
-                    </div>
-                    <div>
-                      <Label className="text-xs">Upload Document</Label>
-                      <Input
-                        type="file"
-                        accept="image/*,application/pdf"
-                        className="mt-1 h-9 text-sm file:text-xs file:mr-2"
-                        onChange={(e) => setForm({ ...form, saleOtherDocument: e.target.files?.[0]?.name ?? "" })}
-                      />
-                      {form.saleOtherDocument && (
-                        <p className="text-[10px] text-emerald-700 mt-0.5 truncate">Attached: {form.saleOtherDocument}</p>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                <div className="flex items-center justify-between p-2.5 bg-white/70 border border-emerald-200 rounded-md">
-                  <span className="text-xs font-semibold text-emerald-700">Total Sale Value</span>
-                  <span className="text-sm font-bold text-emerald-700 tabular-nums">
-                    Tk. {((Number(form.saleQty) || Number(form.disposalQty) || 0) * (Number(form.saleUnitPrice) || 0)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </span>
-                </div>
-              </div>
-            )}
 
             {/* Stock QTY Summary — Galley Returns & Transfer only (Production shows
                 its per-batch QTY strip inside the Re-Cook Batches card above). */}
@@ -1683,215 +1450,19 @@ export default function WastageManagementPage() {
               />
             </div>
 
-            {/* Accountability fields — Production wastage only (not Galley Returns / Transfer) */}
-            {isAccountabilityType(form.wastageType) && (
-            <>
+            </CardContent>
+          </Card>
 
-            {/* Responsible Persons */}
-            <div>
-              <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2">Responsible Person of Flight Kitchen</h4>
-              <div className="border border-border rounded-md overflow-hidden">
-                <Table>
-                  <TableHeader className="bg-muted/40">
-                    <TableRow>
-                      <TableHead className="text-xs w-8">#</TableHead>
-                      <TableHead className="text-xs">Employee ID</TableHead>
-                      <TableHead className="text-xs">Name</TableHead>
-                      <TableHead className="text-xs">Designation</TableHead>
-                      <TableHead className="text-xs">Section</TableHead>
-                      <TableHead className="text-xs">Penalty (Tk.)</TableHead>
-                      <TableHead className="w-8"></TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {form.responsiblePersons.map((p, i) => (
-                      <TableRow key={i}>
-                        <TableCell className="text-xs text-muted-foreground font-mono">{String(i+1).padStart(2,"0")}</TableCell>
-                        <TableCell>
-                          <Input
-                            className="h-7 text-xs w-28"
-                            value={p.empId}
-                            onChange={(e) => setPerson(i, { empId: e.target.value })}
-                            placeholder="USBA-XXXXX"
-                          />
-                        </TableCell>
-                        <TableCell>
-                          <Input
-                            className="h-7 text-xs w-32"
-                            value={p.name}
-                            onChange={(e) => setPerson(i, { name: e.target.value })}
-                            placeholder="Full name"
-                          />
-                        </TableCell>
-                        <TableCell>
-                          <Input
-                            className="h-7 text-xs w-28"
-                            value={p.designation}
-                            onChange={(e) => setPerson(i, { designation: e.target.value })}
-                            placeholder="Designation"
-                          />
-                        </TableCell>
-                        <TableCell>
-                          <Select value={p.section} onValueChange={(v) => setPerson(i, { section: v })}>
-                            <SelectTrigger className="h-7 w-32 text-xs"><SelectValue placeholder="Section" /></SelectTrigger>
-                            <SelectContent>
-                              {SECTIONS.map((s) => <SelectItem key={s} value={s} className="text-xs">{s}</SelectItem>)}
-                            </SelectContent>
-                          </Select>
-                        </TableCell>
-                        <TableCell>
-                          <Input
-                            type="number"
-                            min="0"
-                            className="h-7 text-xs w-24"
-                            value={p.penaltyAmount || ""}
-                            onChange={(e) => setPerson(i, { penaltyAmount: Number(e.target.value) })}
-                            placeholder="0"
-                          />
-                        </TableCell>
-                        <TableCell>
-                          {form.responsiblePersons.length > 1 && (
-                            <button
-                              className="text-red-400 hover:text-red-600"
-                              onClick={() => setForm({
-                                ...form,
-                                responsiblePersons: form.responsiblePersons.filter((_, idx) => idx !== i),
-                              })}
-                            >
-                              <XIcon className="h-3.5 w-3.5" />
-                            </button>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="mt-2 h-7 text-xs gap-1"
-                onClick={() => setForm({ ...form, responsiblePersons: [...form.responsiblePersons, emptyPerson()] })}
-              >
-                <Plus className="h-3 w-3" /> Add Person
-              </Button>
-            </div>
-
-            {/* Correction */}
-            <div>
-              <Label className="text-xs">Correction</Label>
-              <Textarea
-                className="mt-1 text-sm"
-                value={form.correction}
-                onChange={(e) => setForm({ ...form, correction: e.target.value })}
-                placeholder="What immediate correction was taken?"
-              />
-            </div>
-
-            {/* Corrective Action Plan */}
-            <div>
-              <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-2">Corrective Action Plan</h4>
-              <div className="space-y-2">
-                {form.correctiveActionPlan.map((action, i) => (
-                  <div key={i} className="flex gap-2 items-center">
-                    <span className="text-xs text-muted-foreground w-5 shrink-0">{i + 1}.</span>
-                    <Input
-                      className="h-8 text-sm flex-1"
-                      value={action}
-                      onChange={(e) => setAction(i, e.target.value)}
-                      placeholder="Action item..."
-                    />
-                    {form.correctiveActionPlan.length > 1 && (
-                      <button
-                        className="text-red-400 hover:text-red-600 shrink-0"
-                        onClick={() => setForm({
-                          ...form,
-                          correctiveActionPlan: form.correctiveActionPlan.filter((_, idx) => idx !== i),
-                        })}
-                      >
-                        <XIcon className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="mt-2 h-7 text-xs gap-1"
-                onClick={() => setForm({ ...form, correctiveActionPlan: [...form.correctiveActionPlan, ""] })}
-              >
-                <Plus className="h-3 w-3" /> Add Action
-              </Button>
-            </div>
-
-            {/* Compensation */}
-            <div className="p-4 border border-border rounded-md bg-muted/20 space-y-3">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Eligible for Compensation?</h4>
-              <div className="flex gap-3">
-                <button
-                  type="button"
-                  onClick={() => setForm({ ...form, eligibleForCompensation: true })}
-                  className={cn(
-                    "px-4 py-1.5 rounded-md text-xs font-semibold border transition-colors",
-                    form.eligibleForCompensation
-                      ? "bg-emerald-500 text-white border-emerald-500"
-                      : "bg-background text-foreground border-border hover:bg-muted",
-                  )}
-                >
-                  Yes
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setForm({ ...form, eligibleForCompensation: false })}
-                  className={cn(
-                    "px-4 py-1.5 rounded-md text-xs font-semibold border transition-colors",
-                    !form.eligibleForCompensation
-                      ? "bg-red-500 text-white border-red-500"
-                      : "bg-background text-foreground border-border hover:bg-muted",
-                  )}
-                >
-                  No
-                </button>
-              </div>
-              <div>
-                <Label className="text-xs">
-                  Justification <span className="text-red-500">*</span>
-                  <span className="text-muted-foreground font-normal ml-1">
-                    ({form.eligibleForCompensation ? "explain why compensation applies" : "explain why compensation does not apply"})
-                  </span>
-                </Label>
-                <Textarea
-                  className="mt-1 text-sm"
-                  value={form.compensationJustification}
-                  onChange={(e) => setForm({ ...form, compensationJustification: e.target.value })}
-                  placeholder="Provide justification..."
-                />
-              </div>
-            </div>
-
-            </>
-            )}
-
-            {/* Prepared By — auto-saved display */}
-            <div className="p-3 bg-primary/5 border border-primary/20 rounded-md">
-              <p className="text-xs font-semibold text-primary mb-1.5">Prepared By (auto-saved on submit)</p>
-              <div className="grid grid-cols-3 gap-2 text-xs text-foreground">
-                <div><span className="text-muted-foreground">Name: </span>{role}</div>
-                <div><span className="text-muted-foreground">Designation: </span>Senior Executive-Food Safety & Hygiene</div>
-                <div><span className="text-muted-foreground">Date & Time: </span>{nowStamp()}</div>
-              </div>
-            </div>
-          </div>
-
-          <DialogFooter>
+          {/* Action bar */}
+          <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => { setCreateOpen(false); setEditId(null); }}>Cancel</Button>
             <Button onClick={handleSubmit} className="gap-1.5">
-              <CheckCircle2 className="h-4 w-4" /> {editId ? "Save Changes" : "Submit for Approval"}
+              <CheckCircle2 className="h-4 w-4" /> {editId ? "Save Changes" : "Save"}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </div>
+        </div>
+      </>
+      )}
 
       {/* ── View Detail Modal ─────────────────────────────────────────────────── */}
       {viewEntry && (
@@ -1910,6 +1481,12 @@ export default function WastageManagementPage() {
                 <div><span className="text-muted-foreground">Reporting Date: </span><strong>{viewEntry.reportingDate}</strong></div>
                 <div><span className="text-muted-foreground">Type: </span><strong>{wastageTypeLabel(viewEntry.wastageType)}</strong></div>
                 <div className="flex items-center gap-1"><span className="text-muted-foreground">Status: </span><StatusBadge status={viewEntry.status} /></div>
+                {viewEntry.officeId && (
+                  <div><span className="text-muted-foreground">Office: </span><strong>{ALL_OFFICES.find((o) => o.id === viewEntry.officeId)?.name ?? viewEntry.officeId}</strong></div>
+                )}
+                {viewEntry.warehouseId && (
+                  <div><span className="text-muted-foreground">Warehouse: </span><strong>{ALL_WAREHOUSES.find((w) => w.id === viewEntry.warehouseId)?.name ?? viewEntry.warehouseId}</strong></div>
+                )}
                 {viewEntry.returnRef && (
                   <div className="col-span-3"><span className="text-muted-foreground">Return Ref: </span><strong className="font-mono">{viewEntry.returnRef}</strong></div>
                 )}
@@ -1928,46 +1505,53 @@ export default function WastageManagementPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {[
-                        ["01", "Name of RM/PM/FG",       viewEntry.itemName],
-                        ["02", "Package/Batch Size",      viewEntry.packageBatchSize],
-                        ["03", "Batch Code",              viewEntry.batchCode],
-                        ["04", "Production Date",         viewEntry.productionDate],
-                        ["05", "Disposal Quantity",       `${viewEntry.disposalQty} ${viewEntry.disposalQtyUnit}`],
-                        ["06", "Disposal Reason",         viewEntry.disposalReason],
-                        ["07", "Reprocessing Possibility",viewEntry.reprocessingPossibility],
-                        ["08", "Disposal Method",         viewEntry.disposalMethod],
-                        ["09", "Disposal Date",           viewEntry.disposalDate],
-                        ["10", "Disposal Time",           viewEntry.disposalTime],
-                      ].map(([sl, name, value]) => {
-                        const linkedProd = sl === "03"
-                          ? productionEntries.find((e) => e.id === value)
-                          : null;
-                        return (
-                          <TableRow key={sl}>
-                            <TableCell className="text-xs text-muted-foreground font-mono">{sl}</TableCell>
-                            <TableCell className="text-xs font-medium">{name}</TableCell>
-                            <TableCell className="text-xs text-center">
-                              {sl === "03" && value && value !== "N/A" ? (
-                                <button
-                                  className="font-mono font-semibold text-primary hover:underline"
-                                  title={linkedProd ? `View production order ${value}` : `Open ${value} in the Production Order table`}
-                                  onClick={() => {
-                                    if (linkedProd) { setProdDetailEntry(linkedProd); setProdDetailOpen(true); return; }
-                                    // Not in the current list → jump to the Production Order
-                                    // table and flash (blink) that order's row.
-                                    flagArrival({ target: "production-list", ids: [value] });
-                                    setViewOpen(false);
-                                    navigate(`/production-entry?pro=${encodeURIComponent(value)}`);
-                                  }}
-                                >
-                                  {value}
-                                </button>
-                              ) : value}
-                            </TableCell>
-                          </TableRow>
-                        );
-                      })}
+                      {(() => {
+                        // Parameter list mirrors the (redesigned) disposal form: Item,
+                        // then Production-only rows, then the common disposal fields.
+                        const isProd = viewEntry.wastageType === "Production";
+                        const rows: { label: string; value: string; prodOrder?: boolean }[] = [
+                          { label: "Item", value: viewEntry.itemName },
+                          ...(isProd ? [{ label: "Production Order", value: viewEntry.batchCode, prodOrder: true }] : []),
+                          ...(isProd ? [{ label: "Production Date", value: viewEntry.productionDate }] : []),
+                          { label: "Disposal Quantity", value: `${viewEntry.disposalQty} ${viewEntry.disposalQtyUnit}` },
+                          { label: "Disposal Reason", value: viewEntry.disposalReason },
+                          { label: "Reprocessing Possibility", value: viewEntry.reprocessingPossibility },
+                          { label: "Disposal Method", value: viewEntry.disposalMethod },
+                          { label: "Disposal Date", value: viewEntry.disposalDate },
+                          { label: "Disposal Time", value: viewEntry.disposalTime },
+                        ];
+                        return rows.map((row, i) => {
+                          const sl = String(i + 1).padStart(2, "0");
+                          const value = row.value;
+                          const linkedProd = row.prodOrder
+                            ? productionEntries.find((e) => e.id === value)
+                            : null;
+                          return (
+                            <TableRow key={sl}>
+                              <TableCell className="text-xs text-muted-foreground font-mono">{sl}</TableCell>
+                              <TableCell className="text-xs font-medium">{row.label}</TableCell>
+                              <TableCell className="text-xs text-center">
+                                {row.prodOrder && value && value !== "N/A" ? (
+                                  <button
+                                    className="font-mono font-semibold text-primary hover:underline"
+                                    title={linkedProd ? `View production order ${value}` : `Open ${value} in the Production Order table`}
+                                    onClick={() => {
+                                      if (linkedProd) { setProdDetailEntry(linkedProd); setProdDetailOpen(true); return; }
+                                      // Not in the current list → jump to the Production Order
+                                      // table and flash (blink) that order's row.
+                                      flagArrival({ target: "production-list", ids: [value] });
+                                      setViewOpen(false);
+                                      navigate(`/production-entry?pro=${encodeURIComponent(value)}`);
+                                    }}
+                                  >
+                                    {value}
+                                  </button>
+                                ) : (value || "N/A")}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        });
+                      })()}
                     </TableBody>
                   </Table>
                 </div>
