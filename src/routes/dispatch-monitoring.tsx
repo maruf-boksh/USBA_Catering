@@ -7,20 +7,17 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import {
-  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
-} from "@/components/ui/dropdown-menu";
 import { toast } from "sonner";
 import {
   Plus, Minus, Truck, Pencil, Trash2, ThermometerSun, ShieldCheck,
   AlertOctagon, AlertTriangle, PlaneTakeoff, PlaneLanding, Warehouse,
   Clock, User, CheckCircle2, Eye, Smartphone, ChevronRight, QrCode, X as CloseIcon, Timer, Play,
-  Search, Package, ScanLine, MoreHorizontal,
+  Search, Package, ScanLine,
 } from "lucide-react";
 import {
   flights as FLIGHT_BOARD, seedFlightOrders, activeOffices, activeWarehousesByOffice,
@@ -29,7 +26,6 @@ import {
 } from "@/lib/sample-data";
 import { getFlightOrders } from "@/lib/flight-orders-store";
 import { INITIAL_RECORDS as DISPATCH_SEED_RECORDS, INITIAL_PACKAGING_ROWS, type PackagingRow } from "@/routes/dispatch";
-import { type PackagingBatch } from "@/lib/packaging-batches";
 import { useRole } from "@/lib/roles";
 import { useWorkflow } from "@/lib/workflow-store";
 import { useDispatchMonitoringSettings } from "@/lib/dispatch-monitoring-settings";
@@ -129,6 +125,7 @@ export type DispatchEntry = {
 type ScanMealRow = {
   id: string;
   productionOrderId: string;
+  flight: string;         // flight this batch is loaded for
   mealName: string;
   mealType: string;
   qty: number;
@@ -440,6 +437,9 @@ const vehOOR     = (v: string) => { const n = parseFloat(v); return v !== "" && 
 const totalQty   = (lines: MealLine[]) => lines.reduce((s, l) => s + (parseInt(l.qty) || 0), 0);
 export const flightLabel = (id: string) => { const f = flights.find((x) => x.id === id); return f ? `${f.flight} — ${f.sector}` : id; };
 const flightNo    = (id: string) => { const f = flights.find((x) => x.id === id); return f ? f.flight : id; };
+// System packaging id derived from a production order (matches the Packaging &
+// Dispatch modules: PRO-2026-1234 → PKG-2026-1234).
+const toPackagingId = (pro: string) => (pro && pro !== "—" ? `PKG-${pro.replace(/^PRO-?/i, "")}` : "—");
 const flightDest  = (id: string) => { const f = flights.find((x) => x.id === id); return f ? f.sector.split("-").pop() ?? "—" : "—"; };
 // Meal-type badge tones for the Order Details table (Dispatch's own map is not exported).
 const MEAL_TYPE_TONE: Record<string, string> = {
@@ -602,45 +602,6 @@ export default function DispatchMonitoring() {
   const [dispatchPackagingRows] = usePersistedState<PackagingRow[]>("dispatch-packaging-rows", INITIAL_PACKAGING_ROWS);
   const [scannedRowIds, setScannedRowIds] = useState<Set<string>>(new Set());
   const [activeScanRowId, setActiveScanRowId] = useState<string | null>(null);
-  // Forwarded batches approved for airport receive (from the Packaging → Dispatch flow).
-  const [airportBatches, setAirportBatches] = usePersistedState<PackagingBatch[]>("packaging-batches", []);
-  const receiveBatch = (b: PackagingBatch) => {
-    const now = new Date().toISOString().slice(0, 16).replace("T", " ");
-    setAirportBatches((prev) =>
-      prev.map((x) => (x.id === b.id ? { ...x, status: "Received At Airport" as PackagingBatch["status"], receivedAt: now } : x)),
-    );
-    toast.success(`${b.item} scanned & received at the airport store.`);
-  };
-  // Batches ready for airport receive — forwarded from Dispatch (and dispatch-approved).
-  const airportApprovedBatches = airportBatches.filter((b) => b.status === "Forwarded To Airport" || b.status === "Airport Approved");
-  const airportReceivedBatches = airportBatches.filter((b) => b.status === "Received At Airport");
-  // Forwarded-batch Scan (label) & View modals.
-  const [scanBatch, setScanBatch] = useState<PackagingBatch | null>(null);
-  const [viewBatch, setViewBatch] = useState<PackagingBatch | null>(null);
-  // Airport Receive (batch) — unload & scan session with its own timer.
-  const [batchReceiveOpen, setBatchReceiveOpen] = useState(false);
-  const [batchSessionIds, setBatchSessionIds] = useState<string[]>([]);
-  const [batchScannedIds, setBatchScannedIds] = useState<Set<string>>(new Set());
-  const [batchUnloadStartIso, setBatchUnloadStartIso] = useState("");
-  const [batchUnloadEndTime, setBatchUnloadEndTime] = useState("");
-  const [batchUnloadTick, setBatchUnloadTick] = useState(0);
-  const [batchUnloadDurationSec, setBatchUnloadDurationSec] = useState(0);
-  const openBatchReceive = () => {
-    setBatchSessionIds(airportApprovedBatches.map((b) => b.id));
-    setBatchScannedIds(new Set());
-    setBatchUnloadStartIso("");
-    setBatchUnloadEndTime("");
-    setBatchUnloadDurationSec(0);
-    setBatchReceiveOpen(true);
-  };
-  // Confirm a scan from the label popup: first scan starts the unloading timer,
-  // the batch is received, and the auto-stop effect ends the timer once all are done.
-  const confirmBatchScan = (b: PackagingBatch) => {
-    if (batchScannedIds.size === 0 && !batchUnloadEndTime) setBatchUnloadStartIso(new Date().toISOString());
-    setBatchScannedIds((prev) => new Set(prev).add(b.id));
-    receiveBatch(b);
-    setScanBatch(null);
-  };
   const [orderDetailFlight, setOrderDetailFlight] = useState<string | null>(null);
   // Order Details opens in scan mode (scan icons shown) only from ⋯ → Scan Items;
   // the Meals-column / View action opens it read-only.
@@ -731,6 +692,7 @@ export default function DispatchMonitoring() {
     const toRow = (r: PackagingRow): ScanMealRow => ({
       id: r.id,
       productionOrderId: r.productionOrderId ?? "—",
+      flight: r.flight,
       mealName: r.mealName,
       mealType: r.mealType,
       qty: r.qty,
@@ -761,7 +723,7 @@ export default function DispatchMonitoring() {
 
     // Fallback — no Dispatch-table match: show the entry's own meal lines as one leg.
     const rows: ScanMealRow[] = form.mealLines.filter((l) => l.qty).map((l, i) => ({
-      id: `ml-${i}`, productionOrderId: "—", mealName: l.type, mealType: "Regular",
+      id: `ml-${i}`, productionOrderId: "—", flight: fno, mealName: l.type, mealType: "Regular",
       qty: Number(l.qty) || 0, warehouse: "—", label: `LBL-${formDispatchNo}-${i + 1}`,
     }));
     return {
@@ -777,6 +739,30 @@ export default function DispatchMonitoring() {
   }, [form.flightId, form.mealLines, form.packagingDate, dispatchPackagingRows, formDispatchNo]);
 
   const airportScanRows = airportDispatch.legs.flatMap((l) => l.rows);
+  // Catering-point loading — scan each production batch to drive the loading timer.
+  const [loadScannedIds, setLoadScannedIds] = useState<Set<string>>(new Set());
+  const [loadScanRow, setLoadScanRow] = useState<ScanMealRow | null>(null);
+  const confirmLoadScan = (r: ScanMealRow) => {
+    if (loadScannedIds.has(r.id)) { setLoadScanRow(null); return; }
+    const next = new Set(loadScannedIds).add(r.id);
+    // First scan starts the loading timer.
+    if (loadScannedIds.size === 0 && !form.loadStartTime) {
+      const now = new Date();
+      const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      sf("loadStartTime", hhmm);
+      setFormLoadStartIso(now.toISOString());
+    }
+    setLoadScannedIds(next);
+    // Last batch scanned stops the timer and saves the loading (end) time.
+    if (airportScanRows.length > 0 && next.size >= airportScanRows.length && !form.loadEndTime) {
+      const now = new Date();
+      const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      sf("loadEndTime", hhmm);
+      setFormLoadStartIso("");
+      toast.success("All batches scanned — loading completed.");
+    }
+    setLoadScanRow(null);
+  };
   const allRowsScanned = airportScanRows.length > 0 && airportScanRows.every((r) => scannedRowIds.has(r.id));
   const legScanned = (leg: AirportLeg) => leg.rows.length > 0 && leg.rows.every((r) => scannedRowIds.has(r.id));
 
@@ -793,9 +779,19 @@ export default function DispatchMonitoring() {
   // Scan one meal item's label. When every item across both legs is scanned the
   // dispatch reads "Scan Completed".
   const scanRow = (rowId: string) => {
+    const firstScan = scannedRowIds.size === 0;
     const next = new Set(scannedRowIds); next.add(rowId);
     setScannedRowIds(next);
     setActiveScanRowId(null);
+    // Airport Receive: the first scan auto-starts the unloading timer (mirrors the
+    // catering-point loading timer); the last scan stops it via the allRowsScanned effect.
+    if (isAirportReceiveMode && firstScan && !unloadStartIso && !form.unloadingTime) {
+      const now = new Date();
+      const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      sf("unloadingTime", hhmm);
+      setUnloadEndTime("");
+      setUnloadStartIso(now.toISOString());
+    }
     if (airportScanRows.length > 0 && airportScanRows.every((r) => next.has(r.id))) {
       toast.success("All items scanned — Scan Completed. Ready to Save And Accept.");
     } else {
@@ -820,6 +816,7 @@ export default function DispatchMonitoring() {
     setUnloadStartIso(""); setUnloadEndTime(""); setUnloadTimerTick(0);
     setScannedRowIds(new Set()); setActiveScanRowId(null); setOrderDetailFlight(null);
     setOrderDetailScanMode(false); setGateTempLocked(false);
+    setLoadScannedIds(new Set()); setLoadScanRow(null);
   };
 
   const openNew = () => {
@@ -841,6 +838,12 @@ export default function DispatchMonitoring() {
       setDepTime(f.dep);
       handleFlightSelect(f.id);
       toast.info(`Dispatch monitoring opened for flight ${flightNo}.`);
+    } else if (dispatchPackagingRows.some((r) => r.flight === flightNo)) {
+      // Directly-packaged production associated to a flight order not in the
+      // schedule list. flightNo(id) falls back to the id, so airportDispatch
+      // still resolves its batch for scanning.
+      setForm((prev) => ({ ...prev, flightId: flightNo, packagingDate: todayStr }));
+      toast.info(`Dispatch entry opened for ${flightNo}.`);
     } else {
       toast.info(`New dispatch entry — flight ${flightNo} isn't in the flight list, please select it manually.`);
     }
@@ -888,27 +891,6 @@ export default function DispatchMonitoring() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allRowsScanned, unloadStartIso, unloadEndTime]);
-
-  // Batch airport-receive unloading timer tick — re-renders every second while running.
-  useEffect(() => {
-    if (!batchUnloadStartIso) return;
-    const id = setInterval(() => setBatchUnloadTick((t) => t + 1), 1000);
-    return () => clearInterval(id);
-  }, [batchUnloadStartIso]);
-
-  // Auto-stop the batch unloading timer once every session batch is scanned.
-  useEffect(() => {
-    const allScanned = batchSessionIds.length > 0 && batchSessionIds.every((id) => batchScannedIds.has(id));
-    if (batchUnloadStartIso && !batchUnloadEndTime && allScanned) {
-      const now = new Date();
-      const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-      setBatchUnloadDurationSec(Math.floor((Date.now() - new Date(batchUnloadStartIso).getTime()) / 1000));
-      setBatchUnloadEndTime(hhmm);
-      setBatchUnloadStartIso("");
-      toast.success("All batches scanned — unloading completed.");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [batchSessionIds, batchScannedIds, batchUnloadStartIso, batchUnloadEndTime]);
 
 
   function startLoading(entryId: string) {
@@ -997,7 +979,9 @@ export default function DispatchMonitoring() {
     const at = nowTimeStr();
     // Completing the dispatch monitoring entry clears the flight for dispatch —
     // Packaging & Dispatch reads this to unlock "Initiate Dispatch".
-    const flightNo = flights.find((f) => f.id === form.flightId)?.flight;
+    // Real flights resolve to their flight number; a directly-packaged production
+    // uses its own id as the flight key so its QC still clears (unlocks dispatch).
+    const flightNo = flights.find((f) => f.id === form.flightId)?.flight ?? form.flightId;
     if (flightNo) markFlightQcCleared(flightNo, at);
     const existing = editId ? entries.find((e) => e.id === editId) : null;
     const now = new Date();
@@ -1483,256 +1467,6 @@ export default function DispatchMonitoring() {
         </div>
       )}
 
-      {/* ── Airport Receive — forwarded & dispatch-approved batches ─────────── */}
-      {(airportApprovedBatches.length > 0 || airportReceivedBatches.length > 0) && (
-        <div className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-4 mb-6">
-          <div className="flex items-center justify-between gap-2 mb-3 flex-wrap">
-            <div className="flex items-center gap-2 flex-wrap">
-              <Package className="h-4 w-4 text-indigo-600" />
-              <span className="text-sm font-semibold text-indigo-800">Airport Receive — Forwarded Batches</span>
-              <span className="text-[11px] text-indigo-700">Forwarded from Dispatch. Receive &amp; scan each into the airport store.</span>
-            </div>
-            {airportApprovedBatches.length > 0 && (
-              <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700 text-white border-0" onClick={openBatchReceive}>
-                <PlaneLanding className="h-3.5 w-3.5 mr-1" /> Airport Receive
-              </Button>
-            )}
-          </div>
-          <div className="rounded-md border border-indigo-200 bg-white overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-indigo-50/70 border-b border-indigo-200">
-                <tr>
-                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">Dispatch ID</th>
-                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">Batch ID</th>
-                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">Item</th>
-                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">Dispatch Date &amp; Time</th>
-                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">From</th>
-                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">To</th>
-                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">Status</th>
-                  <th className="text-right px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-indigo-800">Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {airportApprovedBatches.map((b, i) => (
-                  <tr key={b.id} className={`border-t border-indigo-100 ${i % 2 ? "bg-indigo-50/30" : ""}`}>
-                    <td className="px-3 py-2 font-mono text-xs text-indigo-700">{b.dispatchId ?? `DSP-${b.batch}`}</td>
-                    <td className="px-3 py-2 font-mono text-xs">{b.batch}</td>
-                    <td className="px-3 py-2 font-medium">{b.item}</td>
-                    <td className="px-3 py-2 text-xs whitespace-nowrap">{b.dispatchedAt ?? "—"}</td>
-                    <td className="px-3 py-2 text-xs text-muted-foreground whitespace-nowrap">{doc.originLabel} Point</td>
-                    <td className="px-3 py-2 text-xs font-medium whitespace-nowrap">{doc.destinationLabel}</td>
-                    <td className="px-3 py-2">
-                      <span className="inline-flex items-center rounded-full border border-sky-300 bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-700 whitespace-nowrap">{b.status}</span>
-                    </td>
-                    <td className="px-3 py-2 text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-slate-500 hover:text-slate-700 hover:bg-slate-50" onClick={() => setViewBatch(b)} title="View">
-                          <Eye className="h-3.5 w-3.5" />
-                        </Button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {airportReceivedBatches.map((b) => (
-                  <tr key={b.id} className="border-t border-indigo-100 bg-emerald-50/40">
-                    <td className="px-3 py-2 font-mono text-xs text-indigo-700">{b.dispatchId ?? `DSP-${b.batch}`}</td>
-                    <td className="px-3 py-2 font-mono text-xs">{b.batch}</td>
-                    <td className="px-3 py-2 font-medium">{b.item}</td>
-                    <td className="px-3 py-2 text-xs whitespace-nowrap">{b.dispatchedAt ?? "—"}</td>
-                    <td className="px-3 py-2 text-xs text-muted-foreground whitespace-nowrap">{doc.originLabel} Point</td>
-                    <td className="px-3 py-2 text-xs font-medium whitespace-nowrap">{doc.destinationLabel}</td>
-                    <td className="px-3 py-2">
-                      <span className="inline-flex items-center rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 whitespace-nowrap">Received by Airport</span>
-                    </td>
-                    <td className="px-3 py-2 text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0 text-slate-500 hover:text-slate-700 hover:bg-slate-50" onClick={() => setViewBatch(b)} title="View">
-                          <Eye className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button
-                          size="sm"
-                          className="no-brand h-6 px-2.5 text-[10px] bg-[#CD7F32] hover:bg-[#b06e2b] text-white border-0 shadow-sm"
-                          onClick={() => navigate("/transfer", { state: { receiveInTransit: true } })}
-                          title="Receive these items into store on the Transfer In Transit tab"
-                        >
-                          <Truck className="h-3 w-3 mr-1" /> Receive In Store
-                        </Button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Airport Receive — unload & scan forwarded batches (with unloading timer) */}
-      <Dialog open={batchReceiveOpen} onOpenChange={(v) => !v && setBatchReceiveOpen(false)}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-base"><PlaneLanding className="h-4 w-4" /> Airport Receive — Unload &amp; Scan</DialogTitle>
-            <DialogDescription>Scan each forwarded batch to receive it. The unloading timer starts on the first scan and stops once all batches are scanned.</DialogDescription>
-          </DialogHeader>
-
-          {/* Time of Unloading */}
-          <div className="rounded-lg border border-indigo-200 bg-indigo-50/50 px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
-            <div className="flex items-center gap-2 text-sm font-medium text-indigo-800">
-              <Timer className="h-4 w-4" /> Time of Unloading
-            </div>
-            <div className="text-sm">
-              {batchUnloadEndTime ? (
-                <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-700">
-                  <CheckCircle2 className="h-4 w-4" /> Unloading Completed · {formatDuration(batchUnloadDurationSec)}
-                </span>
-              ) : batchUnloadStartIso ? (
-                <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-indigo-700 tabular-nums">
-                  <Timer className="h-4 w-4" /> {batchUnloadTick >= 0 && formatElapsed(batchUnloadStartIso)}
-                </span>
-              ) : (
-                <span className="text-muted-foreground text-xs">Scan the first batch to start the timer.</span>
-              )}
-            </div>
-          </div>
-
-          {/* Batch list */}
-          <div className="rounded-md border border-border overflow-hidden mt-2">
-            <table className="w-full text-sm">
-              <thead className="bg-muted/50 border-b">
-                <tr>
-                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Dispatch ID</th>
-                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Batch ID</th>
-                  <th className="text-left px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Item</th>
-                  <th className="text-right px-3 py-2 text-[10px] uppercase tracking-wider font-semibold text-muted-foreground">Scan</th>
-                </tr>
-              </thead>
-              <tbody>
-                {batchSessionIds.length === 0 ? (
-                  <tr><td colSpan={4} className="px-3 py-6 text-center text-sm text-muted-foreground">No forwarded batches to receive.</td></tr>
-                ) : batchSessionIds.map((id) => {
-                  const b = airportBatches.find((x) => x.id === id);
-                  if (!b) return null;
-                  const scanned = batchScannedIds.has(id);
-                  return (
-                    <tr key={id} className={`border-t ${scanned ? "bg-emerald-50/40" : ""}`}>
-                      <td className="px-3 py-2 font-mono text-xs text-indigo-700">{b.dispatchId ?? `DSP-${b.batch}`}</td>
-                      <td className="px-3 py-2 font-mono text-xs">{b.batch}</td>
-                      <td className="px-3 py-2 font-medium">{b.item}</td>
-                      <td className="px-3 py-2 text-right">
-                        {scanned ? (
-                          <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600"><CheckCircle2 className="h-3.5 w-3.5" /> Scanned</span>
-                        ) : (
-                          <Button size="sm" onClick={() => setScanBatch(b)}>
-                            <ScanLine className="h-3.5 w-3.5 mr-1" /> Scan
-                          </Button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="text-xs text-muted-foreground mt-1">
-            {batchScannedIds.size}/{batchSessionIds.length} scanned{batchUnloadEndTime ? " · unloading completed" : ""}.
-          </div>
-
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setBatchReceiveOpen(false)}>Close</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Scan label → receive a forwarded batch into the airport store */}
-      <Dialog open={!!scanBatch} onOpenChange={(v) => !v && setScanBatch(null)}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-base"><ScanLine className="h-4 w-4" /> Scan Label — Airport Receive</DialogTitle>
-            <DialogDescription>Scan the batch label to receive it into the airport store.</DialogDescription>
-          </DialogHeader>
-          {scanBatch && (
-            <div className="rounded-lg border-2 border-dashed border-indigo-300 bg-indigo-50/40 p-4 flex flex-col gap-2">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">USBA Catering · Meal Label</span>
-                <span className="text-[10px] font-bold text-indigo-600">FORWARDED</span>
-              </div>
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="font-semibold text-sm">{scanBatch.item}</span>
-                <span className="text-xs tabular-nums text-muted-foreground shrink-0">Qty {scanBatch.qty > 0 ? scanBatch.qty : "—"}</span>
-              </div>
-              <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
-                <span>Dispatch <b className="text-foreground font-mono">{scanBatch.dispatchId ?? `DSP-${scanBatch.batch}`}</b></span>
-                <span>Batch <b className="text-foreground font-mono">{scanBatch.batch}</b></span>
-              </div>
-              <div className="mt-1">
-                <div className="flex items-end gap-[1px] h-8 w-full overflow-hidden" aria-hidden>
-                  {`LBL-${scanBatch.batch}`.split("").flatMap((ch, i) =>
-                    [0, 1, 2, 3].map((k) => (
-                      <span key={`${i}-${k}`} className="bg-slate-900" style={{ width: ((ch.charCodeAt(0) >> k) & 1) ? 3 : 1, height: "100%" }} />
-                    )),
-                  )}
-                </div>
-                <div className="text-center font-mono text-[11px] tracking-widest mt-1">LBL-{scanBatch.batch}</div>
-              </div>
-            </div>
-          )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setScanBatch(null)}>Cancel</Button>
-            <Button onClick={() => { if (scanBatch) confirmBatchScan(scanBatch); }}>
-              <ScanLine className="h-4 w-4 mr-1.5" /> Scan
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* View — forwarded batch dispatch detail */}
-      <Dialog open={!!viewBatch} onOpenChange={(v) => !v && setViewBatch(null)}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Forwarded Batch — {viewBatch?.batch}</DialogTitle>
-            <DialogDescription>Dispatch → airport receive detail.</DialogDescription>
-          </DialogHeader>
-          {viewBatch && (
-            <div className="grid grid-cols-2 gap-x-4 gap-y-3 py-1 text-sm">
-              {([
-                ["Dispatch ID", viewBatch.dispatchId ?? `DSP-${viewBatch.batch}`, true],
-                ["Batch ID", viewBatch.batch, true],
-                ["Item", viewBatch.item, false],
-                ["Qty", viewBatch.qty > 0 ? String(viewBatch.qty) : "—", false],
-                ["Dispatch Date & Time", viewBatch.dispatchedAt ?? "—", false],
-                ["Vehicle", viewBatch.vehicleNo ?? "—", false],
-                ["From", `${doc.originLabel} Point`, false],
-                ["To", doc.destinationLabel, false],
-                ["Standard Temp", viewBatch.standardTemp, false],
-                ["Measured Temp", `${viewBatch.measuredTemp}°C`, false],
-                ["Taste", viewBatch.taste || "—", false],
-                ["Cooked By", viewBatch.cookedBy, false],
-                ["Checked By", viewBatch.checkedBy, false],
-              ] as [string, string, boolean][]).map(([label, value, mono]) => (
-                <div key={label}>
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">{label}</div>
-                  <div className={mono ? "font-mono text-sm" : "font-medium"}>{value}</div>
-                </div>
-              ))}
-              <div>
-                <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Status</div>
-                <span className="inline-flex items-center rounded-full border border-sky-300 bg-sky-50 px-2 py-0.5 text-[10px] font-semibold text-sky-700 whitespace-nowrap">{viewBatch.status === "Received At Airport" ? "Received by Airport" : viewBatch.status}</span>
-              </div>
-              {viewBatch.receivedAt && (
-                <div>
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-0.5">Received At</div>
-                  <div className="font-medium">{viewBatch.receivedAt}</div>
-                </div>
-              )}
-            </div>
-          )}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setViewBatch(null)}>Close</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       {/* ── Empty State ──────────────────────────────────────────────────────── */}
       <div className="mb-6">
         {entries.length === 0 && (
@@ -1771,78 +1505,6 @@ export default function DispatchMonitoring() {
                 <div className={`p-5 space-y-4${isAirportReceiveMode ? " pointer-events-none opacity-60 select-none" : ""}`}>
                   <MaxTempBanner />
 
-                  {/* ─ Flight & Packaging ─ */}
-                  <Divider label="Flight & Packaging" color="blue" />
-
-                  {/* Row: dep time | flight | date */}
-                  <div className="grid grid-cols-3 gap-3">
-                    <div>
-                      <Label className="text-xs">Departure Time</Label>
-                      <Select value={depTime} onValueChange={(v) => { setDepTime(v); const first = flights.find((f) => f.dep === v); if (first) handleFlightSelect(first.id); else sf("flightId", ""); }}>
-                        <SelectTrigger className="mt-1 h-9 text-sm">
-                          <SelectValue placeholder="Select time" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {DEP_TIMES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div>
-                      <Label className="text-xs">Flight Number *</Label>
-                      <Select value={form.flightId} onValueChange={handleFlightSelect}>
-                        <SelectTrigger className={`mt-1 h-9 text-sm ${errors.flightId ? "border-red-400" : ""}`}>
-                          <SelectValue placeholder="Select flight" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {filteredFlights.map((f) => <SelectItem key={f.id} value={f.id}>{f.flight} — {f.sector}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
-                      <FieldErr msg={errors.flightId} />
-                    </div>
-                    <div>
-                      <Label className="text-xs">Date of Packaging</Label>
-                      <Input type="date" value={form.packagingDate} onChange={(e) => sf("packagingDate", e.target.value)} className="mt-1 h-9 text-sm" />
-                    </div>
-                  </div>
-
-                  {/* Auto-fill chips */}
-                  {selectedFlight && (
-                    <div className="flex flex-wrap gap-2">
-                      {[
-                        { label: selectedFlight.sector, color: "blue" },
-                        { label: selectedFlight.aircraft, color: "blue" },
-                        { label: `DEP ${selectedFlight.dep}`, color: "indigo" },
-                        { label: `${selectedFlight.pax} PAX`, color: "slate" },
-                        { label: selectedFlight.window, color: "amber" },
-                        { label: selectedFlight.status, color: selectedFlight.status === "Boarding" ? "emerald" : selectedFlight.status === "Delayed" ? "red" : "slate" },
-                      ].map(({ label, color }) => (
-                        <span key={label} className={`px-2.5 py-1 rounded-md border text-[11px] font-medium
-                          ${color === "blue" ? "bg-blue-50 border-blue-200 text-blue-700" :
-                            color === "indigo" ? "bg-indigo-50 border-indigo-200 text-indigo-700" :
-                            color === "amber" ? "bg-amber-50 border-amber-200 text-amber-700" :
-                            color === "emerald" ? "bg-emerald-50 border-emerald-200 text-emerald-700" :
-                            color === "red" ? "bg-red-50 border-red-200 text-red-700" :
-                            "bg-slate-50 border-slate-200 text-slate-700"}`}>
-                          {label}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Meal lines */}
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <Label className="text-xs">Quantity</Label>
-                      <span className="text-xs text-muted-foreground">Total: <strong className="text-blue-700">{totalQty(form.mealLines)}</strong> pax</span>
-                    </div>
-                    <Input
-                      type="number" min={0} placeholder="Qty"
-                      value={form.mealLines[0]?.qty ?? ""}
-                      onChange={(e) => sf("mealLines", [{ type: "Regular", qty: e.target.value }])}
-                      className="w-full h-9 text-sm"
-                    />
-                  </div>
-
                   {/* ─ Vehicle ─ */}
                   <Divider label="Vehicle Details" color="blue" />
                   <div className="grid grid-cols-2 gap-3">
@@ -1862,21 +1524,48 @@ export default function DispatchMonitoring() {
                       {form.vehicleClean === "No" && <p className="text-xs text-amber-600 mt-1 font-medium">⚠ Report to supervisor immediately</p>}
                     </div>
                   </div>
-                  {!editId && !isAirportReceiveMode && form.vehicleNo && form.vehicleClean && !form.loadStartTime && (
-                    <div className="mt-2">
-                      <Button
-                        type="button"
-                        className="h-9 bg-indigo-600 hover:bg-indigo-700 text-white"
-                        onClick={() => {
-                          const now = new Date();
-                          const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-                          sf("loadStartTime", hhmm);
-                          setFormLoadStartIso(now.toISOString());
-                          toast.info("Loading started — timer running.");
-                        }}
-                      >
-                        <Play className="h-4 w-4 mr-2" /> Start Loading
-                      </Button>
+                  {/* Load production batches — scan each to record the loading time */}
+                  {!editId && !isAirportReceiveMode && form.vehicleNo && form.vehicleClean && (
+                    <div className="rounded-md border border-border bg-muted/20 p-3 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs font-semibold">Load Production Batches</Label>
+                        <span className="text-[11px] text-muted-foreground tabular-nums">{loadScannedIds.size}/{airportScanRows.length} scanned</span>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground">Scan each Packaging-Done batch — the loading timer starts on the first scan and stops on the last.</p>
+                      {/* Loading time */}
+                      <div className="rounded-md border border-border bg-background px-3 py-2 flex items-center justify-between text-sm">
+                        <span className="inline-flex items-center gap-1.5 text-muted-foreground"><Clock className="h-3.5 w-3.5" /> Loading Time</span>
+                        {form.loadEndTime ? (
+                          <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-700"><CheckCircle2 className="h-4 w-4" /> {form.loadStartTime} → {form.loadEndTime}</span>
+                        ) : formLoadStartIso ? (
+                          <span className="font-mono font-semibold text-indigo-700 tabular-nums">{formTimerTick >= 0 && formatElapsed(formLoadStartIso)}</span>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">Scan the first batch to start</span>
+                        )}
+                      </div>
+                      {/* Batch list */}
+                      <div className="rounded-md border border-border divide-y divide-border overflow-hidden bg-background">
+                        {airportScanRows.length === 0 ? (
+                          <div className="px-3 py-4 text-center text-xs text-muted-foreground">No production batches for this flight.</div>
+                        ) : airportScanRows.map((r) => {
+                          const scanned = loadScannedIds.has(r.id);
+                          return (
+                            <div key={r.id} className={`flex items-center gap-2 px-3 py-2 text-sm ${scanned ? "bg-emerald-50/40" : ""}`}>
+                              <span className="font-mono text-xs font-semibold text-primary shrink-0">{toPackagingId(r.productionOrderId)}</span>
+                              <span className="inline-flex items-center rounded-full border border-sky-300 bg-sky-50 px-2 py-0.5 text-[11px] font-semibold text-sky-700 whitespace-nowrap shrink-0">{r.flight}</span>
+                              <span className="flex-1 truncate text-xs">{r.mealName}</span>
+                              <span className="text-xs tabular-nums text-muted-foreground shrink-0">Qty {r.qty}</span>
+                              {scanned ? (
+                                <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 shrink-0"><CheckCircle2 className="h-3.5 w-3.5" /> Scanned</span>
+                              ) : (
+                                <Button type="button" size="sm" variant="outline" className="h-7 px-2 text-xs shrink-0" onClick={() => setLoadScanRow(r)}>
+                                  <ScanLine className="h-3.5 w-3.5 mr-1" /> Scan
+                                </Button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
                     </div>
                   )}
 
@@ -1952,7 +1641,7 @@ export default function DispatchMonitoring() {
                           </div>
                         ) : (
                           <p className="text-[11px] text-muted-foreground italic mt-2">
-                            Use <span className="font-semibold not-italic text-indigo-600">▶ Start Loading</span> button (after filling vehicle details) to begin recording loading time
+                            <span className="font-semibold not-italic text-indigo-600">Scan the production batches</span> above (after filling vehicle details) — loading time records automatically from the first to the last scan
                           </p>
                         )}
                         <FieldErr msg={errors.loadStartTime ?? errors.loadEndTime} />
@@ -2137,20 +1826,7 @@ export default function DispatchMonitoring() {
                       <Label className="text-xs">Time of Unloading</Label>
                       <div className="mt-1 flex flex-wrap items-center gap-2">
                         {!form.unloadingTime ? (
-                          <Button
-                            type="button"
-                            className="h-9 bg-indigo-600 hover:bg-indigo-700 text-white"
-                            onClick={() => {
-                              const now = new Date();
-                              const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-                              sf("unloadingTime", hhmm);
-                              setUnloadEndTime("");
-                              setUnloadStartIso(now.toISOString());
-                              toast.info("Unloading started — timer running.");
-                            }}
-                          >
-                            <Play className="h-4 w-4 mr-2" /> Start Timer
-                          </Button>
+                          <span className="text-xs text-muted-foreground italic">Scan the first product to start the unloading timer.</span>
                         ) : (
                           <>
                             <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2">
@@ -2175,24 +1851,12 @@ export default function DispatchMonitoring() {
                                 </div>
                               </div>
                             ) : (
-                              <Button
-                                type="button"
-                                className="h-9 bg-emerald-600 hover:bg-emerald-700 text-white"
-                                onClick={() => {
-                                  const now = new Date();
-                                  const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-                                  setUnloadEndTime(hhmm);
-                                  setUnloadStartIso("");
-                                  toast.success("Unloading ended.");
-                                }}
-                              >
-                                <CheckCircle2 className="h-4 w-4 mr-2" /> End Timer
-                              </Button>
+                              <span className="text-[11px] text-muted-foreground italic">Scan the last product to stop.</span>
                             )}
                           </>
                         )}
                       </div>
-                      <TempHint note="Time when unloading begins at gate" />
+                      <TempHint note="Time when unloading begins at gate — records automatically from the first to the last scan" />
                     </div>
                   </div>
 
@@ -2304,18 +1968,9 @@ export default function DispatchMonitoring() {
                                   <Button type="button" size="icon" variant="ghost" className="h-7 w-7 text-slate-500 hover:text-indigo-700" title="View catering dispatch point entry" onClick={() => { if (editId) setViewEntryId(editId); }}>
                                     <Eye className="h-3.5 w-3.5" />
                                   </Button>
-                                  <DropdownMenu>
-                                    <DropdownMenuTrigger asChild>
-                                      <Button type="button" size="icon" variant="ghost" className="h-7 w-7 text-slate-500 hover:text-slate-700" title="More actions">
-                                        <MoreHorizontal className="h-4 w-4" />
-                                      </Button>
-                                    </DropdownMenuTrigger>
-                                    <DropdownMenuContent align="end">
-                                      <DropdownMenuItem onClick={() => openOrderDetails(leg.flight, true)}>
-                                        <ScanLine className="h-3.5 w-3.5 mr-2" /> Scan Items
-                                      </DropdownMenuItem>
-                                    </DropdownMenuContent>
-                                  </DropdownMenu>
+                                  <Button type="button" size="sm" variant="outline" className="h-7 px-2 text-xs whitespace-nowrap" disabled={done} title={done ? "All items scanned" : "Scan items"} onClick={() => openOrderDetails(leg.flight, true)}>
+                                    <ScanLine className="h-3.5 w-3.5 mr-1" /> Scan Items
+                                  </Button>
                                 </div>
                               </td>
                             </tr>
@@ -2328,7 +1983,7 @@ export default function DispatchMonitoring() {
                     <p className={`text-[11px] font-medium ${allRowsScanned ? "text-emerald-600" : "text-amber-600"}`}>
                       {allRowsScanned
                         ? "✓ All items scanned (both legs) — Scan Completed. Ready to Save And Accept."
-                        : `${airportScanRows.filter((r) => scannedRowIds.has(r.id)).length}/${airportScanRows.length} items scanned · use ⋯ → Scan Items.`}
+                        : `${airportScanRows.filter((r) => scannedRowIds.has(r.id)).length}/${airportScanRows.length} items scanned · use the Scan Items button.`}
                     </p>
                   )}
 
@@ -2379,11 +2034,62 @@ export default function DispatchMonitoring() {
               {!isAirportReceiveMode && (
                 <Button className="bg-indigo-600 hover:bg-indigo-700 text-white px-8 shadow-md" onClick={saveEntry}>
                   <ShieldCheck className="h-4 w-4 mr-2" />
-                  {editId ? "Save Changes" : "Save"}
+                  {editId ? "Save Changes" : "Submit for Approval"}
                 </Button>
               )}
             </div>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Load-scan label popup — scan a production batch into the vehicle ──── */}
+      <Dialog open={!!loadScanRow} onOpenChange={(v) => !v && setLoadScanRow(null)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base"><ScanLine className="h-4 w-4" /> Scan Label</DialogTitle>
+          </DialogHeader>
+          {loadScanRow && (() => {
+            const code = loadScanRow.label;
+            return (
+              /* Same label format as the Packaging module (dashed card + barcode). */
+              <div className="rounded-lg border-2 border-dashed border-border bg-card p-3 flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">USBA Catering · Meal Label</span>
+                  <span className="text-[10px] font-bold text-amber-600">READY TO PRINT</span>
+                </div>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="font-semibold text-sm">{loadScanRow.mealName}</span>
+                  <span className="text-xs tabular-nums text-muted-foreground shrink-0">Qty {loadScanRow.qty > 0 ? loadScanRow.qty : "—"}</span>
+                </div>
+                <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+                  <span>Batch <b className="text-foreground font-mono">{loadScanRow.productionOrderId}</b></span>
+                  <span>Type <b className="text-foreground">{loadScanRow.mealType}</b></span>
+                  <span>{loadScanRow.warehouse}</span>
+                </div>
+                {/* Decorative barcode (matches the Packaging label format) */}
+                <div className="mt-1">
+                  <div className="flex items-end gap-[1px] h-8 w-full overflow-hidden" aria-hidden>
+                    {code.split("").flatMap((ch, i) =>
+                      [0, 1, 2, 3].map((k) => (
+                        <span
+                          key={`${i}-${k}`}
+                          className="bg-slate-900"
+                          style={{ width: ((ch.charCodeAt(0) >> k) & 1) ? 3 : 1, height: "100%" }}
+                        />
+                      )),
+                    )}
+                  </div>
+                  <div className="text-center font-mono text-[11px] tracking-widest mt-1">{code}</div>
+                </div>
+              </div>
+            );
+          })()}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setLoadScanRow(null)}>Cancel</Button>
+            <Button onClick={() => loadScanRow && confirmLoadScan(loadScanRow)}>
+              <ScanLine className="h-4 w-4 mr-1.5" /> Scan
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
