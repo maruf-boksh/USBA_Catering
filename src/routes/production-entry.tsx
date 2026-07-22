@@ -341,6 +341,7 @@ function Field({ label, value }: { label: string; value: string }) {
 }
 
 function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
+  const navigate = useNavigate();
   const [viewOpen, setViewOpen] = useState(false);
   const [prDetail, setPrDetail] = useState<PurchaseRequisition | null>(null);
   const [grnDetail, setGrnDetail] = useState<WfGRN | null>(null);
@@ -520,6 +521,32 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
                   </div>
                 </div>
               </div>
+            </div>
+
+            {/* Serves Orders — the flight orders whose menu for this date includes
+                this run's output item (many-to-many; snapshot at creation). */}
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+                Serves Orders {entry.servesOrderNos?.length ? `(${entry.servesOrderNos.length})` : ""}
+              </div>
+              {entry.servesOrderNos && entry.servesOrderNos.length > 0 ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {entry.servesOrderNos.map((no) => (
+                    <button
+                      key={no}
+                      onClick={() => { setViewOpen(false); navigate(`/order-management?ord=${encodeURIComponent(no)}`); }}
+                      className="inline-flex items-center rounded-full border border-primary/30 bg-primary/5 px-2.5 py-1 font-mono text-xs font-semibold text-primary hover:bg-primary/10"
+                      title={`Open ${no} in Order Management`}
+                    >
+                      {no}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  No linked orders — this item isn't on the menu for {entry.date || "this date"}, or the order was created before order-tagging.
+                </p>
+              )}
             </div>
 
             {/* Wastage / Damaged Product Disposal log — shown when this production
@@ -1006,12 +1033,28 @@ export default function ProductionEntryPage() {
   });
 
   const addEntry = (entry: ProductionEntry) => {
-    addProductionEntry(entry);
+    // Smart tag: which flight orders does this run serve? Only those whose menu
+    // for this date actually includes the run's output item. menuSpecFor() tells
+    // us the flight type(s) the item is planned for; we then keep every order of
+    // that date + flight type. Empty when the item isn't on the day's menu.
+    const itemName = entry.outputItemName ?? entry.bom;
+    const spec = itemName && entry.date
+      ? menuSpecFor(itemName, getDayFromDate(entry.date), loadMealPlanningConfig())
+      : null;
+    const servesOrderNos = spec
+      ? Array.from(new Set(
+          flightOrders
+            .filter((o) => o.date === entry.date && spec.flightTypes.includes(getFlightTypeFromSector(o.sector)))
+            .map((o) => o.orderNo),
+        )).sort()
+      : [];
+    const taggedEntry: ProductionEntry = { ...entry, servesOrderNos };
+    addProductionEntry(taggedEntry);
     logAudit({
       action: "Created production order",
       module: "Production",
       entity: entry.id,
-      detail: `${entry.outputItemName ?? entry.bom} · order qty ${entry.orderQty ?? 0}${entry.date ? ` · ${entry.date}` : ""}`,
+      detail: `${entry.outputItemName ?? entry.bom} · order qty ${entry.orderQty ?? 0}${entry.date ? ` · ${entry.date}` : ""}${servesOrderNos.length ? ` · serves ${servesOrderNos.length} order(s): ${servesOrderNos.join(", ")}` : ""}`,
     });
     // Connection: posting a production order auto-advances every flight order
     // for that same date from the production pipeline (Approved / Production)
@@ -1175,11 +1218,23 @@ export default function ProductionEntryPage() {
     }
     const today = new Date().toISOString().slice(0, 10);
     const baseStamp = Date.now();
+    // Menu config + weekday resolved once for the smart order-tagging below.
+    const menuCards = loadMealPlanningConfig();
+    const dow = getDayFromDate(today);
     const created: ProductionEntry[] = [];
     eligible.forEach((item, i) => {
       const qty = item.computedQty ?? 0;
       const seq = String(baseStamp + i).slice(-6);
       const bomMatch = billOfMaterials.find((b) => b.name === item.name);
+      // Smart tag: orders of this date whose menu actually includes this item.
+      const spec = menuSpecFor(item.name, dow, menuCards);
+      const servesOrderNos = spec
+        ? Array.from(new Set(
+            flightOrders
+              .filter((o) => o.date === today && spec.flightTypes.includes(getFlightTypeFromSector(o.sector)))
+              .map((o) => o.orderNo),
+          )).sort()
+        : [];
       const entry: ProductionEntry = {
         id: `PRO-2026-${seq}`,
         date: today,
@@ -1191,6 +1246,7 @@ export default function ProductionEntryPage() {
         status: "Pending",
         officeId: "OFF-001",
         warehouseId: "WH-003",
+        servesOrderNos,
       };
       addProductionEntry(entry);
       logAudit({
@@ -1377,6 +1433,32 @@ export default function ProductionEntryPage() {
       ),
     },
     {
+      key: "id" as keyof NumberedEntry,
+      header: "Serves Orders",
+      sortable: false,
+      render: (r) => {
+        const orders = r.servesOrderNos ?? [];
+        if (orders.length === 0) return <span className="text-muted-foreground text-xs">—</span>;
+        const shown = orders.slice(0, 2);
+        return (
+          <div className="flex flex-wrap items-center gap-1" title={`Serves ${orders.length} order(s): ${orders.join(", ")}`}>
+            {shown.map((no) => (
+              <button
+                key={no}
+                onClick={(e) => { e.stopPropagation(); navigate(`/order-management?ord=${encodeURIComponent(no)}`); }}
+                className="inline-flex items-center rounded-full border border-primary/30 bg-primary/5 px-2 py-0.5 font-mono text-[10px] font-semibold text-primary hover:bg-primary/10"
+              >
+                {no}
+              </button>
+            ))}
+            {orders.length > shown.length && (
+              <span className="text-[10px] text-muted-foreground">+{orders.length - shown.length}</span>
+            )}
+          </div>
+        );
+      },
+    },
+    {
       key: "orderQty" as keyof NumberedEntry,
       header: "Order Qty",
       className: "text-right",
@@ -1553,7 +1635,7 @@ export default function ProductionEntryPage() {
                     Meal Order for Next 24 Hours ({mealOrderConfirmation.tomorrowDayName}) has been generated
                   </p>
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    GM/Admin · {mealOrderConfirmation.timestamp} · {mealOrderConfirmation.totalFlights} flight{mealOrderConfirmation.totalFlights !== 1 ? "s" : ""} · {mealOrderConfirmation.totalMeals.toLocaleString()} meals
+                    Business Analyst · {mealOrderConfirmation.timestamp} · {mealOrderConfirmation.totalFlights} flight{mealOrderConfirmation.totalFlights !== 1 ? "s" : ""} · {mealOrderConfirmation.totalMeals.toLocaleString()} meals
                   </p>
                 </div>
                 <Button
@@ -4206,7 +4288,7 @@ function MaterialRequirementPlanningDialog({
     const run: WfMrpRun = {
       id: runId,
       date: stamp,
-      runBy: "GM/Admin",
+      runBy: "Business Analyst",
       basis,
       orderIds: selectedOrders.map((o) => o.id),
       totalUnits,

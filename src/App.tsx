@@ -55,6 +55,7 @@ import AuditPage from "@/routes/audit";
 import ApprovalManagementPage from "@/routes/approval-management";
 import ConfigItemPage from "@/routes/config-item";
 import ConfigSupplierPage from "@/routes/config-supplier";
+import ConfigCustomerPage from "@/routes/config-customer";
 import ConfigCompanyPage from "@/routes/config-company";
 import ConfigAirlinePage from "@/routes/config-airline";
 import ConfigAircraftPage from "@/routes/config-aircraft";
@@ -76,6 +77,7 @@ import InventoryOverviewPage from "@/routes/inventory-overview";
 import SupplyChainOverviewPage from "@/routes/supply-chain-overview";
 import AccountsOverviewPage from "@/routes/accounts-overview";
 import AccountsCashBankPage from "@/routes/accounts-cash-bank";
+import AccountsIncomePage from "@/routes/accounts-income";
 import ProfilePage from "@/routes/profile";
 import AccountSettingsPage from "@/routes/account-settings";
 import FoodSafetyOverviewPage from "@/routes/food-safety-overview";
@@ -85,6 +87,7 @@ import AirlineEquipmentsOverviewPage from "@/routes/airline-equipments-overview"
 import MaintenanceOverviewPage from "@/routes/maintenance-overview";
 import FleetOverviewPage from "@/routes/fleet-overview";
 import WastageManagementPage from "@/routes/wastage-management";
+import DamagedProductSalesPage from "@/routes/damaged-product-sales";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 1000 * 60 * 5 } },
@@ -153,6 +156,7 @@ export function App() {
             <Route path="/approval-management" element={<ApprovalManagementPage />} />
             <Route path="/config-item" element={<ConfigItemPage />} />
             <Route path="/config-supplier" element={<ConfigSupplierPage />} />
+            <Route path="/config-customer" element={<ConfigCustomerPage />} />
             <Route path="/config-company" element={<ConfigCompanyPage />} />
             <Route path="/config-airline" element={<ConfigAirlinePage />} />
             <Route path="/config-aircraft" element={<ConfigAircraftPage />} />
@@ -174,6 +178,7 @@ export function App() {
             <Route path="/supply-chain-overview" element={<SupplyChainOverviewPage />} />
             <Route path="/accounts-overview" element={<AccountsOverviewPage />} />
             <Route path="/accounts-cash-bank" element={<AccountsCashBankPage />} />
+            <Route path="/accounts-income" element={<AccountsIncomePage />} />
             <Route path="/food-safety-overview" element={<FoodSafetyOverviewPage />} />
             <Route path="/packaging-dispatch-overview" element={<PackagingDispatchOverviewPage />} />
             <Route path="/airline-consumables-overview" element={<AirlineConsumablesOverviewPage />} />
@@ -181,6 +186,7 @@ export function App() {
             <Route path="/maintenance-overview" element={<MaintenanceOverviewPage />} />
             <Route path="/fleet-overview" element={<FleetOverviewPage />} />
             <Route path="/wastage-management" element={<WastageManagementPage />} />
+            <Route path="/damaged-product-sales" element={<DamagedProductSalesPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

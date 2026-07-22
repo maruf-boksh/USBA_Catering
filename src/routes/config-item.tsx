@@ -50,6 +50,7 @@ import {
   PRODUCIBLE_ITEM_TYPES,
   itemCanPurchase,
   itemCanProduce,
+  itemCanSell,
   setBatchTracked as persistBatchTracked,
   subscribeAllocationMethod,
   getAllocationVersion,
@@ -177,12 +178,14 @@ const ALLOCATION_OPTIONS = [
  *  pickers (Direct Receive / PR / PO); producible items can be a production
  *  output. Shared by the Create and Edit forms. */
 function CapabilityChecks({
-  canPurchase, canProduce, onPurchase, onProduce,
+  canPurchase, canProduce, canSell, onPurchase, onProduce, onSell,
 }: {
   canPurchase: boolean;
   canProduce: boolean;
+  canSell: boolean;
   onPurchase: (v: boolean) => void;
   onProduce: (v: boolean) => void;
+  onSell: (v: boolean) => void;
 }) {
   return (
     <div>
@@ -196,10 +199,15 @@ function CapabilityChecks({
           <Checkbox checked={canPurchase} onCheckedChange={(v) => onPurchase(v === true)} />
           <span className="text-sm font-medium">Can be Purchased</span>
         </label>
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <Checkbox checked={canSell} onCheckedChange={(v) => onSell(v === true)} />
+          <span className="text-sm font-medium">Can be Sold</span>
+        </label>
       </div>
       <div className="mt-1.5 text-[11px] text-muted-foreground leading-relaxed">
         <span className="font-semibold text-foreground">Can be Purchased</span> lets the item be received/ordered in Local Purchase (Direct Receive, PR, PO).
         <span className="font-semibold text-foreground"> Can be Produced</span> lets it be chosen as a production output.
+        <span className="font-semibold text-foreground"> Can be Sold</span> lets it be sold as salvage on the Damaged Product Sales page.
       </div>
     </div>
   );
@@ -726,6 +734,7 @@ function ItemProfileView({ row }: { row: ItemRow }) {
         <Field label="Primary UOM">{row.uom}</Field>
         <Field label="Can be Produced">{itemCanProduce(row) ? "Yes" : "No"}</Field>
         <Field label="Can be Purchased">{itemCanPurchase(row) ? "Yes" : "No"}</Field>
+        <Field label="Can be Sold">{itemCanSell(row) ? "Yes" : "No"}</Field>
       </Section>
 
       <Section title="Costing & Nutrition">
@@ -929,6 +938,7 @@ function ItemEditForm({
   // the type-based default) so the checkboxes reflect the current behaviour.
   const [canPurchase, setCanPurchase] = useState(itemCanPurchase(row));
   const [canProduce, setCanProduce] = useState(itemCanProduce(row));
+  const [canSell, setCanSell] = useState(itemCanSell(row));
 
   const [categoryOptions, setCategoryOptions] = useState<string[]>(() => {
     const base = [...CATEGORIES] as string[];
@@ -1007,6 +1017,7 @@ function ItemEditForm({
       kcal: Number(kcal) || 0,
       canPurchase,
       canProduce,
+      canSell,
     });
   };
 
@@ -1147,8 +1158,10 @@ function ItemEditForm({
         <CapabilityChecks
           canPurchase={canPurchase}
           canProduce={canProduce}
+          canSell={canSell}
           onPurchase={setCanPurchase}
           onProduce={setCanProduce}
+          onSell={setCanSell}
         />
       </div>
 
@@ -1426,11 +1439,13 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
   // explicit choice sticks even if the item type changes.
   const [canPurchase, setCanPurchase] = useState(true);
   const [canProduce, setCanProduce] = useState(false);
+  const [canSell, setCanSell] = useState(true);
   const [capsTouched, setCapsTouched] = useState(false);
   useEffect(() => {
     if (capsTouched) return;
     setCanPurchase(itemType !== "Asset");
     setCanProduce(PRODUCIBLE_ITEM_TYPES.includes(itemType as ItemRow["itemType"]));
+    setCanSell(itemType !== "Asset");
   }, [itemType, capsTouched]);
 
   // ALT UOMs — repeatable rows. Each row has its own draft state until added.
@@ -1500,6 +1515,7 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
       altUoms: altUoms.length > 0 ? altUoms : undefined,
       canPurchase,
       canProduce,
+      canSell,
     });
 
     if (fgWithoutBom) {
@@ -1686,8 +1702,10 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
             <CapabilityChecks
               canPurchase={canPurchase}
               canProduce={canProduce}
+              canSell={canSell}
               onPurchase={(v) => { setCapsTouched(true); setCanPurchase(v); }}
               onProduce={(v) => { setCapsTouched(true); setCanProduce(v); }}
+              onSell={(v) => { setCapsTouched(true); setCanSell(v); }}
             />
           </div>
 

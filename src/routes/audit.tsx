@@ -99,7 +99,7 @@ const SEVERITY_BADGE: Record<Severity, string> = {
 
 const LOGS: AuditEvent[] = [
   {
-    id: "LG-9032", at: "2026-05-24 09:42:11", user: "r.hossain", userRole: "GM/Admin",
+    id: "LG-9032", at: "2026-05-24 09:42:11", user: "r.hossain", userRole: "Business Analyst",
     module: "Procurement", action: "Approve", description: "Approved purchase order to Padma Foods Ltd.",
     target: "PO-2025-0451", targetType: "Purchase Order",
     ip: "10.0.4.10", device: "Chrome 132 · Windows",
@@ -158,7 +158,7 @@ const LOGS: AuditEvent[] = [
     result: "Failure", severity: "critical",
   },
   {
-    id: "LG-9024", at: "2026-05-24 09:05:44", user: "r.hossain", userRole: "GM/Admin",
+    id: "LG-9024", at: "2026-05-24 09:05:44", user: "r.hossain", userRole: "Business Analyst",
     module: "Users", action: "Create", description: "Created new user account",
     target: "U-014 / hassan.m", targetType: "User",
     ip: "10.0.4.10", device: "Chrome 132 · Windows",
@@ -213,7 +213,7 @@ const LOGS: AuditEvent[] = [
     changes: [{ field: "status", before: "Loaded", after: "En Route" }],
   },
   {
-    id: "LG-9017", at: "2026-05-24 08:12:31", user: "r.hossain", userRole: "GM/Admin",
+    id: "LG-9017", at: "2026-05-24 08:12:31", user: "r.hossain", userRole: "Business Analyst",
     module: "Config", action: "Update", description: "Updated approval matrix · added second approver above ৳1L",
     target: "Approval Matrix / PR", targetType: "Configuration",
     ip: "10.0.4.10", device: "Chrome 132 · Windows",
@@ -243,7 +243,7 @@ const LOGS: AuditEvent[] = [
     result: "Success", severity: "success",
   },
   {
-    id: "LG-9013", at: "2026-05-24 07:42:20", user: "r.hossain", userRole: "GM/Admin",
+    id: "LG-9013", at: "2026-05-24 07:42:20", user: "r.hossain", userRole: "Business Analyst",
     module: "Auth", action: "Login", description: "Signed in",
     target: "r.hossain", targetType: "Session",
     ip: "10.0.4.10", device: "Chrome 132 · Windows",
@@ -279,7 +279,7 @@ const LOGS: AuditEvent[] = [
     result: "Success", severity: "info",
   },
   {
-    id: "LG-9008", at: "2026-05-23 17:48:05", user: "r.hossain", userRole: "GM/Admin",
+    id: "LG-9008", at: "2026-05-23 17:48:05", user: "r.hossain", userRole: "Business Analyst",
     module: "Users", action: "Update", description: "Role changed for hassan.m",
     target: "U-014 / hassan.m", targetType: "User",
     ip: "10.0.4.10", device: "Chrome 132 · Windows",
@@ -330,7 +330,7 @@ const LOGS: AuditEvent[] = [
     result: "Success", severity: "success",
   },
   {
-    id: "LG-9001", at: "2026-05-23 10:15:12", user: "r.hossain", userRole: "GM/Admin",
+    id: "LG-9001", at: "2026-05-23 10:15:12", user: "r.hossain", userRole: "Business Analyst",
     module: "Auth", action: "Logout", description: "Session ended",
     target: "r.hossain", targetType: "Session",
     ip: "10.0.4.10", device: "Chrome 132 · Windows",

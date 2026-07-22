@@ -28,7 +28,7 @@ import {
 } from "../types/roleSetup.types";
 import { exportAuditExcel, exportAuditPdf, exportAuditWord } from "../utils/exportAudit";
 
-const ACTOR = "GM/Admin";
+const ACTOR = "Business Analyst";
 
 interface RoleForm {
   name: string;

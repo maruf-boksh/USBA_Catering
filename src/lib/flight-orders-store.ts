@@ -345,7 +345,7 @@ if (persistedAdded !== rawAdded) saveAddedOrders();
 const DEMO_AMENDMENTS: OrderAmendment[] = [
   {
     id: "AMD-DEMO-1", orderId: "FO-007", at: "2026-07-06T04:35:00.000Z",
-    by: "R. Hossain", role: "GM/Admin", reason: "Airline sent revised final figures",
+    by: "R. Hossain", role: "Business Analyst", reason: "Airline sent revised final figures",
     changes: [
       { field: "pax", label: "PAX", from: 168, to: 130 },
       { field: "specialMeals", label: "Special Meals", from: 10, to: 16 },
@@ -366,7 +366,7 @@ const DEMO_AMENDMENTS: OrderAmendment[] = [
   },
   {
     id: "AMD-DEMO-4", orderId: "FO-004", at: "2026-07-06T06:05:00.000Z",
-    by: "R. Hossain", role: "GM/Admin", reason: "Re-routed via alternate hub",
+    by: "R. Hossain", role: "Business Analyst", reason: "Re-routed via alternate hub",
     changes: [{ field: "sector", label: "Sector", from: "DAC → KUL", to: "DAC → SIN" }],
     leadHours: 2.9, isLmc: true, severity: "major",
   },

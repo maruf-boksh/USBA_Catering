@@ -102,19 +102,69 @@ function OmStatusPill({ status }: { status: FlightOrderStatus }) {
   );
 }
 
+// Lifecycle order, least → most advanced. Used to roll a whole order's legs up
+// into a single derived status and to order the per-status breakdown chips.
+const LIFECYCLE_ORDER: FlightOrderStatus[] = ["Pending", "Approved", "Production", "Dispatched", "Completed"];
+
+function ReviewedPill() {
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full border px-3 py-1 text-[10.5px] font-bold uppercase tracking-[0.04em] text-amber-700 bg-amber-100 border-amber-300">
+      <CornerUpLeft className="h-3 w-3" /> Reviewed
+    </span>
+  );
+}
+
+/**
+ * Order-level status. Flights advance independently, so an order is a *container*
+ * of legs, not a single state machine. We therefore DERIVE the header status:
+ *   • all legs at the same stage → that concrete status,
+ *   • legs spread across stages   → a neutral "In Progress" pill plus a per-status
+ *     count breakdown (e.g. "22 Pending · 5 Production · 3 Dispatched") so the mix
+ *     is visible without expanding. The "In Progress" pill is titled with the
+ *     least-advanced (blocking) stage — the order isn't done until its slowest leg is.
+ */
 function OrderStatusBadges({ legs }: { legs: { status: FlightOrderStatus; reviewComment?: string }[] }) {
   if (legs.length === 0) return null;
   // A leg returned for correction (reviewComment while still Pending) shows a
   // distinct amber "Reviewed" pill so the requester notices it in the list.
   const reviewed = legs.some((l) => l.reviewComment && l.status === "Pending");
-  if (reviewed) {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full border px-3 py-1 text-[10.5px] font-bold uppercase tracking-[0.04em] text-amber-700 bg-amber-100 border-amber-300">
-        <CornerUpLeft className="h-3 w-3" /> Reviewed
-      </span>
-    );
+
+  // Counts per status in lifecycle order (only stages actually present).
+  const counts = LIFECYCLE_ORDER
+    .map((status) => ({ status, n: legs.filter((l) => l.status === status).length }))
+    .filter((c) => c.n > 0);
+
+  // Single stage across the whole order → one concrete pill (unchanged behaviour).
+  if (counts.length <= 1) {
+    if (reviewed) return <ReviewedPill />;
+    return <OmStatusPill status={counts[0]?.status ?? legs[0].status} />;
   }
-  return <OmStatusPill status={legs[0].status} />;
+
+  // Mixed order → derived "In Progress" pill + breakdown chips.
+  const blocking = counts[0].status; // earliest lifecycle stage present = least advanced
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5">
+      {reviewed && <ReviewedPill />}
+      <span
+        title={`Least-advanced flight: ${blocking}`}
+        className="inline-flex items-center gap-1 rounded-full border px-3 py-1 text-[10.5px] font-bold uppercase tracking-[0.04em] text-[#3651d4] bg-[#eef1fe] border-[#cdd6fb]"
+      >
+        <CircleDot className="h-3 w-3" /> In Progress
+      </span>
+      {counts.map((c) => (
+        <span
+          key={c.status}
+          title={`${c.n} ${c.status}`}
+          className={
+            "inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-semibold tracking-[0.02em] tabular-nums " +
+            OM_STAT_CLS[c.status]
+          }
+        >
+          <span className="font-bold">{c.n}</span> {c.status}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 type FlightOrder = {
@@ -728,7 +778,7 @@ export default function OrderManagementPage() {
                   Meal Order for Next 24 Hours ({confirmedOrder.tomorrowDayName}) has been generated
                 </p>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  GM/Admin · {confirmedOrder.timestamp} · {confirmedOrder.totalFlights} flight{confirmedOrder.totalFlights !== 1 ? "s" : ""} · {confirmedOrder.totalMeals.toLocaleString()} meals
+                  Business Analyst · {confirmedOrder.timestamp} · {confirmedOrder.totalFlights} flight{confirmedOrder.totalFlights !== 1 ? "s" : ""} · {confirmedOrder.totalMeals.toLocaleString()} meals
                 </p>
               </div>
               <Button variant="outline" size="sm" className="shrink-0 text-xs" onClick={() => setShowNextDaySummary(true)}>
@@ -813,7 +863,7 @@ export default function OrderManagementPage() {
                   <div className="space-y-1.5">
                     <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">US-Bangla</div>
                     <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Zenith Load</span>
+                      <span className="text-muted-foreground">PAX</span>
                       <span className="font-medium tabular-nums">{dayAfterComputed?.usbaZenith ?? 0}</span>
                     </div>
                     <div className="flex justify-between text-sm">
@@ -832,7 +882,7 @@ export default function OrderManagementPage() {
                   <div className="space-y-1.5">
                     <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Air Astra</div>
                     <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Zenith Load</span>
+                      <span className="text-muted-foreground">PAX</span>
                       <span className="font-medium tabular-nums">{dayAfterComputed?.aaaZenith ?? 0}</span>
                     </div>
                     <div className="flex justify-between text-sm">
@@ -841,7 +891,7 @@ export default function OrderManagementPage() {
                     </div>
                   </div>
                   <div className="flex justify-between text-sm font-semibold border-t border-primary/20 pt-2">
-                    <span>Total Zenith (USBA + Air Astra)</span>
+                    <span>Total PAX (USBA + Air Astra)</span>
                     <span className="tabular-nums">{dayAfterComputed?.totalZenith ?? 0}</span>
                   </div>
                   <div className="flex justify-between text-sm pt-2 border-t border-primary/10 mt-1">
@@ -1867,7 +1917,7 @@ function OrdersList({
   const access = useAccess();
   // The Special Meals column is a permissioned element (view).
   const showSpecMeals = canElement(role, "/order-management", "col:spec-meals", "view", access);
-  const colCount = showSpecMeals ? 8 : 7;
+  const colCount = showSpecMeals ? 9 : 8;
   // Flight whose special-meal count was clicked — drives the focused roster dialog.
   const [mealDetailLeg, setMealDetailLeg] = useState<FlightOrder | null>(null);
   // Leg being edited — only Pending legs can open this (button disabled otherwise).
@@ -2150,6 +2200,7 @@ function OrdersList({
                             <TableHead className="h-9 text-[10px] uppercase tracking-wider">ETD</TableHead>
                             <TableHead className="h-9 text-[10px] uppercase tracking-wider text-right">PAX</TableHead>
                             {showSpecMeals && <TableHead className="h-9 text-[10px] uppercase tracking-wider text-right">Spec. Meals</TableHead>}
+                            <TableHead className="h-9 text-[10px] uppercase tracking-wider">Status</TableHead>
                             <TableHead className="h-9 text-[10px] uppercase tracking-wider text-right">Action</TableHead>
                           </TableRow>
                         </TableHeader>
@@ -2190,6 +2241,9 @@ function OrdersList({
                                     )}
                                   </TableCell>
                                 )}
+                                <TableCell>
+                                  <OmStatusPill status={o.status} />
+                                </TableCell>
                                 <TableCell>
                                   <div className="flex items-center justify-end gap-1.5">
                                     <Button size="icon" variant="outline" className="h-7 w-7" onClick={() => onView(o)} aria-label={`View ${o.flight}`} title="View flight">
@@ -4418,7 +4472,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
   const addLog = (message: string) => {
     const now = new Date();
     setActivityLog((current) => [
-      { message, user: "GM/Admin", role: "General Manager", at: `${now.toLocaleDateString()} ${now.toLocaleTimeString()}` },
+      { message, user: "Business Analyst", role: "General Manager", at: `${now.toLocaleDateString()} ${now.toLocaleTimeString()}` },
       ...current,
     ]);
   };
@@ -4898,7 +4952,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
   const validIntl = intlDone ? intlParsed.filter((r) => r.valid) : [];
   const usbaDom = validDom.filter((r) => r.airline === "US-Bangla");
   const aaaDom = validDom.filter((r) => r.airline === "Air Astra");
-  const usbaZenith = usbaDom.reduce((s, r) => s + (r.zenLoad ?? 0), 0);
+  const usbaZenith = usbaDom.reduce((s, r) => s + (r.zenLoad ?? r.pax ?? 0), 0);
   const usbaPax = usbaDom.reduce((s, r) => s + r.pax, 0);
   const usbaBreakfast = usbaDom.filter((r) => r.etd <= "10:30").reduce((s, r) => s + (r.totalMeal ?? 0), 0);
   const usbaLunch = usbaDom.filter((r) => r.etd > "10:30" && r.etd <= "14:30").reduce((s, r) => s + (r.totalMeal ?? 0), 0);
@@ -5759,13 +5813,18 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                     }));
                   }} />
               </div>
+              <div>
+                <Label className="text-xs">Airline</Label>
+                <Input className="mt-1 h-8 text-sm" value={editRow.data.airline ?? ""}
+                  onChange={(e) => setEditRow((prev) => prev && ({ ...prev, data: { ...prev.data, airline: e.target.value } }))} />
+              </div>
+              <div>
+                <Label className="text-xs">Date</Label>
+                <Input type="date" className="mt-1 h-8 text-sm" value={editRow.data.date ?? ""}
+                  onChange={(e) => setEditRow((prev) => prev && ({ ...prev, data: { ...prev.data, date: e.target.value } }))} />
+              </div>
               {editRow.source === "crew" ? (
                 <>
-                  <div>
-                    <Label className="text-xs">Airline</Label>
-                    <Input className="mt-1 h-8 text-sm" value={editRow.data.airline}
-                      onChange={(e) => setEditRow((prev) => prev && ({ ...prev, data: { ...prev.data, airline: e.target.value } }))} />
-                  </div>
                   <div>
                     <Label className="text-xs">Meal Slot <span className="text-muted-foreground normal-case">(auto from ETD)</span></Label>
                     <Input className="mt-1 h-8 text-sm bg-muted/40" value={editRow.data.mealSlot ?? ""} readOnly tabIndex={-1} />
@@ -5779,17 +5838,17 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
               ) : editRow.source === "dom" ? (
                 <>
                   <div>
-                    <Label className="text-xs">ZEN Load</Label>
-                    <Input type="number" min={0} className="mt-1 h-8 text-sm" value={editRow.data.zenLoad ?? ""}
-                      onChange={(e) => setEditRow((prev) => prev && ({ ...prev, data: { ...prev.data, zenLoad: Number(e.target.value), totalMeal: Number(e.target.value) } }))} />
+                    <Label className="text-xs">PAX</Label>
+                    <Input type="number" min={0} className="mt-1 h-8 text-sm" value={editRow.data.pax ?? ""}
+                      onChange={(e) => { const n = Number(e.target.value); setEditRow((prev) => prev && ({ ...prev, data: { ...prev.data, pax: n, zenLoad: n, totalMeal: n } })); }} />
                   </div>
                   <div>
-                    <Label className="text-xs">SPEC MEAL</Label>
-                    <Input type="number" min={0} className="mt-1 h-8 text-sm" value={editRow.data.specMeal ?? ""}
-                      onChange={(e) => setEditRow((prev) => prev && ({ ...prev, data: { ...prev.data, specMeal: Number(e.target.value), specialMeals: Number(e.target.value) } }))} />
+                    <Label className="text-xs">Special Meals</Label>
+                    <Input type="number" min={0} className="mt-1 h-8 text-sm" value={editRow.data.specialMeals ?? ""}
+                      onChange={(e) => { const n = Number(e.target.value); setEditRow((prev) => prev && ({ ...prev, data: { ...prev.data, specialMeals: n, specMeal: n } })); }} />
                   </div>
                   <div>
-                    <Label className="text-xs">CREW MEAL</Label>
+                    <Label className="text-xs">Crew Meals <span className="text-muted-foreground normal-case">(optional)</span></Label>
                     <Input type="number" min={0} className="mt-1 h-8 text-sm" value={editRow.data.crewMeal ?? ""}
                       onChange={(e) => setEditRow((prev) => prev && ({ ...prev, data: { ...prev.data, crewMeal: Number(e.target.value) } }))} />
                   </div>
@@ -5826,7 +5885,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
               if (!editRow) return;
               const updated = { ...editRow.data, valid: true,
                 pax: editRow.source === "dom"
-                  ? (editRow.data.zenLoad ?? editRow.data.pax)
+                  ? (editRow.data.pax ?? editRow.data.zenLoad)
                   : editRow.source === "crew"
                   ? 0
                   // International: PAX is edited directly (cabin B/C + E/C loads
@@ -6222,7 +6281,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
             <CardContent className="pt-6">
               <h3 className="text-sm font-semibold tracking-wider uppercase text-foreground mb-4">
                 Meal Order Summary — Next 24 Hours ({tomorrowDayName})
-                <span className="ml-2 text-xs font-normal normal-case tracking-normal text-muted-foreground">{importDate} · From Zenith PAX Load</span>
+                <span className="ml-2 text-xs font-normal normal-case tracking-normal text-muted-foreground">{importDate} · From PAX Load</span>
               </h3>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -6335,7 +6394,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                   <div className="space-y-1.5">
                     <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">US-Bangla</div>
                     <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Zenith Load</span>
+                      <span className="text-muted-foreground">PAX</span>
                       {mealEditMode && summaryEdit ? (
                         <input type="number" min={0} value={summaryEdit.usbaZenith}
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, usbaZenith: Number(e.target.value) })}
@@ -6378,7 +6437,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                   <div className="space-y-1.5">
                     <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Air Astra</div>
                     <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Zenith Load</span>
+                      <span className="text-muted-foreground">PAX</span>
                       {mealEditMode && summaryEdit ? (
                         <input type="number" min={0} value={summaryEdit.aaaZenith}
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, aaaZenith: Number(e.target.value) })}
@@ -6432,7 +6491,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                     </div>
                   </div>
                   <div className="flex justify-between text-sm font-semibold border-t border-primary/20 pt-2">
-                    <span>Total Zenith (USBA + Air Astra)</span>
+                    <span>Total PAX (USBA + Air Astra)</span>
                     <span className="tabular-nums">
                       {mealEditMode && summaryEdit ? summaryEdit.usbaZenith + summaryEdit.aaaZenith : savedEdit ? savedEdit.usbaZenith + savedEdit.aaaZenith : totalZenith}
                     </span>
@@ -6604,7 +6663,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                   <div className="space-y-1.5">
                     <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">US-Bangla</div>
                     <div className="flex justify-between text-sm items-center">
-                      <span className="text-muted-foreground">Zenith Load</span>
+                      <span className="text-muted-foreground">PAX</span>
                       {mealEditMode && summaryEdit ? (
                         <input type="number" min={0} value={summaryEdit.usbaZenith}
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, usbaZenith: Number(e.target.value) })}
@@ -6639,7 +6698,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                   <div className="space-y-1.5">
                     <div className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold mb-1">Air Astra</div>
                     <div className="flex justify-between text-sm items-center">
-                      <span className="text-muted-foreground">Zenith Load</span>
+                      <span className="text-muted-foreground">PAX</span>
                       {mealEditMode && summaryEdit ? (
                         <input type="number" min={0} value={summaryEdit.aaaZenith}
                           onChange={(e) => setSummaryEdit((p) => p && { ...p, aaaZenith: Number(e.target.value) })}
@@ -6656,7 +6715,7 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                     </div>
                   </div>
                   <div className="flex justify-between text-sm font-semibold border-t border-primary/20 pt-2">
-                    <span>Total Zenith (USBA + Air Astra)</span>
+                    <span>Total PAX (USBA + Air Astra)</span>
                     <span className="tabular-nums">{mealEditMode && summaryEdit ? summaryEdit.usbaZenith + summaryEdit.aaaZenith : totalZenith}</span>
                   </div>
                 </div>
@@ -7010,7 +7069,7 @@ function FlightOrderDetailsDialog({
                   <CornerUpLeft className="h-3 w-3" /> Reviewed
                 </span>
               ) : (
-                <StatusBadge status={leg.status} />
+                <OmStatusPill status={leg.status} />
               )}
             </div>
 
@@ -7206,7 +7265,7 @@ function FlightOrderDetailsDialog({
                           <TableCell>{leg.etd}</TableCell>
                           <TableCell className="text-right tabular-nums">{leg.pax}</TableCell>
                           <TableCell className="text-right tabular-nums">{leg.specialMeals}</TableCell>
-                          <TableCell><StatusBadge status={leg.status} /></TableCell>
+                          <TableCell><OmStatusPill status={leg.status} /></TableCell>
                           <TableCell>
                             {next ? (
                               <span

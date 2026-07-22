@@ -174,7 +174,7 @@ export default function UserManagementPage() {
   const add = (u: UserRow) => { setRows((p) => [u, ...p]); setView("list"); };
 
   const active = rows.filter((r) => r.status === "Active").length;
-  const admins = rows.filter((r) => r.role === "GM/Admin").length;
+  const admins = rows.filter((r) => r.role === "Business Analyst").length;
 
   return (
     <>

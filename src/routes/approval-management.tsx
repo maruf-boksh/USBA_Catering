@@ -752,7 +752,7 @@ export default function ApprovalManagementPage() {
   };
 
   const phApprove = (rec: PersonalHygieneRecord) => {
-    const approvedBy = "GM/Admin";
+    const approvedBy = "Business Analyst";
     const approvedAt = phStamp();
     setPhRecords(prev => prev.map(r => r.id === rec.id ? { ...r, status: "approved", approvedBy, approvedAt } : r));
     setPhDetailOpen(false);
@@ -813,7 +813,7 @@ export default function ApprovalManagementPage() {
     // approver as preparer.
     const prepared = record.signOff?.preparedBy?.name
       ? record.signOff.preparedBy
-      : { name: `${role} (GM/Admin)`, designation: "GM/Admin", signedAt: at };
+      : { name: `${role} (Business Analyst)`, designation: "Business Analyst", signedAt: at };
     const signOff: GalleyLoadingRecord["signOff"] = {
       preparedBy: prepared,
       physicallyHandedBy: { name: physicallyBy, designation: galleyAptDesig(physicallyBy), signedAt: at },
@@ -1568,7 +1568,7 @@ export default function ApprovalManagementPage() {
           ? {
               ...r,
               status: "Approved",
-              processedBy: `${role} (GM/Admin)`,
+              processedBy: `${role} (Business Analyst)`,
               processedAt: stamp(),
               lines: r.lines.map((l, i) => ({
                 ...l,
@@ -1611,7 +1611,7 @@ export default function ApprovalManagementPage() {
       module: it.category,
       entity: it.refId,
       detail: it.title,
-      actor: `${role} (GM/Admin)`,
+      actor: `${role} (Business Analyst)`,
     });
     if (it.category === "Demand Request") {
       const dr = demands.find((d) => d.id === it.refId);
@@ -1644,7 +1644,7 @@ export default function ApprovalManagementPage() {
       );
       setFoDecisions((p) => ({
         ...p,
-        [`${it.refId}__${t}`]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
+        [`${it.refId}__${t}`]: { status: "Approved", by: `${role} (Business Analyst)`, at: stamp() },
       }));
       if (!silent) toast.success(`${it.refId} approved — ${moved} flight${moved === 1 ? "" : "s"} moved to Approved.`);
       return;
@@ -1653,7 +1653,7 @@ export default function ApprovalManagementPage() {
       setRfqStatus(it.refId, "Approved");
       setRfqDecisions((p) => ({
         ...p,
-        [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
+        [it.refId]: { status: "Approved", by: `${role} (Business Analyst)`, at: stamp() },
       }));
       if (!silent) toast.success(`${it.refId} approved.`);
       return;
@@ -1662,7 +1662,7 @@ export default function ApprovalManagementPage() {
       setQuotationStatus(it.refId, "Approved");
       setQuotationDecisions((p) => ({
         ...p,
-        [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
+        [it.refId]: { status: "Approved", by: `${role} (Business Analyst)`, at: stamp() },
       }));
       if (!silent) toast.success(`${it.refId} approved.`);
       return;
@@ -1671,7 +1671,7 @@ export default function ApprovalManagementPage() {
       setPurchaseRequisitionStatus(it.refId, "Approved");
       setPrDecisions((p) => ({
         ...p,
-        [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
+        [it.refId]: { status: "Approved", by: `${role} (Business Analyst)`, at: stamp() },
       }));
       if (!silent) toast.success(`${it.refId} approved — ready for procurement.`);
       return;
@@ -1687,13 +1687,13 @@ export default function ApprovalManagementPage() {
       setStockAdjustmentStatus(it.refId, "Approved");
       setStockAdjDecisions((p) => ({
         ...p,
-        [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
+        [it.refId]: { status: "Approved", by: `${role} (Business Analyst)`, at: stamp() },
       }));
       if (!silent) toast.success(`${it.refId} approved — stock balance updated.`);
       return;
     }
     if (it.category === "Meal Quantity Adjustment") {
-      setOrderSummaryAdjustmentStatus(it.refId, "Approved", `${role} (GM/Admin)`, { at: stamp() });
+      setOrderSummaryAdjustmentStatus(it.refId, "Approved", `${role} (Business Analyst)`, { at: stamp() });
       if (!silent) toast.success(`${it.refId} approved — adjustment applied to the order summary.`);
       return;
     }
@@ -1701,7 +1701,7 @@ export default function ApprovalManagementPage() {
       updateProductionEntryStatus(it.refId, "Approved");
       setProductionDecisions((p) => ({
         ...p,
-        [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() },
+        [it.refId]: { status: "Approved", by: `${role} (Business Analyst)`, at: stamp() },
       }));
       if (!silent) toast.success(`${it.refId} approved — released to production.`);
       return;
@@ -1719,7 +1719,7 @@ export default function ApprovalManagementPage() {
     if (it.category === "Maintenance") {
       updateMaintenanceApproval(it.refId, {
         status: "Maintenance Approved",
-        approvedBy: `${role} (GM/Admin)`,
+        approvedBy: `${role} (Business Analyst)`,
         approvedAt: stamp(),
       });
       if (!silent) toast.success(`${it.refId} — Maintenance Approved.`);
@@ -1729,7 +1729,7 @@ export default function ApprovalManagementPage() {
       setReturnApprovals((prev) =>
         prev.map((ra) =>
           ra.id === it.refId
-            ? { ...ra, status: "Approved", processedBy: `${role} (GM/Admin)`, processedAt: stamp() }
+            ? { ...ra, status: "Approved", processedBy: `${role} (Business Analyst)`, processedAt: stamp() }
             : ra,
         ),
       );
@@ -1740,7 +1740,7 @@ export default function ApprovalManagementPage() {
       setDelayApprovals((prev) =>
         prev.map((da) =>
           da.id === it.refId
-            ? { ...da, status: "Approved", processedBy: `${role} (GM/Admin)`, processedAt: stamp() }
+            ? { ...da, status: "Approved", processedBy: `${role} (Business Analyst)`, processedAt: stamp() }
             : da,
         ),
       );
@@ -1758,7 +1758,7 @@ export default function ApprovalManagementPage() {
       setPurchaseReturns((prev) =>
         prev.map((pr) =>
           pr.id === it.refId
-            ? { ...pr, status: "Approved", processedBy: `${role} (GM/Admin)`, processedAt: stamp() }
+            ? { ...pr, status: "Approved", processedBy: `${role} (Business Analyst)`, processedAt: stamp() }
             : pr,
         ),
       );
@@ -1766,7 +1766,7 @@ export default function ApprovalManagementPage() {
       return;
     }
     if (it.category === "Last-Minute Change") {
-      setLmcDecisions((p) => ({ ...p, [it.refId]: { status: "Approved", by: `${role} (GM/Admin)`, at: stamp() } }));
+      setLmcDecisions((p) => ({ ...p, [it.refId]: { status: "Approved", by: `${role} (Business Analyst)`, at: stamp() } }));
       if (!silent) toast.success(`LMC ${it.refId} approved — cleared to action & chargeable.`);
       return;
     }
@@ -1775,7 +1775,7 @@ export default function ApprovalManagementPage() {
         setDailySubmissions((prev) =>
           prev.map((s) =>
             s.id === it.refId
-              ? { ...s, status: "Approved", reviewedBy: `${role} (GM/Admin)`, reviewedAt: stamp() }
+              ? { ...s, status: "Approved", reviewedBy: `${role} (Business Analyst)`, reviewedAt: stamp() }
               : s,
           ),
         );
@@ -1784,7 +1784,7 @@ export default function ApprovalManagementPage() {
         setSlotAppeals((prev) =>
           prev.map((a) =>
             a.id === it.refId
-              ? { ...a, status: "Approved", reviewedBy: `${role} (GM/Admin)`, reviewedAt: stamp() }
+              ? { ...a, status: "Approved", reviewedBy: `${role} (Business Analyst)`, reviewedAt: stamp() }
               : a,
           ),
         );
@@ -1918,14 +1918,14 @@ export default function ApprovalManagementPage() {
       // Record the GRN (→ Quality Control) and write back any PR receipts.
       addGRN(dr.grn);
       if (dr.sourcePrId && dr.prReceipts?.length) applyReceiptToPR(dr.sourcePrId, dr.prReceipts);
-      setDirectReceiptApprovalStatus(dr.id, "Approved", { processedBy: `${role} (GM/Admin)`, processedAt: stamp() });
+      setDirectReceiptApprovalStatus(dr.id, "Approved", { processedBy: `${role} (Business Analyst)`, processedAt: stamp() });
       if (!silent) toast.success(`${it.refId} approved & recorded — sent to Quality Control.`);
       return;
     }
     setItems((p) =>
       p.map((x) =>
         x.id === it.id
-          ? { ...x, status: "Approved", processedBy: "R. Hossain (GM/Admin)", processedAt: stamp() }
+          ? { ...x, status: "Approved", processedBy: "R. Hossain (Business Analyst)", processedAt: stamp() }
           : x,
       ),
     );
@@ -1951,7 +1951,7 @@ export default function ApprovalManagementPage() {
     if (!reviewTarget) return;
     if (!reviewComment.trim()) { toast.error("Provide a review comment for the requester."); return; }
     const comment = reviewComment.trim();
-    const by = `${role} (GM/Admin)`;
+    const by = `${role} (Business Analyst)`;
     const at = stamp();
     if (reviewTarget.category === "Flight Orders" || reviewTarget.category === "Crew Orders") {
       const t = reviewTarget.category === "Crew Orders" ? "crew" : "flight";
@@ -1976,7 +1976,7 @@ export default function ApprovalManagementPage() {
       module: it.category,
       entity: it.refId,
       detail: reason ? `${it.title} — ${reason}` : it.title,
-      actor: `${role} (GM/Admin)`,
+      actor: `${role} (Business Analyst)`,
     });
     if (it.category === "Demand Request") {
       updateDemandStatus(it.refId, "Rejected", {
@@ -1988,38 +1988,38 @@ export default function ApprovalManagementPage() {
       const t = it.category === "Crew Orders" ? "crew" : "flight";
       setFoDecisions((p) => ({
         ...p,
-        [`${it.refId}__${t}`]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+        [`${it.refId}__${t}`]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
       }));
     } else if (it.category === "Request for Quotation") {
       setRfqStatus(it.refId, "Rejected");
       setRfqDecisions((p) => ({
         ...p,
-        [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+        [it.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
       }));
     } else if (it.category === "Quotation") {
       setQuotationStatus(it.refId, "Rejected");
       setQuotationDecisions((p) => ({
         ...p,
-        [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+        [it.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
       }));
     } else if (it.category === "Purchase Requisition" && it.id.startsWith("PR-AP-")) {
       setPurchaseRequisitionStatus(it.refId, "Rejected");
       setPrDecisions((p) => ({
         ...p,
-        [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+        [it.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
       }));
     } else if (it.category === "Stock Adjustment") {
       setStockAdjustmentStatus(it.refId, "Rejected");
       setStockAdjDecisions((p) => ({
         ...p,
-        [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+        [it.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
       }));
     } else if (it.category === "Meal Quantity Adjustment") {
-      setOrderSummaryAdjustmentStatus(it.refId, "Rejected", `${role} (GM/Admin)`, { at: stamp(), rejectionReason: reason });
+      setOrderSummaryAdjustmentStatus(it.refId, "Rejected", `${role} (Business Analyst)`, { at: stamp(), rejectionReason: reason });
     } else if (it.category === "Production Order" && it.id.startsWith("PRO-AP-")) {
       setProductionDecisions((p) => ({
         ...p,
-        [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+        [it.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
       }));
     } else if (it.id.startsWith("WFPO-CLOSE-")) {
       // Close request declined — revert the PO to its pre-request status.
@@ -2030,7 +2030,7 @@ export default function ApprovalManagementPage() {
     } else if (it.category === "Maintenance") {
       updateMaintenanceApproval(it.refId, {
         status: "Rejected",
-        rejectedBy: `${role} (GM/Admin)`,
+        rejectedBy: `${role} (Business Analyst)`,
         rejectedAt: stamp(),
         rejectionReason: reason,
       });
@@ -2038,7 +2038,7 @@ export default function ApprovalManagementPage() {
       setReturnApprovals((prev) =>
         prev.map((ra) =>
           ra.id === it.refId
-            ? { ...ra, status: "Declined", processedBy: `${role} (GM/Admin)`, processedAt: stamp(), declineReason: reason }
+            ? { ...ra, status: "Declined", processedBy: `${role} (Business Analyst)`, processedAt: stamp(), declineReason: reason }
             : ra,
         ),
       );
@@ -2046,7 +2046,7 @@ export default function ApprovalManagementPage() {
       setDelayApprovals((prev) =>
         prev.map((da) =>
           da.id === it.refId
-            ? { ...da, status: "Declined", processedBy: `${role} (GM/Admin)`, processedAt: stamp(), declineReason: reason }
+            ? { ...da, status: "Declined", processedBy: `${role} (Business Analyst)`, processedAt: stamp(), declineReason: reason }
             : da,
         ),
       );
@@ -2061,18 +2061,18 @@ export default function ApprovalManagementPage() {
       setPurchaseReturns((prev) =>
         prev.map((pr) =>
           pr.id === it.refId
-            ? { ...pr, status: "Rejected", processedBy: `${role} (GM/Admin)`, processedAt: stamp(), remarks: reason }
+            ? { ...pr, status: "Rejected", processedBy: `${role} (Business Analyst)`, processedAt: stamp(), remarks: reason }
             : pr,
         ),
       );
     } else if (it.category === "Last-Minute Change") {
-      setLmcDecisions((p) => ({ ...p, [it.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason } }));
+      setLmcDecisions((p) => ({ ...p, [it.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason } }));
     } else if (it.category === "Daily Hygiene Monitoring") {
       if (it.id.startsWith("DHM-AP-")) {
         setDailySubmissions((prev) =>
           prev.map((s) =>
             s.id === it.refId
-              ? { ...s, status: "Rejected", reviewedBy: `${role} (GM/Admin)`, reviewedAt: stamp(), rejectionReason: reason }
+              ? { ...s, status: "Rejected", reviewedBy: `${role} (Business Analyst)`, reviewedAt: stamp(), rejectionReason: reason }
               : s,
           ),
         );
@@ -2080,7 +2080,7 @@ export default function ApprovalManagementPage() {
         setSlotAppeals((prev) =>
           prev.map((a) =>
             a.id === it.refId
-              ? { ...a, status: "Rejected", reviewedBy: `${role} (GM/Admin)`, reviewedAt: stamp(), rejectionReason: reason }
+              ? { ...a, status: "Rejected", reviewedBy: `${role} (Business Analyst)`, reviewedAt: stamp(), rejectionReason: reason }
               : a,
           ),
         );
@@ -2094,7 +2094,7 @@ export default function ApprovalManagementPage() {
       const rejectStep: WastageApprovalStep = {
         step: stepName,
         by: `${role}`,
-        designation: "GM/Admin",
+        designation: "Business Analyst",
         action: "Rejected",
         at: stamp(),
         comment: reason,
@@ -2108,12 +2108,12 @@ export default function ApprovalManagementPage() {
       );
     } else if (it.category === "Goods Receipt" && it.id.startsWith("DRC-AP-")) {
       const dr = directReceipts.find((d) => `DRC-AP-${d.id}` === it.id);
-      if (dr) setDirectReceiptApprovalStatus(dr.id, "Rejected", { rejectionReason: reason, processedBy: `${role} (GM/Admin)`, processedAt: stamp() });
+      if (dr) setDirectReceiptApprovalStatus(dr.id, "Rejected", { rejectionReason: reason, processedBy: `${role} (Business Analyst)`, processedAt: stamp() });
     } else {
       setItems((p) =>
         p.map((x) =>
           x.id === it.id
-            ? { ...x, status: "Rejected", processedBy: "R. Hossain (GM/Admin)", processedAt: stamp(), rejectionReason: reason }
+            ? { ...x, status: "Rejected", processedBy: "R. Hossain (Business Analyst)", processedAt: stamp(), rejectionReason: reason }
             : x,
         ),
       );
@@ -2296,38 +2296,38 @@ export default function ApprovalManagementPage() {
       const t = detailItem.category === "Crew Orders" ? "crew" : "flight";
       setFoDecisions((p) => ({
         ...p,
-        [`${detailItem.refId}__${t}`]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+        [`${detailItem.refId}__${t}`]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
       }));
     } else if (detailItem.category === "Request for Quotation") {
       setRfqStatus(detailItem.refId, "Rejected");
       setRfqDecisions((p) => ({
         ...p,
-        [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+        [detailItem.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
       }));
     } else if (detailItem.category === "Quotation") {
       setQuotationStatus(detailItem.refId, "Rejected");
       setQuotationDecisions((p) => ({
         ...p,
-        [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+        [detailItem.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
       }));
     } else if (detailItem.category === "Purchase Requisition" && detailItem.id.startsWith("PR-AP-")) {
       setPurchaseRequisitionStatus(detailItem.refId, "Rejected");
       setPrDecisions((p) => ({
         ...p,
-        [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+        [detailItem.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
       }));
     } else if (detailItem.category === "Stock Adjustment") {
       setStockAdjustmentStatus(detailItem.refId, "Rejected");
       setStockAdjDecisions((p) => ({
         ...p,
-        [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+        [detailItem.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
       }));
     } else if (detailItem.category === "Meal Quantity Adjustment") {
-      setOrderSummaryAdjustmentStatus(detailItem.refId, "Rejected", `${role} (GM/Admin)`, { at: stamp(), rejectionReason: reason });
+      setOrderSummaryAdjustmentStatus(detailItem.refId, "Rejected", `${role} (Business Analyst)`, { at: stamp(), rejectionReason: reason });
     } else if (detailItem.category === "Production Order" && detailItem.id.startsWith("PRO-AP-")) {
       setProductionDecisions((p) => ({
         ...p,
-        [detailItem.refId]: { status: "Rejected", by: `${role} (GM/Admin)`, at: stamp(), reason },
+        [detailItem.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
       }));
     } else if (detailItem.id.startsWith("WFPO-CLOSE-")) {
       const prior = wfPurchaseOrders.find(p => p.id === detailItem.refId)?.closeRequestedFrom ?? "Approved";
@@ -2337,7 +2337,7 @@ export default function ApprovalManagementPage() {
     } else if (detailItem.category === "Maintenance") {
       updateMaintenanceApproval(detailItem.refId, {
         status: "Rejected",
-        rejectedBy: `${role} (GM/Admin)`,
+        rejectedBy: `${role} (Business Analyst)`,
         rejectedAt: stamp(),
         rejectionReason: reason,
       });
@@ -2345,7 +2345,7 @@ export default function ApprovalManagementPage() {
       setReturnApprovals((prev) =>
         prev.map((ra) =>
           ra.id === detailItem.refId
-            ? { ...ra, status: "Declined", processedBy: `${role} (GM/Admin)`, processedAt: stamp(), declineReason: reason }
+            ? { ...ra, status: "Declined", processedBy: `${role} (Business Analyst)`, processedAt: stamp(), declineReason: reason }
             : ra,
         ),
       );
@@ -2354,7 +2354,7 @@ export default function ApprovalManagementPage() {
         setDailySubmissions((prev) =>
           prev.map((s) =>
             s.id === detailItem.refId
-              ? { ...s, status: "Rejected", reviewedBy: `${role} (GM/Admin)`, reviewedAt: stamp(), rejectionReason: reason }
+              ? { ...s, status: "Rejected", reviewedBy: `${role} (Business Analyst)`, reviewedAt: stamp(), rejectionReason: reason }
               : s,
           ),
         );
@@ -2362,7 +2362,7 @@ export default function ApprovalManagementPage() {
         setSlotAppeals((prev) =>
           prev.map((a) =>
             a.id === detailItem.refId
-              ? { ...a, status: "Rejected", reviewedBy: `${role} (GM/Admin)`, reviewedAt: stamp(), rejectionReason: reason }
+              ? { ...a, status: "Rejected", reviewedBy: `${role} (Business Analyst)`, reviewedAt: stamp(), rejectionReason: reason }
               : a,
           ),
         );
@@ -2376,7 +2376,7 @@ export default function ApprovalManagementPage() {
       const rejectStep: WastageApprovalStep = {
         step: stepName,
         by: `${role}`,
-        designation: "GM/Admin",
+        designation: "Business Analyst",
         action: "Rejected",
         at: stamp(),
         comment: reason,
@@ -2392,7 +2392,7 @@ export default function ApprovalManagementPage() {
       setItems((p) =>
         p.map((x) =>
           x.id === detailItem.id
-            ? { ...x, status: "Rejected", processedBy: "R. Hossain (GM/Admin)", processedAt: stamp(), rejectionReason: reason }
+            ? { ...x, status: "Rejected", processedBy: "R. Hossain (Business Analyst)", processedAt: stamp(), rejectionReason: reason }
             : x,
         ),
       );
@@ -2411,7 +2411,7 @@ export default function ApprovalManagementPage() {
     if (!detailItem) return;
     if (!detailReviewComment.trim()) { toast.error("Provide a review comment for the requester."); return; }
     const comment = detailReviewComment.trim();
-    const by = `${role} (GM/Admin)`;
+    const by = `${role} (Business Analyst)`;
     const at = stamp();
     // Flight / Crew orders persist the review onto the order itself (store) so the
     // requester sees the "Reviewed" status + comment on Order Management. Other
@@ -4432,8 +4432,8 @@ export default function ApprovalManagementPage() {
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-3 rounded-md border border-sky-100 bg-sky-50/40 p-3">
                     <div>
                       <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-0.5">Dispatch Sheet Prepared By</div>
-                      <div className="font-semibold text-sm">{galleyDetailRecord.signOff?.preparedBy?.name || `${role} (GM/Admin)`}</div>
-                      <div className="text-[10px] text-slate-500">{galleyDetailRecord.signOff?.preparedBy?.designation || "GM/Admin"}</div>
+                      <div className="font-semibold text-sm">{galleyDetailRecord.signOff?.preparedBy?.name || `${role} (Business Analyst)`}</div>
+                      <div className="text-[10px] text-slate-500">{galleyDetailRecord.signOff?.preparedBy?.designation || "Business Analyst"}</div>
                     </div>
                     <GalleySignSelect label="Physically Handed Over By" value={galleySignPicks.physicallyBy} options={APT_EXECUTIVES} desig={galleyAptDesig} onChange={(v) => setGalleySignPicks((p) => ({ ...p, physicallyBy: v }))} />
                     <GalleySignSelect label="Flight Checked Over By" value={galleySignPicks.checkedBy} options={APT_EXECUTIVES} desig={galleyAptDesig} onChange={(v) => setGalleySignPicks((p) => ({ ...p, checkedBy: v }))} />

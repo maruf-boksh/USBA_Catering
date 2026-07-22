@@ -365,6 +365,11 @@ export type WfProductionEntry = {
   orderQty?: number;       // planned amount when the production order was created
   producedQty: number;     // actual produced so far — order is complete when this === orderQty
   status: WfProductionEntryStatus;
+  // Flight orders this run serves — snapshot at creation. A production run feeds
+  // many orders and an order pulls from many runs (many-to-many), so we store the
+  // set of Order #s whose menu for this date actually includes the output item
+  // (see resolveServedOrderNos). Empty when the item isn't on that day's menu.
+  servesOrderNos?: string[];
   qcLogId?: string;
   qcPassedAt?: string;
   qcCheckedBy?: string;

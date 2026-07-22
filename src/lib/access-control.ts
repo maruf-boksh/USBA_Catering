@@ -7,7 +7,7 @@ import { PAGE_CONTENT_CATALOG } from "./page-content-catalog";
 // User Access Control (RBAC) — dynamic roles + per-resource CRUD permissions.
 //
 //  • Roles: a fully editable list seeded from the built-in roles — every role
-//    except GM/Admin can be created, renamed or deleted at runtime.
+//    except Business Analyst can be created, renamed or deleted at runtime.
 //  • Resources form a tree derived from the live nav: Module → Page → Element.
 //      - Module id:  "mod:<moduleKey>"          (e.g. "mod:operations")
 //      - Page id:    "<route>"                  (e.g. "/order-management")
@@ -20,13 +20,13 @@ import { PAGE_CONTENT_CATALOG } from "./page-content-catalog";
 //      - Element checks fall back to their page's permission when no explicit
 //        element rule is set, so granting page access reveals its elements by
 //        default; admins then restrict individual elements as needed.
-//  • GM/Admin always has every permission and cannot be restricted.
+//  • Business Analyst always has every permission and cannot be restricted.
 //
 // Persisted: perms → localStorage["harvest-rbac-v2"], role list →
 // localStorage["harvest-roles-v2"] (migrated from the legacy "harvest-roles-v1").
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const ADMIN_ROLE: Role = "GM/Admin";
+export const ADMIN_ROLE: Role = "Business Analyst";
 
 export const ACTIONS = ["view", "create", "edit", "delete"] as const;
 export type Action = (typeof ACTIONS)[number];
@@ -136,7 +136,7 @@ export const elementResourceId = (route: string, elementId: string) => `${route}
 export type PermMap = Record<string, Record<string, Action[]>>;
 
 const DEFAULT_MODULES_BY_ROLE: Record<string, string[]> = {
-  "GM/Admin": RBAC_TREE.map((m) => m.key),
+  "Business Analyst": RBAC_TREE.map((m) => m.key),
   "Menu Planner": ["dashboard", "operations"],
   "Production": ["dashboard", "production", "qc"],
   "Packaging & Dispatch": ["dashboard", "dispatch"],
@@ -172,7 +172,7 @@ const ADMIN_ROLES_KEY = "harvest-admin-roles-v1"; // roles promoted to full-acce
 
 /**
  * Load the set of administrator roles — roles that get unconditional full
- * access, exactly like GM/Admin. GM/Admin is always an admin and can never be
+ * access, exactly like Business Analyst. Business Analyst is always an admin and can never be
  * demoted; any other role can be promoted/demoted at runtime.
  */
 function loadAdminRoles(): Set<string> {
@@ -191,7 +191,7 @@ function loadAdminRoles(): Set<string> {
  * Load the full ordered list of roles. The list is now fully editable — built-in
  * roles can be renamed or deleted — so we persist the entire list rather than
  * rebuilding it from BUILTIN_ROLES each load. Migrates the legacy custom-only
- * list on first run. GM/Admin is always guaranteed present.
+ * list on first run. Business Analyst is always guaranteed present.
  */
 function loadRoles(): string[] {
   const withAdmin = (list: string[]) =>
@@ -268,9 +268,9 @@ export function getCustomRoles(): string[] { return allRoles.filter((r) => r !==
 export function isBuiltinRole(role: string): boolean { return (BUILTIN_ROLES as readonly string[]).includes(role); }
 export function getPerms(): PermMap { return perms; }
 export function getAdminRoles(): string[] { return adminRoles; }
-/** True if `role` is a full-access administrator (GM/Admin or a promoted role). */
+/** True if `role` is a full-access administrator (Business Analyst or a promoted role). */
 export function isAdminRole(role: string): boolean { return adminRoles.includes(role); }
-/** GM/Admin is the root admin and can never be demoted. */
+/** Business Analyst is the root admin and can never be demoted. */
 export function isRootAdmin(role: string): boolean { return role === ADMIN_ROLE; }
 
 export function useAllRoles(): string[] {
@@ -411,7 +411,7 @@ export function clearRole(role: string) {
 
 /**
  * Promote a role to (or demote it from) full-access administrator. Admins behave
- * exactly like GM/Admin — every permission on every resource. GM/Admin itself is
+ * exactly like Business Analyst — every permission on every resource. Business Analyst itself is
  * the root admin and cannot be demoted. Bumps the perms reference so every
  * useAccess() consumer re-renders with the new effective access.
  */

@@ -36,7 +36,7 @@ export default function ConfigAccessControlPage() {
           <CardContent className="py-12 text-center">
             <Lock className="h-8 w-8 mx-auto text-muted-foreground mb-3" />
             <div className="text-sm font-semibold text-foreground">Restricted</div>
-            <p className="text-xs text-muted-foreground mt-1">Only <strong>GM/Admin</strong> can manage access control.</p>
+            <p className="text-xs text-muted-foreground mt-1">Only <strong>Business Analyst</strong> can manage access control.</p>
           </CardContent>
         </Card>
       </>
@@ -73,7 +73,7 @@ export default function ConfigAccessControlPage() {
     <>
       <PageHeader
         title="User Access Control"
-        subtitle="Create roles and manage view / create / edit / delete permissions for every module, page, KPI card, column, field and action. GM/Admin always has full access."
+        subtitle="Create roles and manage view / create / edit / delete permissions for every module, page, KPI card, column, field and action. Business Analyst always has full access."
       />
 
       {/* Roles — CRUD table. Open a role's permissions on its own page. */}

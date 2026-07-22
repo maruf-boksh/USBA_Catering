@@ -60,6 +60,7 @@ import {
   GitBranch,
   Trash2,
   Replace,
+  TrendingUp,
 } from 'lucide-react';
 
 export interface NavSubItem {
@@ -164,6 +165,7 @@ export const NAV_MODULES: NavModule[] = [
     children: [
       { key: '/accounts-overview',  label: 'Accounts Dashboard',    icon: I(LayoutDashboard) },
       { key: '/accounts-invoices',  label: 'Invoices & Payments',   icon: I(Receipt) },
+      { key: '/accounts-income',    label: 'Income & Receipts',     icon: I(TrendingUp) },
       { key: '/accounts-cash-bank', label: 'Finance & Banking',      icon: I(Landmark) },
       { key: '/accounts-expenses',  label: 'Expense Overview',      icon: I(PieChart) },
       { key: '/accounts',           label: 'Accounts Summary',      icon: I(Wallet) },
@@ -232,6 +234,7 @@ export const NAV_MODULES: NavModule[] = [
     icon: I(Trash2),
     children: [
       { key: '/wastage-management', label: 'Damaged Product Disposal',  icon: I(ClipboardCheck) },
+      { key: '/damaged-product-sales', label: 'Damaged Product Sales', icon: I(ShoppingCart) },
     ],
   },
 
@@ -266,6 +269,7 @@ export const NAV_MODULES: NavModule[] = [
     children: [
       { key: '/config-item',       label: 'Item Profile',     icon: I(Tag) },
       { key: '/config-supplier',   label: 'Supplier Profile', icon: I(Truck) },
+      { key: '/config-customer',   label: 'Customer Profile', icon: I(Users) },
       { key: '/config-company',    label: 'Company Profile',  icon: I(Building2) },
       { key: '/config-airline',    label: 'Airline',          icon: I(Plane) },
       { key: '/config-aircraft',   label: 'Aircraft',         icon: I(PlaneTakeoff) },

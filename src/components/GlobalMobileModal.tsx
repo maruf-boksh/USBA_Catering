@@ -124,7 +124,7 @@ export function GlobalMobileModal({ open, onClose }: Props) {
     if (pass) {
       updateProductionEntryStatus(qcTarget.id, "Completed", {
         qcLogId: logId, qcPassedAt: stamp,
-        qcCheckedBy: "R. Hossain (GM/Admin)", completedAt: stamp, inventoryAdded: true,
+        qcCheckedBy: "R. Hossain (Business Analyst)", completedAt: stamp, inventoryAdded: true,
       });
       applyStockDeltas([{
         itemId: qcTarget.outputItemCode ?? qcTarget.outputItemName ?? qcTarget.id,
@@ -292,7 +292,7 @@ export function GlobalMobileModal({ open, onClose }: Props) {
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-white font-bold text-sm">Good morning, R. Hossain 👋</p>
-                      <p className="text-slate-400 text-[10px] mt-0.5">GM/Admin · AeroGalley Catering</p>
+                      <p className="text-slate-400 text-[10px] mt-0.5">Business Analyst · AeroGalley Catering</p>
                     </div>
                     <button onClick={() => setScreen("login")} className="text-slate-400 hover:text-white transition-colors">
                       <LogOut className="h-4 w-4" />

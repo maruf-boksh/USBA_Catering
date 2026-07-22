@@ -814,7 +814,7 @@ function BomCreate({ onSave }: { onSave?: (bom: BillOfMaterial) => void }) {
       altUom: "",
       lotSize: lot,
       bomValue: materialTotal,
-      createdBy: "GM/Admin",
+      createdBy: "Business Analyst",
       bomType: prodLines.length > 1 ? "Multi Output" : "Single Output",
       productionItems: prodLines.map((p) => ({
         item: `${p.item} (PCS)`,

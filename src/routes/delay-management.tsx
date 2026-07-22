@@ -412,7 +412,7 @@ const SEED_APPROVALS: DelayApprovalRecord[] = [
     submittedBy: "R. Islam",
     submittedAt: "2026-05-21 17:00",
     status: "Approved",
-    processedBy: "R. Hossain (GM/Admin)",
+    processedBy: "R. Hossain (Business Analyst)",
     processedAt: "2026-05-21 17:30",
     fulfillmentType: "Direct Receive",
     items: [
@@ -434,7 +434,7 @@ const SEED_APPROVALS: DelayApprovalRecord[] = [
     submittedBy: "T. Ahmed",
     submittedAt: "2026-05-22 08:45",
     status: "Approved",
-    processedBy: "R. Hossain (GM/Admin)",
+    processedBy: "R. Hossain (Business Analyst)",
     processedAt: "2026-05-22 09:00",
     fulfillmentType: "Direct Receive",
     items: [

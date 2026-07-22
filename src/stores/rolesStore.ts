@@ -56,9 +56,9 @@ export const useRolesStore = create<RolesState>((set, get) => ({
       status:      input.status,
       isSystem:    false,
       parentRoleId: input.parentRoleId,
-      createdBy:   'GM/Admin',
+      createdBy:   'Business Analyst',
       createdAt:   audit[0]?.timestamp.split(',')[0] ?? '',
-      modifiedBy:  'GM/Admin',
+      modifiedBy:  'Business Analyst',
       updatedAt:   audit[0]?.timestamp.split(',')[0] ?? '',
       auditLog:    audit,
     };
@@ -69,7 +69,7 @@ export const useRolesStore = create<RolesState>((set, get) => ({
   updateRole: (id, patch, audit) => set(state => ({
     roles: state.roles.map(r =>
       r.id === id
-        ? { ...r, ...patch, auditLog: [...r.auditLog, ...audit], modifiedBy: 'GM/Admin' }
+        ? { ...r, ...patch, auditLog: [...r.auditLog, ...audit], modifiedBy: 'Business Analyst' }
         : r,
     ),
   })),
@@ -77,7 +77,7 @@ export const useRolesStore = create<RolesState>((set, get) => ({
   setStatus: (id, status, audit) => set(state => ({
     roles: state.roles.map(r =>
       r.id === id
-        ? { ...r, status, auditLog: [...r.auditLog, audit], modifiedBy: 'GM/Admin' }
+        ? { ...r, status, auditLog: [...r.auditLog, audit], modifiedBy: 'Business Analyst' }
         : r,
     ),
   })),

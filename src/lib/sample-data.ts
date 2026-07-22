@@ -1954,6 +1954,12 @@ export type ItemMaster = {
    */
   canPurchase?: boolean;
   canProduce?: boolean;
+  /**
+   * canSell — item may be sold as salvage on the Damaged Product Sales page
+   * (its Item picker only lists sellable items). Defaults to true for every
+   * non-Asset type when unset.
+   */
+  canSell?: boolean;
 };
 
 export type AltUom = {
@@ -2255,6 +2261,15 @@ export function itemCanPurchase(i: Pick<ItemMaster, "canPurchase" | "itemType">)
  */
 export function itemCanProduce(i: Pick<ItemMaster, "canProduce" | "itemType">): boolean {
   return i.canProduce ?? PRODUCIBLE_ITEM_TYPES.includes(i.itemType);
+}
+
+/**
+ * Whether an item can be sold as salvage (shown in the Damaged Product Sales
+ * item picker). Explicit `canSell` wins; otherwise every non-Asset item is
+ * sellable by default.
+ */
+export function itemCanSell(i: Pick<ItemMaster, "canSell" | "itemType">): boolean {
+  return i.canSell ?? i.itemType !== "Asset";
 }
 
 /** Unit/book cost of an equipment asset, resolved by name from the Asset item
