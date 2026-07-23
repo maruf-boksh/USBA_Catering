@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { DataTable, type Column } from "@/components/common/DataTable";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,8 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { flagArrival } from "@/lib/arrival-flash";
+import { getFlightOrders } from "@/lib/flight-orders-store";
 import { getAuditEvents, type AuditEvent as LiveAuditEvent } from "@/lib/audit-log";
 
 // ── Types & taxonomies ────────────────────────────────────────────────────
@@ -405,6 +408,157 @@ const selectCls =
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
+// ── Target deep-links ─────────────────────────────────────────────────────
+// An audit target names a real record, so its id opens the page that owns it
+// with the row blinking (the same arrival-flash other modules link with). The
+// route is resolved from the record TYPE first — ids alone are ambiguous
+// (INV-2026-0184 is an invoice, INV-1005 a stock alert) — then the id prefix.
+
+// ONLY pages that run `useArrivalFlash()` are linked — anywhere else the row
+// could never blink, so the id stays plain text rather than promising a jump
+// that does nothing.
+const TYPE_ROUTES: { test: RegExp; path: string; flash: string }[] = [
+  { test: /purchase order/,                      path: "/procurement",          flash: "po-list" },
+  { test: /purchase requisition/,                path: "/purchase-requisition", flash: "pr-list" },
+  { test: /goods receipt/,                       path: "/receive-item",         flash: "grn-list" },
+  { test: /packaging/,                           path: "/packaging",            flash: "packaging-list" },
+  { test: /production/,                          path: "/production-entry",     flash: "production-list" },
+  { test: /dispatch/,                            path: "/dispatch",             flash: "dispatch-list" },
+  { test: /cooking temp/,                        path: "/cooking-temp",         flash: "cooking-temp-list" },
+  { test: /stock (alert|adjustment)/,            path: "/inventory",            flash: "inv-alerts" },
+  { test: /item master|batch lot|opening batch/, path: "/inventory",            flash: "inv-alerts" },
+  { test: /flight order|order/,                  path: "/order-management",     flash: "active-orders" },
+  { test: /transfer/,                            path: "/transfer",             flash: "transfer-list" },
+];
+
+/** Pages that accept a deep-link id on the query string (used to page-jump the
+ *  destination table so the row exists for the flash to find). */
+const DEEP_PARAM: Record<string, string> = {
+  "/production-entry": "pro",
+  "/order-management": "ord",
+};
+
+function readStore<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(`harvest-data-v1:${key}`);
+    return raw ? (JSON.parse(raw) as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * The row ids to blink on the destination. Usually the target id itself, but two
+ * pages key their rows differently from what the audit entry records:
+ *  • Packaging blinks by the batch's PRODUCTION id, not the CT- batch id.
+ *  • Order Management blinks per LEG (FO-…), not by the ORD- order number.
+ */
+function flashIdsFor(path: string, id: string): string[] {
+  if (path === "/packaging" && /^CT-/i.test(id)) {
+    const batch = readStore<Array<{ id: string; batch: string }>>("packaging-batches", [])
+      .find((b) => b.id === id);
+    return batch ? [batch.batch, id] : [id];
+  }
+  if (path === "/order-management" && /^ORD-/i.test(id)) {
+    const legs = getFlightOrders().filter((o) => o.orderNo === id).map((o) => o.id);
+    return legs.length > 0 ? legs : [id];
+  }
+  return [id];
+}
+
+function routeForTarget(targetType: string, id: string): { path: string; flash: string; ids: string[] } | null {
+  const t = (targetType ?? "").toLowerCase();
+  const hit = TYPE_ROUTES.find((r) => r.test.test(t));
+  if (!hit) return null;
+  const param = DEEP_PARAM[hit.path];
+  return {
+    path: param ? `${hit.path}?${param}=${encodeURIComponent(id)}` : hit.path,
+    flash: hit.flash,
+    ids: flashIdsFor(hit.path, id),
+  };
+}
+
+/** A target can name more than one record ("PRD-9006 / BS-225"). Tokens that
+ *  look like a record id become links; free text (names, amounts) stays plain. */
+const isRecordId = (s: string) => /^[A-Za-z]{1,5}-[A-Za-z0-9][\w-]*$/.test(s) && /\d/.test(s);
+
+function TargetLinks({ target, targetType }: { target: string; targetType: string }) {
+  const navigate = useNavigate();
+  const parts = (target ?? "").split("/").map((p) => p.trim()).filter(Boolean);
+  return (
+    <>
+      {parts.map((part, i) => {
+        const route = isRecordId(part) ? routeForTarget(targetType, part) : null;
+        return (
+          <span key={i}>
+            {i > 0 && <span className="text-muted-foreground"> / </span>}
+            {route ? (
+              <button
+                type="button"
+                className="text-primary font-semibold hover:underline focus:outline-none focus:underline"
+                title={`Open in ${route.path.split("?")[0].replace("/", "").replace(/-/g, " ")}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  flagArrival({ target: route.flash, ids: route.ids });
+                  navigate(route.path);
+                }}
+              >
+                {part}
+              </button>
+            ) : (
+              part
+            )}
+          </span>
+        );
+      })}
+    </>
+  );
+}
+
+// ── Plain-language summary ────────────────────────────────────────────────
+// A one-line, non-technical retelling of the entry for the drill-down, e.g.
+// "R. Hossain Created Production Order (PRO-2026-030342) at 12:07:10 on
+//  2026-07-22 from WEB/APP".
+
+const ACTION_VERB: Record<ActionKind, string> = {
+  "Create": "Created", "Update": "Updated", "Delete": "Deleted",
+  "Approve": "Approved", "Reject": "Rejected", "View": "Viewed",
+  "Login": "Signed In To", "Logout": "Signed Out Of", "Export": "Exported",
+  "Import": "Imported", "Print": "Printed", "Lock": "Locked",
+};
+
+/** Where the action came from, in words a non-technical reader expects. */
+const originLabel = (device: string) => {
+  const d = (device ?? "").trim();
+  if (!d || d === "—") return "APP";
+  if (/in-app/i.test(d)) return "APP";
+  return d;
+};
+
+const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** Split a stored "YYYY-MM-DD HH:MM:SS" stamp into its date (with weekday) and a
+ *  12-hour time with AM/PM — { date: "2026-07-22 (Wed)", time: "12:08:19 PM" }. */
+function splitStamp(at: string): { date: string; time: string } {
+  const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(at ?? "");
+  if (!m) return { date: at ?? "", time: "" };
+  const [, date, hhRaw, mm, ss] = m;
+  const hh = Number(hhRaw);
+  const h12 = hh % 12 === 0 ? 12 : hh % 12;
+  const d = new Date(`${date}T00:00:00`);
+  const day = isNaN(d.getTime()) ? "" : DAY_NAMES[d.getDay()];
+  return {
+    date: day ? `${date} (${day})` : date,
+    time: `${String(h12).padStart(2, "0")}:${mm}${ss ? `:${ss}` : ""} ${hh >= 12 ? "PM" : "AM"}`,
+  };
+}
+
+/** Full stamp with weekday on a 12-hour clock — "2026-07-22 (Wed) 12:08:19 PM". */
+function stamp12h(at: string): string {
+  const s = splitStamp(at);
+  return s.time ? `${s.date} ${s.time}` : (at ?? "");
+}
+
 function relativeTime(at: string, now: Date): string {
   const t = new Date(at.replace(" ", "T")).getTime();
   const diff = now.getTime() - t;
@@ -476,16 +630,6 @@ export default function Audit() {
       ),
     },
     {
-      key: "at",
-      header: "When",
-      render: (r) => (
-        <div className="leading-tight">
-          <div className="text-xs font-medium">{relativeTime(r.at, now)}</div>
-          <div className="text-[10px] text-muted-foreground tabular-nums">{r.at}</div>
-        </div>
-      ),
-    },
-    {
       key: "user",
       header: "User",
       render: (r) => (
@@ -496,18 +640,17 @@ export default function Audit() {
       ),
     },
     {
-      key: "module",
-      header: "Module",
-      render: (r) => {
-        const m = MODULE_META[r.module];
-        const Icon = m.icon;
-        return (
-          <span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-semibold", m.color)}>
-            <Icon className="h-3 w-3" />
-            {r.module}
-          </span>
-        );
-      },
+      key: "target",
+      header: "Target",
+      render: (r) => (
+        <div className="leading-tight">
+          {/* Ids open the record's own page with the row blinking. */}
+          <div className="text-xs font-medium font-mono max-w-[200px] truncate" title={r.target}>
+            <TargetLinks target={r.target} targetType={r.targetType} />
+          </div>
+          <div className="text-[10px] text-muted-foreground">{r.targetType}</div>
+        </div>
+      ),
     },
     {
       key: "action",
@@ -529,12 +672,26 @@ export default function Audit() {
       },
     },
     {
-      key: "target",
-      header: "Target",
+      key: "module",
+      header: "Module",
+      render: (r) => {
+        const m = MODULE_META[r.module];
+        const Icon = m.icon;
+        return (
+          <span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-semibold", m.color)}>
+            <Icon className="h-3 w-3" />
+            {r.module}
+          </span>
+        );
+      },
+    },
+    {
+      key: "at",
+      header: "When",
       render: (r) => (
         <div className="leading-tight">
-          <div className="text-xs font-medium font-mono truncate max-w-[200px]" title={r.target}>{r.target}</div>
-          <div className="text-[10px] text-muted-foreground">{r.targetType}</div>
+          <div className="text-xs font-medium">{relativeTime(r.at, now)}</div>
+          <div className="text-[10px] text-muted-foreground tabular-nums whitespace-nowrap">{stamp12h(r.at)}</div>
         </div>
       ),
     },
@@ -578,65 +735,71 @@ export default function Audit() {
       </div>
 
       {/* Filter bar */}
-      <div className="rounded-md border border-border bg-card p-3 mb-4 flex flex-wrap items-end gap-3">
-        <div className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider mr-2">
-          <Filter className="h-3.5 w-3.5" /> Filters
+      {/* Filter bar — a heading row, then the fields on their own line so every
+          label sits directly above its control and the controls share a baseline. */}
+      <div className="rounded-md border border-border bg-card px-4 py-3 mb-4">
+        <div className="flex items-center justify-between gap-3 mb-2.5">
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+            <Filter className="h-3.5 w-3.5" /> Filters
+          </div>
+          <div className="text-[11px] text-muted-foreground tabular-nums">
+            Showing <span className="font-semibold text-foreground">{filtered.length}</span> of {allLogs.length} events
+          </div>
         </div>
-        <div>
-          <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Module</Label>
-          <select
-            value={moduleFilter}
-            onChange={(e) => setModuleFilter(e.target.value as Module | "All")}
-            className={cn(selectCls, "w-36 mt-0.5 block")}
-          >
-            {MODULE_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
-          </select>
-        </div>
-        <div>
-          <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Action</Label>
-          <select
-            value={actionFilter}
-            onChange={(e) => setActionFilter(e.target.value as ActionKind | "All")}
-            className={cn(selectCls, "w-32 mt-0.5 block")}
-          >
-            {ACTION_OPTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
-          </select>
-        </div>
-        <div>
-          <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Severity</Label>
-          <select
-            value={severityFilter}
-            onChange={(e) => setSeverityFilter(e.target.value as Severity | "All")}
-            className={cn(selectCls, "w-32 mt-0.5 block")}
-          >
-            {SEVERITY_OPTIONS.map((s) => (
-              <option key={s} value={s}>{s === "All" ? "All" : s[0].toUpperCase() + s.slice(1)}</option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">From</Label>
-          <Input
-            type="date"
-            value={dateFrom}
-            onChange={(e) => setDateFrom(e.target.value)}
-            className="h-9 w-36 mt-0.5 text-xs tabular-nums"
-          />
-        </div>
-        <div>
-          <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">To</Label>
-          <Input
-            type="date"
-            value={dateTo}
-            onChange={(e) => setDateTo(e.target.value)}
-            className="h-9 w-36 mt-0.5 text-xs tabular-nums"
-          />
-        </div>
-        <Button variant="outline" size="sm" onClick={resetFilters} className="h-9">
-          <RotateCw className="h-3.5 w-3.5 mr-1" /> Reset
-        </Button>
-        <div className="ml-auto text-[11px] text-muted-foreground tabular-nums">
-          Showing <span className="font-semibold text-foreground">{filtered.length}</span> of {allLogs.length} events
+        <div className="flex flex-wrap items-end gap-x-3 gap-y-3">
+          <div className="flex flex-col gap-1">
+            <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Module</Label>
+            <select
+              value={moduleFilter}
+              onChange={(e) => setModuleFilter(e.target.value as Module | "All")}
+              className={cn(selectCls, "w-36")}
+            >
+              {MODULE_OPTIONS.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Action</Label>
+            <select
+              value={actionFilter}
+              onChange={(e) => setActionFilter(e.target.value as ActionKind | "All")}
+              className={cn(selectCls, "w-32")}
+            >
+              {ACTION_OPTIONS.map((a) => <option key={a} value={a}>{a}</option>)}
+            </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Severity</Label>
+            <select
+              value={severityFilter}
+              onChange={(e) => setSeverityFilter(e.target.value as Severity | "All")}
+              className={cn(selectCls, "w-32")}
+            >
+              {SEVERITY_OPTIONS.map((s) => (
+                <option key={s} value={s}>{s === "All" ? "All" : s[0].toUpperCase() + s.slice(1)}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">From</Label>
+            <Input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              className="h-9 w-36 text-xs tabular-nums"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">To</Label>
+            <Input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              className="h-9 w-36 text-xs tabular-nums"
+            />
+          </div>
+          <Button variant="outline" size="sm" onClick={resetFilters} className="h-9">
+            <RotateCw className="h-3.5 w-3.5 mr-1" /> Reset
+          </Button>
         </div>
       </div>
 
@@ -648,12 +811,12 @@ export default function Audit() {
         selectable={false}
         actions={(r) => (
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
-            className="h-7 px-2 text-xs"
+            className="h-7 px-2.5 text-xs"
             onClick={() => setSelected(r)}
           >
-            <Eye className="h-3.5 w-3.5 mr-1" /> Details
+            Details
           </Button>
         )}
       />
@@ -687,7 +850,7 @@ function AuditDetailDialog({
 
         <div className="space-y-4 text-sm">
           <div className="grid grid-cols-2 gap-3">
-            <Field label="When" mono>{event.at}</Field>
+            <Field label="When" mono>{stamp12h(event.at)}</Field>
             <Field label="User">
               <div className="font-semibold">{event.user}</div>
               <div className="text-[11px] text-muted-foreground">{event.userRole}</div>
@@ -703,7 +866,7 @@ function AuditDetailDialog({
               </span>
             </Field>
             <Field label="Target" mono>
-              <div>{event.target}</div>
+              <div><TargetLinks target={event.target} targetType={event.targetType} /></div>
               <div className="text-[11px] text-muted-foreground font-sans">{event.targetType}</div>
             </Field>
             <Field label="Result">
@@ -753,6 +916,29 @@ function AuditDetailDialog({
               </div>
             </div>
           )}
+
+          {/* Plain-language retelling of the entry, for non-technical readers. */}
+          <div className="rounded-md border border-sky-200 bg-sky-50/70 px-3 py-2.5 text-[13px] leading-relaxed text-slate-700">
+            <div className="text-[10px] uppercase tracking-wider text-sky-700 font-semibold mb-1">Summary</div>
+            <span className="font-semibold">
+              {event.userRole && event.userRole !== "—" ? `${event.userRole} ` : ""}{event.user}
+            </span>{" "}
+            <span className="font-semibold">{ACTION_VERB[event.action]}</span>{" "}
+            {event.targetType}
+            {event.target && (
+              <>
+                {" ("}
+                <span className="font-mono text-[12px]">
+                  <TargetLinks target={event.target} targetType={event.targetType} />
+                </span>
+                {")"}
+              </>
+            )}{" "}
+            at <span className="tabular-nums font-medium">{splitStamp(event.at).time || event.at}</span>{" "}
+            on <span className="tabular-nums font-medium">{splitStamp(event.at).date}</span>{" "}
+            from {originLabel(event.device)}.
+            {event.result === "Failure" && <span className="text-destructive font-semibold"> The action did not succeed.</span>}
+          </div>
 
           <div className="rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground flex items-start gap-2">
             <Info className="h-3.5 w-3.5 shrink-0 mt-0.5 text-sky-600" />

@@ -21,6 +21,47 @@ import {
 const AIRCRAFT_TYPES = ["ATR 72-600", "DASH 8", "Q400", "B737-800", "B737 MAX 8", "A320", "A330-300"];
 const MANUFACTURERS = ["Boeing", "Airbus", "ATR", "De Havilland", "Embraer", "Bombardier"];
 
+/** Sentinel value for the inline "+ Add new…" option on the Type / Model selects. */
+const ADD_NEW = "__add_new__";
+const sameText = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+
+/** Models (specific variant designations) offered per aircraft type. This is the
+ *  configuration behind the "Select model…" dropdown on Galley Planning: choose a
+ *  type there and only that type's configured models are selectable. Free text is
+ *  still accepted for a variant that isn't listed yet. */
+export const AIRCRAFT_MODELS: Record<string, string[]> = {
+  "ATR 72-600":  ["ATR 72-212A", "ATR 72-600 HighDensity"],
+  "DASH 8":      ["DHC-8-402Q", "DHC-8-315"],
+  "Q400":        ["DHC-8-402"],
+  "B737-800":    ["737-8Q8", "737-8AS", "737-86N"],
+  "B737 MAX 8":  ["737-8", "737-8200"],
+  "A320":        ["A320-214", "A320-251N"],
+  "A330-300":    ["A330-343", "A330-343E"],
+};
+/** Configured models for a type, merged with any model already saved on the
+ *  fleet register so an existing value is never dropped from the list. */
+export const modelsForAircraftType = (type: string, fleet: Aircraft[] = []): string[] => {
+  const out = [...(AIRCRAFT_MODELS[type] ?? [])];
+  for (const a of fleet) {
+    if (a.type === type && a.model && !out.includes(a.model)) out.push(a.model);
+  }
+  return out;
+};
+
+/** Session-local registry for types/models added inline via "+ Add new…" — the
+ *  addition is immediately offered everywhere these lists are read (including
+ *  the Galley Planning aircraft/model dropdowns), not just on the open form. */
+function registerAircraftType(t: string) {
+  const v = t.trim();
+  if (v && !AIRCRAFT_TYPES.some((x) => sameText(x, v))) AIRCRAFT_TYPES.push(v);
+}
+function registerAircraftModel(type: string, m: string) {
+  const v = m.trim();
+  if (!type || !v) return;
+  const list = (AIRCRAFT_MODELS[type] ??= []);
+  if (!list.some((x) => sameText(x, v))) list.push(v);
+}
+
 const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
@@ -115,6 +156,12 @@ function AircraftList({
       render: (r) => <span className="font-mono text-xs font-semibold">{r.registration}</span>,
     },
     { key: "type", header: "Type" },
+    {
+      key: "model", header: "Model",
+      render: (r) => r.model
+        ? <span className="font-mono text-xs">{r.model}</span>
+        : <span className="text-muted-foreground">—</span>,
+    },
     { key: "manufacturer", header: "Manufacturer" },
     {
       key: "airlineId", header: "Airline",
@@ -152,7 +199,7 @@ function AircraftList({
       title="aircraft"
       data={data}
       columns={cols}
-      searchKeys={["id", "registration", "type", "manufacturer"]}
+      searchKeys={["id", "registration", "type", "model", "manufacturer"]}
       selectable={false}
       actions={(r) => (
         <RowActions
@@ -205,9 +252,64 @@ export function AircraftFields({
   const isEdit = mode === "edit";
   const [registration, setRegistration] = useState(initial?.registration ?? "");
   const [type, setType] = useState(initial?.type ?? AIRCRAFT_TYPES[0]);
+  // Model is scoped to the type — changing the type re-offers that type's models.
+  const [model, setModel] = useState(initial?.model ?? "");
   const [manufacturer, setManufacturer] = useState(initial?.manufacturer ?? MANUFACTURERS[0]);
   const [airlineId, setAirlineId] = useState(initial?.airlineId ?? airlines[0]?.id ?? "");
   const [seats, setSeats] = useState(String(initial?.seats ?? ""));
+
+  // Inline "+ Add new…" state for both selects. Options seed from the master
+  // lists above and grow as new ones are added; `added` keeps the per-type
+  // additions so the open form re-renders with them straight away.
+  const [typeOptions, setTypeOptions] = useState<string[]>(() =>
+    initial?.type && !AIRCRAFT_TYPES.some((t) => sameText(t, initial.type))
+      ? [...AIRCRAFT_TYPES, initial.type]
+      : [...AIRCRAFT_TYPES],
+  );
+  const [addedModels, setAddedModels] = useState<Record<string, string[]>>({});
+  const [addingType, setAddingType] = useState(false);
+  const [newType, setNewType] = useState("");
+  const [addingModel, setAddingModel] = useState(false);
+  const [newModel, setNewModel] = useState("");
+
+  const modelChoices = useMemo(() => {
+    const list = [...(AIRCRAFT_MODELS[type] ?? [])];
+    for (const m of addedModels[type] ?? []) if (!list.some((x) => sameText(x, m))) list.push(m);
+    if (model && !list.some((x) => sameText(x, model))) list.push(model);
+    return list;
+  }, [type, model, addedModels]);
+
+  const changeType = (t: string) => {
+    setType(t);
+    setAddingModel(false);
+    setNewModel("");
+    // Drop a model that doesn't belong to the newly selected type.
+    const known = [...(AIRCRAFT_MODELS[t] ?? []), ...(addedModels[t] ?? [])];
+    if (model && !known.some((x) => sameText(x, model))) setModel("");
+  };
+
+  const commitNewType = () => {
+    const v = newType.trim();
+    if (!v) { toast.error("Enter the aircraft type."); return; }
+    registerAircraftType(v);
+    setTypeOptions((prev) => (prev.some((t) => sameText(t, v)) ? prev : [...prev, v]));
+    changeType(v);
+    setAddingType(false);
+    setNewType("");
+  };
+
+  const commitNewModel = () => {
+    const v = newModel.trim();
+    if (!v) { toast.error("Enter the model."); return; }
+    registerAircraftModel(type, v);
+    setAddedModels((prev) => {
+      const list = prev[type] ?? [];
+      return list.some((m) => sameText(m, v)) ? prev : { ...prev, [type]: [...list, v] };
+    });
+    setModel(v);
+    setAddingModel(false);
+    setNewModel("");
+  };
 
   const save = () => {
     if (!registration.trim()) { toast.error("Registration (tail number) is required."); return; }
@@ -217,6 +319,7 @@ export function AircraftFields({
     const payload = {
       registration: registration.trim().toUpperCase(),
       type,
+      model: model.trim(),
       manufacturer,
       airlineId,
       seats: seatCount,
@@ -256,9 +359,57 @@ export function AircraftFields({
         </div>
         <div>
           <Label className="text-xs uppercase tracking-wider text-muted-foreground">Aircraft Type</Label>
-          <select value={type} onChange={(e) => setType(e.target.value)} className={selectCls}>
-            {AIRCRAFT_TYPES.map((t) => <option key={t}>{t}</option>)}
+          <select
+            value={type}
+            onChange={(e) => { if (e.target.value === ADD_NEW) setAddingType(true); else changeType(e.target.value); }}
+            className={selectCls}
+          >
+            {typeOptions.map((t) => <option key={t} value={t}>{t}</option>)}
+            <option value={ADD_NEW}>+ Add new aircraft type…</option>
           </select>
+          {addingType && (
+            <div className="mt-2 flex items-center gap-2">
+              <Input
+                autoFocus
+                value={newType}
+                onChange={(e) => setNewType(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewType(); } }}
+                placeholder="New aircraft type (e.g. A321neo)"
+                className="h-9"
+              />
+              <Button type="button" size="sm" onClick={commitNewType}>Add</Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => { setAddingType(false); setNewType(""); }}>Cancel</Button>
+            </div>
+          )}
+        </div>
+        <div>
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Model</Label>
+          <select
+            value={model}
+            onChange={(e) => { if (e.target.value === ADD_NEW) setAddingModel(true); else setModel(e.target.value); }}
+            className={selectCls}
+          >
+            <option value="">Select model…</option>
+            {modelChoices.map((m) => <option key={m} value={m}>{m}</option>)}
+            <option value={ADD_NEW}>+ Add new model…</option>
+          </select>
+          {addingModel && (
+            <div className="mt-2 flex items-center gap-2">
+              <Input
+                autoFocus
+                value={newModel}
+                onChange={(e) => setNewModel(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewModel(); } }}
+                placeholder={`New model for ${type}`}
+                className="h-9"
+              />
+              <Button type="button" size="sm" onClick={commitNewModel}>Add</Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => { setAddingModel(false); setNewModel(""); }}>Cancel</Button>
+            </div>
+          )}
+          <p className="text-[10px] text-muted-foreground mt-1">
+            Variant of the selected type — offered on Galley Planning once this type is chosen.
+          </p>
         </div>
         <div>
           <Label className="text-xs uppercase tracking-wider text-muted-foreground">Manufacturer</Label>

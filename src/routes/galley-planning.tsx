@@ -13,7 +13,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  LayoutGrid, Plane, CheckCircle2, Clock, Eye, Search, Send, Printer, X as CloseIcon,
+  LayoutGrid, Plane, CheckCircle2, Clock, Eye, Search, Send, Printer, ArrowLeft, X as CloseIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { consumableItems, type ConsumableItem } from "@/lib/sample-data";
@@ -460,6 +460,32 @@ export default function GalleyPlanningPage() {
   const viewRec = viewEntryId ? recByEntry.get(viewEntryId) : undefined;
   const viewFlight = viewRec ? flights.find((f) => f.id === viewRec.flightId) : undefined;
 
+  // Planning opens as a full page (not a dialog): the list is replaced by the
+  // planner until it is closed via Back / the sheet's close control.
+  if (planEntry) {
+    return (
+      <>
+        <PageHeader
+          title="Galley Plan"
+          subtitle="Plan the per-flight galley load — meals, beverages, amenities, consumables & equipment — then forward to aircraft loading"
+          actions={
+            <Button variant="outline" onClick={() => setPlanEntryId(null)}>
+              <ArrowLeft className="h-4 w-4 mr-1" /> Back to List
+            </Button>
+          }
+        />
+        <GalleyPlanningModal
+          fullPage
+          entry={planEntry}
+          flight={planFlight}
+          initialPlan={recByEntry.get(planEntry.id)?.galleyPlan ?? drafts[planEntry.id]?.plan}
+          onClose={() => setPlanEntryId(null)}
+          onSaveDraft={(plan, source) => saveDraft(planEntry.id, plan, source)}
+        />
+      </>
+    );
+  }
+
   return (
     <>
       <PageHeader
@@ -577,16 +603,6 @@ export default function GalleyPlanningPage() {
           </div>
         </CardContent>
       </Card>
-
-      {planEntry && (
-        <GalleyPlanningModal
-          entry={planEntry}
-          flight={planFlight}
-          initialPlan={recByEntry.get(planEntry.id)?.galleyPlan ?? drafts[planEntry.id]?.plan}
-          onClose={() => setPlanEntryId(null)}
-          onSaveDraft={(plan, source) => saveDraft(planEntry.id, plan, source)}
-        />
-      )}
 
       {viewRec && (
         <GalleySheetViewModal rec={viewRec} flight={viewFlight} onClose={() => setViewEntryId(null)} />

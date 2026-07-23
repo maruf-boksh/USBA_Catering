@@ -32,7 +32,7 @@ import { useDispatchMonitoringSettings } from "@/lib/dispatch-monitoring-setting
 import { KpiCard } from "@/components/common/KpiCard";
 import { loadStandardsForAircraft, computeStandard, isMealMixKey, galleyAircraftTypes } from "@/lib/galley-standards";
 import { usePersistedState } from "@/lib/use-persisted-state";
-import { AircraftFields } from "@/routes/config-aircraft";
+import { AircraftFields, modelsForAircraftType } from "@/routes/config-aircraft";
 import { getGalleySections, computeAutoTotals, loadGalleyItems } from "@/lib/galley-items";
 
 // Flight options for the dispatch-monitoring form. The operational flight board
@@ -3337,7 +3337,25 @@ function GalleySecTitle({ children }: { children: React.ReactNode }) {
 
 export type GalleyPlan = Record<string, string>;
 
-export function buildInitialGalley(entry: DispatchEntry, flight: FlightOption | undefined): GalleyPlan {
+// "CXB → DAC" / "CXB-DAC" → "DAC → CXB". Same normalisation Packaging &
+// Dispatch uses to spot the reverse-sector leg of a round trip.
+function galleyReverseSector(sector: string): string {
+  const parts = (sector ?? "").split(/→|—|–|-/).map((s) => s.trim()).filter(Boolean);
+  if (parts.length !== 2) return sector ?? "";
+  return `${parts[1]} → ${parts[0]}`;
+}
+/** Sector compared separator- and case-insensitively ("DAC-CXB" ≡ "DAC → CXB"). */
+const normSector = (s: string) =>
+  (s ?? "").split(/→|—|–|-/).map((p) => p.trim()).filter(Boolean).join("→").toUpperCase();
+
+export function buildInitialGalley(
+  entry: DispatchEntry,
+  flight: FlightOption | undefined,
+  /** Load counts of the RETURN leg of this rotation, when one is selected.
+   *  Drives every arr* figure on the sheet; omitted, the arrival leg falls back
+   *  to a share of the outbound load exactly as before. */
+  ret?: { pax: number; crew: number },
+): GalleyPlan {
   // Beverage/amenity/equipment quantities auto-fill from the loading standard
   // for THIS flight's aircraft type. Meals come from Dispatch, not the standard.
   const std = loadStandardsForAircraft(flight?.aircraft);
@@ -3353,16 +3371,21 @@ export function buildInitialGalley(entry: DispatchEntry, flight: FlightOption | 
   const chickenShare = 0.40;
   const vegShare = 0.025;
   const arrShare = 0.35;
+  // Return (arrival) leg: its own order load when a return leg is selected,
+  // otherwise a share of the outbound load.
+  const retCrew = ret ? Math.max(0, ret.crew) : crew;
+  const arrCockpit = Math.min(cockpit, retCrew);
+  const arrCabin = Math.max(0, retCrew - arrCockpit);
   const depChicken = Math.round(eyPax * chickenShare);
   const depBeef = eyPax - depChicken;
   const depVeg = Math.max(1, Math.round(eyPax * vegShare));
-  const arrEyPax = Math.round(eyPax * arrShare);
+  const arrEyPax = ret ? Math.max(0, ret.pax) : Math.round(eyPax * arrShare);
   const arrChicken = Math.round(arrEyPax * chickenShare);
   const arrBeef = arrEyPax - arrChicken;
 
   const base: GalleyPlan = {
     depZenithLoad: String(pax),
-    arrZenithLoad: String(Math.round(pax * 0.3)),
+    arrZenithLoad: String(ret ? Math.max(0, ret.pax) : Math.round(pax * 0.3)),
     traySetupDep: String(pax + Math.round(pax * 0.04)),
     traySetupArr: String(arrEyPax),
     depMealLoad: String(eyPax),
@@ -3371,7 +3394,7 @@ export function buildInitialGalley(entry: DispatchEntry, flight: FlightOption | 
     depBCMeal: "0", arrBCMeal: "0",
     depCrewBC: "0", arrCrewBC: "0",
     depCockpit: String(cockpit), depCabin: String(cabin), depObs: "0",
-    arrCockpit: String(cockpit), arrCabin: String(cabin), arrObs: "0",
+    arrCockpit: String(arrCockpit), arrCabin: String(arrCabin), arrObs: "0",
     depChildPax: String(child), arrChildPax: "0",
     depChildMeal: String(child), arrChildMeal: "0",
     extHotMeal: "0",
@@ -3458,6 +3481,7 @@ export function GalleyPlanningModal({
   initialPlan,
   onClose,
   onSaveDraft,
+  fullPage = false,
 }: {
   entry: DispatchEntry;
   flight: FlightOption | undefined;
@@ -3465,6 +3489,8 @@ export function GalleyPlanningModal({
    *  the last issued sheet instead of wiping it back to defaults. */
   initialPlan?: GalleyPlan;
   onClose: () => void;
+  /** Render the planner inline as a full page section instead of a dialog. */
+  fullPage?: boolean;
   /** Save persists a draft with the chosen transfer source; the plan is
    *  forwarded to aircraft loading later from the list page (sign-off is
    *  captured on the Loading QC & Sign-Off page). */
@@ -3500,6 +3526,41 @@ export function GalleyPlanningModal({
   // against this when the load count is overridden.
   const origPax = dispatchSection?.paxLines.reduce((s, l) => s + (Number(l.qty) || 0), 0) ?? 0;
 
+  // ── Return leg ──────────────────────────────────────────────────────────────
+  // A rotation is planned ONCE: the dep* half of the sheet is the outbound leg,
+  // the arr* half is the return leg. The return leg is matched on DESTINATION —
+  // it is the flight that flies this sector back (DAC-CXB out → CXB-DAC back) on
+  // the same day in the opposite direction. Of several such flights the first
+  // departing after the outbound is the rotation's return.
+  const returnOrder = useMemo(() => {
+    if (!order) return undefined;
+    const opp = order.direction === "Return" ? "Outbound" : "Return";
+    const sameDay = getFlightOrders().filter((o) =>
+      (o.orderType ?? "flight") !== "crew" &&
+      o.date === order.date && o.direction === opp && o.flight !== order.flight);
+    if (sameDay.length === 0) return undefined;
+    const matchReverseOf = (sector: string) => {
+      const rev = normSector(galleyReverseSector(sector ?? ""));
+      if (!rev) return undefined;
+      const legs = [...sameDay.filter((o) => normSector(o.sector) === rev)]
+        .sort((a, b) => (a.etd ?? "").localeCompare(b.etd ?? ""));
+      if (legs.length === 0) return undefined;
+      return legs.find((o) => (o.etd ?? "") > (order.etd ?? "")) ?? legs[0];
+    };
+    // The flight board carries the operating sector shown in the header; the
+    // order's own sector is the fallback when the board has no match.
+    return matchReverseOf(flight?.sector ?? "") ?? matchReverseOf(order.sector);
+  }, [order, flight?.sector]);
+
+  // The outbound leg's ROUTE is the operating sector off the flight board — the
+  // same sector the return leg was matched against — so both legs of the
+  // rotation read as one round trip (DAC-CXB out, CXB-DAC back).
+  const outboundSector = flight?.sector || order?.sector || "—";
+
+  const retSection = useMemo(() => dispatchSectionForFlight(returnOrder?.flight), [returnOrder?.flight]);
+  const retSpecialTotal = (retSection?.vgml ?? 0) + (retSection?.chml ?? 0) + (retSection?.spml ?? 0);
+  const retOrigPax = retSection?.paxLines.reduce((s, l) => s + (Number(l.qty) || 0), 0) ?? 0;
+
   // Load counts default from the connected order but are EDITABLE — an updated
   // record (revised PAX/crew/special meals) can arrive after the flight was
   // scheduled. Editing PAX/Crew re-derives the standard-driven quantities for
@@ -3509,6 +3570,11 @@ export function GalleyPlanningModal({
   // Default to the dispatched breakdown sum (VGML+CHML+SPML) so the summary
   // matches the Meals-tab total; fall back to the order-level count.
   const [specialMeals, setSpecialMeals] = useState<number>(specialTotal || order?.specialMeals || 0);
+  // The return leg carries its own load — the arrival half of the sheet is
+  // planned against it instead of a flat share of the outbound load.
+  const [retPax, setRetPax] = useState<number>(returnOrder?.pax ?? 0);
+  const [retCrew, setRetCrew] = useState<number>(returnOrder?.crew ?? 0);
+  const [retSpecialMeals, setRetSpecialMeals] = useState<number>(retSpecialTotal || returnOrder?.specialMeals || 0);
 
   // Aircraft type for this plan — drives which loading standard fills the
   // beverage/amenity/equipment quantities. Editable from the header, and a new
@@ -3516,8 +3582,9 @@ export function GalleyPlanningModal({
   // Starts UNSELECTED — the beverage/amenity/equipment (loading) tabs only appear
   // once an aircraft type is chosen, so their per-aircraft standard is applied.
   const [aircraftType, setAircraftType] = useState("");
-  // The specific aircraft (registration / tail) of the chosen type — a second,
-  // cascading "model" dropdown that only appears once a type is selected.
+  // The model (variant) of the chosen type — a second, cascading dropdown that
+  // only appears once a type is selected. Its options are maintained in
+  // Configuration → Aircraft (AIRCRAFT_MODELS + any model on the fleet register).
   const [aircraftModel, setAircraftModel] = useState("");
   const [aircraftTypes, setAircraftTypes] = useState(() => {
     const list = galleyAircraftTypes();
@@ -3528,10 +3595,11 @@ export function GalleyPlanningModal({
   const [aircraftRows, setAircraftRows] = usePersistedState<Aircraft[]>("config-aircraft-rows", AIRCRAFT_SEED);
   const [airlineList] = usePersistedState<Airline[]>("config-airline-rows", AIRLINE_SEED);
   const [showAddAircraft, setShowAddAircraft] = useState(false);
-  // Registrations (specific aircraft) that belong to the selected type — these
-  // populate the dependent "model" dropdown once a type is chosen.
+  // Models configured for the selected type — these populate the dependent
+  // "model" dropdown once a type is chosen. Sourced from Configuration →
+  // Aircraft, so maintaining a model there makes it selectable here.
   const modelsForType = useMemo(
-    () => aircraftRows.filter((a) => a.type === aircraftType && a.status === "Active"),
+    () => modelsForAircraftType(aircraftType, aircraftRows.filter((a) => a.status === "Active")),
     [aircraftRows, aircraftType],
   );
 
@@ -3540,7 +3608,12 @@ export function GalleyPlanningModal({
   // beverage/amenity/equipment scales and integrates meals from Dispatch. Both
   // the aircraft-type selector and the editable load counts run through this, so
   // the sheet stays connected to the aircraft's standard.
-  const rebuildPlan = (pax: number, crew: number, aircraft: string) => {
+  const rebuildPlan = (
+    pax: number, crew: number, aircraft: string,
+    // Defaults to the currently selected return leg, so every existing caller
+    // keeps re-deriving the arrival half against it.
+    ret: { pax: number; crew: number } | undefined = returnOrder ? { pax: retPax, crew: retCrew } : undefined,
+  ) => {
     const effFlight = {
       ...(flight ?? {}),
       pax, crew,
@@ -3548,16 +3621,16 @@ export function GalleyPlanningModal({
       adult: Math.max(0, pax - (flight?.child ?? 0)),
       aircraft,
     } as FlightOption;
-    setG(buildInitialGalley(entry, effFlight));
+    setG(buildInitialGalley(entry, effFlight, ret));
   };
 
   // Switch the plan to another aircraft type: re-derive the sheet from that
   // type's loading standard (meals still flow from Dispatch inside buildInitialGalley).
   const applyAircraft = (type: string) => {
     setAircraftType(type);
-    // Reset the dependent model; auto-pick when the type has exactly one aircraft.
-    const models = aircraftRows.filter((a) => a.type === type && a.status === "Active");
-    setAircraftModel(models.length === 1 ? models[0].registration : "");
+    // Reset the dependent model; auto-pick when the type has exactly one model.
+    const models = modelsForAircraftType(type, aircraftRows.filter((a) => a.status === "Active"));
+    setAircraftModel(models.length === 1 ? models[0] : "");
     rebuildPlan(planPax, planCrew, type);
   };
   const onAircraftCreated = (a: Aircraft) => {
@@ -3566,7 +3639,7 @@ export function GalleyPlanningModal({
       prev.includes(a.type) ? prev : [...prev, a.type].sort((x, y) => x.localeCompare(y)),
     );
     applyAircraft(a.type);
-    setAircraftModel(a.registration);
+    if (a.model) setAircraftModel(a.model);
     setShowAddAircraft(false);
     toast.success(`Aircraft "${a.registration}" added — plan set to the ${a.type} loading standard.`);
   };
@@ -3581,6 +3654,15 @@ export function GalleyPlanningModal({
     if (origPax > 0) setSpecialMeals(Math.round(specialTotal * pax / origPax));
     rebuildPlan(pax, crew, aircraftType);
   };
+
+  // The same override for the return leg — re-derives the arr* half of the sheet.
+  const applyReturnLoad = (pax: number, crew: number) => {
+    setRetPax(pax);
+    setRetCrew(crew);
+    if (retOrigPax > 0) setRetSpecialMeals(Math.round(retSpecialTotal * pax / retOrigPax));
+    rebuildPlan(planPax, planCrew, aircraftType, { pax, crew });
+  };
+
 
   // On first open of a FRESH plan, reconcile the seeded quantities to the
   // connected load counts (the seed uses the flight schedule PAX/crew; the order
@@ -3611,6 +3693,13 @@ export function GalleyPlanningModal({
     () => scaleDispatchMeals(flightNo, planPax, planCrew, flight?.crew ?? 0)?.scaled ?? null,
     [flightNo, planPax, planCrew, flight?.crew],
   );
+  // …and the same for the return leg, scaled to ITS load counts.
+  const retScaledMeals = useMemo(
+    () => returnOrder
+      ? scaleDispatchMeals(returnOrder.flight, retPax, retCrew, returnOrder.crew || retCrew)?.scaled ?? null
+      : null,
+    [returnOrder, retPax, retCrew],
+  );
 
   // Read-only field (connected value, not editable) for the connected tabs.
   const RO = ({ label, value }: { label: string; value: string | number }) => (
@@ -3621,6 +3710,71 @@ export function GalleyPlanningModal({
       </div>
     </div>
   );
+
+  // Outbound / Return chip — the same colours the airport receive legs use.
+  const dirBadge = (dir?: string) => (
+    <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider ${
+      dir === "Return" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"
+    }`}>
+      {dir || "Outbound"}
+    </span>
+  );
+
+  // The meal breakdown of ONE leg. A plain function (not a component) so the
+  // outbound and return legs render identically without remounting.
+  const mealsBlock = (scaled: ScaledMeals | null, legFlight: string) => {
+    if (!scaled) {
+      return (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+          No dispatch has been built for <strong>{legFlight}</strong> yet — the meal breakdown will populate here once this flight is dispatched in Packaging &amp; Dispatch.
+        </div>
+      );
+    }
+    return (
+      <div className="space-y-5">
+        <div>
+          <GalleySecTitle>Passenger Meals</GalleySecTitle>
+          <div className="rounded-lg border border-border overflow-hidden">
+            {scaled.paxLines.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-muted-foreground">No passenger meal lines.</div>
+            ) : scaled.paxLines.map((l, i) => (
+              <div key={i} className={`flex items-center justify-between px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
+                <span className="text-slate-700">{l.itemName}{l.percent != null ? ` · ${l.percent}%` : ""}</span>
+                <span className="font-semibold tabular-nums">{l.qty}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        {scaled.crewMeals.length > 0 && (
+          <div>
+            <GalleySecTitle>Crew Meals</GalleySecTitle>
+            <div className="rounded-lg border border-border overflow-hidden">
+              {scaled.crewMeals.map((c, i) => (
+                <div key={i} className={`flex items-center justify-between px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
+                  <span className="text-slate-700">{c.type}</span>
+                  <span className="font-semibold tabular-nums">{c.qty}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        <div>
+          <GalleySecTitle>Special Meals</GalleySecTitle>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            {/* Scaled to the current PAX; zero-count types hidden. */}
+            {[
+              { label: "VGML — Veg / Vegan", qty: scaled.special.vgml },
+              { label: "CHML — Child", qty: scaled.special.chml },
+              { label: "SPML — Special", qty: scaled.special.spml },
+            ].filter((s) => s.qty > 0).map((s) => (
+              <RO key={s.label} label={s.label} value={s.qty} />
+            ))}
+            <RO label="Total Special" value={scaled.specialTotal} />
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   // Sign-off (handing/taking accountability) is captured later, at the physical
   // hand-off, on the Loading QC & Sign-Off page — not here at planning time.
@@ -3687,22 +3841,27 @@ export function GalleyPlanningModal({
     );
   }
 
-  return (
-    <>
-    <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
-      <DialogContent className="w-full max-w-[95vw] lg:max-w-5xl max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
+  // The sheet itself is identical in both presentations — only the shell around
+  // it differs (full page section vs. dialog).
+  const sheet = (
+      <>
 
         {/* Header */}
         <div className="bg-white px-6 pt-5 pb-0 shrink-0">
           <div className="flex items-start justify-between mb-3">
             <div>
               <h2 className="text-lg font-bold text-slate-800">Galley Planning</h2>
-              <div className="flex flex-wrap items-center gap-2.5 mt-1 text-xs">
+              {/* One row per leg of the rotation — this plan covers both. */}
+              <div className="mt-1 text-xs space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2.5">
+                {dirBadge(order?.direction)}
                 <span className="font-bold text-white bg-sky-600 px-2 py-0.5 rounded-full">
                   {flight?.flight ?? entry.flightId}
                 </span>
                 <span className="text-slate-600">{flight?.sector ?? "—"}</span>
                 <span className="text-slate-500">{entry.packagingDate}</span>
+                <span className="text-slate-600">PAX: {planPax}</span>
+                <span className="text-slate-600">Crew: {planCrew}</span>
                 {/* Aircraft type — editable; sets this plan's loading standard. */}
                 <span className="flex items-center gap-1">
                   <select
@@ -3717,28 +3876,39 @@ export function GalleyPlanningModal({
                     ))}
                   </select>
                 </span>
-                {/* Dependent model — the specific aircraft (registration) of the
-                    selected type. Only shown once a type with registered aircraft
-                    is chosen. Informational; the loading standard keys off type. */}
+                {/* Dependent model — the variant of the selected type, configured
+                    in Configuration → Aircraft. Only shown once a type with
+                    configured models is chosen. Informational; the loading
+                    standard keys off type. */}
                 {aircraftType && modelsForType.length > 0 && (
                   <span className="flex items-center gap-1">
                     <select
                       value={aircraftModel}
                       onChange={(e) => setAircraftModel(e.target.value)}
-                      title="Aircraft model — the specific aircraft of this type"
-                      className="bg-slate-100 text-slate-700 text-xs rounded-full pl-2 pr-1 py-0.5 border border-slate-300 focus:outline-none focus:ring-1 focus:ring-ring cursor-pointer max-w-[170px]"
+                      title="Aircraft model — configured in Configuration → Aircraft"
+                      className="bg-slate-100 text-slate-700 text-xs rounded-full pl-2 pr-1 py-0.5 border border-slate-300 focus:outline-none focus:ring-1 focus:ring-ring cursor-pointer max-w-[190px]"
                     >
                       <option value="" className="text-slate-800">Select model…</option>
-                      {modelsForType.map((a) => (
-                        <option key={a.id} value={a.registration} className="text-slate-800">
-                          {a.registration}
-                        </option>
+                      {modelsForType.map((m) => (
+                        <option key={m} value={m} className="text-slate-800">{m}</option>
                       ))}
                     </select>
                   </span>
                 )}
-                <span className="text-slate-600">PAX: {planPax}</span>
-                <span className="text-slate-600">Crew: {planCrew}</span>
+              </div>
+              {/* Return leg — its own load counts, per the same logic. */}
+              {returnOrder && (
+                <div className="flex flex-wrap items-center gap-2.5">
+                  {dirBadge(returnOrder.direction)}
+                  <span className="font-bold text-white bg-sky-600 px-2 py-0.5 rounded-full">
+                    {returnOrder.flight}
+                  </span>
+                  <span className="text-slate-600">{returnOrder.sector}</span>
+                  <span className="text-slate-500">{returnOrder.date}</span>
+                  <span className="text-slate-600">PAX: {retPax}</span>
+                  <span className="text-slate-600">Crew: {retCrew}</span>
+                </div>
+              )}
               </div>
             </div>
             <button onClick={onClose} className="text-slate-400 hover:text-slate-700 p-1 rounded transition-colors mt-0.5">
@@ -3791,8 +3961,8 @@ export function GalleyPlanningModal({
           </label>
         </div>
 
-        {/* Tab content */}
-        <div className="flex-1 overflow-y-auto bg-slate-50/20 px-6 py-5">
+        {/* Tab content — scrolls inside the dialog; flows with the page when full page. */}
+        <div className={`bg-slate-50/20 px-6 py-5 ${fullPage ? "" : "flex-1 overflow-y-auto"}`}>
 
           {tab === "overview" && (
             <div className="space-y-5">
@@ -3801,111 +3971,144 @@ export function GalleyPlanningModal({
                   <GalleySecTitle>Flight Order</GalleySecTitle>
                 </div>
                 {order ? (
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                    <RO label="Order #" value={order.orderNo} />
-                    <RO label="Flight" value={order.flight} />
-                    <RO label="Airline" value={order.airline} />
-                    <RO label="Status" value={order.status} />
-                    <RO label="Sector" value={order.sector} />
-                    <RO label="Direction" value={order.direction} />
-                    <RO label="Date" value={order.date} />
-                    <RO label="ETD" value={order.etd} />
-                  </div>
+                  <>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      {dirBadge(order.direction)}
+                      <span className="text-xs font-semibold text-slate-700">{order.flight}</span>
+                      <span className="text-[11px] text-muted-foreground">{outboundSector}</span>
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <RO label="Order #" value={order.orderNo} />
+                      <RO label="Flight" value={order.flight} />
+                      <RO label="Airline" value={order.airline} />
+                      <RO label="Status" value={order.status} />
+                      <RO label="Sector" value={outboundSector} />
+                      <RO label="Direction" value={order.direction} />
+                      <RO label="Date" value={order.date} />
+                      <RO label="ETD" value={order.etd} />
+                    </div>
+
+                    {/* This leg's load counts sit with the leg they belong to. */}
+                    <div className="mt-4">
+                    <GalleySecTitle>
+                      Load Counts
+                      <span className="ml-2 text-[9px] font-normal normal-case tracking-normal text-muted-foreground">Editable — override if an updated record arrives</span>
+                    </GalleySecTitle>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      {/* Editable, inline (not a nested component) to keep input focus
+                          through the plan-recompute re-render. */}
+                      <div>
+                        <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Passengers (PAX)</p>
+                        <input
+                          type="number" min={0} value={planPax}
+                          onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) applyLoad(Math.max(0, v), planCrew); }}
+                          className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Crew</p>
+                        <input
+                          type="number" min={0} value={planCrew}
+                          onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) applyLoad(planPax, Math.max(0, v)); }}
+                          className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Special Meals</p>
+                        <input
+                          type="number" min={0} value={specialMeals}
+                          onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) setSpecialMeals(Math.max(0, v)); }}
+                          className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
+                        />
+                      </div>
+                      <RO label="Total Meals (PAX + Crew + Special)" value={planPax + planCrew + specialMeals} />
+                    </div>
+                    </div>
+
+                    {/* The return leg of this rotation — planned on the same sheet. */}
+                    {returnOrder && (
+                      <div className="mt-5">
+                        <div className="flex items-center gap-2 mb-1.5">
+                          {dirBadge(returnOrder.direction)}
+                          <span className="text-xs font-semibold text-slate-700">{returnOrder.flight}</span>
+                          <span className="text-[11px] text-muted-foreground">{returnOrder.sector}</span>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                          <RO label="Order #" value={returnOrder.orderNo} />
+                          <RO label="Flight" value={returnOrder.flight} />
+                          <RO label="Airline" value={returnOrder.airline} />
+                          <RO label="Status" value={returnOrder.status} />
+                          <RO label="Sector" value={returnOrder.sector} />
+                          <RO label="Direction" value={returnOrder.direction} />
+                          <RO label="Date" value={returnOrder.date} />
+                          <RO label="ETD" value={returnOrder.etd} />
+                        </div>
+
+                        <div className="mt-4">
+                        <GalleySecTitle>
+                          Load Counts
+                          <span className="ml-2 text-[9px] font-normal normal-case tracking-normal text-muted-foreground">Editable — override if an updated record arrives</span>
+                        </GalleySecTitle>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                          <div>
+                            <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Passengers (PAX)</p>
+                            <input
+                              type="number" min={0} value={retPax}
+                              onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) applyReturnLoad(Math.max(0, v), retCrew); }}
+                              className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
+                            />
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Crew</p>
+                            <input
+                              type="number" min={0} value={retCrew}
+                              onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) applyReturnLoad(retPax, Math.max(0, v)); }}
+                              className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
+                            />
+                          </div>
+                          <div>
+                            <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Special Meals</p>
+                            <input
+                              type="number" min={0} value={retSpecialMeals}
+                              onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) setRetSpecialMeals(Math.max(0, v)); }}
+                              className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
+                            />
+                          </div>
+                          <RO label="Total Meals (PAX + Crew + Special)" value={retPax + retCrew + retSpecialMeals} />
+                        </div>
+                        </div>
+                      </div>
+                    )}
+                  </>
                 ) : (
                   <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
                     No matching flight order found in Order Management for <strong>{flightNo}</strong>{entry.packagingDate ? ` on ${entry.packagingDate}` : ""}. Showing schedule data only.
                   </div>
                 )}
               </div>
-              <div>
-                <GalleySecTitle>
-                  Load Counts
-                  <span className="ml-2 text-[9px] font-normal normal-case tracking-normal text-muted-foreground">Editable — override if an updated record arrives</span>
-                </GalleySecTitle>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  {/* Editable, inline (not a nested component) to keep input focus
-                      through the plan-recompute re-render. */}
-                  <div>
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Passengers (PAX)</p>
-                    <input
-                      type="number" min={0} value={planPax}
-                      onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) applyLoad(Math.max(0, v), planCrew); }}
-                      className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Crew</p>
-                    <input
-                      type="number" min={0} value={planCrew}
-                      onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) applyLoad(planPax, Math.max(0, v)); }}
-                      className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">Special Meals</p>
-                    <input
-                      type="number" min={0} value={specialMeals}
-                      onChange={(e) => { const v = e.target.value === "" ? 0 : Number(e.target.value); if (!Number.isNaN(v)) setSpecialMeals(Math.max(0, v)); }}
-                      className="w-full h-7 px-2 text-xs border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
-                    />
-                  </div>
-                  <RO label="Total Meals (PAX + Crew + Special)" value={planPax + planCrew + specialMeals} />
-                </div>
-              </div>
             </div>
           )}
 
           {tab === "meals" && (
-            <div className="space-y-5">
-              <div className="flex items-center justify-between">
+            <div className="space-y-6">
+              {/* One breakdown per leg of the rotation — the outbound leg, then
+                  the return leg scaled to its own load counts. */}
+              <div>
                 <GalleySecTitle>Meals</GalleySecTitle>
+                <div className="flex items-center gap-2 mb-2">
+                  {dirBadge(order?.direction)}
+                  <span className="text-xs font-semibold text-slate-700">{order?.flight ?? flightNo}</span>
+                </div>
+                {mealsBlock(dispatchSection ? scaledMeals : null, order?.flight ?? flightNo)}
               </div>
-              {dispatchSection && scaledMeals ? (
-                <>
-                  <div>
-                    <GalleySecTitle>Passenger Meals</GalleySecTitle>
-                    <div className="rounded-lg border border-border overflow-hidden">
-                      {scaledMeals.paxLines.length === 0 ? (
-                        <div className="px-3 py-2 text-xs text-muted-foreground">No passenger meal lines.</div>
-                      ) : scaledMeals.paxLines.map((l, i) => (
-                        <div key={i} className={`flex items-center justify-between px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
-                          <span className="text-slate-700">{l.itemName}{l.percent != null ? ` · ${l.percent}%` : ""}</span>
-                          <span className="font-semibold tabular-nums">{l.qty}</span>
-                        </div>
-                      ))}
-                    </div>
+              {returnOrder && (
+                <div>
+                  <div className="flex items-center gap-2 mb-2">
+                    {dirBadge(returnOrder.direction)}
+                    <span className="text-xs font-semibold text-slate-700">{returnOrder.flight}</span>
+                    <span className="text-[11px] text-muted-foreground">{returnOrder.sector}</span>
                   </div>
-                  {scaledMeals.crewMeals.length > 0 && (
-                    <div>
-                      <GalleySecTitle>Crew Meals</GalleySecTitle>
-                      <div className="rounded-lg border border-border overflow-hidden">
-                        {scaledMeals.crewMeals.map((c, i) => (
-                          <div key={i} className={`flex items-center justify-between px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
-                            <span className="text-slate-700">{c.type}</span>
-                            <span className="font-semibold tabular-nums">{c.qty}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  <div>
-                    <GalleySecTitle>Special Meals</GalleySecTitle>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      {/* Scaled to the current PAX; zero-count types hidden. */}
-                      {[
-                        { label: "VGML — Veg / Vegan", qty: scaledMeals.special.vgml },
-                        { label: "CHML — Child", qty: scaledMeals.special.chml },
-                        { label: "SPML — Special", qty: scaledMeals.special.spml },
-                      ].filter((s) => s.qty > 0).map((s) => (
-                        <RO key={s.label} label={s.label} value={s.qty} />
-                      ))}
-                      <RO label="Total Special" value={scaledMeals.specialTotal} />
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
-                  No dispatch has been built for <strong>{flightNo}</strong> yet — the meal breakdown will populate here once this flight is dispatched in Packaging &amp; Dispatch.
+                  {mealsBlock(retScaledMeals, returnOrder.flight)}
                 </div>
               )}
             </div>
@@ -3941,8 +4144,22 @@ export function GalleyPlanningModal({
           </div>
         </div>
 
-      </DialogContent>
-    </Dialog>
+      </>
+  );
+
+  return (
+    <>
+    {fullPage ? (
+      <div className="rounded-lg border border-border bg-white shadow-sm overflow-hidden">
+        {sheet}
+      </div>
+    ) : (
+      <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
+        <DialogContent className="w-full max-w-[95vw] lg:max-w-5xl max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
+          {sheet}
+        </DialogContent>
+      </Dialog>
+    )}
 
     {/* Add Aircraft — reuses the Configuration > Aircraft form. The new aircraft
         is a real fleet entry and its type is applied to this plan. */}

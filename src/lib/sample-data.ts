@@ -2531,7 +2531,8 @@ export const airlines: Airline[] = [
 export type Aircraft = {
   id: string;
   registration: string;   // tail number (e.g. S2-AJA)
-  type: string;           // model / variant
+  type: string;           // family (e.g. ATR 72-600) — drives the loading standard
+  model?: string;         // specific model / variant designation of this airframe
   manufacturer: string;
   airlineId: string;      // FK → Airline.id — the operating airline
   seats: number;
@@ -2539,12 +2540,12 @@ export type Aircraft = {
 };
 
 export const aircraftFleet: Aircraft[] = [
-  { id: "ACF-001", registration: "S2-AJA", type: "B737-800",   manufacturer: "Boeing",       airlineId: "AIR-001", seats: 164, status: "Active" },
-  { id: "ACF-002", registration: "S2-AJT", type: "B737 MAX 8", manufacturer: "Boeing",       airlineId: "AIR-001", seats: 174, status: "Active" },
-  { id: "ACF-003", registration: "S2-AGA", type: "ATR 72-600", manufacturer: "ATR",          airlineId: "AIR-001", seats: 72,  status: "Active" },
-  { id: "ACF-004", registration: "S2-AGE", type: "DASH 8",     manufacturer: "De Havilland", airlineId: "AIR-001", seats: 74,  status: "Active" },
-  { id: "ACF-005", registration: "S2-AFM", type: "A330-300",   manufacturer: "Airbus",       airlineId: "AIR-001", seats: 436, status: "Active" },
-  { id: "ACF-006", registration: "S2-STB", type: "ATR 72-600", manufacturer: "ATR",          airlineId: "AIR-002", seats: 72,  status: "Active" },
+  { id: "ACF-001", registration: "S2-AJA", type: "B737-800",   model: "737-8Q8",    manufacturer: "Boeing",       airlineId: "AIR-001", seats: 164, status: "Active" },
+  { id: "ACF-002", registration: "S2-AJT", type: "B737 MAX 8", model: "737-8",      manufacturer: "Boeing",       airlineId: "AIR-001", seats: 174, status: "Active" },
+  { id: "ACF-003", registration: "S2-AGA", type: "ATR 72-600", model: "ATR 72-212A", manufacturer: "ATR",         airlineId: "AIR-001", seats: 72,  status: "Active" },
+  { id: "ACF-004", registration: "S2-AGE", type: "DASH 8",     model: "DHC-8-402Q", manufacturer: "De Havilland", airlineId: "AIR-001", seats: 74,  status: "Active" },
+  { id: "ACF-005", registration: "S2-AFM", type: "A330-300",   model: "A330-343",   manufacturer: "Airbus",       airlineId: "AIR-001", seats: 436, status: "Active" },
+  { id: "ACF-006", registration: "S2-STB", type: "ATR 72-600", model: "ATR 72-212A", manufacturer: "ATR",         airlineId: "AIR-002", seats: 72,  status: "Active" },
 ];
 
 export const activeAirlines = airlines.filter((a) => a.status === "Active");
