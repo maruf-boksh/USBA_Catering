@@ -117,6 +117,11 @@ export type DispatchEntry = {
   /** Label-scan summary captured on airport receipt. */
   containersScanned?: number;
   containersTotal?: number;
+  /** Every flight loaded onto this vehicle — a load can cover several dispatches,
+   *  and all of them must clear QC together, not just `flightId`. */
+  loadFlights?: string[];
+  /** The Dispatch-page dispatch IDs (DSP-…) this entry was raised from. */
+  sourceDispatchIds?: string[];
 };
 
 // A dispatched meal item (one Production line) scanned on airport receipt.
@@ -440,7 +445,17 @@ const flightNo    = (id: string) => { const f = flights.find((x) => x.id === id)
 // System packaging id derived from a production order (matches the Packaging &
 // Dispatch modules: PRO-2026-1234 → PKG-2026-1234).
 const toPackagingId = (pro: string) => (pro && pro !== "—" ? `PKG-${pro.replace(/^PRO-?/i, "")}` : "—");
-const flightDest  = (id: string) => { const f = flights.find((x) => x.id === id); return f ? f.sector.split("-").pop() ?? "—" : "—"; };
+/** Destination airport for an entry's flight. Matches the flight board by id OR
+ *  by flight number (an entry raised from a dispatch carries the number), then
+ *  falls back to the order book — otherwise a real flight read "— Airport".
+ *  Sectors come in both "DAC-CGP" and "DAC → DXB" forms, so split on either. */
+const flightDest = (id: string) => {
+  const f = flights.find((x) => x.id === id) ?? flights.find((x) => x.flight === id);
+  const sector = f?.sector ?? getFlightOrders().find((o) => o.flight === id)?.sector;
+  if (!sector) return "—";
+  const parts = sector.split(/→|->|-/).map((s) => s.trim()).filter(Boolean);
+  return parts[parts.length - 1] ?? "—";
+};
 // Meal-type badge tones for the Order Details table (Dispatch's own map is not exported).
 const MEAL_TYPE_TONE: Record<string, string> = {
   Breakfast: "bg-amber-100 text-amber-700",
@@ -564,6 +579,9 @@ export default function DispatchMonitoring() {
   const formDispatchNo = editId
     ? (entries.find((e) => e.id === editId)?.dispatchNo ?? nextDispatchNo)
     : nextDispatchNo;
+  // Flights loaded onto this one vehicle beyond form.flightId — a vehicle load
+  // selected across several dispatches on the Dispatch page.
+  const [extraFlights, setExtraFlights] = useState<string[]>([]);
   const [depTime, setDepTime] = useState("");
   const [form, setForm] = useState<FormState>({ ...EMPTY_FORM });
   const [errors, setErrors] = useState<Partial<Record<keyof FormState, string>>>({});
@@ -682,12 +700,23 @@ export default function DispatchMonitoring() {
   // packaging rows), matched by the entry's flight. This surfaces the whole
   // round trip — both legs, the order #, and every meal's production/warehouse
   // — instead of the monitoring entry's own thin meal lines.
-  const airportDispatch = useMemo<{ dispatchId: string; orderNo: string; legs: AirportLeg[] }>(() => {
+  const airportDispatch = useMemo<{ dispatchId: string; orderNo: string; legs: AirportLeg[]; sourceRefs: string[] }>(() => {
     const fno = flightNo(form.flightId);
+    // Every flight on this vehicle: the form's own flight plus any others loaded
+    // with it. Each contributes its whole dispatch (dspRef) so a round trip still
+    // pulls both of its legs.
+    const loadFlights = [fno, ...extraFlights.filter((f) => f && f !== fno)];
     const myRows = dispatchPackagingRows.filter((r) => r.flight === fno);
     const dspRef = myRows[0]?.dspRef;
     const orderNo = myRows[0]?.orderNo;
-    const allRows = dspRef ? dispatchPackagingRows.filter((r) => r.dspRef === dspRef) : myRows;
+    const dspRefs = new Set(
+      loadFlights
+        .flatMap((f) => dispatchPackagingRows.filter((r) => r.flight === f).map((r) => r.dspRef))
+        .filter(Boolean) as string[],
+    );
+    const allRows = dspRefs.size > 0
+      ? dispatchPackagingRows.filter((r) => (r.dspRef && dspRefs.has(r.dspRef)) || loadFlights.includes(r.flight))
+      : dispatchPackagingRows.filter((r) => loadFlights.includes(r.flight));
     const orders = getFlightOrders();
     const toRow = (r: PackagingRow): ScanMealRow => ({
       id: r.id,
@@ -718,7 +747,7 @@ export default function DispatchMonitoring() {
           totalQty: rows.reduce((s, r) => s + r.qty, 0),
         };
       });
-      return { dispatchId: dspRef ?? formDispatchNo, orderNo: orderNo ?? "—", legs };
+      return { dispatchId: dspRef ?? formDispatchNo, orderNo: orderNo ?? "—", legs, sourceRefs: [...dspRefs] };
     }
 
     // Fallback — no Dispatch-table match: show the entry's own meal lines as one leg.
@@ -734,9 +763,10 @@ export default function DispatchMonitoring() {
         depTime: selectedFlight?.dep ?? "—", date: form.packagingDate, rows,
         totalQty: rows.reduce((s, r) => s + r.qty, 0),
       }] : [],
+      sourceRefs: [],
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.flightId, form.mealLines, form.packagingDate, dispatchPackagingRows, formDispatchNo]);
+  }, [form.flightId, extraFlights, form.mealLines, form.packagingDate, dispatchPackagingRows, formDispatchNo]);
 
   const airportScanRows = airportDispatch.legs.flatMap((l) => l.rows);
   // Catering-point loading — scan each production batch to drive the loading timer.
@@ -823,6 +853,7 @@ export default function DispatchMonitoring() {
     setForm({ ...EMPTY_FORM }); setDepTime(""); setEditId(null); setErrors({});
     setFsRemarksInput(""); setHocRemarksInput(""); setShowForm(true);
     setFormLoadStartIso(""); setFormTimerTick(0);
+    setExtraFlights([]);
   };
 
   // Deep link from Packaging & Dispatch → "Initiate QC": open a new monitoring
@@ -834,6 +865,9 @@ export default function DispatchMonitoring() {
     deepLinkHandled.current = true;
     const f = flights.find((x) => x.flight === flightNo);
     openNew();
+    // A vehicle load selected across several dispatches arrives as ?flights=a,b,c.
+    const others = (searchParams.get("flights") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    setExtraFlights(others.filter((x) => x !== flightNo));
     if (f) {
       setDepTime(f.dep);
       handleFlightSelect(f.id);
@@ -849,6 +883,7 @@ export default function DispatchMonitoring() {
     }
     // Clear the param so a refresh / re-render doesn't reopen the form.
     searchParams.delete("flight");
+    searchParams.delete("flights");
     setSearchParams(searchParams, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
@@ -982,7 +1017,11 @@ export default function DispatchMonitoring() {
     // Real flights resolve to their flight number; a directly-packaged production
     // uses its own id as the flight key so its QC still clears (unlocks dispatch).
     const flightNo = flights.find((f) => f.id === form.flightId)?.flight ?? form.flightId;
-    if (flightNo) markFlightQcCleared(flightNo, at);
+    // Clear EVERY flight this entry covers, not just the form's own. One vehicle
+    // load can carry several dispatches; clearing only the first left the others
+    // stuck short of "Initiate Dispatch" even though they were loaded and checked.
+    const clearedFlights = [...new Set([flightNo, ...airportDispatch.legs.map((l) => l.flight)].filter(Boolean))];
+    for (const f of clearedFlights) markFlightQcCleared(f, at);
     const existing = editId ? entries.find((e) => e.id === editId) : null;
     const now = new Date();
     const dateStr = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
@@ -1008,6 +1047,10 @@ export default function DispatchMonitoring() {
       receivedRemarks: form.receiverRemarks,
       forwardedToAirportAt: existing?.forwardedToAirportAt,
       dispatchNo: existing?.dispatchNo ?? nextDispatchNo,
+      // Every flight on this vehicle, so a later approval clears them all rather
+      // than only the entry's primary flight.
+      loadFlights: clearedFlights,
+      sourceDispatchIds: airportDispatch.sourceRefs,
     };
     if (editId) {
       setEntries((prev) => prev.map((e) => e.id === editId ? { ...e, ...base } : e));
@@ -1085,8 +1128,27 @@ export default function DispatchMonitoring() {
     }
   };
 
+  /**
+   * Receipt-side validation. The full validate() checks the CATERING-POINT
+   * fields (vehicle no, load times, vehicle temps) — which this screen hides,
+   * because they were captured upstream when the load left. Running it here
+   * failed on entries raised from a dispatch (those fields are blank) and set
+   * errors onto inputs the receiver cannot see, so the button did nothing.
+   */
+  const validateReceipt = () => {
+    const e: Partial<Record<keyof FormState, string>> = {};
+    if (!form.flightId) e.flightId = "Flight is required.";
+    if (vehOOR(form.gateTempGate08) && !form.ackGate08) e.ackGate08 = "Acknowledge exceeds +8°C.";
+    setErrors(e);
+    if (Object.keys(e).length > 0) {
+      toast.error(Object.values(e)[0] ?? "Complete the receipt before accepting.");
+      return false;
+    }
+    return true;
+  };
+
   const acceptReceipt = () => {
-    if (!validate()) return;
+    if (!validateReceipt()) return;
     const label = flightLabel(form.flightId);
     const at = nowTimeStr();
     const existing = editId ? entries.find((e) => e.id === editId) : null;
@@ -1180,8 +1242,10 @@ export default function DispatchMonitoring() {
     if (stage === 2) {
       const entry = entries.find((e) => e.id === editId);
       if (entry) {
-        const flightNo = flights.find((f) => f.id === entry.flightId)?.flight;
-        if (flightNo) markFlightQcCleared(flightNo, nowTimeStr());
+        // Clear every flight the load covered, not only the primary one.
+        const flightNo = flights.find((f) => f.id === entry.flightId)?.flight ?? entry.flightId;
+        const covered = entry.loadFlights?.length ? entry.loadFlights : [flightNo];
+        for (const f of covered) if (f) markFlightQcCleared(f, nowTimeStr());
       }
       if (qcOnlyMode) {
         resetForm();
@@ -1499,11 +1563,66 @@ export default function DispatchMonitoring() {
                       <p className="text-[11px] text-blue-200 mt-0.5">{doc.originName}</p>
                     </div>
                   </div>
-                  <span className="text-xs bg-blue-800/60 px-2.5 py-1 rounded-full">Dispatch No: {formDispatchNo}</span>
+                  {/* The entry's own number identifies the monitoring record; the
+                      dispatch IDs it covers are what the user selected, and those
+                      are what they came here to see. Both, rather than only the
+                      sequence number. */}
+                  <div className="flex flex-col items-end gap-1">
+                    {airportDispatch.sourceRefs.length > 0 ? (
+                      <>
+                        <span className="text-xs bg-blue-800/60 px-2.5 py-1 rounded-full font-semibold">
+                          {airportDispatch.sourceRefs.length > 1
+                            ? `${airportDispatch.sourceRefs.length} Dispatches: ${airportDispatch.sourceRefs.join(" + ")}`
+                            : `Dispatch ID: ${airportDispatch.sourceRefs[0]}`}
+                        </span>
+                        <span className="text-[11px] text-blue-200">
+                          Entry No: {formDispatchNo}
+                          {airportDispatch.legs.length > 1 && ` · ${airportDispatch.legs.length} flights`}
+                          {airportDispatch.orderNo !== "—" && ` · ${airportDispatch.orderNo}`}
+                        </span>
+                      </>
+                    ) : (
+                      <span className="text-xs bg-blue-800/60 px-2.5 py-1 rounded-full">Dispatch No: {formDispatchNo}</span>
+                    )}
+                  </div>
                 </div>
 
                 <div className={`p-5 space-y-4${isAirportReceiveMode ? " pointer-events-none opacity-60 select-none" : ""}`}>
                   <MaxTempBanner />
+
+                  {/* Flights in this dispatch — one vehicle can carry several legs
+                      (a round trip, or a combined load), and the batch list below
+                      mixes their batches together. Without this the entry only
+                      identified itself by a dispatch number. */}
+                  {airportDispatch.legs.length > 0 && (
+                    <div>
+                      <Divider label={airportDispatch.legs.length > 1 ? `Flights In This Dispatch (${airportDispatch.legs.length})` : "Flight"} color="blue" />
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {airportDispatch.legs.map((leg) => (
+                          <div key={leg.flight} className="rounded-md border border-border bg-muted/20 px-3 py-2">
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                              <span className="inline-flex items-center rounded-full border border-sky-300 bg-sky-50 px-2 py-0.5 text-[11px] font-bold text-sky-700">
+                                {leg.flight}
+                              </span>
+                              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${leg.direction === "Return" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
+                                {leg.direction}
+                              </span>
+                              <span className="text-[11px] text-muted-foreground">{leg.sector}</span>
+                            </div>
+                            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground tabular-nums">
+                              <span>Dep <b className="text-foreground">{leg.depTime}</b></span>
+                              <span>{leg.date}</span>
+                              <span>{leg.rows.length} batch{leg.rows.length === 1 ? "" : "es"}</span>
+                              <span>Qty <b className="text-foreground">{leg.totalQty.toLocaleString()}</b></span>
+                              <span className="text-emerald-700 font-medium">
+                                {leg.rows.filter((r) => loadScannedIds.has(r.id)).length}/{leg.rows.length} scanned
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* ─ Vehicle ─ */}
                   <Divider label="Vehicle Details" color="blue" />
@@ -1531,7 +1650,10 @@ export default function DispatchMonitoring() {
                         <Label className="text-xs font-semibold">Load Production Batches</Label>
                         <span className="text-[11px] text-muted-foreground tabular-nums">{loadScannedIds.size}/{airportScanRows.length} scanned</span>
                       </div>
-                      <p className="text-[11px] text-muted-foreground">Scan each Packaging-Done batch — the loading timer starts on the first scan and stops on the last.</p>
+                      <p className="text-[11px] text-muted-foreground">
+                        Scan each Packaging-Done batch — the loading timer starts on the first scan and stops on the last.
+                        {airportDispatch.legs.length > 1 && ` Batches for all ${airportDispatch.legs.length} flights load onto this one vehicle.`}
+                      </p>
                       {/* Loading time */}
                       <div className="rounded-md border border-border bg-background px-3 py-2 flex items-center justify-between text-sm">
                         <span className="inline-flex items-center gap-1.5 text-muted-foreground"><Clock className="h-3.5 w-3.5" /> Loading Time</span>

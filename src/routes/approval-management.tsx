@@ -39,6 +39,7 @@ import {
   type WfDemandRequest, type WfDemandStatus, type WfDispatchApproval,
 } from "@/lib/workflow-store";
 import { mergePassedBatches, type PackagingBatch } from "@/lib/packaging-batches";
+import { type PackagingAllocation } from "@/lib/packaging-allocations";
 import { inventory, warehouses, consumableItems, type ConsumableItem } from "@/lib/sample-data";
 import { getItemStock } from "@/lib/inventory-stock";
 import { roundQty } from "@/lib/num";
@@ -666,6 +667,11 @@ export default function ApprovalManagementPage() {
   >({});
   // Packaging batches — passed QC (temp + taste), awaiting packaging approval.
   const [packagingBatches, setPackagingBatches] = usePersistedState<PackagingBatch[]>("packaging-batches", []);
+  // Packaging RUNS — run × flight × qty, raised from New Packaging. A separate
+  // gate from the batch above: that one releases QC-passed production into the
+  // pool, this one signs off the actual per-flight run before labels print.
+  const [packagingAllocations, setPackagingAllocations] =
+    usePersistedState<PackagingAllocation[]>("packaging-allocations", []);
   useEffect(() => {
     const qtyFor = (id: string) => productionEntries.find((e) => e.id === id)?.producedQty ?? 0;
     setPackagingBatches((prev) => mergePassedBatches(prev, qtyFor));
@@ -1189,6 +1195,45 @@ export default function ApprovalManagementPage() {
     });
   }, [packagingBatches]);
 
+  // Packaging RUNS raised from New Packaging (run × flight × qty). Approving
+  // here is what unlocks label printing on the Packaging page — a created run
+  // sits at "Pending Approval" until it is signed off here.
+  const packagingRunItems: ApprovalItem[] = useMemo(() => {
+    return packagingAllocations.map((a) => {
+      const status: ApprovalStatus =
+        a.status === "Pending Approval" ? "Pending"
+        : a.status === "Rejected"       ? "Rejected"
+        : "Approved";
+      return {
+        id: `PKR-AP-${a.id}`,
+        category: "Packaging" as Category,
+        refId: a.id,
+        title: `${a.flight} — packaging run (${a.item})`,
+        requestedBy: a.createdBy ?? "Packaging",
+        requestedAt: a.createdAt,
+        summary: `${a.qty.toLocaleString()} portions of ${a.item} for ${a.flight}${a.depTime ? " dep " + a.depTime : ""} on ${a.date} · run ${a.productionId}`,
+        itemsCount: 1,
+        status,
+        processedBy: a.approvedBy,
+        processedAt: a.approvedAt,
+        lines: [{ name: a.item, qty: a.qty, uom: "portions", note: `${a.flight} · ${a.productionId}` }],
+        fields: [
+          { label: "Packaging ID", value: a.packagingId },
+          { label: "Production ID", value: a.productionId },
+          { label: "Item", value: a.item },
+          { label: "Flight", value: a.flight },
+          { label: "Order", value: a.orderNo ?? "—" },
+          { label: "Flight Date", value: a.date },
+          { label: "Dep Time", value: a.depTime ?? "—" },
+          { label: "Qty For Flight", value: `${a.qty.toLocaleString()} portions` },
+          { label: "Raised By", value: a.createdBy ?? "—" },
+          { label: "Raised At", value: a.createdAt },
+          { label: "Run Status", value: a.status },
+        ],
+      };
+    });
+  }, [packagingAllocations]);
+
   // Batches forwarded to airport → Dispatch approval. Approving unlocks them for
   // airport receive in Dispatch Monitoring.
   const dispatchForwardItems: ApprovalItem[] = useMemo(() => {
@@ -1496,7 +1541,7 @@ export default function ApprovalManagementPage() {
   }), [mealQtyAdjustments]);
 
   const allItems = useMemo(() => {
-    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...prItems, ...stockAdjItems, ...wfPoItems, ...wfPoCloseItems, ...productionItems, ...packagingItems, ...dispatchForwardItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...hygieneAppealItems, ...hygieneDailyItems, ...wastageItems, ...delayApprovalItems, ...directReceiptItems, ...mealQtyAdjItems, ...items];
+    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...prItems, ...stockAdjItems, ...wfPoItems, ...wfPoCloseItems, ...productionItems, ...packagingItems, ...packagingRunItems, ...dispatchForwardItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...hygieneAppealItems, ...hygieneDailyItems, ...wastageItems, ...delayApprovalItems, ...directReceiptItems, ...mealQtyAdjItems, ...items];
     // Overlay "Reviewed" (returned for correction) onto still-pending requests.
     return base.map((it) => {
       const rv = reviews[reviewKey(it.category, it.refId)];
@@ -1505,7 +1550,7 @@ export default function ApprovalManagementPage() {
       }
       return it;
     });
-  }, [flightOrderItems, demandItems, rfqItems, quotationItems, prItems, stockAdjItems, wfPoItems, wfPoCloseItems, productionItems, packagingItems, dispatchForwardItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, hygieneAppealItems, hygieneDailyItems, wastageItems, delayApprovalItems, directReceiptItems, mealQtyAdjItems, items, reviews]);
+  }, [flightOrderItems, demandItems, rfqItems, quotationItems, prItems, stockAdjItems, wfPoItems, wfPoCloseItems, productionItems, packagingItems, packagingRunItems, dispatchForwardItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, hygieneAppealItems, hygieneDailyItems, wastageItems, delayApprovalItems, directReceiptItems, mealQtyAdjItems, items, reviews]);
 
   const counts = useMemo(() => {
     const pendingByCat = new Map<Category, number>();
@@ -1816,6 +1861,22 @@ export default function ApprovalManagementPage() {
         ),
       );
       if (!silent) toast.success(`${it.refId} approved — sent to Packaging.`);
+      return;
+    }
+    if (it.category === "Packaging" && it.id.startsWith("PKR-AP-")) {
+      // Packaging run signed off → labels can now be printed on the Packaging page.
+      setPackagingAllocations((prev) =>
+        prev.map((a) =>
+          a.id === it.refId
+            ? {
+                ...a,
+                status: "In Packaging" as PackagingAllocation["status"],
+                approvedBy: `${role} (GM/Admin)`, approvedAt: stamp(), rejectedReason: undefined,
+              }
+            : a,
+        ),
+      );
+      if (!silent) toast.success(`Packaging run approved — labels unlocked on the Packaging page.`);
       return;
     }
     if (it.category === "Dispatch" && it.id.startsWith("DSPF-AP-")) {
@@ -2172,6 +2233,14 @@ export default function ApprovalManagementPage() {
       setPackagingBatches((prev) =>
         prev.map((b) => (b.id === it.refId ? { ...b, status: "Rejected" as PackagingBatch["status"] } : b)),
       );
+    } else if (it.category === "Packaging" && it.id.startsWith("PKR-AP-")) {
+      // Run declined — it packages nothing, and its portions return to the pool
+      // so the production can be picked for this flight (or another) again.
+      setPackagingAllocations((prev) =>
+        prev.map((a) => (a.id === it.refId
+          ? { ...a, status: "Rejected" as PackagingAllocation["status"], rejectedReason: reason }
+          : a)),
+      );
     } else if (it.category === "Dispatch" && it.id.startsWith("DSPF-AP-")) {
       // Dispatch declined — send the batch back to Ready to Load.
       setPackagingBatches((prev) =>
@@ -2488,6 +2557,12 @@ export default function ApprovalManagementPage() {
     } else if (detailItem.category === "Packaging" && detailItem.id.startsWith("PKG-AP-")) {
       setPackagingBatches((prev) =>
         prev.map((b) => (b.id === detailItem.refId ? { ...b, status: "Rejected" as PackagingBatch["status"] } : b)),
+      );
+    } else if (detailItem.category === "Packaging" && detailItem.id.startsWith("PKR-AP-")) {
+      setPackagingAllocations((prev) =>
+        prev.map((a) => (a.id === detailItem.refId
+          ? { ...a, status: "Rejected" as PackagingAllocation["status"], rejectedReason: reason }
+          : a)),
       );
     } else if (detailItem.category === "Dispatch" && detailItem.id.startsWith("DSPF-AP-")) {
       setPackagingBatches((prev) =>

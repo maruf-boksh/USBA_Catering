@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { type PackagingBatch } from "@/lib/packaging-batches";
+import { isPackaged, type PackagingAllocation } from "@/lib/packaging-allocations";
 import { useNavigate } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -12,9 +13,11 @@ import {
 } from "lucide-react";
 import { flights, meals, activeWarehouses, activeOffices, activeWarehousesByOffice } from "@/lib/sample-data";
 import {
-  dayFromDate, parseMealQty, resolveCrewDish, resolveSpecialDish,
+  dayFromDate, parseMealQty, resolveCrewDish, resolveSpecialDish, resolveDessert,
 } from "@/lib/meal-planning-data";
-import { useFlightOrders, getFlightOrders, updateFlightOrdersWhere, getOrderAmendments, type FlightOrder } from "@/lib/flight-orders-store";
+import { flightTypeFromSector } from "@/lib/production-order-link";
+import { useFlightOrders, updateFlightOrdersWhere, getOrderAmendments, type FlightOrder } from "@/lib/flight-orders-store";
+import { resolveManifestRow, resolveFlightOrder, resolveReturnLeg } from "@/lib/order-chain";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import {
@@ -78,13 +81,6 @@ type ProductionLine = {
   legSector: string;            // sector (e.g. "SIN → DAC")
   legDirection: LegDirection;
 };
-
-// "SIN → DAC" / "SIN-DAC" → "DAC → SIN" — used to spot the reverse-sector leg.
-function reverseSector(sector: string): string {
-  const parts = sector.split(/→|—|–|-/).map((s) => s.trim()).filter(Boolean);
-  if (parts.length !== 2) return sector;
-  return `${parts[1]} → ${parts[0]}`;
-}
 
 type FlightSection = {
   flightNo: string; sector: string;
@@ -260,15 +256,28 @@ function mealMeta(name: string): { section: string; mealType: PackagingRow["meal
 // module: PRO-2026-1234 → PKG-2026-1234).
 const toPackagingId = (pro: string) => `PKG-${pro.replace(/^PRO-?/i, "")}`;
 
-// Deterministic order/flight association for a directly-packaged production —
-// mirrors the Packaging page exactly (same date-preference + stable pick keyed
-// off the production id) so both surfaces resolve the identical flight order.
-function resolveOrderFlight(productionId: string, date: string, pool: FlightOrder[]): FlightOrder | null {
-  if (pool.length === 0) return null;
-  const sameDate = pool.filter((o) => o.date === date);
-  const list = sameDate.length ? sameDate : pool;
-  const n = parseInt(productionId.replace(/\D/g, "").slice(-6) || "0", 10);
-  return list[n % list.length];
+/**
+ * The flight order a directly-packaged production belongs to — resolved through
+ * the shared chain (manifest link → Order Management), never guessed.
+ *
+ * This used to be `list[n % list.length]`: a hash of the production id picking an
+ * arbitrary flight order. It made every batch look linked, so a production with
+ * no manifest line was filed under a flight whose meals had nothing to do with
+ * it — and Packaging, which resolves honestly, then disagreed with this page
+ * about the same batch. Nothing to link to now returns null and the row lands in
+ * the Unassigned bucket, matching Packaging exactly.
+ */
+function resolveOrderFlight(
+  b: { batch: string; item?: string; date?: string },
+  rows: PackagingRow[],
+  pool: FlightOrder[],
+): FlightOrder | null {
+  const link = resolveManifestRow({ batch: b.batch, item: b.item, date: b.date }, rows);
+  if (!link.row) return null;
+  return resolveFlightOrder(
+    { flight: link.row.flight, date: link.row.date, orderNo: link.row.orderNo },
+    pool,
+  ) ?? null;
 }
 
 export const STATUS_BADGE: Record<DispatchStatus, string> = {
@@ -526,11 +535,19 @@ export default function Dispatch() {
   const flightOrders = useFlightOrders();
   // ── Dispatch records state ──────────────────────────────────────────────────
   const [records, setRecords] = usePersistedState<DispatchRecord[]>("dispatch-records", INITIAL_RECORDS);
-  // Seed from the persisted records (not just INITIAL_RECORDS) so flights added
-  // via "+ New Dispatch" stay flagged as configured across reloads.
-  const [configuredFlights, setConfiguredFlights] = useState<Set<string>>(
-    () => new Set(records.flatMap((r) => r.flightNos))
+  // Flights already configured for dispatch, keyed `flight|date`.
+  //
+  // NOT the flight number alone. A flight number recurs every day it flies, so
+  // a single set of numbers meant one dispatch of BG-403 back in June blocked
+  // BG-403 for every other date forever — "BG-403 is already configured for
+  // dispatch" against a flight that had never been configured for that day.
+  // Derived from the records rather than held in its own state, so deleting a
+  // dispatch frees its flight again instead of leaving a phantom block.
+  const configuredLegs = useMemo(
+    () => new Set(records.flatMap((r) => r.flightNos.map((f) => `${f}|${r.date}`))),
+    [records],
   );
+  const isConfigured = (flight: string, date: string) => configuredLegs.has(`${flight}|${date}`);
 
   // ── Packaging pipeline state ────────────────────────────────────────────────
   // Persisted so dispatches created via "+ New Dispatch" (and packaging/QC
@@ -623,22 +640,35 @@ export default function Dispatch() {
 
   // ── Derived ─────────────────────────────────────────────────────────────────
 
-  // Flights whose EVERY packaging batch is Packaging Done — only these are
-  // selectable for a new dispatch. A flight with multiple productions appears
-  // only once all of them are packaged.
+  // Per-flight packaging allocations (run × flight × qty). Read-only here, and
+  // only to say WHICH flights are ready to dispatch — never to raise a row.
+  // Declared above the two memos below, which read it during render.
+  const [packagingAllocations] = usePersistedState<PackagingAllocation[]>("packaging-allocations", []);
+
+  // Flights whose packaging is finished — the pool "+ New Dispatch" picks from.
+  //
+  // Read straight off the packaging ALLOCATIONS, not off this table's rows: the
+  // table now only holds dispatches somebody configured, so deriving "what is
+  // ready" from it would be circular — nothing could ever be picked because
+  // nothing is there until it is picked.
+  //
+  // A flight qualifies once it has at least one allocation and every one of them
+  // has its labels printed; a run still awaiting packaging approval or mid-print
+  // holds the whole flight back, which is the point.
   const packagingDoneFlights = useMemo(() => {
-    const byFlight = new Map<string, PackagingRow[]>();
-    for (const r of packagingRows) {
-      const arr = byFlight.get(r.flight) ?? [];
-      arr.push(r);
-      byFlight.set(r.flight, arr);
+    const byFlight = new Map<string, PackagingAllocation[]>();
+    for (const a of packagingAllocations) {
+      if (a.status === "Rejected") continue;
+      const arr = byFlight.get(a.flight) ?? [];
+      arr.push(a);
+      byFlight.set(a.flight, arr);
     }
     const done = new Set<string>();
-    for (const [f, rows] of byFlight) {
-      if (rows.length > 0 && rows.every((r) => r.packagingStatus === "Packaging Done")) done.add(f);
+    for (const [f, allocs] of byFlight) {
+      if (allocs.length > 0 && allocs.every(isPackaged)) done.add(f);
     }
     return done;
-  }, [packagingRows]);
+  }, [packagingAllocations]);
 
   // Flights selectable for dispatch come from Order Management (flight orders),
   // narrowed to the chosen date and to fully packaging-done flights — one entry
@@ -655,15 +685,16 @@ export default function Dispatch() {
   // Ready-to-Dispatch production orders (Packaging Done / Ready for Dispatch) — the
   // "Ready to Dispatch" multi-select in the New Dispatch modal. Selecting one
   // auto-loads its connected flight (same path as the flight dropdown).
+  // Same source as above — packaged allocations, one entry per production run,
+  // so picking a run here loads the flight it was actually packaged for.
   const readyToDispatchPros = useMemo(() => {
     const seen = new Map<string, { pro: string; flight: string; orderNo?: string; mealName: string }>();
-    for (const r of packagingRows) {
-      if ((r.packagingStatus === "Packaging Done" || r.packagingStatus === "Ready for Dispatch") && r.productionOrderId && !seen.has(r.productionOrderId)) {
-        seen.set(r.productionOrderId, { pro: r.productionOrderId, flight: r.flight, orderNo: r.orderNo, mealName: r.mealName });
-      }
+    for (const a of packagingAllocations) {
+      if (!isPackaged(a) || seen.has(a.productionId)) continue;
+      seen.set(a.productionId, { pro: a.productionId, flight: a.flight, orderNo: a.orderNo, mealName: a.item });
     }
     return [...seen.values()];
-  }, [packagingRows]);
+  }, [packagingAllocations]);
   const selectedOrder = useMemo(
     () =>
       flightOrders.find((o) => o.flight === configFlight && (!configDate || o.date === configDate)) ??
@@ -688,40 +719,11 @@ export default function Dispatch() {
     [selectedOrder, configFlight]
   );
 
-  // The return leg of an order's round trip. An explicit Trip Ref (pairId, set on
-  // bulk upload) is the authoritative link — it disambiguates same-sector trips
-  // that share one date's Order #. Without it, fall back to same Order # + the
-  // opposite direction, preferring the exact reverse sector.
-  const findReturnLeg = (order: FlightOrder | null | undefined): FlightOrder | null => {
-    if (!order) return null;
-    const opp: LegDirection = order.direction === "Return" ? "Outbound" : "Return";
-    // Crew orders can now share a flight order's Order #, so match the same
-    // order TYPE — a flight's return leg is a flight, never the crew order.
-    const orderKind = order.orderType ?? "flight";
-    const rev = reverseSector(order.sector);
-    // 1) Explicit pair key wins.
-    if (order.pairId) {
-      const paired = flightOrders.filter(
-        (o) =>
-          o.pairId === order.pairId &&
-          (o.orderType ?? "flight") === orderKind &&
-          o.flight !== order.flight &&
-          o.direction === opp,
-      );
-      if (paired.length > 0) return paired.find((o) => o.sector === rev) ?? paired[0];
-    }
-    // 2) Fall back to Order # + opposite direction (+ reverse-sector preference).
-    if (!order.orderNo) return null;
-    const legs = flightOrders.filter(
-      (o) =>
-        o.orderNo === order.orderNo &&
-        (o.orderType ?? "flight") === orderKind &&
-        o.flight !== order.flight &&
-        o.direction === opp,
-    );
-    if (legs.length === 0) return null;
-    return legs.find((o) => o.sector === rev) ?? legs[0];
-  };
+  // The return leg of an order's round trip — Trip Ref (pairId) first, then
+  // Order # + opposite direction. The rule lives in the chain layer because
+  // Packaging pairs round trips the same way and the two must not diverge.
+  const findReturnLeg = (order: FlightOrder | null | undefined): FlightOrder | null =>
+    resolveReturnLeg(order, flightOrders)?.order ?? null;
   const returnOrder = useMemo<FlightOrder | null>(
     () => findReturnLeg(selectedOrder),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -945,20 +947,13 @@ export default function Dispatch() {
   // already Ready for Dispatch / Dispatched — so the existing flow is untouched.
   const [packagingModuleBatches] = usePersistedState<PackagingBatch[]>("packaging-batches", []);
   useEffect(() => {
-    const doneBatches = packagingModuleBatches
-      .filter((b) => b.status === "Packaging Done")
-      // Most-recently packaged (Initiate Packaging) first, so they lead the table.
-      .sort((a, b) => (b.packagedAt ?? "").localeCompare(a.packagedAt ?? ""));
-    const doneProdIds = new Set(doneBatches.map((b) => b.batch));
+    const doneProdIds = new Set(
+      packagingModuleBatches.filter((b) => b.status === "Packaging Done").map((b) => b.batch),
+    );
     setPackagingRows((prev) => {
       let changed = false;
-      // Preserve each placeholder row's progressed status (e.g. Dispatched) so the
-      // rebuild below doesn't reset a dispatched batch back to Packaging Done.
-      const prevPkgStatus = new Map(
-        prev.filter((r) => r.id.startsWith("PKG-")).map((r) => [r.id, r.packagingStatus]),
-      );
-      // Drop the previous placeholder rows (rebuilt fresh below) and the legacy
-      // lumped catering-point row.
+      // Drop any auto-generated placeholder row a previous build wrote, and the
+      // legacy lumped catering-point row.
       let next = prev.filter((r) => {
         if (r.id.startsWith("PKG-") || r.flight === CATERING_FLIGHT || r.dspRef === CATERING_DSP_REF) {
           changed = true;
@@ -980,35 +975,17 @@ export default function Dispatch() {
         }
         return r;
       });
-      // 2) A production packaged directly in the Packaging module (no flight
-      //    order) gets a new dispatch row — associated with the SAME real flight
-      //    order the Packaging page resolves, so the Flight column + its
-      //    Outbound/Return flag line up. A dispatch id is generated per flight.
-      const knownPros = new Set(next.map((r) => r.productionOrderId).filter(Boolean));
-      const foPool = getFlightOrders().filter((o) => (o.orderType ?? "flight") === "flight");
-      const additions: PackagingRow[] = [];
-      for (const b of doneBatches) {
-        if (!b.packagedAt) continue;
-        if (knownPros.has(b.batch)) continue;
-        const rowId = `PKG-${b.id}`;
-        const meta = mealMeta(b.item);
-        const fo = resolveOrderFlight(b.batch, b.date, foPool);
-        additions.push({
-          id: rowId,
-          date: b.date,
-          depTime: fo ? to12h(fo.etd) : "—",
-          flight: fo?.flight ?? b.batch,
-          mealType: meta.mealType,
-          mealName: b.item,
-          qty: b.qty,
-          section: meta.section,
-          packagingStatus: prevPkgStatus.get(rowId) ?? "Packaging Done",
-          dspRef: fo ? `DSP-${fo.flight}` : `DSP-${b.batch.replace(/^PRO-?/i, "")}`,
-          orderNo: fo?.orderNo,
-          productionOrderId: b.batch,
-        });
-      }
-      if (additions.length > 0) { changed = true; next = [...additions, ...next]; }
+      // 2) Packaged production does NOT raise a row here. Finishing packaging
+      //    makes a flight AVAILABLE to dispatch, it does not configure the
+      //    dispatch — that is what "+ New Dispatch" is for. Auto-adding a row
+      //    per packaged allocation filled this table with dispatches nobody had
+      //    set up, with no vehicle, warehouses or sheet behind them. The pool of
+      //    packaged allocations is read by `packagingDoneFlights` /
+      //    `readyToDispatchPros` instead, which is what the New Dispatch form
+      //    offers you to pick from.
+      //
+      //    The filter above still drops any `PKG-…` row a previous build wrote,
+      //    so those clear themselves out on first load.
       return changed ? next : prev;
     });
   }, [packagingModuleBatches, setPackagingRows, flightOrders]);
@@ -1248,8 +1225,21 @@ export default function Dispatch() {
 
   // Checkbox selection — dispatches ticked for loading into one vehicle.
   const [selectedVehicleFlights, setSelectedVehicleFlights] = useState<Set<string>>(new Set());
-  // Header select-all — every flight shown in the dispatch table (all runs/pages).
-  const allSelectableFlights = useMemo(() => [...new Set(filteredPRDs.map((r) => r.flight))], [filteredPRDs]);
+  /** A flight whose every row has gone out — nothing left to select it for. */
+  const isFlightDispatched = (flight: string) => {
+    const frows = filteredPRDs.filter((r) => r.flight === flight);
+    return frows.length > 0 && frows.every((r) => r.packagingStatus === "Dispatched");
+  };
+  // Header select-all — every flight shown in the dispatch table (all runs/pages),
+  // excluding the ones already dispatched: they can't be loaded or dispatched
+  // again, so select-all must not tick them.
+  const allSelectableFlights = useMemo(
+    () => [...new Set(filteredPRDs.map((r) => r.flight))].filter((f) => {
+      const frows = filteredPRDs.filter((r) => r.flight === f);
+      return !frows.every((r) => r.packagingStatus === "Dispatched");
+    }),
+    [filteredPRDs],
+  );
   const allDispatchesSelected = allSelectableFlights.length > 0 && allSelectableFlights.every((f) => selectedVehicleFlights.has(f));
   const toggleSelectAllDispatches = () =>
     setSelectedVehicleFlights(() => (allDispatchesSelected ? new Set<string>() : new Set(allSelectableFlights)));
@@ -1267,7 +1257,24 @@ export default function Dispatch() {
   // Dispatch Entry sheet, loading them together into one vehicle. Works for a
   // single marked dispatch or several.
   const loadSelectedVehicle = () => {
-    const loadable = [...selectedVehicleFlights].filter((f) => {
+    const loadable = loadableSelection;
+    if (loadable.length === 0) { toast.error("Select at least one Packaging-Done dispatch to load into the vehicle."); return; }
+    loadable.forEach((f) => handleQCAction(f));
+    setSelectedVehicleFlights(new Set());
+    // Every selected dispatch travels on the one vehicle, so hand all of them
+    // over — passing only loadable[0] silently dropped the rest, and the
+    // monitoring entry then showed a single flight for a multi-flight load.
+    navigate(
+      `/dispatch-monitoring?flight=${encodeURIComponent(loadable[0])}`
+      + `&flights=${encodeURIComponent(loadable.join(","))}&mode=qc-only`,
+    );
+  };
+
+  // Selected flights that still need loading into a vehicle. A flight whose
+  // loading is already complete (QC done) has nothing left to load, so the
+  // Vehicle Load action is not offered for it — only Initiate Dispatch is.
+  const loadableSelection = useMemo(() => {
+    return [...selectedVehicleFlights].filter((f) => {
       // Use the rows the table actually shows for this flight, so "loadable"
       // matches the displayed "Packaging Done / Ready to Load" status.
       const frows = filteredPRDs.filter((r) => r.flight === f);
@@ -1276,10 +1283,47 @@ export default function Dispatch() {
       const disp = frows.every((r) => r.packagingStatus === "Dispatched");
       return done && !disp && getQcState(f) !== "done";
     });
-    if (loadable.length === 0) { toast.error("Select at least one Packaging-Done dispatch to load into the vehicle."); return; }
-    loadable.forEach((f) => handleQCAction(f));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedVehicleFlights, filteredPRDs, flightQCStates, qcClearedFlights, dispatchApprovals]);
+
+  // ── Multi-dispatch initiate ────────────────────────────────────────────────
+  // Selected flights that are QC-done and not yet dispatched — these can be sent
+  // together, so several dispatch IDs go out on one action instead of one at a
+  // time. Round-trip partners of a selected leg come along automatically, since a
+  // dispatch is only meaningful as a whole.
+  const dispatchableSelection = useMemo(() => {
+    const out: string[] = [];
+    for (const f of selectedVehicleFlights) {
+      const frows = filteredPRDs.filter((r) => r.flight === f);
+      if (frows.length === 0) continue;
+      if (getQcState(f) !== "done") continue;
+      if (frows.every((r) => r.packagingStatus === "Dispatched")) continue;
+      out.push(f);
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedVehicleFlights, filteredPRDs, flightQCStates, qcClearedFlights, dispatchApprovals]);
+
+  const dispatchSelected = () => {
+    if (dispatchableSelection.length === 0) return;
+    // Pull in every leg of each selected dispatch (its dspRef group), so a
+    // round trip is never half-dispatched.
+    const refs = new Set(
+      dispatchableSelection
+        .map((f) => filteredPRDs.find((r) => r.flight === f)?.dspRef)
+        .filter(Boolean) as string[],
+    );
+    const flightsToSend = [...new Set([
+      ...dispatchableSelection,
+      ...packagingRows.filter((r) => r.dspRef && refs.has(r.dspRef)).map((r) => r.flight),
+    ])].filter((f) => getQcState(f) === "done");
+    const groups: FlightGroup[] = flightsToSend.map((f) => ({
+      flight: f,
+      rows: packagingRows.filter((r) => r.flight === f),
+    }));
+    if (groups.length === 0) return;
     setSelectedVehicleFlights(new Set());
-    navigate(`/dispatch-monitoring?flight=${encodeURIComponent(loadable[0])}&mode=qc-only`);
+    openWarningForDispatchRun(groups);
   };
 
   // Combined dispatch for a round-trip run: opens ONE check sheet covering every
@@ -1382,9 +1426,14 @@ export default function Dispatch() {
   const handleConfigSave = () => {
     if (!configDepTime) { toast.error("Please select a departure time."); return; }
     if (!configFlight)  { toast.error("Please select a flight."); return; }
-    if (configuredFlights.has(configFlight)) { toast.error(`${configFlight} is already configured for dispatch.`); return; }
-    if (includeReturn && returnOrder && configuredFlights.has(returnOrder.flight)) {
-      toast.error(`Return leg ${returnOrder.flight} is already configured — untick "Dispatch the return sector together" to dispatch ${configFlight} alone.`);
+    if (isConfigured(configFlight, configDate)) {
+      toast.error(`${configFlight} on ${configDate} is already configured for dispatch.`);
+      return;
+    }
+    // The return leg carries its OWN date — a cross-midnight round trip returns
+    // the next day, so checking it against the outbound's date would be wrong.
+    if (includeReturn && returnOrder && isConfigured(returnOrder.flight, returnOrder.date)) {
+      toast.error(`Return leg ${returnOrder.flight} on ${returnOrder.date} is already configured — untick "Dispatch the return sector together" to dispatch ${configFlight} alone.`);
       return;
     }
     if (!configFromWarehouse || !configToWarehouse) { toast.error("Please select both a from and to warehouse."); return; }
@@ -1456,6 +1505,13 @@ export default function Dispatch() {
     };
     const dispatchDay = dayFromDate(configDate);
     const stamp = Date.now();
+    // The form only offers flights whose packaging is finished, so a row it
+    // creates opens at "Packaging Done" (Vehicle Load available) rather than
+    // claiming the meals still have to be packaged. A flight configured ahead
+    // of packaging — possible for a leg with no allocations yet — still starts
+    // at "Ready for Packaging" and is flipped by the sync effect above.
+    const legStatus = (flight: string): PackagingStatus =>
+      packagingDoneFlights.has(flight) ? "Packaging Done" : "Ready for Packaging";
     const rowsForLeg = (leg: LegConfig, legIdx: number): PackagingRow[] => [
       ...leg.paxLines
         .filter((l) => l.itemName && (Number(l.qty) || 0) > 0)
@@ -1465,7 +1521,7 @@ export default function Dispatch() {
             id: `PRD-${stamp}-L${legIdx}-${i}`,
             date: configDate, depTime: configDepTime, flight: leg.flight,
             mealType: meta.mealType, mealName: l.itemName, qty: Number(l.qty) || 0,
-            section: meta.section, packagingStatus: "Ready for Packaging" as PackagingStatus,
+            section: meta.section, packagingStatus: legStatus(leg.flight),
             dspRef: recId, orderNo: leg.order?.orderNo, productionOrderId: proFor(l.itemName),
           };
         }),
@@ -1479,7 +1535,7 @@ export default function Dispatch() {
             mealType: crewMealType(m.type),
             mealName: dish ? `${dish} (Crew ${m.type})` : `Crew ${m.type}`,
             qty: parseMealQty(m.qty), section: "Crew Meal",
-            packagingStatus: "Ready for Packaging" as PackagingStatus,
+            packagingStatus: legStatus(leg.flight),
             dspRef: recId, orderNo: leg.order?.orderNo,
             productionOrderId: dish ? proFor(dish) : undefined,
           };
@@ -1493,7 +1549,7 @@ export default function Dispatch() {
             date: configDate, depTime: configDepTime, flight: leg.flight,
             mealType: "Special" as PackagingRow["mealType"], mealName: m.type,
             qty: Number(m.qty) || 0, section: "Special Meal",
-            packagingStatus: "Ready for Packaging" as PackagingStatus,
+            packagingStatus: legStatus(leg.flight),
             dspRef: recId, orderNo: leg.order?.orderNo,
             productionOrderId: dish ? proFor(dish) : undefined,
           };
@@ -1560,7 +1616,8 @@ export default function Dispatch() {
       );
     }
 
-    setConfiguredFlights((prev) => new Set([...prev, ...legFlights]));
+    // No separate "configured" bookkeeping — `configuredLegs` derives from the
+    // records this just wrote.
     setConfigOpen(false);
     resetConfig();
   };
@@ -1569,13 +1626,20 @@ export default function Dispatch() {
     const now = new Date();
     const dateStr = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
     const timeStr = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: true });
+    // Every dispatch record whose flights are going out on this run — a combined
+    // dispatch can cover several dispatch IDs, and marking only the one whose
+    // record opened the sheet left the others sitting at "Ready For Dispatch".
+    const goingFlights = new Set(dispatchingRecord?.flightNos ?? []);
     setRecords((prev) =>
-      prev.map((r) =>
-        r.id === dispatchingRecord?.id
-          ? { ...r, status: "Dispatched", dispatchedBy: "M. Karim",
-              trail: [...r.trail, { status: "Dispatched", by: "M. Karim (Dispatch Executive)", date: dateStr, time: timeStr }] }
-          : r
-      )
+      prev.map((r) => {
+        const covered = r.id === dispatchingRecord?.id
+          || (r.status !== "Dispatched" && r.flightNos.length > 0 && r.flightNos.every((f) => goingFlights.has(f)));
+        if (!covered) return r;
+        return {
+          ...r, status: "Dispatched", dispatchedBy: "M. Karim",
+          trail: [...r.trail, { status: "Dispatched", by: "M. Karim (Dispatch Executive)", date: dateStr, time: timeStr }],
+        };
+      })
     );
     if (dispatchingRecord) {
       const execName = "M. Karim";
@@ -1611,6 +1675,78 @@ export default function Dispatch() {
       setDispatchedFlightEntries((prev) => [...prev, ...newEntries]);
       const dispatchedFlightSet = new Set(dispatchingRecord.flightNos);
       const dispatchedRows = packagingRows.filter((r) => dispatchedFlightSet.has(r.flight));
+
+      // ── Dispatch → Dispatch Monitoring → Galley Planning ────────────────────
+      // Monitoring (and Galley Planning, which plans against the same entries)
+      // read sessionStorage["dm_entries"]. Nothing wrote a real dispatch into it,
+      // so those pages only ever showed their own demo seed — the last hop of the
+      // chain was open. Initiating a dispatch now upserts one entry per flight,
+      // carrying the meal lines actually dispatched, so the galley plans against
+      // the real load. Monitoring fills in the cold-chain/vehicle fields it owns.
+      try {
+        const raw = sessionStorage.getItem("dm_entries");
+        const entries: Array<Record<string, unknown>> = raw ? JSON.parse(raw) : [];
+        for (const flight of dispatchingRecord.flightNos) {
+          const rows = packagingRows.filter((r) => r.flight === flight);
+          const mealLines = rows.map((r) => ({ type: r.mealName, qty: String(r.qty) }));
+          // Match an OPEN entry for this flight, however its flightId was
+          // stored. Keying on flightId + packagingDate missed two things: an
+          // entry created from the monitoring form stores the flight-board id
+          // ("MFL-BS-307") and today's date, not the flight number and the
+          // dispatch's date — so the same flight got a second, duplicate row
+          // awaiting receipt. An already-received entry is left alone; that load
+          // is closed and a new dispatch deserves its own record.
+          const sameFlight = (e: Record<string, unknown>) => {
+            const fid = String(e.flightId ?? "");
+            return fid === flight || fid === `MFL-${flight}` || fid.endsWith(`-${flight}`);
+          };
+          const idx = entries.findIndex((e) => sameFlight(e) && !e.receivedAt);
+          const base = {
+            flightId: flight,
+            packagingDate: dispatchingRecord.date,
+            dispatchNo: dispatchingRecord.id,
+            mealLines,
+          };
+          if (idx >= 0) {
+            // Same flight still awaiting receipt — refresh the load and push it
+            // to "Forwarded to Airport" if it hasn't got there yet, keeping the
+            // monitoring fields already captured against it.
+            const prev = entries[idx];
+            entries[idx] = {
+              ...prev,
+              ...base,
+              flightId: prev.flightId ?? base.flightId,
+              approvalStage: Math.max(Number(prev.approvalStage ?? 0), 3),
+              forwardedToAirportAt: prev.forwardedToAirportAt || `${dateStr} ${timeStr}`,
+            };
+          } else {
+            // The load has already been checked and has physically left the
+            // catering point, so it enters Monitoring as "Forwarded to Airport"
+            // (stage 3) — the stage that offers Airport Receive. Creating it at
+            // stage 0 left it sitting as "Pending" with no way to receive it.
+            const stamp = `${dateStr} ${timeStr}`;
+            entries.unshift({
+              id: `DM-${dispatchingRecord.id}-${flight}`,
+              ...base,
+              vehicleNo: "", vehicleClean: "Yes",
+              chilledTemp: "", frozenTemp: "",
+              loadStartTime: "", loadEndTime: "", vehicleTempBegin: "", vehicleTempEnd: "",
+              resultSatisfy: "Yes", gateTempGate08: "",
+              unloadingTime: "", checkedByApt: "",
+              monitoredByRemarks: `Dispatched from ${dispatchingRecord.kitchenName ?? "catering point"} — ${dispatchingRecord.id}`,
+              monitoredAt: stamp,
+              approvalStage: 3,
+              verifiedBy: { name: execName, date: dateStr, time: timeStr, remarks: "Loaded & QC cleared at catering point" },
+              approvedBy: { name: execName, date: dateStr, time: timeStr, remarks: "Dispatch initiated" },
+              forwardedToAirportAt: stamp,
+              receivedBy: "", receivedDesignation: "", receivedAt: "", receivedRemarks: "",
+            });
+          }
+        }
+        sessionStorage.setItem("dm_entries", JSON.stringify(entries));
+      } catch {
+        /* storage unavailable — monitoring keeps its own entries */
+      }
 
       // Dispatched meals leave inventory. Key the negative delta by meal name so
       // it nets against the positive delta QC adds on production completion
@@ -1923,7 +2059,12 @@ export default function Dispatch() {
       flightOrders.find((o) => o.flight === flight && o.date === date && o.orderType !== "crew") ??
       flightOrders.find((o) => o.flight === flight && o.orderType !== "crew");
 
-    const paxRows = rows.filter((r) => r.mealType !== "Special");
+    // Crew meals are ordered and counted separately, and get their own row on
+    // the sheet — folding them into PAX reported a 202-pax flight as 218 (202
+    // pax + 16 crew) under "PAX MEALS".
+    const isCrewRow = (r: PackagingRow) =>
+      r.section === "Crew Meal" || /crew/i.test(r.mealName);
+    const paxRows = rows.filter((r) => r.mealType !== "Special" && !isCrewRow(r));
     const specialRows = rows.filter((r) => r.mealType === "Special");
     const paxTotal = paxRows.reduce((s, r) => s + r.qty, 0) || (order?.pax ?? 0);
     const paxLines: PaxLine[] = paxRows.length
@@ -1952,6 +2093,27 @@ export default function Dispatch() {
       ? [{ type: slotLabel(order.etd), qty: String(order.crew) }]
       : [];
 
+    // Pastry ← the dessert planned for this service on the Menu Planning card,
+    // taken at whatever was actually produced for the flight; the order's pax
+    // count only when there is a dessert on the card but no production line yet.
+    //
+    // This used to be `pastry: paxTotal` — not a literal, but no less invented:
+    // it restated the PAX figure under a second heading, so a flight with no
+    // dessert on its menu still reported one pastry per passenger.
+    const dessert = resolveDessert(dayFromDate(date || order?.date || ""), {
+      flightType: flightTypeFromSector(order?.sector ?? ""),
+      mealType: order ? slotLabel(order.etd) : undefined,
+      date: date || order?.date,
+    });
+    const dessertRows = dessert
+      ? rows.filter((r) => r.mealName === dessert.name || r.mealName.includes(dessert.name))
+      : [];
+    const pastry = dessertRows.length
+      ? dessertRows.reduce((s, r) => s + r.qty, 0)
+      : dessert ? (order?.pax ?? 0) : 0;
+    // Child meals are a separate order line that this system does not yet
+    // capture, so it stays 0 rather than being guessed. The field is editable
+    // on the sheet for the operator to fill in.
     return {
       flightNo: flight,
       sector: (order?.sector ?? "").replace(/\s*→\s*/g, "-"),
@@ -1959,7 +2121,7 @@ export default function Dispatch() {
       paxLines,
       vgml, chml, spml,
       crewMeals,
-      pastry: paxTotal,
+      pastry,
       childMealsPastry: 0,
     };
   };
@@ -2354,13 +2516,32 @@ export default function Dispatch() {
       {selectedVehicleFlights.size > 0 && (
         <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-violet-200 bg-violet-50/60 px-4 py-2.5">
           <span className="text-xs font-medium text-violet-800">
-            {selectedVehicleFlights.size} dispatch leg{selectedVehicleFlights.size === 1 ? "" : "s"} selected for one vehicle
+            {selectedVehicleFlights.size} dispatch leg{selectedVehicleFlights.size === 1 ? "" : "s"} selected
+            {loadableSelection.length > 0
+              ? " for one vehicle"
+              : dispatchableSelection.length > 0 ? " — loading complete, ready to dispatch" : ""}
           </span>
           <div className="flex items-center gap-2">
             <Button size="sm" variant="ghost" className="h-8 text-xs text-muted-foreground" onClick={() => setSelectedVehicleFlights(new Set())}>Clear</Button>
-            <Button size="sm" className="h-8 bg-violet-600 hover:bg-violet-700 text-white border-0" onClick={loadSelectedVehicle}>
-              <ShieldCheck className="h-3.5 w-3.5 mr-1" /> Vehicle Load ({selectedVehicleFlights.size})
-            </Button>
+            {/* Hidden once loading is complete — there is nothing left to load,
+                and the only action left for those dispatches is Initiate Dispatch. */}
+            {loadableSelection.length > 0 && (
+              <Button size="sm" className="h-8 bg-violet-600 hover:bg-violet-700 text-white border-0" onClick={loadSelectedVehicle}>
+                <ShieldCheck className="h-3.5 w-3.5 mr-1" /> Vehicle Load ({loadableSelection.length})
+              </Button>
+            )}
+            {/* Dispatch every selected dispatch in one go, once they have all
+                passed QC — previously this was only available per dispatch run. */}
+            {dispatchableSelection.length > 0 && (
+              <Button
+                size="sm"
+                className="h-8 bg-gradient-to-r from-teal-500 to-cyan-600 text-white hover:from-teal-600 hover:to-cyan-700 border-0"
+                onClick={dispatchSelected}
+                title={`Initiate dispatch for ${dispatchableSelection.length} flight${dispatchableSelection.length === 1 ? "" : "s"} together`}
+              >
+                <Truck className="h-3.5 w-3.5 mr-1" /> Initiate Dispatch ({dispatchableSelection.length})
+              </Button>
+            )}
           </div>
         </div>
       )}
@@ -2368,7 +2549,7 @@ export default function Dispatch() {
       {/* ── PRD Packaging Table ──────────────────────────────────────────────── */}
       <div data-arrival-id="dispatch-list" className="rounded-lg border border-border bg-card shadow-sm mb-6 overflow-hidden">
         <div className="overflow-x-auto">
-          <table className="text-sm min-w-[960px]">
+          <table className="w-full text-sm min-w-[960px]">
             <thead className="bg-muted/50 border-b border-border">
               <tr>
                 <th className="p-3 text-center font-semibold w-16 whitespace-nowrap">
@@ -2490,11 +2671,16 @@ export default function Dispatch() {
                           {run.first && (
                             <td rowSpan={run.span} className="p-3 align-middle border-r border-border/20">
                               <div className="flex items-center justify-center gap-2">
-                                {runAllFlights.length > 0 && (
+                                {runAllFlights.length > 0 && (() => {
+                                  // Already gone out → nothing to load or dispatch,
+                                  // so the row can't be selected.
+                                  const runDispatched = runAllFlights.every(isFlightDispatched);
+                                  return (
                                   <input
                                     type="checkbox"
-                                    className="h-4 w-4 accent-primary cursor-pointer shrink-0"
-                                    checked={runAllSelected}
+                                    className={`h-4 w-4 accent-primary shrink-0 ${runDispatched ? "cursor-not-allowed opacity-30" : "cursor-pointer"}`}
+                                    checked={runAllSelected && !runDispatched}
+                                    disabled={runDispatched}
                                     onChange={() => setSelectedVehicleFlights((prev) => {
                                       const n = new Set(prev);
                                       if (runAllSelected) runAllFlights.forEach((f) => n.delete(f));
@@ -2502,9 +2688,12 @@ export default function Dispatch() {
                                       return n;
                                     })}
                                     aria-label={`Select dispatch ${dspId ?? ""} for vehicle load`}
-                                    title="Select this dispatch to load into one vehicle"
+                                    title={runDispatched
+                                      ? `${dspId ?? "This dispatch"} has already been dispatched`
+                                      : "Select this dispatch to load into one vehicle"}
                                   />
-                                )}
+                                  );
+                                })()}
                                 <span className="text-xs font-medium text-muted-foreground tabular-nums">{serialNo}</span>
                               </div>
                             </td>
@@ -2540,24 +2729,31 @@ export default function Dispatch() {
                               )}
                             </td>
                           )}
-                          {/* Packaging ID — one system id per line, clickable → Production Entry */}
+                          {/* Packaging ID — a single id reads inline; a flight packaged
+                              from many runs would stack a dozen codes and blow the row
+                              height open, so those collapse to a count and the full
+                              list lives in the View dialog. */}
                           <td className="p-3 align-middle border-r border-border/20">
                             {donePros.length === 0 ? (
                               <span className="text-xs text-muted-foreground">—</span>
+                            ) : donePros.length === 1 ? (
+                              <button
+                                type="button"
+                                className="w-fit text-left font-mono text-xs font-semibold text-primary whitespace-nowrap hover:underline focus:outline-none focus:underline"
+                                title="Open in Packaging"
+                                onClick={() => { flagArrival({ target: "packaging-list", ids: [donePros[0]] }); navigate(`/packaging?pkg=${encodeURIComponent(donePros[0])}`); }}
+                              >
+                                {toPackagingId(donePros[0])}
+                              </button>
                             ) : (
-                              <div className="flex flex-col gap-0.5">
-                                {donePros.map((pid) => (
-                                  <button
-                                    key={pid}
-                                    type="button"
-                                    className="w-fit text-left font-mono text-xs font-semibold text-primary whitespace-nowrap hover:underline focus:outline-none focus:underline"
-                                    title="Open in Packaging"
-                                    onClick={() => { flagArrival({ target: "packaging-list", ids: [pid] }); navigate(`/packaging?pkg=${encodeURIComponent(pid)}`); }}
-                                  >
-                                    {toPackagingId(pid)}
-                                  </button>
-                                ))}
-                              </div>
+                              <button
+                                type="button"
+                                className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/5 px-2 py-0.5 text-[11px] font-semibold text-primary whitespace-nowrap hover:bg-primary/10"
+                                title={`${donePros.length} packages — open to see every Packaging ID`}
+                                onClick={() => setViewPackagingRow(flightGroup.rows[0])}
+                              >
+                                <Package className="h-3 w-3" /> {donePros.length} packages
+                              </button>
                             )}
                           </td>
                           <td className="p-3 font-semibold text-sm align-middle border-r border-border/20 whitespace-nowrap">
@@ -2890,6 +3086,36 @@ export default function Dispatch() {
                     <div><span className="text-muted-foreground">QC at:</span><span className="font-semibold ml-1">{qcCheckedAt}</span></div>
                   )}
                 </div>
+
+                {/* Packaging IDs — the full list the row's cell summarises. */}
+                {(() => {
+                  const pros = [...new Set(
+                    orderRows
+                      .filter((r) => (r.packagingStatus === "Packaging Done" || r.packagingStatus === "Ready for Dispatch" || r.packagingStatus === "Dispatched") && r.productionOrderId)
+                      .map((r) => r.productionOrderId!),
+                  )];
+                  if (pros.length === 0) return null;
+                  return (
+                    <div>
+                      <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-1">
+                        Packaging IDs ({pros.length})
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {pros.map((pid) => (
+                          <button
+                            key={pid}
+                            type="button"
+                            className="inline-flex items-center rounded-full border border-primary/30 bg-primary/5 px-2 py-0.5 font-mono text-[11px] font-semibold text-primary hover:bg-primary/10 focus:outline-none focus:ring-1 focus:ring-primary/40"
+                            title="Open in Packaging"
+                            onClick={() => { flagArrival({ target: "packaging-list", ids: [pid] }); navigate(`/packaging?pkg=${encodeURIComponent(pid)}`); }}
+                          >
+                            {toPackagingId(pid)}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 <div>
                   <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-1">Meals ({orderRows.length})</div>

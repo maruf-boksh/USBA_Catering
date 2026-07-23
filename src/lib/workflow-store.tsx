@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { usePersistedState } from "@/lib/use-persisted-state";
 import { getDemandRequests, saveDemandRequests } from "@/lib/demand-requests";
 import { requisitions as seedReqs, purchaseOrders as seedPOs } from "@/lib/sample-data";
 
@@ -747,7 +748,13 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   );
   const [prdStatuses, setPrdStatuses] = useState<Record<string, string>>({});
   const [prdProgress, setPrdProgress] = useState<Record<string, number>>({});
-  const [productionEntries, setProductionEntries] = useState<WfProductionEntry[]>(initialProductionEntries);
+  // Persisted: a production order created in-app used to live only in memory, so
+  // every reload dropped it back to the seed. Everything downstream that looks a
+  // run up by id — packaging (produced qty, warehouse, order tagging), QC, the
+  // Production Order page — then found nothing and rendered blanks.
+  const [productionEntries, setProductionEntries] = usePersistedState<WfProductionEntry[]>(
+    "wf-production-entries", initialProductionEntries,
+  );
 
   // Production-floor entry records. The seeds line up with PRO-2026-000031's
   // 280-order which already shows 140 produced — that 140 came from these

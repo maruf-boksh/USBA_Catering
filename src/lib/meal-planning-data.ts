@@ -577,6 +577,33 @@ export function resolveSpecialDish(
   return pick.sp?.items[0]?.name ?? null;
 }
 
+/**
+ * The dessert / pastry planned for a day — the `dessert` item on the matching
+ * meal card. Prefers the card for this day, flight type and meal period, then
+ * falls back to any card for the day, then any card at all. Returns null when
+ * no card carries a dessert, which is a real answer: not every service does.
+ */
+export function resolveDessert(
+  day: string,
+  opts: { flightType?: FlightType; mealType?: string; date?: string } = {},
+  cards: MealCard[] = loadMealPlanningConfig(),
+): MealItem | null {
+  const pool = cards.filter(
+    (c) => c.forType === "Passengers" && !!c.dessert?.name && cardMatchesDate(c, opts.date),
+  );
+  if (pool.length === 0) return null;
+  const byDay = pool.filter((c) => c.day === day);
+  const scope = byDay.length ? byDay : pool;
+  // A card lists the flight types it applies to, so this is membership, not
+  // equality — an "International + Domestic" card serves both.
+  const exact = scope.find(
+    (c) =>
+      (!opts.flightType || c.flightType.includes(opts.flightType)) &&
+      (!opts.mealType || c.mealType.toLowerCase() === opts.mealType.toLowerCase()),
+  );
+  return (exact ?? scope[0]).dessert ?? null;
+}
+
 // ── Mobile bridge: map the web Meal-Planning config into the mobile screen's
 // plan shape ─────────────────────────────────────────────────────────────────
 // The mobile MealPlanningScreen renders a flat plan shape. This adapter lets the
