@@ -28,12 +28,19 @@ type AllocLine = {
   uom: string;
 };
 
+type LegDirection = "Outbound" | "Return";
+
 type AllocRecord = {
   id: string;
   date: string;
   scheduledTime: string;
   flight: string;
   sector: string;
+  /** The return leg of the same rotation. One allocation covers BOTH legs, so
+   *  the outbound is `flight`/`sector` and the return is recorded here. Absent
+   *  on galley-forwarded and seed records, which are single-leg. */
+  returnFlight?: string;
+  returnSector?: string;
   lines: AllocLine[];
   // Source location the stock was transferred from (galley-forwarded allocs).
   officeId?: string;
@@ -47,14 +54,37 @@ type DraftAllocLine = {
   qty: string;
 };
 
+/** A single-leg record's direction, derived from its sector the way the order
+ *  book does (DAC→X out, X→DAC back). Rotation records name both legs outright. */
+const directionOf = (sector: string): LegDirection =>
+  (sector ?? "").trim().toUpperCase().startsWith("DAC") ? "Outbound" : "Return";
+
+/** Outbound / Return chip — the same colours the galley plan legs use. */
+function DirBadge({ direction }: { direction: LegDirection }) {
+  return (
+    <Badge
+      variant="outline"
+      className={`h-4 px-1.5 text-[9px] font-bold uppercase tracking-wider ${
+        direction === "Return"
+          ? "bg-amber-100 text-amber-700 border-amber-200"
+          : "bg-emerald-100 text-emerald-700 border-emerald-200"
+      }`}
+    >
+      {direction}
+    </Badge>
+  );
+}
+
 // ── Flight schedule seed ────────────────────────────────────────────────────
+// Every outbound flight returns, and the rotation is allocated ONCE — picking
+// the flight covers both its legs, so each row carries the return leg with it.
 
 const FLIGHT_SCHEDULES = [
-  { time: "06:30", flight: "BG-401", sector: "DAC→DXB" },
-  { time: "06:30", flight: "BS-141", sector: "DAC→CGP" },
-  { time: "08:45", flight: "BS-105", sector: "DAC→CXB" },
-  { time: "10:15", flight: "BG-522", sector: "DAC→LHR" },
-  { time: "14:00", flight: "VQ-901", sector: "DAC→KUL" },
+  { time: "06:30", flight: "BG-401", sector: "DAC→DXB", returnFlight: "BG-402", returnSector: "DXB→DAC" },
+  { time: "06:30", flight: "BS-141", sector: "DAC→CGP", returnFlight: "BS-142", returnSector: "CGP→DAC" },
+  { time: "08:45", flight: "BS-105", sector: "DAC→CXB", returnFlight: "BS-106", returnSector: "CXB→DAC" },
+  { time: "10:15", flight: "BG-522", sector: "DAC→LHR", returnFlight: "BG-523", returnSector: "LHR→DAC" },
+  { time: "14:00", flight: "VQ-901", sector: "DAC→KUL", returnFlight: "VQ-904", returnSector: "KUL→DAC" },
 ];
 
 const SCHEDULE_TIMES = [...new Set(FLIGHT_SCHEDULES.map((f) => f.time))].sort();
@@ -134,13 +164,16 @@ function AllocationList({
   const [dateTo, setDateTo] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
 
-  // Convert new AllocRecord[] to the same row shape as SEED_USAGE and merge
+  // Convert new AllocRecord[] to the same row shape as SEED_USAGE and merge.
+  // A rotation record carries both its legs so the ledger shows the round trip.
   const allocRows = allocations.flatMap((a) =>
     a.lines.map((l) => ({
       id: `${a.id}-${l.itemId}`,
       date: a.date,
       flight: a.flight,
       sector: a.sector,
+      returnFlight: a.returnFlight,
+      returnSector: a.returnSector,
       cabinClass: "Economy",
       itemId: l.itemId,
       itemName: l.itemName,
@@ -156,7 +189,13 @@ function AllocationList({
     if (a.warehouseName && !sourceByFlight.has(a.flight)) sourceByFlight.set(a.flight, a.warehouseName);
   }
 
-  const allRows = [...allocRows, ...SEED_USAGE];
+  // Seed rows are single-leg — they carry no return leg of their own.
+  const seedRows = SEED_USAGE.map((r) => ({
+    ...r,
+    returnFlight: undefined as string | undefined,
+    returnSector: undefined as string | undefined,
+  }));
+  const allRows = [...allocRows, ...seedRows];
 
   // KPIs always reflect full dataset
   const kpiFlight = new Set(allRows.map((r) => r.flight)).size;
@@ -266,6 +305,16 @@ function AllocationList({
             <TableBody>
               {entries.map(([flight, rows]) => {
                 const sector = rows[0]?.sector ?? "—";
+                const retFlight = rows[0]?.returnFlight;
+                const retSector = rows[0]?.returnSector;
+                // A rotation names both its legs; a single-leg record derives its
+                // own direction from its sector.
+                const legs = retFlight
+                  ? [
+                      { dir: "Outbound" as LegDirection, flight, sector },
+                      { dir: "Return" as LegDirection, flight: retFlight, sector: retSector ?? "—" },
+                    ]
+                  : [{ dir: directionOf(sector), flight, sector }];
                 const flightValue = rows.reduce((s, r) => {
                   const item = inventoryItems.find((i) => i.id === r.itemId);
                   return s + r.qty * (item?.unitCost ?? 0);
@@ -274,8 +323,16 @@ function AllocationList({
                   <Fragment key={flight}>
                     <TableRow className="bg-primary/5 hover:bg-primary/10 border-t-2 border-t-primary/40">
                       <TableCell colSpan={4} className="py-2">
-                        <span className="font-mono text-sm font-semibold text-primary">{flight}</span>
-                        <span className="ml-2 text-[11px] text-muted-foreground">{sector}</span>
+                        <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1 align-middle">
+                          {legs.map((leg, i) => (
+                            <Fragment key={leg.dir}>
+                              {i > 0 && <span className="text-muted-foreground">⇄</span>}
+                              <DirBadge direction={leg.dir} />
+                              <span className="font-mono text-sm font-semibold text-primary">{leg.flight}</span>
+                              <span className="text-[11px] text-muted-foreground">{leg.sector}</span>
+                            </Fragment>
+                          ))}
+                        </span>
                         <span className="ml-3 text-[11px] text-muted-foreground tabular-nums">
                           {rows.length} item{rows.length === 1 ? "" : "s"}
                         </span>
@@ -395,11 +452,13 @@ function AllocationCreate({
       scheduledTime,
       flight,
       sector: selectedSchedule?.sector ?? "",
+      returnFlight: selectedSchedule?.returnFlight,
+      returnSector: selectedSchedule?.returnSector,
       lines: allocLines,
     });
 
     toast.success(
-      `${nextId} issued — ${allocLines.length} item${allocLines.length !== 1 ? "s" : ""} allocated to ${flight}.`,
+      `${nextId} issued — ${allocLines.length} item${allocLines.length !== 1 ? "s" : ""} allocated to ${flight}${selectedSchedule?.returnFlight ? ` / ${selectedSchedule.returnFlight}` : ""}.`,
     );
   };
 
@@ -446,16 +505,31 @@ function AllocationCreate({
               <option value="">Select flight…</option>
               {flightsAtTime.map((f) => (
                 <option key={f.flight} value={f.flight}>
-                  {f.flight} — {f.sector}
+                  {f.flight}
                 </option>
               ))}
             </select>
           </div>
-          <div>
+          {/* One allocation covers the whole rotation, so both legs' routes show
+              here once the flight is picked. */}
+          <div className="md:col-span-2">
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Sector</Label>
-            <div className="mt-1 h-9 flex items-center px-3 rounded-md border border-input bg-muted/40 text-sm text-muted-foreground">
-              {selectedSchedule?.sector ?? "—"}
-            </div>
+            {selectedSchedule ? (
+              <div className="mt-1 h-9 w-fit max-w-full flex items-center gap-x-4 rounded-md border border-input bg-muted/40 px-3 text-sm text-muted-foreground whitespace-nowrap">
+                <span className="flex items-center gap-2">
+                  <DirBadge direction="Outbound" />
+                  {selectedSchedule.sector}
+                </span>
+                <span className="flex items-center gap-2">
+                  <DirBadge direction="Return" />
+                  {selectedSchedule.returnSector}
+                </span>
+              </div>
+            ) : (
+              <div className="mt-1 h-9 w-fit min-w-[8rem] flex items-center px-3 rounded-md border border-input bg-muted/40 text-sm text-muted-foreground">
+                —
+              </div>
+            )}
           </div>
         </div>
 
