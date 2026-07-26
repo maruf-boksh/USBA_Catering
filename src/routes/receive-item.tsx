@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X, Zap, BarChart2, Send, Check, Paperclip, FileText, Eye, Ban, ClipboardList, Info, CalendarDays } from "lucide-react";
+import { Plus, PackageCheck, ClipboardCheck, AlertOctagon, Truck, X, Zap, BarChart2, Send, Check, Paperclip, FileText, Eye, Ban, ClipboardList, Info, CalendarDays, Boxes } from "lucide-react";
 import { receiveItems, inventory, items as MASTER_ITEMS, itemCanPurchase, type ItemMaster } from "@/lib/sample-data";
 import { applyReceiptToPR, getPurchaseRequisitions, prReceived } from "@/lib/purchase-requisitions";
 import { roundQty } from "@/lib/num";
@@ -164,6 +164,32 @@ function poReceipt(po: WfPurchaseOrder, grns: WfGRN[]): {
   return { lines, ordered, received, fully, anyReceived };
 }
 
+/**
+ * Small batch icon shown BESIDE a batch-tracked item's name. Clicking it opens
+ * the batch editor (batch no + expiry, both mandatory). Single items render no
+ * icon at all — the caller only mounts this for batch-tracked lines.
+ */
+function BatchIcon({ line, onEdit }: { line: FormLine; onEdit: () => void }) {
+  const done = !!(line.batchNo?.trim() && line.expiry);
+  return (
+    <button
+      type="button"
+      onClick={onEdit}
+      className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border transition-colors ${
+        done
+          ? "border-emerald-300 bg-emerald-50 text-emerald-600 hover:bg-emerald-100"
+          : "border-amber-300 bg-amber-50 text-amber-600 hover:bg-amber-100"
+      }`}
+      title={done
+        ? `Batch ${line.batchNo} · expiry ${line.expiry} — click to edit`
+        : "Batch item — set batch no & expiry (required)"}
+      aria-label="Batch details"
+    >
+      <Boxes className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
 export default function ReceiveItem() {
   useArrivalFlash();
   const navigate = useNavigate();
@@ -288,6 +314,26 @@ export default function ReceiveItem() {
   // the "Can be Purchased" flag — take effect here. Only active, purchasable
   // items are offered.
   const [itemMaster] = usePersistedState<ItemMaster[]>("config-item-rows", MASTER_ITEMS);
+
+  // Whether a received line's item is batch-tracked (from the Item Profile). Only
+  // batch items need a batch no + expiry; single items receive directly. Items
+  // not found in the master default to single (no batch action).
+  const isBatchItem = (name: string): boolean => {
+    const m = itemMaster.find((it) => it.name.trim().toLowerCase() === name.trim().toLowerCase());
+    return m ? (m.batchTracked ?? true) : false;
+  };
+
+  // The line whose batch/expiry is being edited in the popup, scoped to which
+  // form (PO GRN vs Direct Receive) owns it.
+  const [batchEdit, setBatchEdit] = useState<{ scope: "grn" | "direct"; id: string } | null>(null);
+  const batchEditLine = batchEdit
+    ? (batchEdit.scope === "grn" ? formLines : dpLines).find((l) => l.id === batchEdit.id)
+    : undefined;
+  const setBatchField = (field: "batchNo" | "expiry", value: string) => {
+    if (!batchEdit) return;
+    if (batchEdit.scope === "grn") updateLine(batchEdit.id, field, value);
+    else dpUpdateLine(batchEdit.id, field, value);
+  };
   const dpItemOptions = useMemo(
     () => itemMaster.filter((i) => i.status === "Active" && itemCanPurchase(i)).slice(0, 120),
     [itemMaster],
@@ -381,9 +427,13 @@ export default function ReceiveItem() {
   const submitForApproval = () => {
     if (!dpVendor) { toast.error("Select a vendor."); return; }
     if (!dpDate) { toast.error("Receipt date is required."); return; }
-    // Batch-received items require an expiry date; single-received items don't.
-    if (dpLines.some(l => (Number(l.qty) || 0) > 0 && l.receiveMode === "batch" && !l.expiry)) {
-      toast.error("Expiry Date is required");
+    // Batch-tracked items require a batch no + expiry; single items don't.
+    const dpBatchIncomplete = dpLines.find(
+      (l) => (Number(l.qty) || 0) > 0 && isBatchItem(l.name) && (!l.batchNo?.trim() || !l.expiry),
+    );
+    if (dpBatchIncomplete) {
+      toast.error(`Batch no & expiry are required for ${dpBatchIncomplete.name || "batch items"}.`);
+      setBatchEdit({ scope: "direct", id: dpBatchIncomplete.id });
       return;
     }
     if (!dpReceivedBy) { toast.error("Received By is required."); return; }
@@ -520,11 +570,15 @@ export default function ReceiveItem() {
   const saveGRN = () => {
     if (!selectedPORef) { toast.error("Please select a PO."); return; }
     if (!grnDate) { toast.error("GRN date is required."); return; }
-    // Batch-received items require an expiry date; single-received items don't.
-    // Checked ahead of the other required fields so a Batch row with a missing
-    // expiry reports "Expiry Date is required" rather than an unrelated field.
-    if (formLines.some(l => (Number(l.qty) || 0) > 0 && l.receiveMode === "batch" && !l.expiry)) {
-      toast.error("Expiry Date is required");
+    // Batch-tracked items require a batch no + expiry; single items don't. Checked
+    // ahead of the other required fields so a batch row with missing details
+    // reports the batch error rather than an unrelated field.
+    const grnBatchIncomplete = formLines.find(
+      (l) => (Number(l.qty) || 0) > 0 && isBatchItem(l.name) && (!l.batchNo?.trim() || !l.expiry),
+    );
+    if (grnBatchIncomplete) {
+      toast.error(`Batch no & expiry are required for ${grnBatchIncomplete.name || "batch items"}.`);
+      setBatchEdit({ scope: "grn", id: grnBatchIncomplete.id });
       return;
     }
     if (!receivedBy.trim()) { toast.error("Received By is required."); return; }
@@ -952,21 +1006,15 @@ export default function ReceiveItem() {
           <div className="mt-2 min-w-0">
             <div className="flex items-center justify-between gap-3 flex-wrap mb-2">
               <Label>Items Received</Label>
-              <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-800 shadow-sm">
-                <Info className="h-4 w-4 shrink-0 text-amber-600" />
-                Note: For Batch / LOT receive, expiry date is mandatory
-              </span>
             </div>
             <div className="rounded-md border border-border overflow-x-auto">
-              <table className="w-full text-sm min-w-[620px]">
+              <table className="w-full text-sm min-w-[560px]">
                 <thead className="bg-muted/50">
                   <tr>
                     <th className="p-2 text-left font-semibold">Item</th>
                     <th className="p-2 text-left font-semibold w-20">Ordered</th>
                     <th className="p-2 text-left font-semibold w-20">Received</th>
                     <th className="p-2 text-left font-semibold w-16">UOM</th>
-                    <th className="p-2 text-left font-semibold w-44">Received With</th>
-                    <th className="p-2 text-left font-semibold w-28">Expiry</th>
                     <th className="w-8" />
                   </tr>
                 </thead>
@@ -974,12 +1022,17 @@ export default function ReceiveItem() {
                   {formLines.map(line => (
                     <tr key={line.id} className="border-t border-border/50">
                       <td className="p-2">
-                        <Input
-                          value={line.name}
-                          onChange={(e) => updateLine(line.id, "name", e.target.value)}
-                          className="h-7 text-xs"
-                          placeholder="Item name"
-                        />
+                        <div className="flex items-center gap-1.5">
+                          <Input
+                            value={line.name}
+                            onChange={(e) => updateLine(line.id, "name", e.target.value)}
+                            className="h-7 text-xs"
+                            placeholder="Item name"
+                          />
+                          {isBatchItem(line.name) && (
+                            <BatchIcon line={line} onEdit={() => setBatchEdit({ scope: "grn", id: line.id })} />
+                          )}
+                        </div>
                       </td>
                       <td className="p-2">
                         <Input
@@ -1003,37 +1056,6 @@ export default function ReceiveItem() {
                           readOnly
                           tabIndex={-1}
                           className="h-7 text-xs w-16 bg-muted/50 text-muted-foreground cursor-default"
-                        />
-                      </td>
-                      <td className="p-2">
-                        <div className="flex items-center gap-3">
-                          <label className="inline-flex items-center gap-1 text-xs cursor-pointer select-none">
-                            <input
-                              type="checkbox"
-                              checked={line.receiveMode === "batch"}
-                              onChange={(e) => updateLine(line.id, "receiveMode", e.target.checked ? "batch" : undefined)}
-                              className="h-3.5 w-3.5 accent-primary"
-                            />
-                            Batch
-                          </label>
-                          <label className="inline-flex items-center gap-1 text-xs cursor-pointer select-none">
-                            <input
-                              type="checkbox"
-                              checked={line.receiveMode === "single"}
-                              onChange={(e) => updateLine(line.id, "receiveMode", e.target.checked ? "single" : undefined)}
-                              className="h-3.5 w-3.5 accent-primary"
-                            />
-                            Single
-                          </label>
-                        </div>
-                      </td>
-                      <td className="p-2">
-                        <Input
-                          type="date"
-                          value={line.expiry}
-                          onChange={(e) => updateLine(line.id, "expiry", e.target.value)}
-                          className={`h-7 text-xs ${line.receiveMode === "batch" && !line.expiry ? "border-destructive focus-visible:ring-destructive" : ""}`}
-                          title={line.receiveMode === "batch" ? "Expiry is required for batch-received items" : undefined}
                         />
                       </td>
                       <td className="p-2">
@@ -1235,7 +1257,7 @@ export default function ReceiveItem() {
                 <Label>Items Received</Label>
                 <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-800 shadow-sm">
                   <Info className="h-4 w-4 shrink-0 text-amber-600" />
-                  Note: For Batch / LOT receive, expiry date is mandatory
+                  Batch items show a batch icon beside the name — click it to set batch no &amp; expiry (required). Single items receive directly.
                 </span>
               </div>
               <Button size="sm" variant="outline" onClick={dpAddLine}>
@@ -1243,36 +1265,39 @@ export default function ReceiveItem() {
               </Button>
             </div>
             <div className="rounded-md border border-border overflow-x-auto">
-              <table className="w-full text-sm min-w-[860px] table-fixed border-separate border-spacing-0">
+              <table className="w-full text-sm min-w-[720px] table-fixed border-separate border-spacing-0">
                 <thead className="bg-muted/50">
                   <tr>
-                    <th className="px-3 py-2.5 text-left font-semibold w-[20%]">Item</th>
-                    <th className="px-3 py-2.5 text-left font-semibold w-[15%]">Qty</th>
-                    <th className="px-3 py-2.5 text-left font-semibold w-[8%]">UOM</th>
-                    <th className="px-3 py-2.5 text-right font-semibold w-[13%]">Rate</th>
-                    <th className="px-3 py-2.5 text-right font-semibold w-[12%]">Total</th>
-                    <th className="px-3 py-2.5 text-left font-semibold w-[16%]">Received With</th>
-                    <th className="px-3 py-2.5 text-left font-semibold w-[13%]">Expiry</th>
-                    <th className="px-3 py-2.5 w-[3%]" />
+                    <th className="px-3 py-2.5 text-left font-semibold w-[34%]">Item</th>
+                    <th className="px-3 py-2.5 text-left font-semibold w-[16%]">Qty</th>
+                    <th className="px-3 py-2.5 text-left font-semibold w-[10%]">UOM</th>
+                    <th className="px-3 py-2.5 text-right font-semibold w-[18%]">Rate</th>
+                    <th className="px-3 py-2.5 text-right font-semibold w-[18%]">Total</th>
+                    <th className="px-3 py-2.5 w-[4%]" />
                   </tr>
                 </thead>
                 <tbody>
                   {dpLines.map(line => (
                     <tr key={line.id} className="border-t border-border/50">
                       <td className="px-3 py-2 align-middle">
-                        <select
-                          value={line.name}
-                          onChange={(e) => dpPickItem(line.id, e.target.value)}
-                          className="w-full h-8 text-xs rounded-md border border-input bg-background px-2"
-                        >
-                          <option value="">Select item…</option>
-                          {line.name && !dpItemOptions.some((it) => it.name === line.name) && (
-                            <option value={line.name}>{line.name}</option>
+                        <div className="flex items-center gap-1.5">
+                          <select
+                            value={line.name}
+                            onChange={(e) => dpPickItem(line.id, e.target.value)}
+                            className="w-full h-8 text-xs rounded-md border border-input bg-background px-2"
+                          >
+                            <option value="">Select item…</option>
+                            {line.name && !dpItemOptions.some((it) => it.name === line.name) && (
+                              <option value={line.name}>{line.name}</option>
+                            )}
+                            {dpItemOptions.map((it) => (
+                              <option key={it.id} value={it.name}>{it.name}</option>
+                            ))}
+                          </select>
+                          {isBatchItem(line.name) && (
+                            <BatchIcon line={line} onEdit={() => setBatchEdit({ scope: "direct", id: line.id })} />
                           )}
-                          {dpItemOptions.map((it) => (
-                            <option key={it.id} value={it.name}>{it.name}</option>
-                          ))}
-                        </select>
+                        </div>
                       </td>
                       <td className="px-3 py-2 align-middle">
                         <Input
@@ -1308,37 +1333,6 @@ export default function ReceiveItem() {
                       <td className="px-3 py-2 align-middle text-right text-xs font-medium tabular-nums whitespace-nowrap">
                         {fmtBdt(dpLineTotal(line))}
                       </td>
-                      <td className="px-3 py-2 align-middle">
-                        <div className="flex items-center gap-2">
-                          <label className="inline-flex items-center gap-1 text-xs cursor-pointer select-none">
-                            <input
-                              type="checkbox"
-                              checked={line.receiveMode === "batch"}
-                              onChange={(e) => dpUpdateLine(line.id, "receiveMode", e.target.checked ? "batch" : undefined)}
-                              className="h-3.5 w-3.5 accent-primary"
-                            />
-                            Batch
-                          </label>
-                          <label className="inline-flex items-center gap-1 text-xs cursor-pointer select-none">
-                            <input
-                              type="checkbox"
-                              checked={line.receiveMode === "single"}
-                              onChange={(e) => dpUpdateLine(line.id, "receiveMode", e.target.checked ? "single" : undefined)}
-                              className="h-3.5 w-3.5 accent-primary"
-                            />
-                            Single
-                          </label>
-                        </div>
-                      </td>
-                      <td className="px-3 py-2 align-middle">
-                        <Input
-                          type="date"
-                          value={line.expiry}
-                          onChange={(e) => dpUpdateLine(line.id, "expiry", e.target.value)}
-                          className={`h-8 text-xs ${line.receiveMode === "batch" && !line.expiry ? "border-destructive focus-visible:ring-destructive" : ""}`}
-                          title={line.receiveMode === "batch" ? "Expiry is required for batch-received items" : undefined}
-                        />
-                      </td>
                       <td className="px-3 py-2 align-middle text-center">
                         <button type="button" onClick={() => dpRemoveLine(line.id)} className="text-muted-foreground hover:text-destructive">
                           <X className="h-3.5 w-3.5" />
@@ -1355,7 +1349,7 @@ export default function ReceiveItem() {
                     <td className="px-3 py-2.5 text-right text-sm font-bold tabular-nums whitespace-nowrap">
                       {fmtBdt(dpGrandTotal)}
                     </td>
-                    <td colSpan={3} />
+                    <td />
                   </tr>
                 </tfoot>
               </table>
@@ -1368,6 +1362,57 @@ export default function ReceiveItem() {
           <DialogFooter>
             <Button variant="outline" onClick={() => { setDirectOpen(false); resetDirect(); }}>Cancel</Button>
             <Button onClick={submitForApproval}><Send className="h-4 w-4 mr-1.5" /> Submit for Approval</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Batch details editor — batch no + expiry for a batch-tracked line */}
+      <Dialog open={!!batchEdit} onOpenChange={(v) => { if (!v) setBatchEdit(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Boxes className="h-4 w-4 text-primary" /> Batch Details
+            </DialogTitle>
+          </DialogHeader>
+          {batchEditLine && (
+            <div className="space-y-4">
+              <p className="text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">{batchEditLine.name || "This item"}</span> is batch-tracked — a batch no and expiry are required.
+              </p>
+              <div>
+                <Label>Batch / LOT No <span className="text-destructive">*</span></Label>
+                <Input
+                  value={batchEditLine.batchNo ?? ""}
+                  onChange={(e) => setBatchField("batchNo", e.target.value)}
+                  className="mt-1"
+                  placeholder="e.g. BR-2406"
+                  autoFocus
+                />
+              </div>
+              <div>
+                <Label>Expiry Date <span className="text-destructive">*</span></Label>
+                <Input
+                  type="date"
+                  value={batchEditLine.expiry}
+                  onChange={(e) => setBatchField("expiry", e.target.value)}
+                  className="mt-1"
+                />
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBatchEdit(null)}>Cancel</Button>
+            <Button
+              onClick={() => {
+                if (!batchEditLine?.batchNo?.trim() || !batchEditLine?.expiry) {
+                  toast.error("Enter both the batch no and expiry.");
+                  return;
+                }
+                setBatchEdit(null);
+              }}
+            >
+              <Check className="h-4 w-4 mr-1.5" /> Done
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

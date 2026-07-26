@@ -87,8 +87,6 @@ const FLIGHT_SCHEDULES = [
   { time: "14:00", flight: "VQ-901", sector: "DAC→KUL", returnFlight: "VQ-904", returnSector: "KUL→DAC" },
 ];
 
-const SCHEDULE_TIMES = [...new Set(FLIGHT_SCHEDULES.map((f) => f.time))].sort();
-
 // ── Shared select style ─────────────────────────────────────────────────────
 
 const selectCls =
@@ -392,23 +390,31 @@ function AllocationCreate({
 }) {
   const today = new Date().toISOString().slice(0, 10);
 
-  const [scheduledTime, setScheduledTime] = useState("");
   const [flight, setFlight] = useState("");
+  // Which leg(s) of the rotation this allocation loads. Default both; the return
+  // toggle is only meaningful when the picked flight actually has a return leg.
+  const [legs, setLegs] = useState<{ outbound: boolean; return: boolean }>({ outbound: true, return: true });
   const [lines, setLines] = useState<DraftAllocLine[]>([emptyDraftLine()]);
   const [ack, setAck] = useState(false);
 
-  const flightsAtTime = FLIGHT_SCHEDULES.filter((f) => f.time === scheduledTime);
   const selectedSchedule = FLIGHT_SCHEDULES.find((f) => f.flight === flight);
+  // Flight Time is the picked flight's scheduled ETD — no longer chosen directly.
+  const scheduledTime = selectedSchedule?.time ?? "";
+  const hasReturn = !!selectedSchedule?.returnFlight;
+  const wantOutbound = legs.outbound;
+  const wantReturn = legs.return && hasReturn;
+  // Return-only loads are recorded against the return flight itself.
+  const primaryFlight = !wantOutbound && wantReturn ? (selectedSchedule?.returnFlight ?? flight) : flight;
 
   // Duplicate guard: an allocation for this flight may already exist — a
   // galley-forwarded one (id "FA-G…") especially, since that already deducted
   // stock. Recording another here is an *additional* load, so we surface it.
-  const existingForFlight = flight ? allocations.filter((a) => a.flight === flight) : [];
+  const existingForFlight = primaryFlight ? allocations.filter((a) => a.flight === primaryFlight) : [];
   const galleyForwarded = existingForFlight.some((a) => a.id.startsWith("FA-G"));
 
-  const handleTimeChange = (time: string) => {
-    setScheduledTime(time);
-    setFlight("");
+  const handleFlightChange = (f: string) => {
+    setFlight(f);
+    setLegs({ outbound: true, return: true });
     setAck(false);
   };
 
@@ -421,10 +427,10 @@ function AllocationCreate({
   };
 
   const save = () => {
-    if (!scheduledTime) { toast.error("Select a flight time."); return; }
     if (!flight) { toast.error("Select a flight number."); return; }
+    if (!wantOutbound && !wantReturn) { toast.error("Select at least one leg — Outbound or Return."); return; }
     if (galleyForwarded && !ack) {
-      toast.error(`${flight} already has a galley-forwarded allocation. Tick the acknowledgement to record an additional ad-hoc load.`);
+      toast.error(`${primaryFlight} already has a galley-forwarded allocation. Tick the acknowledgement to record an additional ad-hoc load.`);
       return;
     }
     if (lines.length === 0) { toast.error("Add at least one item."); return; }
@@ -446,19 +452,33 @@ function AllocationCreate({
       };
     });
 
+    // Shape the record to the chosen legs: both → outbound + its return; outbound
+    // only → single outbound leg; return only → recorded against the return flight.
+    let recFlight = flight;
+    let recSector = selectedSchedule?.sector ?? "";
+    let recReturnFlight: string | undefined;
+    let recReturnSector: string | undefined;
+    if (wantOutbound && wantReturn) {
+      recReturnFlight = selectedSchedule?.returnFlight;
+      recReturnSector = selectedSchedule?.returnSector;
+    } else if (!wantOutbound && wantReturn) {
+      recFlight = selectedSchedule?.returnFlight ?? flight;
+      recSector = selectedSchedule?.returnSector ?? "";
+    }
+
     onSave({
       id: nextId,
       date: today,
       scheduledTime,
-      flight,
-      sector: selectedSchedule?.sector ?? "",
-      returnFlight: selectedSchedule?.returnFlight,
-      returnSector: selectedSchedule?.returnSector,
+      flight: recFlight,
+      sector: recSector,
+      returnFlight: recReturnFlight,
+      returnSector: recReturnSector,
       lines: allocLines,
     });
 
     toast.success(
-      `${nextId} issued — ${allocLines.length} item${allocLines.length !== 1 ? "s" : ""} allocated to ${flight}${selectedSchedule?.returnFlight ? ` / ${selectedSchedule.returnFlight}` : ""}.`,
+      `${nextId} issued — ${allocLines.length} item${allocLines.length !== 1 ? "s" : ""} allocated to ${recFlight}${recReturnFlight ? ` / ${recReturnFlight}` : ""}.`,
     );
   };
 
@@ -480,57 +500,71 @@ function AllocationCreate({
             <Input value={today} disabled className="mt-1 tabular-nums" />
           </div>
           <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground flex items-center gap-1">
-              <Clock className="h-3 w-3" /> Flight Time *
-            </Label>
-            <select
-              value={scheduledTime}
-              onChange={(e) => handleTimeChange(e.target.value)}
-              className={selectCls}
-            >
-              <option value="">Select time…</option>
-              {SCHEDULE_TIMES.map((t) => (
-                <option key={t} value={t}>{t}</option>
-              ))}
-            </select>
-          </div>
-          <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Flight Number *</Label>
             <select
               value={flight}
-              onChange={(e) => { setFlight(e.target.value); setAck(false); }}
+              onChange={(e) => handleFlightChange(e.target.value)}
               className={selectCls}
-              disabled={!scheduledTime}
             >
               <option value="">Select flight…</option>
-              {flightsAtTime.map((f) => (
+              {FLIGHT_SCHEDULES.map((f) => (
                 <option key={f.flight} value={f.flight}>
                   {f.flight}
                 </option>
               ))}
             </select>
           </div>
-          {/* One allocation covers the whole rotation, so both legs' routes show
-              here once the flight is picked. */}
-          <div className="md:col-span-2">
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Sector</Label>
-            {selectedSchedule ? (
-              <div className="mt-1 h-9 w-fit max-w-full flex items-center gap-x-4 rounded-md border border-input bg-muted/40 px-3 text-sm text-muted-foreground whitespace-nowrap">
-                <span className="flex items-center gap-2">
-                  <DirBadge direction="Outbound" />
-                  {selectedSchedule.sector}
-                </span>
-                <span className="flex items-center gap-2">
-                  <DirBadge direction="Return" />
-                  {selectedSchedule.returnSector}
-                </span>
-              </div>
-            ) : (
-              <div className="mt-1 h-9 w-fit min-w-[8rem] flex items-center px-3 rounded-md border border-input bg-muted/40 text-sm text-muted-foreground">
-                —
-              </div>
-            )}
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground flex items-center gap-1">
+              <Clock className="h-3 w-3" /> Flight Time (ETD)
+            </Label>
+            <Input
+              value={scheduledTime || "—"}
+              disabled
+              className="mt-1 tabular-nums"
+              title="Auto-filled from the selected flight's scheduled departure"
+            />
           </div>
+        </div>
+
+        {/* Leg selection — pick which leg(s) of the rotation to load. Return is
+            offered only when the picked flight actually has a return leg. */}
+        <div className="mb-6">
+          <Label className="text-xs uppercase tracking-wider text-muted-foreground">Legs to Load *</Label>
+          {selectedSchedule ? (
+            <div className="mt-1 flex flex-wrap items-center gap-3">
+              <label className={`flex items-center gap-2 rounded-md border px-3 h-9 cursor-pointer select-none text-sm ${legs.outbound ? "border-primary bg-primary/5" : "border-input"}`}>
+                <input
+                  type="checkbox"
+                  checked={legs.outbound}
+                  onChange={(e) => setLegs((p) => ({ ...p, outbound: e.target.checked }))}
+                  className="h-3.5 w-3.5 accent-primary"
+                />
+                <DirBadge direction="Outbound" />
+                <span className="text-muted-foreground">{selectedSchedule.sector}</span>
+              </label>
+              <label
+                className={`flex items-center gap-2 rounded-md border px-3 h-9 select-none text-sm ${
+                  !hasReturn ? "border-input opacity-50 cursor-not-allowed" : legs.return ? "border-primary bg-primary/5 cursor-pointer" : "border-input cursor-pointer"
+                }`}
+                title={hasReturn ? undefined : "This flight has no return leg"}
+              >
+                <input
+                  type="checkbox"
+                  checked={wantReturn}
+                  disabled={!hasReturn}
+                  onChange={(e) => setLegs((p) => ({ ...p, return: e.target.checked }))}
+                  className="h-3.5 w-3.5 accent-primary"
+                />
+                <DirBadge direction="Return" />
+                <span className="text-muted-foreground">{hasReturn ? `${selectedSchedule.returnFlight} · ${selectedSchedule.returnSector}` : "—"}</span>
+              </label>
+            </div>
+          ) : (
+            <div className="mt-1 h-9 w-fit min-w-[8rem] flex items-center px-3 rounded-md border border-input bg-muted/40 text-sm text-muted-foreground">
+              Select a flight first
+            </div>
+          )}
         </div>
 
         {/* Duplicate-load warning */}

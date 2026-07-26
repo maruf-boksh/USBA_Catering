@@ -4709,6 +4709,29 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
     }
     return m;
   }, [specialRows]);
+  // Flight NUMBER → the dates it exists on, across the order book and this
+  // session's flight upload.
+  //
+  // The join key is Flight No + Date, and rightly so — a flight number recurs
+  // every day it flies, so BS-901 alone identifies nothing. But when a manifest
+  // missed, "no matching flight — upload its flight order" sent people hunting
+  // for an order that was there all along, just on another date. That is almost
+  // always what a miss is: a stale date in the CSV. Say which dates DO exist.
+  const datesByFlightNo = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    const add = (flight: string, date?: string) => {
+      if (!flight || !date) return;
+      const k = flight.toUpperCase();
+      const s = m.get(k);
+      if (s) s.add(date); else m.set(k, new Set([date]));
+    };
+    for (const o of existingOrders) add(o.flight, o.date);
+    for (const r of allFlightRows) add(r.flight, r.date);
+    return m;
+  }, [existingOrders, allFlightRows]);
+  /** Dates this flight number exists on, other than the manifest's own. */
+  const otherDatesFor = (flight: string, date: string) =>
+    [...(datesByFlightNo.get(flight.toUpperCase()) ?? [])].filter((d) => d !== date).sort();
   // Classify each manifest flight against what we know:
   //  • upload-match / upload-mismatch — flight is in THIS session's flight file
   //    (strict: roster count must equal the declared count).
@@ -5518,11 +5541,17 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                 const st = manifestStatus.get(key);
                 const codeCounts = new Map<string, number>();
                 entries.forEach((e) => codeCounts.set(e.mealCode, (codeCounts.get(e.mealCode) ?? 0) + 1));
+                // A miss is a DATE miss whenever the flight number is known.
+                const otherDates = st?.kind === "none"
+                  ? otherDatesFor(entries[0].flight, entries[0].date)
+                  : [];
                 const badge =
                   st?.kind === "upload-match" ? { cls: "bg-success/15 text-success border-success/40", text: `Order ${st.declared} · attached ${entries.length}` }
                   : st?.kind === "upload-mismatch" ? { cls: "bg-destructive/15 text-destructive border-destructive/40", text: `Order ${st.declared} · attached ${entries.length} — mismatch` }
                   : st?.kind === "existing" ? { cls: "bg-sky-100 text-sky-700 border-sky-300", text: `Order ${st.declared} · attaching ${entries.length}` }
-                  : { cls: "bg-muted text-muted-foreground", text: `${entries.length} uploaded · no matching flight` };
+                  : otherDates.length > 0
+                    ? { cls: "bg-amber-100 text-amber-700 border-amber-300", text: `${entries.length} uploaded · wrong date` }
+                    : { cls: "bg-muted text-muted-foreground", text: `${entries.length} uploaded · no matching flight` };
                 return (
                   <div key={key} className="border border-border rounded-md overflow-hidden">
                     <Table>
@@ -5532,8 +5561,12 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="inline-flex items-center rounded-[7px] bg-[#2a2528] px-[9px] py-1 text-xs font-bold tabular-nums text-white">{entries[0].flight}</span>
                               {fr?.direction && <DirectionBadge direction={fr.direction} />}
-                              <span className="text-xs font-medium text-foreground">
-                                {fr ? `${fr.airline} · ${fr.sector} · ${fr.etd}` : "no matching flight — upload its flight order, or it must already exist"}
+                              <span className={cn("text-xs font-medium", otherDates.length > 0 ? "text-amber-700" : "text-foreground")}>
+                                {fr
+                                  ? `${fr.airline} · ${fr.sector} · ${fr.etd}`
+                                  : otherDates.length > 0
+                                    ? `${entries[0].flight} exists on ${otherDates.slice(0, 3).join(", ")}${otherDates.length > 3 ? ` +${otherDates.length - 3} more` : ""} — but not on ${entries[0].date}. Correct the Date column in the manifest, or upload the flight order for ${entries[0].date}.`
+                                    : "no matching flight — upload its flight order, or it must already exist"}
                               </span>
                               <span className="text-[11px] text-muted-foreground tabular-nums">{entries[0].date}</span>
                               <Badge variant="outline" className={cn("ml-auto h-5 px-1.5 text-[10px] tabular-nums", badge.cls)}>
@@ -5620,14 +5653,19 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
           </div>
           {specialMealIssues.length > 0 ? (
             <ul className="mt-1 space-y-0.5 text-xs text-destructive">
-              {specialMealIssues.map((iss) => (
-                <li key={`${iss.flight}-${iss.date}`}>
-                  <span className="font-mono font-medium">{iss.flight}</span> ({iss.date}) —{" "}
-                  {iss.declared === null
-                    ? `no matching flight in the uploaded orders (${iss.uploaded} meal${iss.uploaded === 1 ? "" : "s"} in manifest)`
-                    : `declares ${iss.declared} special meal${iss.declared === 1 ? "" : "s"} but manifest has ${iss.uploaded} — counts must match exactly.`}
-                </li>
-              ))}
+              {specialMealIssues.map((iss) => {
+                const other = iss.declared === null ? otherDatesFor(iss.flight, iss.date) : [];
+                return (
+                  <li key={`${iss.flight}-${iss.date}`}>
+                    <span className="font-mono font-medium">{iss.flight}</span> ({iss.date}) —{" "}
+                    {iss.declared !== null
+                      ? `declares ${iss.declared} special meal${iss.declared === 1 ? "" : "s"} but manifest has ${iss.uploaded} — counts must match exactly.`
+                      : other.length > 0
+                        ? `no order on this date — ${iss.flight} exists on ${other.slice(0, 3).join(", ")}${other.length > 3 ? ` +${other.length - 3} more` : ""}. Fix the Date column (${iss.uploaded} meal${iss.uploaded === 1 ? "" : "s"} in manifest).`
+                        : `no matching flight in the uploaded orders (${iss.uploaded} meal${iss.uploaded === 1 ? "" : "s"} in manifest)`}
+                  </li>
+                );
+              })}
             </ul>
           ) : (
             <p className="text-xs text-success">All manifest counts match each flight's declared Special Meals total. Ready to import.</p>

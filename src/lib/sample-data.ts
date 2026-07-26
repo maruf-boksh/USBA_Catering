@@ -1759,7 +1759,8 @@ export const seedFlightOrders: FlightOrderRow[] = [
   // ── Domestic short-haul (Breakfast slot 06:00-11:00)
   { id: "FO-009", orderNo: "ORD-3416", flight: "BS-141", airline: "US-Bangla", sector: "DAC → CGP", date: "2026-05-20", etd: "06:30", pax: 68,  crew: 4,  specialMeals: 2, status: "Production", direction: "Outbound" },
   { id: "FO-010", orderNo: "ORD-3416", flight: "BS-142", airline: "US-Bangla", sector: "CGP → DAC", date: "2026-05-20", etd: "08:30", pax: 64,  crew: 4,  specialMeals: 1, status: "Production", direction: "Return"   },
-  { id: "FO-011", orderNo: "ORD-3417", flight: "BS-105", airline: "US-Bangla", sector: "DAC → CXB", date: "2026-05-20", etd: "07:15", pax: 72,  crew: 4,  specialMeals: 2, status: "Approved",   direction: "Outbound" },
+  { id: "FO-011", orderNo: "ORD-3417", flight: "BS-105", airline: "US-Bangla", sector: "DAC → CXB", date: "2026-05-20", etd: "07:15", pax: 72,  crew: 4,  specialMeals: 2, status: "Approved",   direction: "Outbound", pairId: "TRIP-3417" },
+  { id: "FO-011R", orderNo: "ORD-3417", flight: "BS-106", airline: "US-Bangla", sector: "CXB → DAC", date: "2026-05-20", etd: "09:45", pax: 70,  crew: 4,  specialMeals: 2, status: "Approved",   direction: "Return",   pairId: "TRIP-3417" },
   { id: "FO-012", orderNo: "ORD-3418", flight: "BS-151", airline: "US-Bangla", sector: "DAC → ZYL", date: "2026-05-20", etd: "09:45", pax: 65,  crew: 4,  specialMeals: 1, status: "Pending",    direction: "Outbound" },
 
   // ── Domestic (Heavy Snacks 11:00-15:00)
