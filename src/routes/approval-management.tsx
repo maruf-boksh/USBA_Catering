@@ -858,6 +858,16 @@ export default function ApprovalManagementPage() {
     );
     setGalleyLoadingRecords(updated);
     sessionStorage.setItem("galley_loading", JSON.stringify(updated));
+    // Galley loading signed off = the catering cycle for this flight is closed
+    // out → advance its dispatched flight order to Completed. (It later becomes
+    // Departed once its ETD passes — see Order Management's reconciliation.)
+    const flightNo = record.flightLabel.split(" — ")[0].trim();
+    if (flightNo) {
+      updateFlightOrdersWhere(
+        (o) => o.flight === flightNo && o.status === "Dispatched",
+        { status: "Completed" },
+      );
+    }
     setGalleyDetailOpen(false);
     toast.success("Galley signed off & approved — Ready To Fly!");
   }

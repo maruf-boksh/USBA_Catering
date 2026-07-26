@@ -582,6 +582,7 @@ const MOBILE_FLIGHT_STATUS: Record<FlightOrderStatus, string> = {
   Packaged: "boarding",
   Dispatched: "departed",
   Completed: "departed",
+  Departed: "departed",
 };
 
 /**
@@ -652,7 +653,7 @@ export type MobileOrderGroup = {
 
 // Active-first ordering — identical priority table to the web dashboard.
 const ACTIVE_ORDER_PRIORITY: Record<string, number> = {
-  Production: 0, Packaged: 1, Approved: 2, Dispatched: 3, Pending: 4, Completed: 5,
+  Production: 0, Packaged: 1, Approved: 2, Dispatched: 3, Pending: 4, Completed: 5, Departed: 6,
 };
 
 /**

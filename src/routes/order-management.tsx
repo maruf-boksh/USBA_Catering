@@ -51,7 +51,7 @@ import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-
 import { useSpecialMealCountConfig, applySpecialMealMode, type SpecialMealMode } from "@/lib/special-meal-count-settings";
 import { useFlightSpecialMealRules, setFlightSpecialMealMode } from "@/lib/flight-special-meal-rules";
 import {
-  useFlightOrders, addFlightOrders, updateFlightOrder,
+  useFlightOrders, addFlightOrders, updateFlightOrder, updateFlightOrdersWhere,
   amendOrder, getOrderAmendments, revertAmendment, canRevertAmendment,
   leadHoursToDeparture, isLmcLead, hasDeparted, getLmcWindowHours,
   type OrderAmendment,
@@ -83,6 +83,7 @@ function orderBarColor(status: FlightOrderStatus): string {
 // amber (the shared StatusBadge collapses both to amber, so this stays page-local).
 const OM_STAT_CLS: Record<FlightOrderStatus, string> = {
   Completed:  "text-[#0f7a40] bg-[#ecf5ef] border-[#c4e3cf]",
+  Departed:   "text-[#475569] bg-[#f1f5f9] border-[#cbd5e1]",
   Approved:   "text-[#1f9d57] bg-[#ecf5ef] border-[#c4e3cf]",
   Dispatched: "text-[#1f9d57] bg-[#ecf5ef] border-[#c4e3cf]",
   Packaged:   "text-[#2563eb] bg-[#eff4ff] border-[#c7d7fe]",
@@ -118,7 +119,7 @@ function OmStatusPill({ status, ghost = false }: { status: FlightOrderStatus; gh
 
 // Lifecycle order, least → most advanced. Used to roll a whole order's legs up
 // into a single derived status and to order the per-status breakdown chips.
-const LIFECYCLE_ORDER: FlightOrderStatus[] = ["Pending", "Approved", "Production", "Packaged", "Dispatched", "Completed"];
+const LIFECYCLE_ORDER: FlightOrderStatus[] = ["Pending", "Approved", "Production", "Packaged", "Dispatched", "Completed", "Departed"];
 
 function ReviewedPill() {
   return (
@@ -576,6 +577,16 @@ export default function OrderManagementPage() {
   useArrivalFlash();
   const navigate = useNavigate();
   const orders = useFlightOrders();
+  // Departed is the terminal stage: a signed-off (Completed) flight whose ETD has
+  // passed has physically left. Reconciled here (Order Management is where the
+  // statuses are viewed) — only Completed legs advance, so nothing regresses, and
+  // once flipped the store persists it so every surface reads Departed.
+  useEffect(() => {
+    updateFlightOrdersWhere(
+      (o) => o.status === "Completed" && hasDeparted(o),
+      { status: "Departed" },
+    );
+  }, [orders]);
   // Action buttons are permissioned elements — shown only with "create".
   const canCreate = useElementPermission("/order-management", "action-create").create;
   const canBulk = useElementPermission("/order-management", "action-bulk").create;
@@ -7276,7 +7287,7 @@ function FlightOrderDetailsDialog({
                     acc[s] = legs.filter((l) => l.status === s).length;
                     return acc;
                   },
-                  { Pending: 0, Approved: 0, Production: 0, Packaged: 0, Dispatched: 0, Completed: 0 },
+                  { Pending: 0, Approved: 0, Production: 0, Packaged: 0, Dispatched: 0, Completed: 0, Departed: 0 },
                 )
               }
             />

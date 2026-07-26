@@ -70,8 +70,8 @@ function buildForwardedOrders(orders: FlightOrderRow[]): { date: string; totalMe
   const byDate = new Map<string, number>();
   for (const o of orders) {
     // Only count orders that haven't been pushed past Production yet — once an
-    // order is Dispatched or Completed it has left the production pipeline.
-    if (o.status === "Dispatched" || o.status === "Completed") continue;
+    // order is Dispatched, Completed or Departed it has left the pipeline.
+    if (o.status === "Dispatched" || o.status === "Completed" || o.status === "Departed") continue;
     byDate.set(o.date, (byDate.get(o.date) ?? 0) + o.pax + o.crew + o.specialMeals);
   }
   return Array.from(byDate.entries())
