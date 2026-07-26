@@ -1508,6 +1508,7 @@ export type FlightOrderStatus =
   | "Pending"
   | "Approved"
   | "Production"
+  | "Packaged"
   | "Dispatched"
   | "Completed";
 
@@ -1519,6 +1520,7 @@ export const FLIGHT_ORDER_STATUS_FLOW: FlightOrderStatus[] = [
   "Pending",
   "Approved",
   "Production",
+  "Packaged",
   "Dispatched",
   "Completed",
 ];

@@ -361,23 +361,17 @@ function buildCustomTrend(range: DateRange, producedTotal: number, targetTotal: 
 }
 
 function pickActiveFlights(rows: typeof seedFlightOrders = seedFlightOrders) {
-  const priority: Record<string, number> = {
-    Production: 0,
-    Approved: 1,
-    Dispatched: 2,
-    Pending: 3,
-    Completed: 4,
-  };
-  // Sort active-first; keep a generous slice so a single large order's legs
-  // aren't truncated before grouping (the panel caps to 5 orders, and each
-  // card caps its visible legs separately).
+  // Order exactly like the Order Management table (order-management.tsx
+  // `sortedOrders`): freshly created/imported orders first, then by flight date
+  // / ETD descending — so the panel leads with the same orders the table's first
+  // page shows, not a separate status-ranked view. Keep a generous slice so a
+  // single large order's legs aren't truncated before grouping (the panel caps
+  // to 5 orders, and each card caps its visible legs separately).
   return [...rows]
-    .sort((a, b) => {
-      const pa = priority[a.status] ?? 99;
-      const pb = priority[b.status] ?? 99;
-      if (pa !== pb) return pa - pb;
-      return a.etd.localeCompare(b.etd);
-    })
+    .sort((a, b) =>
+      (b.createdAt ?? 0) - (a.createdAt ?? 0)
+      || b.date.localeCompare(a.date)
+      || b.etd.localeCompare(a.etd))
     .slice(0, 500);
 }
 
@@ -1121,6 +1115,7 @@ export default function Dashboard() {
 function aoStatusPill(status: string): { color: string; bg: string; border: string } {
   const s = status.toLowerCase();
   if (s === "production") return { color: "#b45309", bg: "#fbf1e6", border: "#f0d9bf" };
+  if (s === "packaged")   return { color: "#2563eb", bg: "#eff4ff", border: "#c7d7fe" };
   if (s === "pending")    return { color: "#6b6b72", bg: "#f4f1ef", border: "#e9e4e1" };
   return { color: "#0f7a40", bg: "#ecf5ef", border: "#c9e6d4" };
 }

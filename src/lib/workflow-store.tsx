@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { getDemandRequests, saveDemandRequests } from "@/lib/demand-requests";
 import { requisitions as seedReqs, purchaseOrders as seedPOs } from "@/lib/sample-data";
+import { updateFlightOrdersWhere } from "@/lib/flight-orders-store";
 
 // ── Status enums ───────────────────────────────────────────────────────────────
 export type WfDemandStatus =
@@ -882,7 +883,20 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       applyStockDeltas: (deltas) => setStockDeltas(prev => [...prev, ...deltas]),
 
       productionEntries,
-      addProductionEntry: (entry) => setProductionEntries(prev => [entry, ...prev]),
+      addProductionEntry: (entry) => {
+        setProductionEntries(prev => [entry, ...prev]);
+        // Raising a production order takes that date's Approved flight orders
+        // into Production — their real entry into the stage. Universal here so
+        // EVERY creation path (single Create form, batch "from meal plan", the
+        // mobile flow) advances the status. Only Approved legs match, so it's a
+        // no-op once they're already Production.
+        if (entry.date) {
+          updateFlightOrdersWhere(
+            (o) => o.date === entry.date && o.status === "Approved",
+            { status: "Production" },
+          );
+        }
+      },
       updateProductionEntryStatus: (id, status, extra) =>
         setProductionEntries(prev => prev.map(e => e.id === id ? { ...e, status, ...extra } : e)),
 

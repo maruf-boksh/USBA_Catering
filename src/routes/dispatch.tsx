@@ -990,6 +990,34 @@ export default function Dispatch() {
     });
   }, [packagingModuleBatches, setPackagingRows, flightOrders]);
 
+  // Reflect packaging progress onto the flight-order lifecycle. Once every
+  // packaging row of a flight order (matched by Order # + flight) is packed —
+  // Packaging Done or beyond — the order moves Approved/Production → Packaged.
+  // The final Approved→Dispatched jump was removed at the production step, so the
+  // lifecycle now passes Approved → Production → Packaged → Dispatched in order.
+  // Matching on Order # + flight (both carried on the row) avoids date-format
+  // drift; the update only fires while a leg is still Approved/Production, so it
+  // settles after one pass and never loops.
+  useEffect(() => {
+    const PACKED = new Set<PackagingStatus>(["Packaging Done", "Ready for Dispatch", "Dispatched"]);
+    const groups = new Map<string, PackagingRow[]>();
+    for (const r of packagingRows) {
+      if (!r.orderNo || !r.flight) continue;
+      const key = `${r.orderNo}__${r.flight}`;
+      const list = groups.get(key);
+      if (list) list.push(r); else groups.set(key, [r]);
+    }
+    for (const [key, grp] of groups) {
+      if (!grp.every((r) => PACKED.has(r.packagingStatus))) continue;
+      const [orderNo, flight] = key.split("__");
+      updateFlightOrdersWhere(
+        (o) => o.orderNo === orderNo && o.flight === flight
+          && (o.status === "Approved" || o.status === "Production"),
+        { status: "Packaged" },
+      );
+    }
+  }, [packagingRows]);
+
   // ── Packaging derived ───────────────────────────────────────────────────────
 
   const depTimesForDate = useMemo(() => {
