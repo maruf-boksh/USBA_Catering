@@ -159,6 +159,12 @@ export default function CookingTemp() {
 
   const signOff = (passed: boolean) => {
     if (!qcTarget) return;
+    // Cooked By and Taste are both mandatory to record a test. Taste can only be
+    // required when its field is enabled — it's disabled (and irrelevant) when the
+    // temperature is below standard, since the batch is sent back regardless.
+    if (!qcCookedBy) { toast.error("Please select who cooked this batch."); return; }
+    const tasteApplicable = !(qcMeasured > 0 && qcMeasured < qcTemp);
+    if (tasteApplicable && !qcTaste) { toast.error("Please select a taste result."); return; }
     // Temperature-accepted re-cooks are driven by the sensory/taste result, which
     // has no separate justification field — fall back to the taste as the reason.
     const tasteNote = qcTaste === "Other" ? qcTasteOther.trim() : qcTaste;
@@ -250,7 +256,9 @@ export default function CookingTemp() {
         toast.error(`Enter measured °C for ${entry.id}.`); return;
       }
       if (!row.cookedBy) { toast.error(`Select who cooked ${entry.id}.`); return; }
-      // Same rule as the single Record Test: a free-text taste needs a value.
+      // Taste is mandatory for every batch, same as the single Record Test.
+      if (!row.taste) { toast.error(`Select a taste result for ${entry.id}.`); return; }
+      // A free-text taste needs a value.
       if (row.taste === "Other" && !row.tasteOther.trim()) {
         toast.error(`Specify the taste observation for ${entry.id}.`); return;
       }
@@ -799,9 +807,9 @@ export default function CookingTemp() {
               <div>Batch / Item</div>
               <div className="text-right">Qty</div>
               <div className="text-center">Std °C</div>
-              <div className="text-center">Measured °C</div>
-              <div>Taste</div>
-              <div>Cooked By</div>
+              <div className="text-center">Measured °C <span className="text-destructive">*</span></div>
+              <div>Taste <span className="text-destructive">*</span></div>
+              <div>Cooked By <span className="text-destructive">*</span></div>
               <div className="text-center">Result</div>
             </div>
             <div className="divide-y divide-border max-h-[44vh] overflow-y-auto">
@@ -1169,11 +1177,11 @@ export default function CookingTemp() {
                   />
                 </div>
               )}
-              {/* Taste — optional sensory QC parameter, independent of temperature.
+              {/* Taste — mandatory sensory QC parameter, independent of temperature.
                   Disabled when the temperature test fails (batch is sent back anyway). */}
               <div className="col-span-2">
                 <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-                  Taste
+                  Taste <span className="text-destructive">*</span>
                 </Label>
                 <select
                   value={qcTaste}
@@ -1229,6 +1237,7 @@ export default function CookingTemp() {
                 if (qcMeasured > 0 && qcMeasured < qcTemp && !failReason.trim()) {
                   toast.error("Justification is required when temperature is below standard."); return;
                 }
+                if (!(qcMeasured > 0 && qcMeasured < qcTemp) && !qcTaste) { toast.error("Please select a taste result."); return; }
                 if (qcTaste === "Other" && !qcTasteOther.trim()) { toast.error("Please specify the taste observation."); return; }
                 setRecookConfirmOpen(true);
               }}
