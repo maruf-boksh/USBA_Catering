@@ -40,7 +40,11 @@ import {
 } from "@/lib/workflow-store";
 import { mergePassedBatches, type PackagingBatch } from "@/lib/packaging-batches";
 import { type PackagingAllocation } from "@/lib/packaging-allocations";
-import { inventory, warehouses, consumableItems, type ConsumableItem } from "@/lib/sample-data";
+import { inventory, warehouses, consumableItems, type ConsumableItem, activeOffices, activeWarehousesByOffice } from "@/lib/sample-data";
+import {
+  TR_STORAGE_KEY, TR_SEED, officeNameOf as trOfficeNameOf,
+  type TransferRequest,
+} from "@/routes/transfer-request";
 import { getItemStock } from "@/lib/inventory-stock";
 import { roundQty } from "@/lib/num";
 import { useFlightOrders, updateFlightOrdersWhere, type FlightOrder } from "@/lib/flight-orders-store";
@@ -275,16 +279,9 @@ const SEED: ApprovalItem[] = [
       { name: "Salmon Fillet", qty: 60, uom: "Kg", note: "On hold for QC" },
     ] },
 
-  // Transfer Request
-  { id: "AP-1301", category: "Transfer Request",     refId: "TR-7001",     title: "Central WH → Hot Kitchen",                requestedBy: "S. Ahmed",   requestedAt: "2026-05-19 10:25", summary: "Daily production replenishment — 2 items",               itemsCount: 2,  status: "Pending",
-    lines: [
-      { name: "Basmati Rice", qty: 200, uom: "Kg" },
-      { name: "Cooking Oil", qty: 50, uom: "L" },
-    ] },
-  { id: "AP-1302", category: "Transfer Request",     refId: "TR-7004",     title: "Regional CXB → Central WH",               requestedBy: "T. Islam",   requestedAt: "2026-05-18 11:32", summary: "Stock balancing — Meal Box 500 pcs",                     itemsCount: 1,  status: "Pending",
-    lines: [
-      { name: "Meal Box", qty: 500, uom: "pcs" },
-    ] },
+  // Transfer Requests are projected live from the Transfer Request store
+  // (transferRequestItems) so newly-raised requests surface for approval — the
+  // approver picks the Sending Office/Warehouse here before signing off.
 
   // Production Order approvals are projected live from the workflow store
   // (production orders awaiting release) — see `productionItems` below.
@@ -663,6 +660,16 @@ export default function ApprovalManagementPage() {
   // production (status "Approved") in the workflow store; reject is recorded
   // here (production orders have no Rejected status in their store flow).
   const [productionDecisions, setProductionDecisions] = useState<
+    Record<string, { status: ApprovalStatus; by: string; at: string; reason?: string }>
+  >({});
+  // Transfer Requests — the live store the Transfer Request page writes to.
+  // Approving here sets the Sending Office/Warehouse (chosen below) and flips the
+  // request to "Approved" so it becomes issuable on the Transfer page.
+  const [transferRequests, setTransferRequests] = usePersistedState<TransferRequest[]>(TR_STORAGE_KEY, TR_SEED);
+  // Sending side the approver picks per request, keyed by TR id.
+  const [trSending, setTrSending] = useState<Record<string, { officeId: string; warehouse: string }>>({});
+  // Local approve/reject decisions for Transfer Requests decided this session.
+  const [trDecisions, setTrDecisions] = useState<
     Record<string, { status: ApprovalStatus; by: string; at: string; reason?: string }>
   >({});
   // Packaging batches — passed QC (temp + taste), awaiting packaging approval.
@@ -1065,6 +1072,32 @@ export default function ApprovalManagementPage() {
         };
       });
   }, [stockAdjDecisions]);
+
+  // Project Transfer Requests into ApprovalItem shape — only ones still awaiting
+  // approval (or decided here this session). The approver sets the sending side
+  // and approving flips the request to "Approved" in the persisted TR store.
+  const transferRequestItems: ApprovalItem[] = useMemo(() => {
+    return transferRequests
+      .filter((r) => r.status === "Pending Approval" || trDecisions[r.id])
+      .map((r) => {
+        const decision = trDecisions[r.id];
+        return {
+          id: `TR-AP-${r.id}`,
+          category: "Transfer Request" as Category,
+          refId: r.id,
+          title: `${r.from || "?"} → ${r.to}`,
+          requestedBy: r.requestedBy,
+          requestedAt: r.date,
+          summary: `${r.reason || "Inter-location transfer"} — ${r.lines.length} item${r.lines.length === 1 ? "" : "s"}`,
+          itemsCount: r.lines.length,
+          status: decision ? decision.status : "Pending",
+          processedBy: decision?.by,
+          processedAt: decision?.at,
+          rejectionReason: decision?.reason,
+          lines: r.lines.map((l) => ({ name: l.item, qty: l.qty, uom: l.uom })),
+        };
+      });
+  }, [transferRequests, trDecisions]);
 
   // Project workflow-store POs with "Pending Approval" status into the approval queue.
   // Approving here sets the PO to "Approved" in the workflow store so Receive Items picks it up.
@@ -1541,7 +1574,7 @@ export default function ApprovalManagementPage() {
   }), [mealQtyAdjustments]);
 
   const allItems = useMemo(() => {
-    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...prItems, ...stockAdjItems, ...wfPoItems, ...wfPoCloseItems, ...productionItems, ...packagingItems, ...packagingRunItems, ...dispatchForwardItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...hygieneAppealItems, ...hygieneDailyItems, ...wastageItems, ...delayApprovalItems, ...directReceiptItems, ...mealQtyAdjItems, ...items];
+    const base = [...flightOrderItems, ...demandItems, ...rfqItems, ...quotationItems, ...prItems, ...stockAdjItems, ...transferRequestItems, ...wfPoItems, ...wfPoCloseItems, ...productionItems, ...packagingItems, ...packagingRunItems, ...dispatchForwardItems, ...maintenanceItems, ...returnApprovalItems, ...purchaseReturnItems, ...lmcApprovalItems, ...personalHygieneItems, ...hygieneAppealItems, ...hygieneDailyItems, ...wastageItems, ...delayApprovalItems, ...directReceiptItems, ...mealQtyAdjItems, ...items];
     // Overlay "Reviewed" (returned for correction) onto still-pending requests.
     return base.map((it) => {
       const rv = reviews[reviewKey(it.category, it.refId)];
@@ -1550,7 +1583,7 @@ export default function ApprovalManagementPage() {
       }
       return it;
     });
-  }, [flightOrderItems, demandItems, rfqItems, quotationItems, prItems, stockAdjItems, wfPoItems, wfPoCloseItems, productionItems, packagingItems, packagingRunItems, dispatchForwardItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, hygieneAppealItems, hygieneDailyItems, wastageItems, delayApprovalItems, directReceiptItems, mealQtyAdjItems, items, reviews]);
+  }, [flightOrderItems, demandItems, rfqItems, quotationItems, prItems, stockAdjItems, transferRequestItems, wfPoItems, wfPoCloseItems, productionItems, packagingItems, packagingRunItems, dispatchForwardItems, maintenanceItems, returnApprovalItems, purchaseReturnItems, lmcApprovalItems, personalHygieneItems, hygieneAppealItems, hygieneDailyItems, wastageItems, delayApprovalItems, directReceiptItems, mealQtyAdjItems, items, reviews]);
 
   const counts = useMemo(() => {
     const pendingByCat = new Map<Category, number>();
@@ -1835,6 +1868,26 @@ export default function ApprovalManagementPage() {
         [it.refId]: { status: "Approved", by: `${role} (Business Analyst)`, at: stamp() },
       }));
       if (!silent) toast.success(`${it.refId} approved — stock balance updated.`);
+      return;
+    }
+    if (it.category === "Transfer Request") {
+      // The approver must have chosen the sending Office + Warehouse; stamp them
+      // onto the request and flip it to Approved so it becomes issuable on the
+      // Transfer page. `from` is the warehouse name (source of truth there).
+      const sel = trSending[it.refId];
+      if (!sel?.officeId || !sel?.warehouse) {
+        if (!silent) toast.error(`Open ${it.refId} and select the sending Office & Warehouse before approving.`);
+        return;
+      }
+      setTransferRequests((prev) =>
+        prev.map((r) =>
+          r.id === it.refId
+            ? { ...r, from: sel.warehouse, fromOfficeId: sel.officeId, status: "Approved", approvedBy: `${role} (Business Analyst)` }
+            : r,
+        ),
+      );
+      setTrDecisions((p) => ({ ...p, [it.refId]: { status: "Approved", by: `${role} (Business Analyst)`, at: stamp() } }));
+      if (!silent) toast.success(`${it.refId} approved — sending from ${sel.warehouse}, ready to issue on Transfer.`);
       return;
     }
     if (it.category === "Meal Quantity Adjustment") {
@@ -2222,6 +2275,12 @@ export default function ApprovalManagementPage() {
         ...p,
         [it.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
       }));
+    } else if (it.category === "Transfer Request") {
+      setTransferRequests((prev) => prev.map((r) => (r.id === it.refId ? { ...r, status: "Rejected" } : r)));
+      setTrDecisions((p) => ({
+        ...p,
+        [it.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
+      }));
     } else if (it.category === "Meal Quantity Adjustment") {
       setOrderSummaryAdjustmentStatus(it.refId, "Rejected", `${role} (Business Analyst)`, { at: stamp(), rejectionReason: reason });
     } else if (it.category === "Production Order" && it.id.startsWith("PRO-AP-")) {
@@ -2544,6 +2603,12 @@ export default function ApprovalManagementPage() {
     } else if (detailItem.category === "Stock Adjustment") {
       setStockAdjustmentStatus(detailItem.refId, "Rejected");
       setStockAdjDecisions((p) => ({
+        ...p,
+        [detailItem.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
+      }));
+    } else if (detailItem.category === "Transfer Request") {
+      setTransferRequests((prev) => prev.map((r) => (r.id === detailItem.refId ? { ...r, status: "Rejected" } : r)));
+      setTrDecisions((p) => ({
         ...p,
         [detailItem.refId]: { status: "Rejected", by: `${role} (Business Analyst)`, at: stamp(), reason },
       }));
@@ -4440,6 +4505,67 @@ export default function ApprovalManagementPage() {
                 );
               })()}
 
+              {/* Transfer Request — receiving side is fixed by the requester; the
+                  approver picks the sending Office + Warehouse before approving. */}
+              {detailItem.category === "Transfer Request" && (() => {
+                const tr = transferRequests.find((r) => r.id === detailItem.refId);
+                if (!tr) return null;
+                const pending = detailItem.status === "Pending";
+                const sel = trSending[tr.id] ?? { officeId: tr.fromOfficeId ?? activeOffices[0]?.id ?? "", warehouse: tr.from ?? "" };
+                const whOptions = activeWarehousesByOffice(sel.officeId);
+                const setSel = (patch: Partial<{ officeId: string; warehouse: string }>) =>
+                  setTrSending((p) => ({ ...p, [tr.id]: { ...sel, ...patch } }));
+                const trSelectCls = "mt-1 w-full h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+                return (
+                  <div className="space-y-4">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">
+                        Requested Delivery — To (fixed by requester)
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-6 gap-y-3 rounded-md border border-border bg-muted/20 p-3">
+                        <Detail label="To Office" value={trOfficeNameOf(tr.toOfficeId)} />
+                        <Detail label="To Warehouse" value={tr.to} />
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">
+                        Sending — Source {pending && <span className="text-destructive">* select before approving</span>}
+                      </div>
+                      {pending ? (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 rounded-md border border-amber-300 bg-amber-50/50 p-3">
+                          <div>
+                            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Sending Office</Label>
+                            <select
+                              value={sel.officeId}
+                              onChange={(e) => {
+                                const o = e.target.value;
+                                const opts = activeWarehousesByOffice(o);
+                                setSel({ officeId: o, warehouse: opts.some((w) => w.name === sel.warehouse) ? sel.warehouse : "" });
+                              }}
+                              className={trSelectCls}
+                            >
+                              {activeOffices.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                            </select>
+                          </div>
+                          <div>
+                            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Sending Warehouse</Label>
+                            <select value={sel.warehouse} onChange={(e) => setSel({ warehouse: e.target.value })} className={trSelectCls}>
+                              <option value="">Select warehouse…</option>
+                              {whOptions.map((w) => <option key={w.id} value={w.name}>{w.name}</option>)}
+                            </select>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-2 gap-x-6 gap-y-3 rounded-md border border-border bg-muted/20 p-3">
+                          <Detail label="Sending Office" value={trOfficeNameOf(tr.fromOfficeId)} />
+                          <Detail label="Sending Warehouse" value={tr.from || "—"} />
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Processing history */}
               {(detailItem.processedBy || detailItem.processedAt) && (
                 <div
@@ -4584,14 +4710,24 @@ export default function ApprovalManagementPage() {
                     >
                       <CornerUpLeft className="h-4 w-4 mr-1.5" /> Review
                     </Button>
-                    <Button
-                      className="bg-success text-success-foreground hover:bg-success/90"
-                      onClick={() => {
-                        if (detailItem) { approve(detailItem); setDetailOpen(false); }
-                      }}
-                    >
-                      <Check className="h-4 w-4 mr-1.5" /> Approve
-                    </Button>
+                    {(() => {
+                      // Transfer Requests can't be approved until the sending
+                      // Office + Warehouse are chosen above.
+                      const trSel = detailItem?.category === "Transfer Request" ? trSending[detailItem.refId] : undefined;
+                      const trBlocked = detailItem?.category === "Transfer Request" && !(trSel?.officeId && trSel?.warehouse);
+                      return (
+                        <Button
+                          className="bg-success text-success-foreground hover:bg-success/90"
+                          disabled={trBlocked}
+                          title={trBlocked ? "Select the sending Office and Warehouse first" : undefined}
+                          onClick={() => {
+                            if (detailItem) { approve(detailItem); setDetailOpen(false); }
+                          }}
+                        >
+                          <Check className="h-4 w-4 mr-1.5" /> Approve
+                        </Button>
+                      );
+                    })()}
                   </>
                 ) : null}
                 <Button variant="outline" onClick={() => setDetailOpen(false)}>Close</Button>

@@ -934,15 +934,24 @@ export default function PackagingPage() {
     return { lines, qty };
   };
 
-  // Preselect every approved line of each leg once the dialog is open. This can
-  // NOT happen in the click handler: poolIndex is empty until `newOpen` flips,
-  // so preselecting there ticked nothing at all.
+  // Preselect every contributing line of each leg once the dialog is open. A run
+  // does NOT need to be approved to be packaged: packaging is started here first,
+  // and approval is granted afterward on the resulting run (Approval Management).
+  // Preselect can NOT happen in the click handler: poolIndex is empty until
+  // `newOpen` flips, so preselecting there ticked nothing at all.
   useEffect(() => {
     if (!newOpen || !newFlightKey) return;
     const next = new Set<string>();
     for (const leg of newLegs) {
+      const plan = legPlan(leg);
       for (const b of legPool(leg)) {
-        if (b.status === "Approved") next.add(selKey(leg.key, b.id));
+        // Skip runs already created for this leg — Add to Run leaves them locked
+        // and only preselects the runs not yet packaged for the flight.
+        const existing = existingAllocation(allocations, b.batch, leg.flight, leg.date);
+        if (existing && existing.status !== "Rejected") continue;
+        if (b.status !== "Rejected" && (plan.get(b.id)?.qty ?? 0) > 0) {
+          next.add(selKey(leg.key, b.id));
+        }
       }
     }
     setNewSelected(next);
@@ -951,61 +960,38 @@ export default function PackagingPage() {
 
   // Ticked AND able to contribute, per leg. A line whose requirement another run
   // covers, or that has no menu rule, must not be counted on the Start button —
-  // it would promise 18 lines and package 12.
+  // it would promise 18 lines and package 12. Runs already created for the leg are
+  // excluded too, so Add to Run only ever queues the runs not yet packaged.
   const newJobs = newLegs.map((leg) => ({
     leg,
     lines: legPool(leg)
-      .filter((b) => newSelected.has(selKey(leg.key, b.id)) && (legPlan(leg).get(b.id)?.qty ?? 0) > 0)
+      .filter((b) => {
+        if (!newSelected.has(selKey(leg.key, b.id)) || (legPlan(leg).get(b.id)?.qty ?? 0) <= 0) return false;
+        const existing = existingAllocation(allocations, b.batch, leg.flight, leg.date);
+        return !(existing && existing.status !== "Rejected");
+      })
       .map((b) => ({ batch: b, qty: legPlan(leg).get(b.id)?.qty ?? 0 })),
   }));
   const newEligibleCount = newJobs.reduce((s, j) => s + j.lines.length, 0);
-  // Start packaging → queue the lines that are approved. Approval itself is NOT
-  // granted here: packaging approval belongs to Approval Management, which
-  // already projects every Pending Approval batch into its queue and stamps
-  // approvedBy/approvedAt on release. Unapproved lines are reported, with a jump
-  // to that queue, rather than approved behind its back.
+  // Start packaging → queue every ticked line as a run. Approval is NOT required
+  // first: the run is created here as "Pending Approval" and signed off afterward
+  // in Approval Management (which unlocks its labels). Both legs of a round trip
+  // are queued in one action so the pair never splits across two runs.
   const startNewPackaging = () => {
     if (!newOption) { toast.error("Choose a flight number first."); return; }
     if (newEligibleCount === 0) {
       toast.error("Select at least one production line for this flight.");
       return;
     }
-    // Approved lines start now; the rest are reported, per leg, with a jump to
-    // the approval queue. Both legs of a round trip are queued in one action so
-    // the pair never splits across two runs.
-    const jobs = newJobs
-      .map((j) => ({ leg: j.leg, lines: j.lines.filter((l) => l.batch.status === "Approved") }))
-      .filter((j) => j.lines.length > 0);
-    const awaiting = newJobs.flatMap((j) => j.lines.filter((l) => l.batch.status !== "Approved").map((l) => l.batch));
-
+    const jobs = newJobs.filter((j) => j.lines.length > 0);
     if (jobs.length === 0) {
-      if (awaiting.length === 0) {
-        toast.error("Nothing to package: this flight's requirement is already covered, or these items aren't on its menu plan.");
-        return;
-      }
-    } else {
-      allocateToFlights(jobs.map((j) => ({
-        lines: j.lines,
-        leg: { flight: j.leg.flight, orderNo: j.leg.orderNo, date: j.leg.date, depTime: j.leg.etd },
-      })));
+      toast.error("Nothing to package: this flight's requirement is already covered, or these items aren't on its menu plan.");
+      return;
     }
-    if (awaiting.length > 0) {
-      toast.warning(
-        `${awaiting.length} line${awaiting.length === 1 ? "" : "s"} still awaiting packaging approval — approve ${awaiting.length === 1 ? "it" : "them"} in Approval Management, then start the run.`,
-        {
-          action: { label: "Open Approval Management", onClick: () => navigate("/approval-management") },
-          duration: 8000,
-        },
-      );
-      logAudit({
-        action: "Packaging run held for approval",
-        module: "Packaging",
-        entity: newOption.flight,
-        detail: `${awaiting.length} batch(es) awaiting approval: ${awaiting.map((b) => b.batch).join(", ")}`,
-      });
-    }
-    // Nothing could start — keep the dialog open so the selection isn't lost.
-    if (jobs.length === 0) return;
+    allocateToFlights(jobs.map((j) => ({
+      lines: j.lines,
+      leg: { flight: j.leg.flight, orderNo: j.leg.orderNo, date: j.leg.date, depTime: j.leg.etd },
+    })));
     setNewOpen(false);
     setNewFlightKey("");
     setNewSelected(new Set());
@@ -1082,25 +1068,6 @@ export default function PackagingPage() {
 
       {/* Runs are created here but signed off in Approval Management — say so
           once, with the way there, rather than leaving them looking stuck. */}
-      {pendingRuns.length > 0 && (
-        <div className="mb-6 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-800">
-          <Clock className="h-3.5 w-3.5 shrink-0" />
-          <span>
-            <b>{pendingRuns.length} packaging run{pendingRuns.length === 1 ? "" : "s"}</b>
-            {" "}({pendingRuns.reduce((s, a) => s + a.qty, 0).toLocaleString()} portions across{" "}
-            {new Set(pendingRuns.map((a) => a.flight)).size} flight
-            {new Set(pendingRuns.map((a) => a.flight)).size === 1 ? "" : "s"}) awaiting packaging approval — labels cannot be printed until they are approved.
-          </span>
-          <button
-            type="button"
-            className="font-semibold underline underline-offset-2 hover:text-amber-950"
-            onClick={() => navigate("/approval-management")}
-          >
-            Approve in Approval Management
-          </button>
-        </div>
-      )}
-
       {/* Filters — Search · Date range · Status */}
       <div className="flex flex-wrap items-end gap-3 mb-6">
         <div className="flex flex-col gap-1 flex-1 min-w-[200px]">
@@ -1361,18 +1328,6 @@ export default function PackagingPage() {
                           <span className="inline-flex items-center rounded-full border border-teal-300 bg-teal-50 px-2 py-0.5 text-[10px] font-semibold text-teal-700 whitespace-nowrap">
                             Ready For Dispatch
                           </span>
-                        )}
-                        {/* Where the sign-off happens — the badge alone reads as
-                            "stuck" without it. */}
-                        {isAwaitingApproval(a) && (
-                          <button
-                            type="button"
-                            onClick={() => navigate("/approval-management")}
-                            className="text-[10px] font-semibold text-amber-700 underline underline-offset-2 hover:text-amber-900 whitespace-nowrap"
-                            title="Packaging approval is granted in Approval Management"
-                          >
-                            Approve
-                          </button>
                         )}
                       </div>
                     </TableCell>
@@ -1768,7 +1723,6 @@ export default function PackagingPage() {
                 (r) => r.flight === opt.flight && r.date === opt.date,
               );
               const mealQty = legMeals.reduce((s, r) => s + r.qty, 0);
-              const pendingCount = pool.filter((b) => b.status === "Pending Approval").length;
               const fo = findFlightOrder(opt);
               const crewOrder = findCrewOrder(opt);
               // What the ORDER asks for vs. what the manifest actually raised as
@@ -1913,11 +1867,16 @@ export default function PackagingPage() {
                               const left = batch ? remainingOf(batch) : undefined;
                               const planned = batch ? plan.get(batch.id) : undefined;
                               const reqQty = batch ? planned?.qty : meal?.qty;
+                              // A run already packaged for THIS flight can't be added
+                              // again — Add to Run only offers the runs not yet created
+                              // for it, so an existing allocation locks the row.
+                              const existingAlloc = batch ? existingAllocation(allocations, batch.batch, opt.flight, opt.date) : undefined;
+                              const alreadyCreated = !!existingAlloc && existingAlloc.status !== "Rejected";
                               // A line with no quantity to contribute can't join
                               // the run — its requirement is already covered by
                               // another run, or the item has no menu rule to size it.
-                              const selectable = !!batch && (planned?.qty ?? 0) > 0;
-                              const ticked = !!batch && newSelected.has(selKey(opt.key, batch.id));
+                              const selectable = !!batch && (planned?.qty ?? 0) > 0 && !alreadyCreated;
+                              const ticked = !alreadyCreated && !!batch && newSelected.has(selKey(opt.key, batch.id));
                               const producedQty = pe?.producedQty ?? (batch && batch.qty > 0 ? batch.qty : undefined);
                               const servesCount = batch ? servedFlightCount(batch) : 0;
                               const takenBy = batch ? flightsOfRun(allocations, batch.batch).filter((f) => f !== opt.flight) : [];
@@ -1940,6 +1899,7 @@ export default function PackagingPage() {
                                       label={`Select ${batch?.batch ?? meal?.mealName ?? key} for ${opt.flight}`}
                                       title={
                                         selectable ? `Package ${batch!.batch} for ${opt.flight}`
+                                          : alreadyCreated ? `${batch!.batch} is already in a run for ${opt.flight} (${existingAlloc!.status}) — nothing to add.`
                                           : !batch ? "No QC-passed batch for this meal yet"
                                           : planned?.reason === "covered" ? `${opt.flight} needs ${planned.required?.toLocaleString()} ${batch.item}, and ${planned.coveredBy ?? "another run"} already supplies all of it. This run stays available for other flights.`
                                           : planned?.reason === "unsized" ? `${batch.item} isn't on any meal card for this day, so there is no rule to size it against ${opt.flight}. Add it to the menu plan and it will size automatically.`
@@ -1949,7 +1909,12 @@ export default function PackagingPage() {
                                   </td>
                                   <td className="p-2 whitespace-nowrap">
                                     {batch
-                                      ? <span className="font-mono text-primary">{batch.batch}</span>
+                                      ? <span className="inline-flex items-center gap-1.5">
+                                          <span className={cn("font-mono", alreadyCreated ? "text-muted-foreground line-through" : "text-primary")}>{batch.batch}</span>
+                                          {alreadyCreated && (
+                                            <span className="rounded-full border border-slate-300 bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">Already in run</span>
+                                          )}
+                                        </span>
                                       : meal?.productionOrderId
                                         // Manifest line with no QC-passed batch — it can't join the
                                         // run, and with the Status column gone this is what says so.
@@ -2024,19 +1989,6 @@ export default function PackagingPage() {
                     {sharedRuns > 0 && (
                       <p className="mt-1.5 text-[11px] text-muted-foreground">
                         {sharedRuns} of these run{sharedRuns === 1 ? " is" : "s are"} shared across several of the day's flights — <b>Run Produced</b> is the day total, and only <b>For This Flight</b> ({lineQty.toLocaleString()} portions, sized from {opt.flight}'s {fo?.pax ?? "—"} pax / {crewOrdered} crew) is packaged here.
-                      </p>
-                    )}
-                    {pendingCount > 0 && (
-                      <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 text-[11px] text-amber-700">
-                        {pendingCount} line{pendingCount === 1 ? "" : "s"} still await{pendingCount === 1 ? "s" : ""} packaging approval.
-                        <button
-                          type="button"
-                          className="font-semibold underline underline-offset-2 hover:text-amber-900"
-                          onClick={() => navigate("/approval-management")}
-                        >
-                          Approve in Approval Management
-                        </button>
-                        to include {pendingCount === 1 ? "it" : "them"} in a run.
                       </p>
                     )}
                   </section>

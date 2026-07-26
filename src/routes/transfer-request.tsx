@@ -17,32 +17,53 @@ import {
   Plus, ArrowLeft, Save, ArrowLeftRight, Trash2, Clock, CheckCircle, XCircle, FileText,
 } from "lucide-react";
 import { KpiCard } from "@/components/common/KpiCard";
+import { activeOffices, activeWarehousesByOffice, warehouses as ALL_WAREHOUSES, offices as ALL_OFFICES } from "@/lib/sample-data";
+import { getActiveStaff } from "@/lib/staff";
 import { toast } from "sonner";
 
 
-type TRStatus = "Draft" | "Pending Approval" | "Approved" | "Rejected" | "Completed";
+export type TRStatus = "Draft" | "Pending Approval" | "Approved" | "Rejected" | "Completed";
 
-type TRLine = { id: string; item: string; uom: string; qty: number };
-
-type TransferRequest = {
+export type TRLine = {
   id: string;
-  date: string;
+  item: string;
+  uom: string;
+  qty: number;
+  /** How much of this line has been issued so far via Transfer Out. Remaining =
+   *  qty − issuedQty; the request completes when every line is fully issued. */
+  issuedQty?: number;
+};
+
+export type TransferRequest = {
+  id: string;
+  /** Sending warehouse NAME — the source. Chosen by the APPROVER, so it is blank
+   *  until the request is approved. Source of truth for the Transfer page. */
   from: string;
+  /** Receiving warehouse NAME — the destination. Chosen by the REQUESTER here. */
   to: string;
+  date: string;
+  /** Sending office — chosen at approval, alongside `from`. */
+  fromOfficeId?: string;
+  /** Receiving office — chosen by the requester, alongside `to`. */
+  toOfficeId?: string;
   requestedBy: string;
   reason: string;
   lines: TRLine[];
   status: TRStatus;
+  /** Set when the request is approved — shown on the Transfer Out issue screen. */
+  approvedBy?: string;
 };
 
-const LOCATIONS = [
-  "Central Warehouse",
-  "Cold Storage 1",
-  "Hot Kitchen",
-  "Cold Kitchen",
-  "Regional Warehouse CXB",
-  "Head Office Dhaka",
-];
+/** Shared persistence key — Transfer reads approved requests from the same store
+ *  so issuing against one flips its status back here. */
+export const TR_STORAGE_KEY = "transfer-request-rows";
+
+/** Office id that owns a warehouse NAME (the store is keyed by name). */
+export const officeIdForWarehouseName = (name: string): string | undefined =>
+  ALL_WAREHOUSES.find((w) => w.name === name)?.officeId;
+/** Display name of an office id. */
+export const officeNameOf = (officeId?: string): string =>
+  ALL_OFFICES.find((o) => o.id === officeId)?.name ?? "—";
 
 const ITEMS: { code: string; name: string; uom: string }[] = [
   { code: "RM-RICE-BSMT", name: "Basmati Rice",            uom: "Kg"     },
@@ -56,9 +77,11 @@ const ITEMS: { code: string; name: string; uom: string }[] = [
 const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
-const SEED: TransferRequest[] = [
+export const TR_SEED: TransferRequest[] = [
   {
-    id: "TR-7001", date: "2026-05-19 10:25", from: "Central Warehouse", to: "Hot Kitchen",
+    // Pending — the requester picked the receiving side; sending is chosen at approval.
+    id: "TR-7001", date: "2026-05-19 10:25", from: "", to: "Hot Kitchen",
+    toOfficeId: "OFF-001",
     requestedBy: "S. Ahmed", reason: "Daily production replenishment", status: "Pending Approval",
     lines: [
       { id: "L1", item: "Basmati Rice",   uom: "Kg",    qty: 120 },
@@ -67,7 +90,8 @@ const SEED: TransferRequest[] = [
   },
   {
     id: "TR-7002", date: "2026-05-19 09:10", from: "Cold Storage 1", to: "Cold Kitchen",
-    requestedBy: "F. Begum", reason: "Salad station prep", status: "Approved",
+    fromOfficeId: "OFF-001", toOfficeId: "OFF-001",
+    requestedBy: "F. Begum", reason: "Salad station prep", status: "Approved", approvedBy: "T. Islam",
     lines: [
       { id: "L1", item: "Tomato",                 uom: "Kg",     qty: 45 },
       { id: "L2", item: "Mineral Water 250ml",    uom: "Bottle", qty: 300 },
@@ -75,20 +99,24 @@ const SEED: TransferRequest[] = [
   },
   {
     id: "TR-7003", date: "2026-05-18 14:50", from: "Central Warehouse", to: "Cold Kitchen",
+    fromOfficeId: "OFF-001", toOfficeId: "OFF-001",
     requestedBy: "M. Hossain", reason: "Bakery oil top-up", status: "Completed",
     lines: [
       { id: "L1", item: "Cooking Oil", uom: "Litre", qty: 25 },
     ],
   },
   {
-    id: "TR-7004", date: "2026-05-18 11:32", from: "Regional Warehouse CXB", to: "Central Warehouse",
+    // Draft — receiving side captured, sending still to be decided at approval.
+    id: "TR-7004", date: "2026-05-18 11:32", from: "", to: "Central Warehouse",
+    toOfficeId: "OFF-001",
     requestedBy: "T. Islam", reason: "Stock balancing", status: "Draft",
     lines: [
       { id: "L1", item: "Meal Box", uom: "Piece", qty: 500 },
     ],
   },
   {
-    id: "TR-7005", date: "2026-05-17 08:00", from: "Central Warehouse", to: "Hot Kitchen",
+    id: "TR-7005", date: "2026-05-17 08:00", from: "", to: "Hot Kitchen",
+    toOfficeId: "OFF-001",
     requestedBy: "S. Ahmed", reason: "Emergency stock — chicken curry batch", status: "Rejected",
     lines: [
       { id: "L1", item: "Chicken Breast", uom: "Kg", qty: 200 },
@@ -97,7 +125,7 @@ const SEED: TransferRequest[] = [
 ];
 
 export default function TransferRequestPage() {
-  const [rows, setRows] = usePersistedState<TransferRequest[]>("transfer-request-rows", SEED);
+  const [rows, setRows] = usePersistedState<TransferRequest[]>(TR_STORAGE_KEY, TR_SEED);
   const [view, setView] = useState<"list" | "create">("list");
 
   const add = (tr: TransferRequest) => { setRows((p) => [tr, ...p]); setView("list"); };
@@ -152,7 +180,9 @@ function TRList({
       header: "Route",
       render: (r) => (
         <div className="flex items-center gap-1.5 text-xs">
-          <span className="font-medium">{r.from}</span>
+          {r.from
+            ? <span className="font-medium">{r.from}</span>
+            : <span className="italic text-muted-foreground">Sending set at approval</span>}
           <ArrowLeftRight className="h-3 w-3 text-muted-foreground" />
           <span className="font-medium">{r.to}</span>
         </div>
@@ -207,10 +237,23 @@ function TRFields({
 }) {
   const isEdit = mode === "edit";
   const today = new Date().toISOString().slice(0, 16).replace("T", " ");
-  const [from, setFrom] = useState(initial?.from ?? LOCATIONS[0]);
-  const [to, setTo] = useState(initial?.to ?? LOCATIONS[1]);
+  // Only the RECEIVING side is captured here — the sending office/warehouse is
+  // chosen by the approver in Approval Management.
+  const [toOfficeId, setToOfficeId] = useState(
+    initial?.toOfficeId ?? officeIdForWarehouseName(initial?.to ?? "") ?? activeOffices[0]?.id ?? "",
+  );
+  const toWarehouseOptions = activeWarehousesByOffice(toOfficeId);
+  const [to, setTo] = useState(initial?.to ?? toWarehouseOptions[0]?.name ?? "");
   const [requestedBy, setRequestedBy] = useState(initial?.requestedBy ?? "");
   const [reason, setReason] = useState(initial?.reason ?? "");
+  const staffNames = getActiveStaff().map((s) => s.fullName);
+
+  // When the office changes, keep the warehouse valid for it.
+  const onToOffice = (officeId: string) => {
+    setToOfficeId(officeId);
+    const first = activeWarehousesByOffice(officeId)[0]?.name ?? "";
+    setTo((prev) => (activeWarehousesByOffice(officeId).some((w) => w.name === prev) ? prev : first));
+  };
 
   const [itemIdx, setItemIdx] = useState(0);
   const [qty, setQty] = useState("");
@@ -231,12 +274,17 @@ function TRFields({
   const removeLine = (id: string) => setLines((p) => p.filter((l) => l.id !== id));
 
   const buildPayload = () => ({
-    date: today, from, to, requestedBy: requestedBy.trim(),
+    date: today,
+    // Sending side is set at approval — carry any existing value, else blank.
+    from: initial?.from ?? "",
+    fromOfficeId: initial?.fromOfficeId,
+    to, toOfficeId,
+    requestedBy: requestedBy.trim(),
     reason: reason.trim(), lines,
   });
 
   const validate = () => {
-    if (from === to) { toast.error("Source and destination must be different."); return false; }
+    if (!toOfficeId || !to) { toast.error("Select the To office and warehouse."); return false; }
     if (!requestedBy.trim()) { toast.error("Requested By is required."); return false; }
     if (lines.length === 0) { toast.error("Add at least one item."); return false; }
     return true;
@@ -282,20 +330,26 @@ function TRFields({
               <Input value={today} disabled className="mt-1 tabular-nums" />
             </div>
             <div>
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground">From Location <span className="text-destructive">*</span></Label>
-              <select value={from} onChange={(e) => setFrom(e.target.value)} className={selectCls}>
-                {LOCATIONS.map((l) => <option key={l}>{l}</option>)}
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">To Office <span className="text-destructive">*</span></Label>
+              <select value={toOfficeId} onChange={(e) => onToOffice(e.target.value)} className={selectCls}>
+                {activeOffices.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
               </select>
             </div>
             <div>
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground">To Location <span className="text-destructive">*</span></Label>
-              <select value={to} onChange={(e) => setTo(e.target.value)} className={selectCls}>
-                {LOCATIONS.map((l) => <option key={l}>{l}</option>)}
+              <Label className="text-xs uppercase tracking-wider text-muted-foreground">To Warehouse <span className="text-destructive">*</span></Label>
+              <select value={to} onChange={(e) => setTo(e.target.value)} className={selectCls} disabled={toWarehouseOptions.length === 0}>
+                {toWarehouseOptions.length === 0
+                  ? <option value="">No warehouse for this office</option>
+                  : toWarehouseOptions.map((w) => <option key={w.id} value={w.name}>{w.name}</option>)}
               </select>
             </div>
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Requested By <span className="text-destructive">*</span></Label>
-              <Input value={requestedBy} onChange={(e) => setRequestedBy(e.target.value)} className="mt-1" placeholder="Full name" />
+              <select value={requestedBy} onChange={(e) => setRequestedBy(e.target.value)} className={selectCls}>
+                <option value="">Select staff…</option>
+                {requestedBy && !staffNames.includes(requestedBy) && <option value={requestedBy}>{requestedBy}</option>}
+                {staffNames.map((n) => <option key={n} value={n}>{n}</option>)}
+              </select>
             </div>
             <div>
               <Label className="text-xs uppercase tracking-wider text-muted-foreground">Reason / Purpose</Label>

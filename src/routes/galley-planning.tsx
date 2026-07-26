@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Card, CardContent } from "@/components/ui/card";
@@ -9,12 +9,17 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem,
+} from "@/components/ui/command";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  LayoutGrid, Plane, CheckCircle2, Clock, Eye, Search, Send, Printer, ArrowLeft, X as CloseIcon,
+  LayoutGrid, Plane, CheckCircle2, Clock, Eye, Search, Send, Printer, ArrowLeft, X as CloseIcon, CalendarDays, Download, Plus, Check, ChevronDown,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { consumableItems, type ConsumableItem } from "@/lib/sample-data";
 import { officeName, warehouseName } from "@/components/common/LocationPicker";
@@ -25,6 +30,7 @@ import {
 } from "@/lib/galley-drafts";
 import { getAuthUser } from "@/lib/auth";
 import { getFlightOrders } from "@/lib/flight-orders-store";
+import { resolveFlightOrder, resolveReturnLeg } from "@/lib/order-chain";
 // Galley planning was relocated out of Dispatch Monitoring into this module.
 // The plan editor (GalleyPlanningModal) and its data plumbing still live in
 // dispatch-monitoring.tsx (exported); this page is the new launch surface.
@@ -325,13 +331,45 @@ export function GalleySheetViewModal({
 }
 
 export default function GalleyPlanningPage() {
-  const [entries] = useState<DispatchEntry[]>(() => loadDispatchEntries());
+  const [dispatchEntries] = useState<DispatchEntry[]>(() => loadDispatchEntries());
+  // Flight-wise plans started from the order book (before/without a dispatch
+  // record) — persisted so they survive a reload, merged with the dispatched
+  // worklist below.
+  const [manualEntries, setManualEntries] = useState<DispatchEntry[]>(
+    () => readLS<DispatchEntry[]>("galley-manual-entries", []),
+  );
   const [galleyRecords, setGalleyRecords] = useState<GalleyLoadingRecord[]>(() => loadGalleyRecords());
   const [drafts, setDrafts] = useState<Record<string, GalleyDraft>>(() => loadDrafts());
   const [planEntryId, setPlanEntryId] = useState<string | null>(null);
   const [viewEntryId, setViewEntryId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | RowStatus>("all");
+  const [airlineFilter, setAirlineFilter] = useState("all");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  // Bulk selection (entry ids) and the remaining queue for sequential "Plan".
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [planQueue, setPlanQueue] = useState<string[]>([]);
+  // "+ New Galley Plan" dialog — pick a flight from the order book (its return
+  // leg is pulled in automatically when the rotation is tagged with one).
+  const [showNewPlan, setShowNewPlan] = useState(false);
+  const [newPlanFlight, setNewPlanFlight] = useState("");
+  const [newPlanDate, setNewPlanDate] = useState("");
+  const [flightPickerOpen, setFlightPickerOpen] = useState(false);
+
+  // Dispatched worklist + manual flight-wise plans, deduped by flight+date. A
+  // real dispatch entry supersedes a manual plan for the same flight & date.
+  const entries = useMemo(() => {
+    const byKey = new Set(dispatchEntries.map((e) => `${e.flightId}|${e.packagingDate}`));
+    const out = [...dispatchEntries];
+    for (const e of manualEntries) {
+      const key = `${e.flightId}|${e.packagingDate}`;
+      if (byKey.has(key)) continue;
+      byKey.add(key);
+      out.unshift(e); // newest manual plans sit on top
+    }
+    return out;
+  }, [dispatchEntries, manualEntries]);
 
   const recByEntry = useMemo(() => {
     const m = new Map<string, GalleyLoadingRecord>();
@@ -351,6 +389,94 @@ export default function GalleyPlanningPage() {
   const airlineOf = (flightNo?: string) =>
     (flightNo && airlineByFlight.get(flightNo)) || "—";
 
+  // Order book — used to pair each outbound with its return leg (same rotation),
+  // so the list can show the return flight alongside the one being planned.
+  const flightOrders = useMemo(() => getFlightOrders(), []);
+  const orderFor = (flightNo?: string, date?: string) =>
+    flightNo ? resolveFlightOrder({ flight: flightNo, date }, flightOrders) : undefined;
+  const returnLegFor = (flightNo?: string, date?: string) =>
+    resolveReturnLeg(orderFor(flightNo, date), flightOrders);
+  // Departure time (ETD) of an entry's flight — used for the column and sort.
+  const etdOf = (e: DispatchEntry) => {
+    const f = flights.find((x) => x.id === e.flightId);
+    return f?.dep && f.dep !== "—" ? f.dep : "";
+  };
+
+  // ── "+ New Galley Plan" — flight-wise plan creation ──────────────────────────
+  // The pickable flights: distinct outbound orders that resolve to a renderable
+  // flight on the board. The FIRST order per flight wins (named seeds sort ahead
+  // of generated ones), so its date + return leg are the sensible defaults.
+  const newPlanFlightOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const opts: {
+      flight: string; flightId: string; sector: string; etd: string;
+      date: string; airline: string; hasReturn: boolean;
+    }[] = [];
+    for (const o of flightOrders) {
+      if ((o.orderType ?? "flight") === "crew" || o.direction !== "Outbound") continue;
+      if (seen.has(o.flight)) continue;
+      const fo = flights.find((f) => f.flight === o.flight);
+      if (!fo) continue; // must map to a board flight so the row renders fully
+      seen.add(o.flight);
+      opts.push({
+        flight: o.flight, flightId: fo.id, sector: o.sector, etd: o.etd,
+        date: o.date, airline: o.airline,
+        hasReturn: !!resolveReturnLeg(o, flightOrders),
+      });
+    }
+    return opts.sort((a, b) => a.flight.localeCompare(b.flight));
+  }, [flightOrders]);
+
+  const newPlanOpt = newPlanFlightOptions.find((o) => o.flight === newPlanFlight);
+  // Live preview of the return leg the chosen flight+date resolves to.
+  const newPlanReturn = newPlanOpt
+    ? returnLegFor(newPlanOpt.flight, newPlanDate || newPlanOpt.date)?.order
+    : undefined;
+
+  const openNewPlan = () => {
+    setNewPlanFlight("");
+    setNewPlanDate("");
+    setShowNewPlan(true);
+  };
+
+  // Build a blank dispatch entry for a flight-wise plan. Only the fields the
+  // planner reads carry data; the dispatch/QC fields stay empty (this row was
+  // never dispatched — it's a plan started ahead of one).
+  const blankPlanEntry = (flightId: string, date: string, pax: number): DispatchEntry => ({
+    id: `GALLEY-${Date.now().toString(36)}`,
+    flightId, packagingDate: date,
+    mealLines: [{ type: "Regular", qty: pax > 0 ? String(pax) : "" }],
+    vehicleNo: "", vehicleClean: "Yes", chilledTemp: "", frozenTemp: "",
+    loadStartTime: "", loadEndTime: "", vehicleTempBegin: "", vehicleTempEnd: "",
+    resultSatisfy: "Yes", gateTempGate08: "", unloadingTime: "", checkedByApt: "",
+    monitoredByRemarks: "", monitoredAt: "", approvalStage: 0,
+    receivedBy: "", receivedDesignation: "", receivedAt: "", receivedRemarks: "",
+  });
+
+  const createNewPlan = () => {
+    if (!newPlanOpt) { toast.error("Pick a flight first."); return; }
+    const date = newPlanDate || newPlanOpt.date;
+    // Don't duplicate a flight+date already in the worklist — open it instead.
+    const existing = entries.find(
+      (e) => e.flightId === newPlanOpt.flightId && e.packagingDate === date,
+    );
+    if (existing) {
+      setShowNewPlan(false);
+      setPlanEntryId(existing.id);
+      toast.info(`${newPlanOpt.flight} on ${date} is already in the list — opening it.`);
+      return;
+    }
+    const ord = orderFor(newPlanOpt.flight, date);
+    const entry = blankPlanEntry(newPlanOpt.flightId, date, ord?.pax ?? 0);
+    const next = [entry, ...manualEntries];
+    setManualEntries(next);
+    writeLS("galley-manual-entries", next);
+    setShowNewPlan(false);
+    setPlanEntryId(entry.id); // drop straight into the planner
+    const retMsg = newPlanReturn ? ` · return leg ${newPlanReturn.flight} included` : "";
+    toast.success(`Galley plan started for ${newPlanOpt.flight}${retMsg}.`);
+  };
+
   const rowStatus = (entryId: string): RowStatus =>
     recByEntry.get(entryId)?.galleyStatus ?? (drafts[entryId] ? "draft" : "not_planned");
 
@@ -358,13 +484,63 @@ export default function GalleyPlanningPage() {
   const approvedCount = galleyRecords.filter((r) => r.galleyStatus === "approved").length;
   const inFlowCount = galleyRecords.length - approvedCount;
 
+  // Airlines present across the dispatches — the Airline filter's options.
+  const airlineOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const e of entries) {
+      const f = flights.find((x) => x.id === e.flightId);
+      const a = airlineOf(f?.flight);
+      if (a && a !== "—") set.add(a);
+    }
+    return [...set].sort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries]);
+
   const visibleEntries = entries.filter((e) => {
     if (statusFilter !== "all" && rowStatus(e.id) !== statusFilter) return false;
-    if (!query.trim()) return true;
     const f = flights.find((x) => x.id === e.flightId);
+    if (airlineFilter !== "all" && airlineOf(f?.flight) !== airlineFilter) return false;
+    if (dateFrom && e.packagingDate < dateFrom) return false;
+    if (dateTo && e.packagingDate > dateTo) return false;
+    if (!query.trim()) return true;
     const hay = `${f?.flight ?? e.flightId} ${f?.sector ?? ""} ${airlineOf(f?.flight)} ${f?.aircraft ?? ""} ${e.packagingDate}`.toLowerCase();
     return hay.includes(query.trim().toLowerCase());
   });
+
+  // Ordered for display: by date, then by ETD (blank ETDs sort last).
+  const sortedEntries = [...visibleEntries].sort((a, b) => {
+    const ka = `${a.packagingDate} ${etdOf(a) || "99:99"}`;
+    const kb = `${b.packagingDate} ${etdOf(b) || "99:99"}`;
+    return ka.localeCompare(kb);
+  });
+
+  const setToday = () => {
+    const t = new Date().toISOString().slice(0, 10);
+    setDateFrom(t);
+    setDateTo(t);
+  };
+
+  // Close the planner; if a bulk "Plan" queue is running, advance to the next
+  // flight instead of returning to the list.
+  const closePlanner = () => {
+    setPlanQueue((q) => {
+      if (q.length > 0) {
+        const [next, ...rest] = q;
+        setPlanEntryId(next);
+        return rest;
+      }
+      setPlanEntryId(null);
+      return q;
+    });
+  };
+
+  // ── Bulk selection ──────────────────────────────────────────────────────────
+  const toggleSelect = (id: string) =>
+    setSelected((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
 
   const saveDraft = (
     entryId: string, plan: GalleyPlan,
@@ -437,7 +613,7 @@ export default function GalleyPlanningPage() {
     } else {
       allocMsg = " · consumables already allocated";
     }
-    setPlanEntryId(null);
+    closePlanner();
     toast.success(`Galley plan forwarded to aircraft loading${allocMsg}.`);
   };
 
@@ -455,6 +631,110 @@ export default function GalleyPlanningPage() {
     forward(entryId, draft.plan, source);
   };
 
+  // Bulk forward: forward every selected draft; report what could/couldn't go.
+  const bulkForward = () => {
+    const ids = [...selected];
+    const drafted = ids.filter((id) => rowStatus(id) === "draft");
+    if (drafted.length === 0) {
+      toast.error("None of the selected rows is a saved draft ready to forward.");
+      return;
+    }
+    drafted.forEach((id) => forwardDraft(id));
+    const skipped = ids.length - drafted.length;
+    setSelected(new Set());
+    toast.success(`${drafted.length} plan${drafted.length === 1 ? "" : "s"} forwarded${skipped > 0 ? ` · ${skipped} skipped (not a draft)` : ""}.`);
+  };
+
+  // Bulk plan: open the planner for each selected not-yet-forwarded flight in
+  // turn (guided sequence) — planning needs per-flight quantities, so it can't be
+  // a single silent batch.
+  const bulkPlan = () => {
+    const queue = [...selected].filter((id) => !recByEntry.has(id));
+    if (queue.length === 0) {
+      toast.error("The selected rows are already forwarded — nothing to plan.");
+      return;
+    }
+    setPlanQueue(queue.slice(1));
+    setPlanEntryId(queue[0]);
+    setSelected(new Set());
+    if (queue.length > 1) toast.info(`Planning ${queue.length} flights in sequence — the next opens when you forward or go back.`);
+  };
+
+  // ── Export / Print ──────────────────────────────────────────────────────────
+  // Flat display rows (outbound + any return leg) for the current filtered list.
+  const exportRows = () =>
+    sortedEntries.flatMap((e, i) => {
+      const f = flights.find((x) => x.id === e.flightId);
+      const out = {
+        sl: String(i + 1),
+        flight: f?.flight ?? e.flightId,
+        sector: f?.sector ?? "—",
+        airline: airlineOf(f?.flight),
+        etd: etdOf(e) || "—",
+        date: e.packagingDate,
+        pax: String(f?.pax ?? "—"),
+        crew: String(f?.crew ?? "—"),
+        special: String(orderFor(f?.flight, e.packagingDate)?.specialMeals ?? "—"),
+        status: ROW_STATUS_LABEL[rowStatus(e.id)],
+      };
+      const retLeg = returnLegFor(f?.flight, e.packagingDate)?.order;
+      const rows = [out];
+      if (retLeg) {
+        rows.push({
+          sl: "", flight: `↳ ${retLeg.flight} (Return)`, sector: retLeg.sector ?? "—",
+          airline: airlineOf(retLeg.flight), etd: retLeg.etd || "—", date: retLeg.date ?? e.packagingDate,
+          pax: String(retLeg.pax ?? "—"), crew: String(retLeg.crew ?? "—"),
+          special: String(retLeg.specialMeals ?? "—"), status: `Planned with ${out.flight}`,
+        });
+      }
+      return rows;
+    });
+
+  const EXPORT_COLS = ["SL", "Flight", "Sector", "Airline", "ETD", "Date", "PAX", "Crew", "Special", "Galley Status"];
+  const rowValues = (r: ReturnType<typeof exportRows>[number]) =>
+    [r.sl, r.flight, r.sector, r.airline, r.etd, r.date, r.pax, r.crew, r.special, r.status];
+
+  const downloadCsv = () => {
+    const rows = exportRows();
+    if (rows.length === 0) { toast.error("Nothing to export."); return; }
+    const esc = (v: string) => `"${v.replace(/"/g, '""')}"`;
+    const csv = [EXPORT_COLS, ...rows.map(rowValues)].map((r) => r.map(esc).join(",")).join("\r\n");
+    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `galley-plan-${dateFrom || "all"}${dateTo && dateTo !== dateFrom ? `_to_${dateTo}` : ""}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success(`Exported ${rows.length} line${rows.length === 1 ? "" : "s"} to CSV.`);
+  };
+
+  const printList = () => {
+    const rows = exportRows();
+    if (rows.length === 0) { toast.error("Nothing to print."); return; }
+    const win = window.open("", "_blank", "width=1024,height=720");
+    if (!win) { toast.error("Pop-up blocked — allow pop-ups to print."); return; }
+    const range = dateFrom || dateTo ? `${dateFrom || "…"} → ${dateTo || "…"}` : "All dates";
+    const body = rows
+      .map((r) => `<tr>${rowValues(r).map((v, i) => `<td class="${i === 0 ? "sl" : ""} ${i >= 6 && i <= 8 ? "num" : ""}">${v}</td>`).join("")}</tr>`)
+      .join("");
+    win.document.write(`<!doctype html><html><head><title>Galley Plan</title><style>
+      body{font-family:system-ui,Arial,sans-serif;padding:24px;color:#0f172a}
+      h1{font-size:18px;margin:0 0 2px} .meta{color:#64748b;font-size:12px;margin-bottom:16px}
+      table{width:100%;border-collapse:collapse;font-size:12px}
+      th,td{border:1px solid #cbd5e1;padding:6px 8px;text-align:left}
+      th{background:#f1f5f9;text-transform:uppercase;font-size:10px;letter-spacing:.05em}
+      td.num{text-align:right;font-variant-numeric:tabular-nums} td.sl{color:#64748b}
+      @media print{@page{margin:14mm}}
+    </style></head><body>
+      <h1>Galley Plan — Loading List</h1>
+      <div class="meta">${range} · ${rows.length} line(s) · printed ${new Date().toLocaleString()}</div>
+      <table><thead><tr>${EXPORT_COLS.map((c) => `<th>${c}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table>
+      <script>window.onload=function(){window.print()}</script>
+    </body></html>`);
+    win.document.close();
+  };
+
   const planEntry = planEntryId ? entries.find((e) => e.id === planEntryId) : undefined;
   const planFlight = planEntry ? flights.find((f) => f.id === planEntry.flightId) : undefined;
   const viewRec = viewEntryId ? recByEntry.get(viewEntryId) : undefined;
@@ -469,8 +749,8 @@ export default function GalleyPlanningPage() {
           title="Galley Plan"
           subtitle="Plan the per-flight galley load — meals, beverages, amenities, consumables & equipment — then forward to aircraft loading"
           actions={
-            <Button variant="outline" onClick={() => setPlanEntryId(null)}>
-              <ArrowLeft className="h-4 w-4 mr-1" /> Back to List
+            <Button variant="outline" onClick={closePlanner}>
+              <ArrowLeft className="h-4 w-4 mr-1" /> {planQueue.length > 0 ? `Next (${planQueue.length} left)` : "Back to List"}
             </Button>
           }
         />
@@ -479,7 +759,7 @@ export default function GalleyPlanningPage() {
           entry={planEntry}
           flight={planFlight}
           initialPlan={recByEntry.get(planEntry.id)?.galleyPlan ?? drafts[planEntry.id]?.plan}
-          onClose={() => setPlanEntryId(null)}
+          onClose={closePlanner}
           onSaveDraft={(plan, source) => saveDraft(planEntry.id, plan, source)}
         />
       </>
@@ -491,6 +771,11 @@ export default function GalleyPlanningPage() {
       <PageHeader
         title="Galley Plan"
         subtitle="Plan the per-flight galley load — meals, beverages, amenities, consumables & equipment — then forward to aircraft loading"
+        actions={
+          <Button size="sm" className="h-9 text-xs" onClick={openNewPlan} title="Start a galley plan flight-wise from the order book">
+            <Plus className="h-4 w-4 mr-1" /> New Galley Plan
+          </Button>
+        }
       />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
@@ -523,42 +808,149 @@ export default function GalleyPlanningPage() {
                 ))}
               </SelectContent>
             </Select>
-            <span className="text-[11px] text-muted-foreground ml-auto tabular-nums">
-              {visibleEntries.length} of {entries.length} dispatches
-            </span>
+            <Select value={airlineFilter} onValueChange={setAirlineFilter}>
+              <SelectTrigger className="h-8 w-full sm:w-44 text-xs">
+                <SelectValue placeholder="Airline" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All airlines</SelectItem>
+                {airlineOptions.map((a) => (
+                  <SelectItem key={a} value={a}>{a}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {/* Date range — one field holding both From and To (app-standard pill). */}
+            <div className="inline-flex items-center gap-2 rounded-lg border border-border bg-card px-2.5 py-1 shadow-sm">
+              <CalendarDays className="h-3.5 w-3.5 text-muted-foreground" />
+              <span className="field-label">Date</span>
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                aria-label="From date"
+                className="h-7 rounded-md border border-input bg-background px-2 text-xs tabular-nums"
+              />
+              <span className="text-xs text-muted-foreground">→</span>
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                aria-label="To date"
+                className="h-7 rounded-md border border-input bg-background px-2 text-xs tabular-nums"
+              />
+              {(dateFrom || dateTo) && (
+                <button
+                  type="button"
+                  onClick={() => { setDateFrom(""); setDateTo(""); }}
+                  className="text-xs text-muted-foreground hover:text-foreground"
+                  title="Clear date filter"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <Button variant="outline" size="sm" className="h-8 text-xs" onClick={setToday}>Today</Button>
+            <div className="ml-auto flex items-center gap-2">
+              <span className="text-[11px] text-muted-foreground tabular-nums">
+                {visibleEntries.length} of {entries.length} dispatches
+              </span>
+              <Button variant="outline" size="sm" className="h-8 text-xs" onClick={downloadCsv} title="Export the list to CSV (Excel)">
+                <Download className="h-3.5 w-3.5 mr-1" /> Export
+              </Button>
+              <Button variant="outline" size="sm" className="h-8 text-xs" onClick={printList} title="Print the list (PDF)">
+                <Printer className="h-3.5 w-3.5 mr-1" /> Print
+              </Button>
+            </div>
           </div>
 
+          {/* Bulk action bar. Plan acts on unplanned / draft rows; Forward can only
+              act on rows already planned (saved as a draft) — you cannot forward a
+              flight that has not been planned. */}
+          {selected.size > 0 && (() => {
+            const sel = [...selected];
+            const planCount = sel.filter((id) => !recByEntry.has(id)).length;         // not yet forwarded
+            const forwardCount = sel.filter((id) => rowStatus(id) === "draft").length; // planned, ready to send
+            return (
+              <div className="flex flex-wrap items-center gap-2 mb-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2">
+                <span className="text-xs font-medium">{selected.size} selected</span>
+                <Button size="sm" className="h-7 px-2.5 text-xs" onClick={bulkPlan} disabled={planCount === 0}
+                  title={planCount === 0 ? "All selected flights are already forwarded" : undefined}>
+                  <LayoutGrid className="h-3 w-3 mr-1" /> Plan{planCount > 0 ? ` (${planCount})` : ""}
+                </Button>
+                <Button size="sm" className="h-7 px-2.5 text-xs bg-violet-600 hover:bg-violet-700 text-white" onClick={bulkForward} disabled={forwardCount === 0}
+                  title={forwardCount === 0 ? "Only planned flights (saved drafts) can be forwarded — plan them first" : undefined}>
+                  <Send className="h-3 w-3 mr-1" /> Forward{forwardCount > 0 ? ` (${forwardCount})` : ""}
+                </Button>
+                {forwardCount === 0 && (
+                  <span className="text-[11px] text-muted-foreground">Plan a flight before forwarding.</span>
+                )}
+                <button type="button" onClick={() => setSelected(new Set())} className="ml-1 text-xs text-muted-foreground hover:text-foreground">
+                  Clear
+                </button>
+              </div>
+            );
+          })()}
+
           <div className="border border-border rounded-md overflow-hidden">
-            <Table className="min-w-[960px]">
+            <Table className="min-w-[1120px]">
               <TableHeader className="bg-muted/40">
                 <TableRow>
+                  <TableHead className="w-8">
+                    <input
+                      type="checkbox"
+                      className="h-3.5 w-3.5 accent-primary align-middle"
+                      aria-label="Select all"
+                      checked={sortedEntries.length > 0 && sortedEntries.every((e) => selected.has(e.id))}
+                      onChange={(ev) => {
+                        setSelected(ev.target.checked ? new Set(sortedEntries.map((e) => e.id)) : new Set());
+                      }}
+                    />
+                  </TableHead>
+                  <TableHead className="text-xs uppercase tracking-wider w-12">SL</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Flight</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Airline</TableHead>
+                  <TableHead className="text-xs uppercase tracking-wider">ETD</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Aircraft</TableHead>
                   <TableHead className="text-right text-xs uppercase tracking-wider">PAX</TableHead>
                   <TableHead className="text-right text-xs uppercase tracking-wider">Crew</TableHead>
+                  <TableHead className="text-right text-xs uppercase tracking-wider">Special</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Galley Status</TableHead>
                   <TableHead className="text-xs uppercase tracking-wider">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {visibleEntries.length === 0 ? (
+                {sortedEntries.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={9} className="text-center text-sm text-muted-foreground py-10">
+                    <TableCell colSpan={13} className="text-center text-sm text-muted-foreground py-10">
                       {entries.length === 0 ? "No dispatches to plan." : "No dispatches match the current filters."}
                     </TableCell>
                   </TableRow>
-                ) : visibleEntries.map((e) => {
+                ) : sortedEntries.map((e, idx) => {
                   const f = flights.find((x) => x.id === e.flightId);
                   const rec = recByEntry.get(e.id);
                   const status = rowStatus(e.id);
+                  // The paired return leg of this rotation, if the order is tagged
+                  // with one — shown as a sub-row (planned together with the outbound).
+                  const ret = returnLegFor(f?.flight, e.packagingDate)?.order;
                   return (
-                    <TableRow key={e.id} className="hover:bg-muted/30">
+                    <Fragment key={e.id}>
+                    <TableRow className="hover:bg-muted/30">
+                      <TableCell>
+                        <input
+                          type="checkbox"
+                          className="h-3.5 w-3.5 accent-primary align-middle"
+                          aria-label={`Select ${f?.flight ?? e.flightId}`}
+                          checked={selected.has(e.id)}
+                          onChange={() => toggleSelect(e.id)}
+                        />
+                      </TableCell>
+                      <TableCell className="tabular-nums text-muted-foreground">{idx + 1}</TableCell>
                       <TableCell className="font-semibold">{f?.flight ?? e.flightId}</TableCell>
                       <TableCell>{f?.sector ?? "—"}</TableCell>
                       <TableCell>{airlineOf(f?.flight)}</TableCell>
+                      <TableCell className="tabular-nums text-xs">{etdOf(e) || "—"}</TableCell>
                       <TableCell className="tabular-nums text-xs">{e.packagingDate}</TableCell>
                       {/* Aircraft is assigned during galley planning — it can't be
                           pre-loaded, so it only appears once a plan is saved. */}
@@ -569,6 +961,7 @@ export default function GalleyPlanningPage() {
                       </TableCell>
                       <TableCell className="text-right tabular-nums">{f?.pax ?? "—"}</TableCell>
                       <TableCell className="text-right tabular-nums">{f?.crew ?? "—"}</TableCell>
+                      <TableCell className="text-right tabular-nums">{orderFor(f?.flight, e.packagingDate)?.specialMeals ?? "—"}</TableCell>
                       <TableCell>{rowStatusBadge(status)}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1.5">
@@ -596,6 +989,33 @@ export default function GalleyPlanningPage() {
                         </div>
                       </TableCell>
                     </TableRow>
+                    {ret && (
+                      <TableRow className="bg-muted/20 hover:bg-muted/30">
+                        <TableCell />
+                        <TableCell />
+                        <TableCell className="font-medium text-muted-foreground">
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="text-muted-foreground/70">↳</span>
+                            {ret.flight}
+                            <Badge variant="outline" className="h-4 px-1.5 text-[10px] border-amber-300 bg-amber-50 text-amber-700">Return</Badge>
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">{ret.sector ?? "—"}</TableCell>
+                        <TableCell className="text-muted-foreground">{airlineOf(ret.flight)}</TableCell>
+                        <TableCell className="tabular-nums text-xs text-muted-foreground">{ret.etd || "—"}</TableCell>
+                        <TableCell className="tabular-nums text-xs text-muted-foreground">{ret.date ?? e.packagingDate}</TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {status === "not_planned" ? <span className="text-muted-foreground">—</span> : (f?.aircraft ?? "—")}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums text-muted-foreground">{ret.pax ?? "—"}</TableCell>
+                        <TableCell className="text-right tabular-nums text-muted-foreground">{ret.crew ?? "—"}</TableCell>
+                        <TableCell className="text-right tabular-nums text-muted-foreground">{ret.specialMeals ?? "—"}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground italic" colSpan={2}>
+                          Planned with {f?.flight ?? e.flightId}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    </Fragment>
                   );
                 })}
               </TableBody>
@@ -607,6 +1027,121 @@ export default function GalleyPlanningPage() {
       {viewRec && (
         <GalleySheetViewModal rec={viewRec} flight={viewFlight} onClose={() => setViewEntryId(null)} />
       )}
+
+      {/* + New Galley Plan — start a plan flight-wise from the order book. The
+          return leg is pulled in automatically when the rotation is tagged. */}
+      <Dialog open={showNewPlan} onOpenChange={setShowNewPlan}>
+        <DialogContent className="max-w-md">
+          <div className="flex items-center justify-between mb-1">
+            <h2 className="text-base font-bold">New Galley Plan</h2>
+            <button type="button" onClick={() => setShowNewPlan(false)} className="text-muted-foreground hover:text-foreground">
+              <CloseIcon className="h-4 w-4" />
+            </button>
+          </div>
+          <p className="text-xs text-muted-foreground mb-4">
+            Pick a flight — its return leg is added automatically when the rotation is tagged with one.
+          </p>
+
+          <div className="space-y-3">
+            <div>
+              <label className="field-label">Flight</label>
+              <Popover open={flightPickerOpen} onOpenChange={setFlightPickerOpen}>
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    role="combobox"
+                    aria-expanded={flightPickerOpen}
+                    className={cn(
+                      "mt-1 flex h-9 w-full items-center justify-between gap-2 rounded-md border border-input bg-background px-3 text-xs shadow-sm transition-colors hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                      !newPlanOpt && "text-muted-foreground",
+                    )}
+                  >
+                    <span className="truncate text-left">
+                      {newPlanOpt
+                        ? `${newPlanOpt.flight} · ${newPlanOpt.sector} · ${newPlanOpt.etd}`
+                        : "Select or search a flight…"}
+                    </span>
+                    <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] min-w-[300px] p-0">
+                  <Command>
+                    <CommandInput placeholder="Search flight, sector, airline…" className="h-9 text-xs" />
+                    <CommandList>
+                      <CommandEmpty>No flight found.</CommandEmpty>
+                      <CommandGroup>
+                        {newPlanFlightOptions.map((o) => (
+                          <CommandItem
+                            key={o.flight}
+                            value={`${o.flight} ${o.sector} ${o.airline}`}
+                            onSelect={() => {
+                              setNewPlanFlight(o.flight);
+                              setNewPlanDate(o.date);
+                              setFlightPickerOpen(false);
+                            }}
+                            className="text-xs"
+                          >
+                            <Check className={cn("mr-2 h-3.5 w-3.5 shrink-0", newPlanFlight === o.flight ? "opacity-100" : "opacity-0")} />
+                            <span className="truncate">
+                              <span className="font-medium">{o.flight}</span>
+                              <span className="text-muted-foreground"> · {o.sector} · {o.etd} · {o.airline}</span>
+                            </span>
+                            {o.hasReturn && (
+                              <Badge variant="outline" className="ml-auto h-4 px-1.5 text-[10px] border-amber-300 bg-amber-50 text-amber-700">↔ return</Badge>
+                            )}
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
+            </div>
+
+            <div>
+              <label className="field-label">Plan date</label>
+              <input
+                type="date"
+                value={newPlanDate}
+                onChange={(e) => setNewPlanDate(e.target.value)}
+                className="h-9 w-full rounded-md border border-input bg-background px-2 text-xs tabular-nums mt-1"
+              />
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Defaults to the order date so the return leg &amp; special meals resolve.
+              </p>
+            </div>
+
+            {newPlanOpt && (
+              <div className="rounded-md border border-border bg-muted/30 p-3 text-xs space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold">{newPlanOpt.flight}</span>
+                  <span className="text-muted-foreground">{newPlanOpt.sector} · {newPlanOpt.etd}</span>
+                </div>
+                {newPlanReturn ? (
+                  <div className="flex items-center gap-1.5 text-muted-foreground">
+                    <span className="text-muted-foreground/70">↳</span>
+                    <Badge variant="outline" className="h-4 px-1.5 text-[10px] border-amber-300 bg-amber-50 text-amber-700">Return</Badge>
+                    <span>{newPlanReturn.flight} · {newPlanReturn.sector} · {newPlanReturn.etd || "—"}</span>
+                  </div>
+                ) : (
+                  <p className="text-muted-foreground italic">
+                    No return leg tagged for this rotation{newPlanDate && newPlanDate !== newPlanOpt.date ? " on this date" : ""}.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="flex justify-end gap-2 mt-5">
+            <Button variant="outline" size="sm" className="h-8 text-xs" onClick={() => setShowNewPlan(false)}>
+              Cancel
+            </Button>
+            <Button size="sm" className="h-8 text-xs" onClick={createNewPlan} disabled={!newPlanOpt}>
+              <LayoutGrid className="h-3.5 w-3.5 mr-1" /> Create &amp; Plan
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -19,6 +20,8 @@ import {
 import {
   GalleySheetViewModal, rowStatusBadge, STATUS_LABEL,
 } from "@/routes/galley-planning";
+import { getFlightOrders } from "@/lib/flight-orders-store";
+import { resolveFlightOrder, resolveReturnLeg } from "@/lib/order-chain";
 
 // Loading QC — the actionable galley loading workflow: a forwarded sheet is
 // loaded (Start → Complete, timed), then sent to Approval Management where the
@@ -67,6 +70,15 @@ export default function GalleyQcPage() {
     saveGalleyRecords(next);
     setRecords(next);
   };
+
+  // Order book — pairs each outbound with its return leg (same rotation), so a
+  // forwarded sheet shows the return flight alongside it, mirroring Galley Plan.
+  const flightOrders = useMemo(() => getFlightOrders(), []);
+  const returnLegFor = (flightNo?: string, date?: string) =>
+    resolveReturnLeg(
+      flightNo ? resolveFlightOrder({ flight: flightNo, date }, flightOrders) : undefined,
+      flightOrders,
+    )?.order;
 
   const startLoading = (rec: GalleyLoadingRecord) => {
     if (records.some((r) => r.galleyStatus === "loading")) {
@@ -175,8 +187,12 @@ export default function GalleyQcPage() {
                   </TableRow>
                 ) : visible.map((r) => {
                   const f = flights.find((x) => x.id === r.flightId);
+                  // The paired return leg of this rotation, if the order is tagged
+                  // with one — loaded together with the outbound sheet.
+                  const ret = returnLegFor(f?.flight, r.date);
                   return (
-                    <TableRow key={r.id} className="hover:bg-muted/30">
+                    <Fragment key={r.id}>
+                    <TableRow className="hover:bg-muted/30">
                       <TableCell className="font-semibold">{r.flightLabel}</TableCell>
                       <TableCell>{f?.sector ?? "—"}</TableCell>
                       <TableCell className="tabular-nums text-xs">{r.date}</TableCell>
@@ -203,11 +219,6 @@ export default function GalleyQcPage() {
                               <Check className="h-3 w-3 mr-1" /> Complete
                             </Button>
                           )}
-                          {r.galleyStatus === "awaiting_approval" && (
-                            <span className="text-[11px] text-amber-600 font-semibold flex items-center gap-1">
-                              <Clock className="h-3.5 w-3.5" /> Awaiting Approval
-                            </span>
-                          )}
                           {r.galleyStatus === "approved" && (
                             <span className="text-[11px] text-emerald-600 font-semibold flex items-center gap-1">
                               <BadgeCheck className="h-3.5 w-3.5" /> {r.approvedBy ?? "Approved"} · {r.approvedAt}
@@ -216,6 +227,23 @@ export default function GalleyQcPage() {
                         </div>
                       </TableCell>
                     </TableRow>
+                    {ret && (
+                      <TableRow className="bg-muted/20 hover:bg-muted/30">
+                        <TableCell className="font-medium text-muted-foreground">
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="text-muted-foreground/70">↳</span>
+                            {ret.flight}
+                            <Badge variant="outline" className="h-4 px-1.5 text-[10px] border-amber-300 bg-amber-50 text-amber-700">Return</Badge>
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">{ret.sector ?? "—"}</TableCell>
+                        <TableCell className="tabular-nums text-xs text-muted-foreground">{ret.date ?? r.date}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground italic" colSpan={3}>
+                          Loaded with {f?.flight ?? r.flightLabel}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    </Fragment>
                   );
                 })}
               </TableBody>
