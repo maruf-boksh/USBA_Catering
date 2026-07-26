@@ -1510,7 +1510,8 @@ export type FlightOrderStatus =
   | "Production"
   | "Packaged"
   | "Dispatched"
-  | "Completed";
+  | "Completed"
+  | "Departed";
 
 /**
  * Status workflow for flight orders, in order. Use `nextFlightStatus` to
@@ -1523,6 +1524,7 @@ export const FLIGHT_ORDER_STATUS_FLOW: FlightOrderStatus[] = [
   "Packaged",
   "Dispatched",
   "Completed",
+  "Departed",
 ];
 
 export function nextFlightStatus(s: FlightOrderStatus): FlightOrderStatus | null {

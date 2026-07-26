@@ -2,7 +2,8 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from "
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { getDemandRequests, saveDemandRequests } from "@/lib/demand-requests";
 import { requisitions as seedReqs, purchaseOrders as seedPOs } from "@/lib/sample-data";
-import { updateFlightOrdersWhere } from "@/lib/flight-orders-store";
+import { updateFlightOrdersWhere, getFlightOrders } from "@/lib/flight-orders-store";
+import { servedOrderNosFor } from "@/lib/production-order-link";
 
 // ── Status enums ───────────────────────────────────────────────────────────────
 export type WfDemandStatus =
@@ -883,22 +884,33 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       applyStockDeltas: (deltas) => setStockDeltas(prev => [...prev, ...deltas]),
 
       productionEntries,
-      addProductionEntry: (entry) => {
-        setProductionEntries(prev => [entry, ...prev]);
-        // Raising a production order takes that date's Approved flight orders
-        // into Production — their real entry into the stage. Universal here so
-        // EVERY creation path (single Create form, batch "from meal plan", the
-        // mobile flow) advances the status. Only Approved legs match, so it's a
-        // no-op once they're already Production.
-        if (entry.date) {
-          updateFlightOrdersWhere(
-            (o) => o.date === entry.date && o.status === "Approved",
-            { status: "Production" },
-          );
+      addProductionEntry: (entry) => setProductionEntries(prev => [entry, ...prev]),
+      updateProductionEntryStatus: (id, status, extra) => {
+        setProductionEntries(prev => prev.map(e => e.id === id ? { ...e, status, ...extra } : e));
+        // A flight order enters Production when a run that ACTUALLY SERVES it
+        // begins execution (Production Initiation onward) — not when the order was
+        // raised (still Pending/Approved), and NOT for every same-date run. A
+        // flight is fed by many runs and a run feeds many flights, so we advance
+        // only the flights this run serves — its servesOrderNos (recomputed via
+        // servedOrderNosFor when the stamp is missing). The first serving run to
+        // start is enough (the flight has entered production); "all runs done" is
+        // captured later by Packaged. Only Approved legs move, so a leg already
+        // Packaged/Dispatched never regresses.
+        const started = status !== "Pending" && status !== "Approved";
+        const entry = productionEntries.find((e) => e.id === id);
+        if (started && entry) {
+          const served = entry.servesOrderNos?.length
+            ? entry.servesOrderNos
+            : servedOrderNosFor(entry.outputItemName ?? entry.bom, entry.date, getFlightOrders());
+          const servedSet = new Set(served);
+          if (servedSet.size > 0) {
+            updateFlightOrdersWhere(
+              (o) => servedSet.has(o.orderNo) && o.status === "Approved",
+              { status: "Production" },
+            );
+          }
         }
       },
-      updateProductionEntryStatus: (id, status, extra) =>
-        setProductionEntries(prev => prev.map(e => e.id === id ? { ...e, status, ...extra } : e)),
 
       mrpRuns,
       addMrpRun: (run) => setMrpRuns((prev) => [run, ...prev]),

@@ -70,8 +70,8 @@ function buildForwardedOrders(orders: FlightOrderRow[]): { date: string; totalMe
   const byDate = new Map<string, number>();
   for (const o of orders) {
     // Only count orders that haven't been pushed past Production yet — once an
-    // order is Dispatched or Completed it has left the production pipeline.
-    if (o.status === "Dispatched" || o.status === "Completed") continue;
+    // order is Dispatched, Completed or Departed it has left the pipeline.
+    if (o.status === "Dispatched" || o.status === "Completed" || o.status === "Departed") continue;
     byDate.set(o.date, (byDate.get(o.date) ?? 0) + o.pax + o.crew + o.specialMeals);
   }
   return Array.from(byDate.entries())
@@ -1083,13 +1083,9 @@ export default function ProductionEntryPage() {
         )).sort()
       : [];
     const taggedEntry: ProductionEntry = { ...entry, servesOrderNos };
-    // Count the Approved legs this order will take into Production *before* adding
-    // it — addProductionEntry performs the actual Approved→Production advance (in
-    // the workflow store, so every creation path shares it), after which the
-    // snapshot below would already read Production.
-    const willAdvance = flightOrders.filter(
-      (o) => o.date === entry.date && o.status === "Approved",
-    ).length;
+    // Raising the order does NOT move flight orders to Production — that happens
+    // when the run actually starts (Production Initiation, in Production Entry),
+    // wired in the workflow store's updateProductionEntryStatus.
     addProductionEntry(taggedEntry);
     logAudit({
       action: "Created production order",
@@ -1097,9 +1093,6 @@ export default function ProductionEntryPage() {
       entity: entry.id,
       detail: `${entry.outputItemName ?? entry.bom} · order qty ${entry.orderQty ?? 0}${entry.date ? ` · ${entry.date}` : ""}${servesOrderNos.length ? ` · serves ${servesOrderNos.length} order(s): ${servesOrderNos.join(", ")}` : ""}`,
     });
-    if (willAdvance > 0) {
-      toast.success(`${willAdvance} flight order leg${willAdvance === 1 ? "" : "s"} for ${entry.date} moved to Production.`);
-    }
     setView("list");
     setPendingItem(undefined);
   };
