@@ -25,7 +25,7 @@ import { LocationPicker, LocationFilter, LocationCell } from "@/components/commo
 import { PRODUCTION_ITEMS, type RecipeItem } from "@/routes/production-entry";
 import { resolveProductionItem } from "@/lib/meal-recipe";
 import { usePersistedState } from "@/lib/use-persisted-state";
-import { inventory, type InventoryItem } from "@/lib/sample-data";
+import { inventory, warehouses, type InventoryItem } from "@/lib/sample-data";
 import { roundQty, fmtQty } from "@/lib/num";
 
 const SHIFTS = ["Morning", "Evening", "Night"] as const;
@@ -61,6 +61,19 @@ export default function ProductionEntryPage() {
   });
 
   const totalProduced = filteredRecords.reduce((s, r) => s + r.producedQty, 0);
+
+  // ── At-a-glance breakdowns for the KPI cards ────────────────────────────────
+  // Approved-order counts, the entry vs pending-entry split, the fulfillable
+  // kitchen mix, and the in-preparation / pending pipeline stages.
+  const approvedStatuses = ["Approved", "Production Initiation", "In Preparation", "Ready for QC", "Completed"];
+  const approvedOrders = productionEntries.filter((o) => approvedStatuses.includes(o.status));
+  const totalEntry     = filteredRecords.length;
+  const pendingEntry   = approvedOrders.filter((o) => o.producedQty === 0).length;
+  const whNameById     = (id?: string) => warehouses.find((w) => w.id === id)?.name ?? "";
+  const hotKitchen     = fulfillableOrders.filter((o) => whNameById(o.warehouseId).toLowerCase().includes("hot")).length;
+  const coldKitchen    = fulfillableOrders.filter((o) => whNameById(o.warehouseId).toLowerCase().includes("cold")).length;
+  const inPrepCount    = productionEntries.filter((o) => o.status === "In Preparation").length;
+  const pendingCount   = productionEntries.filter((o) => o.status === "Pending").length;
 
   const cols: Column<WfProductionEntryRecord>[] = [
     { key: "id", header: "Entry No", render: (r) => <span className="font-mono text-xs">{r.id}</span> },
@@ -131,9 +144,36 @@ export default function ProductionEntryPage() {
       {view === "list" ? (
         <>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
-            <KpiCard label="Total Entries" value={filteredRecords.length} icon={ClipboardCheck} tone="navy" />
-            <KpiCard label="Total Produced" value={totalProduced.toLocaleString()} icon={Factory} tone="success" />
-            <KpiCard label="Fulfillable Orders" value={fulfillableOrders.length} icon={CheckCircle2} tone="warning" />
+            <KpiCard
+              label="Total Approved Orders" value={approvedOrders.length} icon={ClipboardCheck}
+              tone="violet" variant="aurora"
+              sub={`${pendingEntry} awaiting entry`}
+              hint="Orders that passed approval, with entries logged vs pending."
+              breakdown={[
+                { label: "Total Entry",   value: totalEntry,   icon: "📝" },
+                { label: "Pending Entry", value: pendingEntry, icon: "⏳" },
+              ]}
+            />
+            <KpiCard
+              label="Fulfillable Orders" value={fulfillableOrders.length} icon={CheckCircle2}
+              tone="amber" variant="aurora"
+              sub="open for entry"
+              hint="Orders still able to accept production entries, by kitchen."
+              breakdown={[
+                { label: "Hot Kitchen",  value: hotKitchen,  icon: "🔥" },
+                { label: "Cold Kitchen", value: coldKitchen, icon: "❄️" },
+              ]}
+            />
+            <KpiCard
+              label="Total Produced" value={totalProduced.toLocaleString()} icon={Factory}
+              tone="green" variant="aurora"
+              sub="units produced"
+              hint="Units produced so far, with the active pipeline stages."
+              breakdown={[
+                { label: "In Preparation", value: inPrepCount,  icon: "👨‍🍳" },
+                { label: "Pending",        value: pendingCount, icon: "⏳" },
+              ]}
+            />
           </div>
 
           <div className="mb-4">

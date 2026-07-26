@@ -114,7 +114,12 @@ export default function CookingTemp() {
   const [qcTaste, setQcTaste] = useState<"" | "Good" | "Average" | "Not Good" | "Other">("");
   const [qcTasteOther, setQcTasteOther] = useState(""); // free-text when Taste = "Other"
   // Per-batch inputs for the combined "Record Test — All" form (keyed by entry id).
-  const [qcAllRows, setQcAllRows] = useState<Record<string, { measured: number | ""; cookedBy: string }>>({});
+  // Taste mirrors the single Record Test — same categories + free-text "Other".
+  type QcTasteValue = "" | "Good" | "Average" | "Not Good" | "Other";
+  // tasteResult is the manual Pass/Fail decision required only when taste is
+  // "Other" — a free-text observation can't be auto-judged, so the user picks.
+  type QcAllRow = { measured: number | ""; cookedBy: string; taste: QcTasteValue; tasteOther: string; tasteResult: "" | "Pass" | "Fail" };
+  const [qcAllRows, setQcAllRows] = useState<Record<string, QcAllRow>>({});
 
   // Fail state
   const [failReason, setFailReason] = useState("");
@@ -222,8 +227,8 @@ export default function CookingTemp() {
   // Open the combined "Record Test — All" form, seeding one empty input row per
   // pending batch (measured °C + chef), mirroring the single Record Test inputs.
   const openQcAll = () => {
-    const seed: Record<string, { measured: number | ""; cookedBy: string }> = {};
-    pendingQC.forEach((e) => { seed[e.id] = { measured: "", cookedBy: "" }; });
+    const seed: Record<string, QcAllRow> = {};
+    pendingQC.forEach((e) => { seed[e.id] = { measured: "", cookedBy: "", taste: "", tasteOther: "", tasteResult: "" }; });
     setQcAllRows(seed);
     setQcAllOpen(true);
   };
@@ -245,6 +250,15 @@ export default function CookingTemp() {
         toast.error(`Enter measured °C for ${entry.id}.`); return;
       }
       if (!row.cookedBy) { toast.error(`Select who cooked ${entry.id}.`); return; }
+      // Same rule as the single Record Test: a free-text taste needs a value.
+      if (row.taste === "Other" && !row.tasteOther.trim()) {
+        toast.error(`Specify the taste observation for ${entry.id}.`); return;
+      }
+      // "Other" taste can't be auto-judged — the manual Pass/Fail must be chosen
+      // (only surfaced when the temperature itself meets standard).
+      if (row.taste === "Other" && Number(row.measured) >= stdTempFor(entry) && !row.tasteResult) {
+        toast.error(`Select Pass or Fail for ${entry.id}.`); return;
+      }
     }
 
     const now = new Date();
@@ -262,7 +276,17 @@ export default function CookingTemp() {
       const stdTemp = stdTempFor(entry);
       const row = qcAllRows[entry.id];
       const measured = Number(row.measured);
-      const passed = measured >= stdTemp;
+      const tempOk = measured >= stdTemp;
+      // Taste is a QC dimension independent of temperature (same as the single
+      // test): "Not Good" is sent back; "Other" is judged by the manual result.
+      const tasteNote = row.taste === "Other" ? row.tasteOther.trim() : row.taste;
+      const tasteAcceptable = row.taste === "Other" ? row.tasteResult === "Pass" : row.taste !== "Not Good";
+      const passed = tempOk && tasteAcceptable;
+      const failReason = !tempOk
+        ? `Measured ${measured}°C below HACCP standard of ≥${stdTemp}°C.`
+        : !tasteAcceptable
+          ? `Sensory/taste not acceptable — ${tasteNote || "Not Good"}.`
+          : undefined;
       const logId = `CT-${base + i}`;
       newRecords.push({
         id: logId,
@@ -276,7 +300,8 @@ export default function CookingTemp() {
         sensoryPass: passed,
         checkedBy: checkedByFull,
         date: now.toISOString().slice(0, 10),
-        failReason: passed ? undefined : `Measured ${measured}°C below HACCP standard of ≥${stdTemp}°C.`,
+        failReason,
+        taste: tasteNote || undefined,
         checkedAt: stamp,
       } as T);
       if (passed) {
@@ -735,15 +760,15 @@ export default function CookingTemp() {
 
       {/* Bulk record-test — combined per-batch input form */}
       <Dialog open={qcAllOpen} onOpenChange={setQcAllOpen}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <ClipboardCheck className="h-5 w-5 text-primary" /> Record Test — All Pending QC
             </DialogTitle>
             <DialogDescription>
-              Enter measured temperature and the chef for each batch, same as a single Record Test.
-              Batches meeting their standard are completed and added to inventory; any measuring below
-              standard are sent back to In Preparation.
+              Enter measured temperature, the chef, and the taste result for each batch, same as a single Record Test.
+              Batches meeting their standard with an acceptable taste are completed and added to inventory; any measuring below
+              standard — or tasting "Not Good" — are sent back to In Preparation.
             </DialogDescription>
           </DialogHeader>
 
@@ -770,22 +795,25 @@ export default function CookingTemp() {
 
           {/* Per-batch input table */}
           <div className="rounded-md border border-border overflow-hidden">
-            <div className="grid grid-cols-[1.6fr_0.7fr_0.7fr_0.9fr_1.1fr_0.6fr] gap-2 bg-muted/40 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+            <div className="grid grid-cols-[1.5fr_0.5fr_0.5fr_0.8fr_1fr_1fr_0.9fr] gap-2 bg-muted/40 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
               <div>Batch / Item</div>
               <div className="text-right">Qty</div>
               <div className="text-center">Std °C</div>
               <div className="text-center">Measured °C</div>
+              <div>Taste</div>
               <div>Cooked By</div>
               <div className="text-center">Result</div>
             </div>
             <div className="divide-y divide-border max-h-[44vh] overflow-y-auto">
               {pendingQC.map((entry) => {
                 const std = stdTempFor(entry);
-                const row = qcAllRows[entry.id] ?? { measured: "", cookedBy: "" };
+                const row = qcAllRows[entry.id] ?? { measured: "", cookedBy: "", taste: "", tasteOther: "" };
                 const hasMeasured = row.measured !== "" && !isNaN(Number(row.measured));
-                const passed = hasMeasured && Number(row.measured) >= std;
+                const tempOk = hasMeasured && Number(row.measured) >= std;
+                const tasteBad = row.taste === "Not Good";
+                const passed = tempOk && !tasteBad;
                 return (
-                  <div key={entry.id} className="grid grid-cols-[1.6fr_0.7fr_0.7fr_0.9fr_1.1fr_0.6fr] gap-2 px-3 py-2 items-center text-sm">
+                  <div key={entry.id} className="grid grid-cols-[1.5fr_0.5fr_0.5fr_0.8fr_1fr_1fr_0.9fr] gap-2 px-3 py-2 items-center text-sm">
                     <div className="min-w-0">
                       <div className="font-mono text-xs text-primary truncate">{entry.id}</div>
                       <div className="text-xs text-muted-foreground truncate">{entry.outputItemName ?? entry.bom}</div>
@@ -804,6 +832,29 @@ export default function CookingTemp() {
                         placeholder="°C"
                       />
                     </div>
+                    {/* Taste — same categories as the single Record Test, with the
+                        dynamic free-text "Other" entry shown below when selected. */}
+                    <div>
+                      <select
+                        value={row.taste}
+                        onChange={(e) => setQcAllRows((prev) => ({ ...prev, [entry.id]: { ...row, taste: e.target.value as QcTasteValue } }))}
+                        className={`h-8 w-full rounded-md border bg-background px-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring ${tasteBad ? "border-destructive focus-visible:ring-destructive" : "border-input"}`}
+                      >
+                        <option value="">— Taste —</option>
+                        <option value="Good">Good</option>
+                        <option value="Average">Average</option>
+                        <option value="Not Good">Not Good (off-taste)</option>
+                        <option value="Other">Other</option>
+                      </select>
+                      {row.taste === "Other" && (
+                        <Input
+                          value={row.tasteOther}
+                          onChange={(e) => setQcAllRows((prev) => ({ ...prev, [entry.id]: { ...row, tasteOther: e.target.value } }))}
+                          placeholder="Specify…"
+                          className="h-8 mt-1"
+                        />
+                      )}
+                    </div>
                     <div>
                       <select
                         value={row.cookedBy}
@@ -817,6 +868,27 @@ export default function CookingTemp() {
                     <div className="text-center">
                       {!hasMeasured ? (
                         <span className="text-xs text-muted-foreground">—</span>
+                      ) : !tempOk ? (
+                        // Temperature is a hard HACCP gate — below standard always fails.
+                        <Badge variant="outline" className="bg-destructive/15 text-destructive border-destructive/40">Fail</Badge>
+                      ) : row.taste === "Other" ? (
+                        // "Other" taste can't be auto-judged — pick the result manually.
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => setQcAllRows((prev) => ({ ...prev, [entry.id]: { ...row, tasteResult: "Pass" } }))}
+                            className={`h-6 px-2 rounded-md border text-[11px] font-semibold transition ${row.tasteResult === "Pass" ? "bg-success text-success-foreground border-success" : "border-success/40 text-success hover:bg-success/10"}`}
+                          >
+                            Pass
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setQcAllRows((prev) => ({ ...prev, [entry.id]: { ...row, tasteResult: "Fail" } }))}
+                            className={`h-6 px-2 rounded-md border text-[11px] font-semibold transition ${row.tasteResult === "Fail" ? "bg-destructive text-destructive-foreground border-destructive" : "border-destructive/40 text-destructive hover:bg-destructive/10"}`}
+                          >
+                            Fail
+                          </button>
+                        </div>
                       ) : (
                         <Badge variant="outline" className={passed
                           ? "bg-success/15 text-success border-success/40"
@@ -837,7 +909,9 @@ export default function CookingTemp() {
             pendingQC.forEach((entry) => {
               const row = qcAllRows[entry.id];
               if (!row || row.measured === "" || isNaN(Number(row.measured))) return;
-              if (Number(row.measured) >= stdTempFor(entry)) { willPass += 1; unitsIn += entry.producedQty; }
+              const tempOk = Number(row.measured) >= stdTempFor(entry);
+              const tasteAcceptable = row.taste === "Other" ? row.tasteResult === "Pass" : row.taste !== "Not Good";
+              if (tempOk && tasteAcceptable) { willPass += 1; unitsIn += entry.producedQty; }
               else willFail += 1;
             });
             return (

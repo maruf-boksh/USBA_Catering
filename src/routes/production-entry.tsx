@@ -950,6 +950,20 @@ export default function ProductionEntryPage() {
   const [adjustReq, setAdjustReq] = useState<{ qty: number; breakdown: string } | null>(null);
   // Order whose material requirement-vs-stock breakdown is open.
   const [materialsOrder, setMaterialsOrder] = useState<NumberedEntry | null>(null);
+  // Bulk Production Initiation picker — modal open + the set of order ids ticked
+  // to initiate (defaults to all approved orders; user can uncheck to leave some
+  // pending, and those stay counted in the banner).
+  const [initiateOpen, setInitiateOpen] = useState(false);
+  const [initiateSel, setInitiateSel] = useState<Set<string>>(new Set());
+  // Cumulative log of every bulk-initiation run this session — each run keeps its
+  // own timestamp + order snapshot, so "View Details" shows the full history
+  // (batch of 10, then batch of 4, …) and the banner can summarise the latest.
+  type InitiationRun = { at: string; orders: NumberedEntry[] };
+  const [initiationRuns, setInitiationRuns] = useState<InitiationRun[]>([]);
+  const [initiatedDetailOpen, setInitiatedDetailOpen] = useState(false);
+  // "Total Approved" list — every order that has been approved (still-pending +
+  // already-initiated), opened from the clickable count in the banner.
+  const [approvedListOpen, setApprovedListOpen] = useState(false);
 
   // Live stock — the same persisted store the Stock Overview / Production Entry
   // read — so Available matches everywhere in the app.
@@ -1302,6 +1316,57 @@ export default function ProductionEntryPage() {
 
   type NumberedEntry = ProductionEntry & { __sl: number };
   const numberedEntries: NumberedEntry[] = entries.map((e, i) => ({ ...e, __sl: i + 1 }));
+
+  // ── Bulk Production Initiation ──────────────────────────────────────────────
+  // The same "Production Initiation" action offered per-row (in each row's menu)
+  // applied to the whole order in one click, mirroring the batch affordance on
+  // Approval Management. Only plain Approved orders are eligible — Re-Cook has a
+  // separate re-approval path and later stages are already past initiation, so
+  // they're left to the one-by-one menu, which stays available on every row.
+  const initiatableEntries = numberedEntries.filter((e) => e.status === "Approved");
+  // Open the picker with every approved order preselected.
+  const openBulkInitiate = () => {
+    if (initiatableEntries.length === 0) return;
+    setInitiateSel(new Set(initiatableEntries.map((e) => e.id)));
+    setInitiateOpen(true);
+  };
+  const toggleInitiate = (id: string) =>
+    setInitiateSel((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  const allInitiateSelected =
+    initiatableEntries.length > 0 && initiatableEntries.every((e) => initiateSel.has(e.id));
+  const toggleInitiateAll = () =>
+    setInitiateSel(allInitiateSelected ? new Set() : new Set(initiatableEntries.map((e) => e.id)));
+  // Initiate only the ticked orders; the unticked ones stay Approved and remain
+  // counted in the banner for a later run.
+  const confirmBulkInitiate = () => {
+    const targets = initiatableEntries.filter((e) => initiateSel.has(e.id));
+    if (targets.length === 0) return;
+    for (const e of targets) {
+      updateProductionEntryStatus(e.id, "Production Initiation");
+    }
+    const at = new Date().toISOString().slice(0, 16).replace("T", " ");
+    setInitiationRuns((prev) => [...prev, { at, orders: targets }]);
+    toast.success(
+      `${targets.length} order${targets.length === 1 ? "" : "s"} moved to Production Initiation — now available in the Production Entry order list.`,
+    );
+    setInitiateOpen(false);
+  };
+  // Derived initiation summary — latest run for the banner, cumulative counts for
+  // the "Total Approved" figure (still-pending + everything already initiated).
+  const lastRun = initiationRuns[initiationRuns.length - 1];
+  const totalInitiated = initiationRuns.reduce((s, r) => s + r.orders.length, 0);
+  const totalApproved = initiatableEntries.length + totalInitiated;
+  // Every approved order tagged with whether it's already been initiated. The
+  // snapshot orders in `initiationRuns` keep their frozen "Approved" status, so
+  // the flag (not e.status) is the source of truth for the display badge.
+  const allApprovedList: { entry: NumberedEntry; initiated: boolean }[] = [
+    ...initiatableEntries.map((e) => ({ entry: e, initiated: false })),
+    ...initiationRuns.flatMap((r) => r.orders.map((e) => ({ entry: e, initiated: true }))),
+  ];
 
   // ── Row-level LMC awareness ─────────────────────────────────────────────────
   // Production is planned at the aggregate meal-item level (no per-flight qty
@@ -1926,6 +1991,50 @@ export default function ProductionEntryPage() {
               onChange={(n) => { setFilterOffice(n.officeId); setFilterWarehouse(n.warehouseId); }}
             />
           </div>
+
+          {/* Bulk Production Initiation — initiate every Approved order at once.
+              The per-row menu still offers the same action one order at a time. */}
+          {initiatableEntries.length > 0 && (
+            <div className="flex items-center justify-between gap-3 mb-3 rounded-md border border-primary/30 bg-primary/[0.06] px-3 py-2">
+              <span className="text-xs font-medium text-foreground shrink-0">
+                {initiatableEntries.length} approved order{initiatableEntries.length === 1 ? "" : "s"} ready for production initiation
+                {totalApproved > 0 && (
+                  <>
+                    {" "}(Total Approved:{" "}
+                    <button
+                      type="button"
+                      className="font-semibold text-primary underline underline-offset-2 hover:no-underline"
+                      onClick={() => setApprovedListOpen(true)}
+                      title="View all approved production orders"
+                    >
+                      {totalApproved}
+                    </button>
+                    )
+                  </>
+                )}
+              </span>
+              {lastRun && (
+                <span className="flex-1 min-w-0 text-center text-xs text-muted-foreground truncate">
+                  {lastRun.orders.length} Production Order{lastRun.orders.length === 1 ? "" : "s"} {lastRun.orders.length === 1 ? "has" : "have"} been initiated and {initiatableEntries.length} Pending from the latest production order.{" "}
+                  <button
+                    type="button"
+                    className="font-medium text-primary underline underline-offset-2 hover:no-underline"
+                    onClick={() => setInitiatedDetailOpen(true)}
+                  >
+                    View Details
+                  </button>
+                </span>
+              )}
+              <Button
+                size="sm"
+                className="h-7 px-2.5 text-[11px] shrink-0"
+                onClick={openBulkInitiate}
+              >
+                <Zap className="h-3 w-3 mr-1" /> Initiate {initiatableEntries.length}
+              </Button>
+            </div>
+          )}
+
           <div data-arrival-id="production-list">
             <DataTable
               title="production-entries"
@@ -1950,6 +2059,204 @@ export default function ProductionEntryPage() {
         date={selectedForwardedDate}
         readOnly={isViewOnly}
       />
+
+      {/* Bulk Production Initiation picker — tick the orders to begin; the rest
+          stay Approved and remain in the banner's pending count. */}
+      <Dialog open={initiateOpen} onOpenChange={setInitiateOpen}>
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-hidden flex flex-col p-0 gap-0">
+          <DialogHeader className="px-6 pt-5 pb-4 border-b border-border">
+            <DialogTitle className="flex items-center gap-2">
+              <Zap className="h-5 w-5 text-primary" />
+              Production Initiation
+            </DialogTitle>
+            <p className="text-xs text-muted-foreground mt-1">
+              Tick the production orders to begin. Unticked orders stay Approved and remain available for a later run.
+            </p>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto px-6 py-4">
+            <div className="border border-border rounded-md overflow-hidden">
+              <Table>
+                <TableHeader className="bg-muted/40">
+                  <TableRow>
+                    <TableHead className="w-9">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 accent-primary cursor-pointer align-middle"
+                        checked={allInitiateSelected}
+                        onChange={toggleInitiateAll}
+                        aria-label="Select all"
+                        title="Select all"
+                      />
+                    </TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Order No</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Production Item</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right">Order Qty</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {initiatableEntries.map((e) => (
+                    <TableRow
+                      key={e.id}
+                      className={cn("cursor-pointer hover:bg-muted/30", initiateSel.has(e.id) && "bg-primary/[0.04]")}
+                      onClick={() => toggleInitiate(e.id)}
+                    >
+                      <TableCell onClick={(ev) => ev.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 accent-primary cursor-pointer align-middle"
+                          checked={initiateSel.has(e.id)}
+                          onChange={() => toggleInitiate(e.id)}
+                          aria-label={`Select ${e.id}`}
+                        />
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{e.id}</TableCell>
+                      <TableCell className="text-sm">{e.date}</TableCell>
+                      <TableCell className="text-sm">
+                        {e.outputItemCode && (
+                          <span className="font-mono text-xs text-muted-foreground mr-1">{e.outputItemCode}</span>
+                        )}
+                        {e.outputItemName ?? e.bom}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">{(e.orderQty ?? e.producedQty).toLocaleString()}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+
+          <DialogFooter className="px-6 py-3 border-t border-border bg-muted/20 sm:justify-between items-center gap-2">
+            <span className="text-xs text-muted-foreground">
+              {initiateSel.size} of {initiatableEntries.length} selected
+            </span>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" onClick={() => setInitiateOpen(false)}>Cancel</Button>
+              <Button onClick={confirmBulkInitiate} disabled={initiateSel.size === 0}>
+                <Zap className="h-4 w-4 mr-1.5" /> Initiate {initiateSel.size}
+              </Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Initiated orders — full session log, one group per initiation run, each
+          stamped with its initiation time (batch of 10, then batch of 4, …). */}
+      <Dialog open={initiatedDetailOpen} onOpenChange={setInitiatedDetailOpen}>
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-hidden flex flex-col p-0 gap-0">
+          <DialogHeader className="px-6 pt-5 pb-4 border-b border-border">
+            <DialogTitle className="flex items-center gap-2">
+              <Zap className="h-5 w-5 text-primary" />
+              Initiated Production Orders
+            </DialogTitle>
+            <p className="text-xs text-muted-foreground mt-1">
+              {totalInitiated} order{totalInitiated === 1 ? "" : "s"} moved to Production Initiation across {initiationRuns.length} run{initiationRuns.length === 1 ? "" : "s"}.
+            </p>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
+            {initiationRuns.map((run, ri) => (
+              <div key={ri}>
+                <div className="flex items-center justify-between gap-3 mb-2">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Initiation #{ri + 1} · {run.orders.length} order{run.orders.length === 1 ? "" : "s"}
+                  </div>
+                  <div className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                    <Clock className="h-3 w-3" />
+                    <span className="tabular-nums">{run.at}</span>
+                  </div>
+                </div>
+                <div className="border border-border rounded-md overflow-hidden">
+                  <Table>
+                    <TableHeader className="bg-muted/40">
+                      <TableRow>
+                        <TableHead className="text-xs uppercase tracking-wider">Order No</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider">Production Item</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider text-right">Order Qty</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {run.orders.map((e) => (
+                        <TableRow key={e.id}>
+                          <TableCell className="font-mono text-xs">{e.id}</TableCell>
+                          <TableCell className="text-sm">{e.date}</TableCell>
+                          <TableCell className="text-sm">
+                            {e.outputItemCode && (
+                              <span className="font-mono text-xs text-muted-foreground mr-1">{e.outputItemCode}</span>
+                            )}
+                            {e.outputItemName ?? e.bom}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">{(e.orderQty ?? e.producedQty).toLocaleString()}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <DialogFooter className="px-6 py-3 border-t border-border bg-muted/20">
+            <Button variant="outline" onClick={() => setInitiatedDetailOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Total Approved — every order that has been approved: still-pending plus
+          all already-initiated. Opened from the clickable count in the banner. */}
+      <Dialog open={approvedListOpen} onOpenChange={setApprovedListOpen}>
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-hidden flex flex-col p-0 gap-0">
+          <DialogHeader className="px-6 pt-5 pb-4 border-b border-border">
+            <DialogTitle className="flex items-center gap-2">
+              <CheckCircle2 className="h-5 w-5 text-primary" />
+              Approved Production Orders
+            </DialogTitle>
+            <p className="text-xs text-muted-foreground mt-1">
+              {totalApproved} approved · {initiatableEntries.length} pending initiation · {totalInitiated} already initiated.
+            </p>
+          </DialogHeader>
+
+          <div className="flex-1 overflow-y-auto px-6 py-4">
+            <div className="border border-border rounded-md overflow-hidden">
+              <Table>
+                <TableHeader className="bg-muted/40">
+                  <TableRow>
+                    <TableHead className="text-xs uppercase tracking-wider">Order No</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Production Item</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right">Order Qty</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {allApprovedList.map(({ entry: e, initiated }) => (
+                    <TableRow key={e.id}>
+                      <TableCell className="font-mono text-xs">{e.id}</TableCell>
+                      <TableCell className="text-sm">{e.date}</TableCell>
+                      <TableCell className="text-sm">
+                        {e.outputItemCode && (
+                          <span className="font-mono text-xs text-muted-foreground mr-1">{e.outputItemCode}</span>
+                        )}
+                        {e.outputItemName ?? e.bom}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">{(e.orderQty ?? e.producedQty).toLocaleString()}</TableCell>
+                      <TableCell>
+                        <StatusBadge status={initiated ? "Production Initiation" : "Approved"} />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+
+          <DialogFooter className="px-6 py-3 border-t border-border bg-muted/20">
+            <Button variant="outline" onClick={() => setApprovedListOpen(false)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Materials — requirement (BOM × order qty) vs current stock, per order. */}
       <Dialog open={!!materialsOrder} onOpenChange={(o) => { if (!o) setMaterialsOrder(null); }}>

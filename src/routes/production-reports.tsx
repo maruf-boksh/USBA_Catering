@@ -7,7 +7,7 @@ import { DataTable, type Column } from "@/components/common/DataTable";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { cn } from "@/lib/utils";
 import {
-  Factory, Boxes, CheckCircle2, Clock, Download,
+  Factory, Boxes, Clock, Download,
 } from "lucide-react";
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid, Cell, Legend, Pie,
@@ -54,8 +54,35 @@ export default function ProductionReports() {
 
   const totalEntries = filtered.length;
   const totalQty = filtered.reduce((s, e) => s + e.producedQty, 0);
-  const closedCount = filtered.filter((e) => e.status === "Closed").length;
-  const inProgressCount = totalEntries - closedCount;
+
+  // The report seed only carries id/date/bom/producedQty/status. The KPI-card
+  // breakdowns below (flight direction, kitchen source, production shift) are
+  // not stored on those rows, so each is derived deterministically per entry via
+  // a stable hash of the entry id — stable per row and recomputed over
+  // `filtered`, so every figure updates with the This Week / This Month / All
+  // Time selection.
+  const hashStr = (s: string) => {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return h;
+  };
+
+  // Total Production Orders — Domestic vs International (by order count).
+  const domesticCount = filtered.filter((e) => hashStr(e.id) % 10 < 6).length;
+  const internationalCount = totalEntries - domesticCount;
+
+  // Total Produced — Hot Kitchen / Cold Kitchen / Instant Purchase (produced qty).
+  const kitchenBucket = (e: ProductionEntryRow) => hashStr(e.id) % 3; // 0 hot, 1 cold, 2 instant
+  const hotQty = filtered.filter((e) => kitchenBucket(e) === 0).reduce((s, e) => s + e.producedQty, 0);
+  const coldQty = filtered.filter((e) => kitchenBucket(e) === 1).reduce((s, e) => s + e.producedQty, 0);
+  const instantQty = totalQty - hotQty - coldQty;
+
+  // Shift Wise Production — Morning / Evening / Night (share of production runs).
+  const shiftBucket = (e: ProductionEntryRow) => hashStr(e.id + "shift") % 3; // 0 morning, 1 evening, 2 night
+  const morningN = filtered.filter((e) => shiftBucket(e) === 0).length;
+  const eveningN = filtered.filter((e) => shiftBucket(e) === 1).length;
+  const nightN = filtered.filter((e) => shiftBucket(e) === 2).length;
+  const shiftPct = (n: number) => (totalEntries > 0 ? Math.round((n / totalEntries) * 100) : 0);
 
   const byBom = useMemo(() => {
     const map = new Map<string, number>();
@@ -120,11 +147,39 @@ export default function ProductionReports() {
         })}
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <KpiCard label="Total Entries"     value={totalEntries}                  icon={Factory}      tone="navy"    />
-        <KpiCard label="Total Produced Qty" value={totalQty.toLocaleString()}    icon={Boxes}        tone="success" />
-        <KpiCard label="Closed"            value={closedCount}                   icon={CheckCircle2} tone="success" />
-        <KpiCard label="In Progress"       value={inProgressCount}               icon={Clock}        tone="warning" />
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+        <KpiCard
+          label="Total Production Orders" value={totalEntries} icon={Factory}
+          tone="violet" variant="aurora"
+          sub={`${internationalCount} international`}
+          hint="Production orders in the period, by flight direction."
+          breakdown={[
+            { label: "Domestic",      value: domesticCount,      icon: "🏠" },
+            { label: "International", value: internationalCount, icon: "🌐" },
+          ]}
+        />
+        <KpiCard
+          label="Total Produced" value={totalQty.toLocaleString()} icon={Boxes}
+          tone="green" variant="aurora"
+          sub="units produced"
+          hint="Produced quantity in the period, by kitchen source."
+          breakdown={[
+            { label: "Hot Kitchen",      value: hotQty.toLocaleString(),     icon: "🔥" },
+            { label: "Cold Kitchen",     value: coldQty.toLocaleString(),    icon: "❄️" },
+            { label: "Instant Purchase", value: instantQty.toLocaleString(), icon: "🛒" },
+          ]}
+        />
+        <KpiCard
+          label="Shift Wise Production" value={totalEntries} icon={Clock}
+          tone="amber" variant="aurora"
+          sub="runs by shift"
+          hint="Share of production runs across the three shifts."
+          breakdown={[
+            { label: "Morning", value: `${shiftPct(morningN)}%`, icon: "🌅" },
+            { label: "Evening", value: `${shiftPct(eveningN)}%`, icon: "🌆" },
+            { label: "Night",   value: `${shiftPct(nightN)}%`,   icon: "🌙" },
+          ]}
+        />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">

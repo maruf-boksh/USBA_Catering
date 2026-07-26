@@ -4,7 +4,7 @@ import { KpiCard } from "@/components/common/KpiCard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import {
-  Plane, Clock, CheckCircle2, Factory, UtensilsCrossed, Users, Truck, AlertCircle,
+  Plane, UtensilsCrossed,
 } from "lucide-react";
 import { useFlightOrders } from "@/lib/flight-orders-store";
 import {
@@ -34,6 +34,45 @@ export default function OperationsOverviewPage() {
     const todaysPax = todays.reduce((s, o) => s + o.pax, 0);
     const todaysCrew = todays.reduce((s, o) => s + o.crew, 0);
     const specialMeals = flightOrders.reduce((s, o) => s + o.specialMeals, 0);
+
+    // Next-24h window (today + tomorrow) for the flight & meal load cards.
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = tomorrow.toISOString().slice(0, 10);
+    const next24 = flightOrders.filter((o) => o.date >= today && o.date <= tomorrowStr);
+    const flights24 = next24.length;
+    const outbound24 = next24.filter((o) => o.direction === "Outbound").length;
+    const return24 = next24.filter((o) => o.direction === "Return").length;
+    // Domestic when every airport in the sector is a home airport, else international.
+    const DOMESTIC_AIRPORTS = new Set(["DAC", "CXB", "CGP", "ZYL", "JSR"]);
+    const isDomestic = (sector: string) =>
+      sector.split("→").map((s) => s.trim()).every((a) => DOMESTIC_AIRPORTS.has(a));
+    const domestic24 = next24.filter((o) => isDomestic(o.sector)).length;
+    const international24 = next24.length - domestic24;
+    // Domestic / international split within each direction (for the nested rows).
+    const obDom = next24.filter((o) => o.direction === "Outbound" && isDomestic(o.sector)).length;
+    const obIntl = outbound24 - obDom;
+    const rtDom = next24.filter((o) => o.direction === "Return" && isDomestic(o.sector)).length;
+    const rtIntl = return24 - rtDom;
+    const pax24 = next24.reduce((s, o) => s + o.pax, 0);
+    const crew24 = next24.reduce((s, o) => s + o.crew, 0);
+    const special24 = next24.reduce((s, o) => s + o.specialMeals, 0);
+    const meals24 = pax24 + crew24 + special24;
+
+    // Yesterday comparison for the "more/less than yesterday" delta pills.
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().slice(0, 10);
+    const mealsForDate = (d: string) =>
+      flightOrders.filter((o) => o.date === d).reduce((s, o) => s + o.pax + o.crew + o.specialMeals, 0);
+    const flightsDelta = todays.length - flightOrders.filter((o) => o.date === yesterdayStr).length;
+    const mealsDelta = mealsForDate(today) - mealsForDate(yesterdayStr);
+
+    // Distinct orders by status (an order's first leg represents it) so the
+    // Total Orders breakdown sums to the order count, not the leg count.
+    const orderStatus = new Map<string, string>();
+    for (const o of flightOrders) if (!orderStatus.has(o.orderNo)) orderStatus.set(o.orderNo, o.status);
+    const orderStatusCount = (st: string) => [...orderStatus.values()].filter((s) => s === st).length;
 
     // 14-day flight-volume trend, starting today
     const trend: { date: string; flights: number; pax: number }[] = [];
@@ -69,6 +108,13 @@ export default function OperationsOverviewPage() {
       byStatus,
       todaysFlights: todays.length,
       todaysPax, todaysCrew, specialMeals,
+      flights24, outbound24, return24, domestic24, international24,
+      obDom, obIntl, rtDom, rtIntl,
+      pax24, crew24, special24, meals24,
+      flightsDelta, mealsDelta,
+      approvedOrders: orderStatusCount("Approved"),
+      pendingOrders: orderStatusCount("Pending"),
+      inPrepOrders: orderStatusCount("Production"),
       trend, topSectors, todaysActive,
     };
   }, [today, flightOrders]);
@@ -82,15 +128,51 @@ export default function OperationsOverviewPage() {
         subtitle="Snapshot of flight orders, meal planning load, and today's operating picture"
       />
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-4 mb-6">
-        <KpiCard label="Total Orders"     value={stats.totalOrders.toLocaleString()} icon={Plane} tone="navy" />
-        <KpiCard label="Total Flights"    value={stats.totalLegs.toLocaleString()} icon={Plane} tone="navy" sub={`${stats.totalOrders} orders`} />
-        <KpiCard label="Today's Flights"  value={stats.todaysFlights.toLocaleString()} icon={Factory} tone="navy" sub={`${stats.todaysPax.toLocaleString()} pax`} />
-        <KpiCard label="Today's Crew"     value={stats.todaysCrew.toLocaleString()} icon={Users} tone="navy" sub="across all flights" />
-        <KpiCard label="Pending"          value={(stats.byStatus.Pending ?? 0).toLocaleString()} icon={Clock} tone="warning" />
-        <KpiCard label="Approved"         value={(stats.byStatus.Approved ?? 0).toLocaleString()} icon={CheckCircle2} tone="success" />
-        <KpiCard label="In Production"    value={(stats.byStatus.Production ?? 0).toLocaleString()} icon={AlertCircle} tone="warning" />
-        <KpiCard label="Special Meals"    value={stats.specialMeals.toLocaleString()} icon={UtensilsCrossed} tone="warning" sub="across all orders" />
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+        <KpiCard
+          label="Total Orders" value={stats.totalOrders.toLocaleString()} icon={Plane}
+          tone="violet" variant="aurora"
+          sub={`${stats.totalLegs.toLocaleString()} flights`}
+          hint="Distinct flight orders, by current pipeline stage."
+          breakdown={[
+            { label: "Approved",       value: stats.approvedOrders, icon: "✅" },
+            { label: "Pending",        value: stats.pendingOrders,  icon: "⏳" },
+            { label: "In Preparation", value: stats.inPrepOrders,   icon: "👨‍🍳" },
+          ]}
+        />
+        <KpiCard
+          label="Flights next 24 hours" value={stats.flights24.toLocaleString()} icon={Plane}
+          tone="violet" variant="aurora"
+          sub={`${stats.flightsDelta >= 0 ? "+" : "-"}${Math.abs(stats.flightsDelta)} ${stats.flightsDelta >= 0 ? "more" : "less"} than yesterday`}
+          hint="Flight legs departing in the next 24 hours, by direction and sector."
+          breakdown={[
+            {
+              label: "Outbound", value: stats.outbound24, icon: "🛫",
+              children: [
+                { label: "Domestic",      value: stats.obDom,  icon: "🏠" },
+                { label: "International", value: stats.obIntl, icon: "🌐" },
+              ],
+            },
+            {
+              label: "Return", value: stats.return24, icon: "🛬",
+              children: [
+                { label: "Domestic",      value: stats.rtDom,  icon: "🏠" },
+                { label: "International", value: stats.rtIntl, icon: "🌐" },
+              ],
+            },
+          ]}
+        />
+        <KpiCard
+          label="Total Meals next 24 hours" value={stats.meals24.toLocaleString()} icon={UtensilsCrossed}
+          tone="green" variant="aurora"
+          sub={`${stats.mealsDelta >= 0 ? "+" : "-"}${Math.abs(stats.mealsDelta).toLocaleString()} ${stats.mealsDelta >= 0 ? "more" : "less"} than yesterday`}
+          hint="Total meal load for the next 24 hours, by audience."
+          breakdown={[
+            { label: "Total PAX",           value: stats.pax24.toLocaleString(),     icon: "👥" },
+            { label: "Total Crew",          value: stats.crew24.toLocaleString(),    icon: "🧑‍✈️" },
+            { label: "Total Special Meals", value: stats.special24.toLocaleString(), icon: "🍱" },
+          ]}
+        />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">

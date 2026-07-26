@@ -397,6 +397,26 @@ export default function LmcPage() {
   const majorCount = lmc.filter((r) => r.it.severity === "major" && r.status !== "closed").length;
   const closedCount = lmc.filter((r) => r.status === "closed").length;
 
+  // ── At-a-glance breakdowns for the KPI cards ────────────────────────────────
+  // Sub-stage counts so each card reads like the dashboard KPIs: a headline
+  // number, a stat pill for the most actionable context, and a small two-column
+  // breakdown of what makes up the total (severity mix / work stage / approval).
+  const cnt = (pred: (r: (typeof lmc)[number]) => boolean) => lmc.filter(pred).length;
+  const openCritical     = cnt((r) => r.status === "open" && r.it.severity === "critical");
+  const openMajor        = cnt((r) => r.status === "open" && r.it.severity === "major");
+  const openMinor        = cnt((r) => r.status === "open" && r.it.severity === "minor");
+  const openInfo         = cnt((r) => r.status === "open" && r.it.severity === "info");
+  const criticalOpen     = cnt((r) => r.it.severity === "critical" && r.status === "open");
+  const criticalActioned = cnt((r) => r.it.severity === "critical" && r.status === "actioned");
+  const criticalAwaiting = cnt((r) => r.it.severity === "critical" && r.approval === "awaiting");
+  const criticalApproved = cnt((r) => r.it.severity === "critical" && r.approval === "approved");
+  const majorOpen        = cnt((r) => r.it.severity === "major" && r.status === "open");
+  const majorActioned    = cnt((r) => r.it.severity === "major" && r.status === "actioned");
+  const closedCritical   = cnt((r) => r.status === "closed" && r.it.severity === "critical");
+  const closedMajor      = cnt((r) => r.status === "closed" && r.it.severity === "major");
+  const closedMinor      = cnt((r) => r.status === "closed" && r.it.severity === "minor");
+  const awaitingApproval = cnt((r) => r.approval === "awaiting");
+
   const setStatus = (id: string, next: WorkStatus | "open") => {
     setWorkStatus((prev) => {
       const copy = { ...prev };
@@ -427,10 +447,51 @@ export default function LmcPage() {
       />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-        <KpiCard label="Open LMCs" value={openCount}     icon={AlertTriangle} tone="warning" />
-        <KpiCard label="Critical"  value={criticalCount} icon={ShieldAlert}   tone="red" />
-        <KpiCard label="Major"     value={majorCount}    icon={Replace}       tone="info" />
-        <KpiCard label="Closed"    value={closedCount}   icon={CheckCircle2}  tone="success" />
+        <KpiCard
+          label="Open LMCs" value={openCount} icon={AlertTriangle}
+          tone="amber" variant="aurora"
+          sub={`${awaitingApproval} awaiting approval`}
+          hint="Last-minute changes still to be worked to closure, by severity."
+          breakdown={[
+            { label: "Critical", value: openCritical, icon: "🔴" },
+            { label: "Major",    value: openMajor,    icon: "🟠" },
+            { label: "Minor",    value: openMinor,    icon: "🔵" },
+            { label: "Info",     value: openInfo,     icon: "ℹ️" },
+          ]}
+        />
+        <KpiCard
+          label="Critical" value={criticalCount} icon={ShieldAlert}
+          tone="rose" variant="aurora"
+          sub={`${criticalAwaiting} awaiting approval`}
+          hint="Critical changes needing GM sign-off before they can close."
+          breakdown={[
+            { label: "Open",     value: criticalOpen,     icon: "⏳" },
+            { label: "Actioned", value: criticalActioned, icon: "⚙️" },
+            { label: "Awaiting", value: criticalAwaiting, icon: "📩" },
+            { label: "Approved", value: criticalApproved, icon: "✓" },
+          ]}
+        />
+        <KpiCard
+          label="Major" value={majorCount} icon={Replace}
+          tone="indigo" variant="aurora"
+          sub={`${majorOpen} open`}
+          hint="Major changes in the window and how far each has been worked."
+          breakdown={[
+            { label: "Open",     value: majorOpen,     icon: "⏳" },
+            { label: "Actioned", value: majorActioned, icon: "⚙️" },
+          ]}
+        />
+        <KpiCard
+          label="Closed" value={closedCount} icon={CheckCircle2}
+          tone="green" variant="aurora"
+          sub={`${lmc.length} total LMCs`}
+          hint="Changes fully worked to closure, by original severity."
+          breakdown={[
+            { label: "Critical", value: closedCritical, icon: "🔴" },
+            { label: "Major",    value: closedMajor,    icon: "🟠" },
+            { label: "Minor",    value: closedMinor,    icon: "🔵" },
+          ]}
+        />
       </div>
 
       <Card>

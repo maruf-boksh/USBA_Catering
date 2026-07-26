@@ -2,10 +2,10 @@ import { useState } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import {
-  Plus, Layers, FileText, CheckCircle, Save, Trash2, ArrowLeft, Eye, Printer, Search,
+  Plus, Layers, FileText, CheckCircle, Save, Trash2, ArrowLeft, Eye, Printer, Search, Warehouse,
 } from "lucide-react";
 import {
-  billOfMaterials, itemsByType, purchaseOrders,
+  billOfMaterials, itemsByType, purchaseOrders, warehouses, offices,
   type BillOfMaterial, type BomProductionItem, type BomInputMaterial,
 } from "@/lib/sample-data";
 import { KpiCard } from "@/components/common/KpiCard";
@@ -1210,6 +1210,22 @@ export default function BomPage() {
   const activeCount = boms.filter((b) => b.status === "Active").length;
   const inactiveCount = boms.length - activeCount;
 
+  // ── At-a-glance breakdowns for the KPI cards ────────────────────────────────
+  // Category mix, output type, and the inactive/draft split so each card reads
+  // like the dashboard KPIs: a headline number, a stat pill, and a small
+  // two-column breakdown.
+  const draftCount     = boms.filter((b) => b.status === "Draft").length;
+  const strictInactive = boms.filter((b) => b.status === "Inactive").length;
+  const catCount       = (c: string) => boms.filter((b) => b.category === c).length;
+  const activeSingle   = boms.filter((b) => b.status === "Active" && b.bomType === "Single Output").length;
+  const activeMulti    = boms.filter((b) => b.status === "Active" && b.bomType === "Multi Output").length;
+  const activePct      = boms.length ? Math.round((activeCount / boms.length) * 100) : 0;
+
+  // Warehouse network — counts by facility type + active total, for the
+  // Warehouses KPI card.
+  const whType      = (t: string) => warehouses.filter((w) => w.type === t).length;
+  const activeWh    = warehouses.filter((w) => w.status === "Active").length;
+
   return (
     <>
       <PageHeader
@@ -1236,10 +1252,51 @@ export default function BomPage() {
 
       {view === "list" ? (
         <>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
-            <KpiCard label="Total BOMs" value={boms.length} icon={Layers} tone="navy" />
-            <KpiCard label="Active" value={activeCount} icon={CheckCircle} tone="success" />
-            <KpiCard label="Inactive" value={inactiveCount} icon={FileText} tone="warning" />
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <KpiCard
+              label="Total BOMs" value={boms.length} icon={Layers}
+              tone="violet" variant="aurora"
+              sub={`${activeCount} active`}
+              hint="All bills of materials, by kitchen category."
+              breakdown={[
+                { label: "Hot Kitchen",  value: catCount("Hot Kitchen"),  icon: "🔥" },
+                { label: "Cold Kitchen", value: catCount("Cold Kitchen"), icon: "❄️" },
+                { label: "Bakery",       value: catCount("Bakery"),       icon: "🥐" },
+                { label: "Beverage",     value: catCount("Beverage"),     icon: "🥤" },
+              ]}
+            />
+            <KpiCard
+              label="Active" value={activeCount} icon={CheckCircle}
+              tone="green" variant="aurora"
+              sub={`${activePct}% of total`}
+              hint="Live BOMs available to production, by output type."
+              breakdown={[
+                { label: "Single Output", value: activeSingle, icon: "🍽️" },
+                { label: "Multi Output",  value: activeMulti,  icon: "🍱" },
+              ]}
+            />
+            <KpiCard
+              label="Inactive" value={inactiveCount} icon={FileText}
+              tone="amber" variant="aurora"
+              sub={`${draftCount} draft`}
+              hint="BOMs not currently in use, plus drafts in progress."
+              breakdown={[
+                { label: "Inactive", value: strictInactive, icon: "💤" },
+                { label: "Draft",    value: draftCount,     icon: "📝" },
+              ]}
+            />
+            <KpiCard
+              label="Warehouses" value={warehouses.length} icon={Warehouse}
+              tone="blue" variant="aurora"
+              sub={`${activeWh} active`}
+              hint="Facilities across the network, by type, plus offices."
+              breakdown={[
+                { label: "Warehouse",  value: whType("Warehouse"),  icon: "🏬" },
+                { label: "Cold Store", value: whType("Cold Store"), icon: "❄️" },
+                { label: "Kitchen",    value: whType("Kitchen"),    icon: "🍳" },
+                { label: "Offices",    value: offices.length,       icon: "🏢" },
+              ]}
+            />
           </div>
           <div className="mb-4">
             <LocationFilter

@@ -957,13 +957,74 @@ function DelayList({
   const pending    = events.filter((e) => e.status === "Approval Pending").length;
   const dispatched = events.filter((e) => e.status === "Dispatched" || e.status === "Sent To Dispatch").length;
 
+  // ── At-a-glance breakdowns for the KPI cards ────────────────────────────────
+  // Extra stage counts + passenger tallies so each card reads like the dashboard
+  // KPIs: a headline number, a "pax affected/served" stat pill, and a small
+  // two-column breakdown of the sub-stages that make up the total.
+  const pendingEvents      = events.filter((e) => e.status === "Approval Pending");
+  const activeEvents       = events.filter(isActiveDelayEvent);
+  const dispatchedEvents   = events.filter((e) => e.status === "Dispatched" || e.status === "Sent To Dispatch");
+  const dispatchedOnly     = events.filter((e) => e.status === "Dispatched").length;
+  const sentToDispatch     = events.filter((e) => e.status === "Sent To Dispatch").length;
+  const closed             = events.filter((e) => e.status === "Closed").length;
+  const fulfillmentPending = events.filter((e) => e.status === "Fulfillment Pending").length;
+  const inProduction       = events.filter((e) => e.status === "Sent To Production").length;
+  const readyStage         = events.filter((e) => e.status === "Approved").length + sentToDispatch;
+  const sumPax             = (arr: DelayEvent[]) => arr.reduce((s, e) => s + e.paxCount, 0);
+  const totalPax           = sumPax(events);
+  const activePax          = sumPax(activeEvents);
+  const pendingPax         = sumPax(pendingEvents);
+  const dispatchedPax      = sumPax(dispatchedEvents);
+  const pendingUrgent      = pendingEvents.filter((e) => e.delayDurationHours > 6).length;
+
   return (
     <>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
-        <KpiCard label="Total Events"     value={events.length} icon={Clock}         tone="navy"    />
-        <KpiCard label="Active"           value={active}        icon={AlertTriangle}  tone="warning" />
-        <KpiCard label="Pending Approval" value={pending}       icon={Send}          tone="warning" />
-        <KpiCard label="Dispatched"       value={dispatched}    icon={Truck}         tone="success" />
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <KpiCard
+          label="Total Events" value={events.length} icon={Clock}
+          tone="violet" variant="aurora"
+          sub={`${totalPax.toLocaleString()} pax affected`}
+          hint="All logged delay events and the passengers affected."
+          breakdown={[
+            { label: "Active",     value: active,     icon: "⚠️" },
+            { label: "Pending",    value: pending,    icon: "📩" },
+            { label: "Dispatched", value: dispatched, icon: "🚚" },
+            { label: "Closed",     value: closed,     icon: "✓" },
+          ]}
+        />
+        <KpiCard
+          label="Active" value={active} icon={AlertTriangle}
+          tone="amber" variant="aurora"
+          sub={`${activePax.toLocaleString()} pax affected`}
+          hint="Delay events still moving through fulfilment to dispatch."
+          breakdown={[
+            { label: "Fulfilment", value: fulfillmentPending, icon: "🍽️" },
+            { label: "Approval",   value: pending,            icon: "📩" },
+            { label: "Production", value: inProduction,       icon: "👨‍🍳" },
+            { label: "Ready",      value: readyStage,         icon: "📦" },
+          ]}
+        />
+        <KpiCard
+          label="Pending Approval" value={pending} icon={Send}
+          tone="rose" variant="aurora"
+          sub={`${pendingPax.toLocaleString()} pax affected`}
+          hint="Refreshment requests awaiting sign-off before dispatch."
+          breakdown={[
+            { label: "Urgent (>6h)", value: pendingUrgent,            icon: "🔴" },
+            { label: "Standard",     value: pending - pendingUrgent,  icon: "🕒" },
+          ]}
+        />
+        <KpiCard
+          label="Dispatched" value={dispatched} icon={Truck}
+          tone="green" variant="aurora"
+          sub={`${dispatchedPax.toLocaleString()} pax served`}
+          hint="Delay refreshments already sent to or dispatched on the aircraft."
+          breakdown={[
+            { label: "Dispatched",       value: dispatchedOnly, icon: "🚚" },
+            { label: "Sent To Dispatch", value: sentToDispatch, icon: "📦" },
+            { label: "Closed",           value: closed,         icon: "✓" },
+          ]}
+        />
       </div>
 
       {/* ── Filter bar ── */}
