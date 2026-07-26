@@ -40,7 +40,7 @@ import {
   useProductionBasisSettings, effectiveBasis, productionQtyForBasis,
   PRODUCTION_BASIS_LABEL, type ProductionBasis,
 } from "@/lib/production-basis-settings";
-import { useFlightOrders, updateFlightOrdersWhere, getAllAmendments } from "@/lib/flight-orders-store";
+import { useFlightOrders, getAllAmendments } from "@/lib/flight-orders-store";
 import { useMealSlots, resolveMealSlot, formatSlotRange } from "@/lib/meal-slot-settings";
 import { Fragment } from "react";
 import { useArrivalFlash } from "@/lib/arrival-flash";
@@ -943,6 +943,7 @@ export default function ProductionEntryPage() {
     productionEntries, addProductionEntry, updateProductionEntryStatus, mrpRuns,
     demands, addDemands, addMrpRun,
   } = useWorkflow();
+
   // In-progress batch target correction (LMC "Adjust batch"). adjustReq holds the
   // menu-plan-derived required qty + breakdown so the dialog shows the derivation.
   const [adjustEntry, setAdjustEntry] = useState<NumberedEntry | null>(null);
@@ -1068,6 +1069,13 @@ export default function ProductionEntryPage() {
         )).sort()
       : [];
     const taggedEntry: ProductionEntry = { ...entry, servesOrderNos };
+    // Count the Approved legs this order will take into Production *before* adding
+    // it — addProductionEntry performs the actual Approved→Production advance (in
+    // the workflow store, so every creation path shares it), after which the
+    // snapshot below would already read Production.
+    const willAdvance = flightOrders.filter(
+      (o) => o.date === entry.date && o.status === "Approved",
+    ).length;
     addProductionEntry(taggedEntry);
     logAudit({
       action: "Created production order",
@@ -1075,15 +1083,8 @@ export default function ProductionEntryPage() {
       entity: entry.id,
       detail: `${entry.outputItemName ?? entry.bom} · order qty ${entry.orderQty ?? 0}${entry.date ? ` · ${entry.date}` : ""}${servesOrderNos.length ? ` · serves ${servesOrderNos.length} order(s): ${servesOrderNos.join(", ")}` : ""}`,
     });
-    // Connection: posting a production order auto-advances every flight order
-    // for that same date from the production pipeline (Approved / Production)
-    // into Dispatched, so they appear on the Dispatch page automatically.
-    const advanced = updateFlightOrdersWhere(
-      (o) => o.date === entry.date && (o.status === "Approved" || o.status === "Production"),
-      { status: "Dispatched" },
-    );
-    if (advanced > 0) {
-      toast.success(`${advanced} flight order leg${advanced === 1 ? "" : "s"} for ${entry.date} forwarded to Dispatch.`);
+    if (willAdvance > 0) {
+      toast.success(`${willAdvance} flight order leg${willAdvance === 1 ? "" : "s"} for ${entry.date} moved to Production.`);
     }
     setView("list");
     setPendingItem(undefined);

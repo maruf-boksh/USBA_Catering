@@ -85,11 +85,25 @@ const OM_STAT_CLS: Record<FlightOrderStatus, string> = {
   Completed:  "text-[#0f7a40] bg-[#ecf5ef] border-[#c4e3cf]",
   Approved:   "text-[#1f9d57] bg-[#ecf5ef] border-[#c4e3cf]",
   Dispatched: "text-[#1f9d57] bg-[#ecf5ef] border-[#c4e3cf]",
+  Packaged:   "text-[#2563eb] bg-[#eff4ff] border-[#c7d7fe]",
   Production: "text-[#b45309] bg-[#fbf1e6] border-[#f0d9bf]",
   Pending:    "text-[#8a6400] bg-[#fbf4e2] border-[#ecdcae]",
 };
 
-function OmStatusPill({ status }: { status: FlightOrderStatus }) {
+function OmStatusPill({ status, ghost = false }: { status: FlightOrderStatus; ghost?: boolean }) {
+  // Ghost = an "inherited" pill for a leg whose status matches its order's single
+  // status. Muted, no fill, normal weight — present so the column never reads as
+  // empty, but clearly de-emphasized so it isn't a bold repeat of the header.
+  if (ghost) {
+    return (
+      <span
+        title={`Same as order status — ${status}`}
+        className="inline-flex items-center rounded-full border border-border/60 bg-transparent px-3 py-1 text-[10.5px] font-medium uppercase tracking-[0.04em] text-muted-foreground/60"
+      >
+        {status}
+      </span>
+    );
+  }
   return (
     <span
       className={
@@ -104,7 +118,7 @@ function OmStatusPill({ status }: { status: FlightOrderStatus }) {
 
 // Lifecycle order, least → most advanced. Used to roll a whole order's legs up
 // into a single derived status and to order the per-status breakdown chips.
-const LIFECYCLE_ORDER: FlightOrderStatus[] = ["Pending", "Approved", "Production", "Dispatched", "Completed"];
+const LIFECYCLE_ORDER: FlightOrderStatus[] = ["Pending", "Approved", "Production", "Packaged", "Dispatched", "Completed"];
 
 function ReviewedPill() {
   return (
@@ -2122,6 +2136,12 @@ function OrdersList({
               const maxDate = dates.reduce((a, b) => (a > b ? a : b), dates[0]);
               const groupDateLabel = minDate === maxDate ? minDate : `${minDate} → ${maxDate}`;
 
+              // When every leg shares one status, the order header pill already
+              // conveys it — repeating the identical pill on each flight row is
+              // noise. Show the per-leg status only for mixed orders; a uniform
+              // order's rows inherit (a subtle dash) so nothing looks off.
+              const orderUniform = legs.every((l) => l.status === legs[0].status);
+
               // Cap legs per order; "show all" expands in place.
               const isExpanded = expandedOrders.has(orderNo) || isDeepLinkTarget;
               const shownLegs = isExpanded ? legs : legs.slice(0, LEG_CAP);
@@ -2242,7 +2262,7 @@ function OrdersList({
                                   </TableCell>
                                 )}
                                 <TableCell>
-                                  <OmStatusPill status={o.status} />
+                                  <OmStatusPill status={o.status} ghost={orderUniform} />
                                 </TableCell>
                                 <TableCell>
                                   <div className="flex items-center justify-end gap-1.5">
@@ -7256,7 +7276,7 @@ function FlightOrderDetailsDialog({
                     acc[s] = legs.filter((l) => l.status === s).length;
                     return acc;
                   },
-                  { Pending: 0, Approved: 0, Production: 0, Dispatched: 0, Completed: 0 },
+                  { Pending: 0, Approved: 0, Production: 0, Packaged: 0, Dispatched: 0, Completed: 0 },
                 )
               }
             />
