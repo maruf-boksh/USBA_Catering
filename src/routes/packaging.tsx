@@ -24,7 +24,7 @@ import { usePersistedState } from "@/lib/use-persisted-state";
 import { useWorkflow, type WfProductionEntry } from "@/lib/workflow-store";
 import { cn } from "@/lib/utils";
 import { INITIAL_PACKAGING_ROWS, type PackagingRow } from "@/routes/dispatch";
-import { useFlightOrders, type FlightOrder } from "@/lib/flight-orders-store";
+import { useFlightOrders, updateFlightOrdersWhere, type FlightOrder } from "@/lib/flight-orders-store";
 import {
   UNASSIGNED_FLIGHT, resolveManifestRow, manifestLinesFor, resolveFlightOrder, resolveCrewOrder,
   resolveBatchChain, resolveReturnLeg,
@@ -1010,11 +1010,10 @@ export default function PackagingPage() {
     if (list.length === 0) { toast.error("No labels to print."); return; }
     const now = new Date().toISOString().slice(0, 16).replace("T", " ");
     const ids = new Set(list.map((a) => a.id));
-    setAllocations((prev) =>
-      prev.map((a) => (ids.has(a.id)
-        ? { ...a, status: "Packaged" as PackagingAllocationStatus, packagedAt: now, dispatchId: a.dispatchId ?? `DSP-${a.flight}` }
-        : a)),
-    );
+    const nextAllocations = allocations.map((a) => (ids.has(a.id)
+      ? { ...a, status: "Packaged" as PackagingAllocationStatus, packagedAt: now, dispatchId: a.dispatchId ?? `DSP-${a.flight}` }
+      : a));
+    setAllocations(nextAllocations);
     const byBatchId = new Map(list.map((a) => [a.batchId, a]));
     setBatches((prev) =>
       prev.map((b) => {
@@ -1031,6 +1030,24 @@ export default function PackagingPage() {
         };
       }),
     );
+    // Advance the flight-order lifecycle: once every non-rejected allocation of a
+    // flight (matched by Order # + flight) is packaged, its order moves
+    // Approved/Production → Packaged. Uses the just-computed allocation set so the
+    // check reflects this action, not the pre-update state.
+    const affected = new Map<string, { orderNo: string; flight: string }>();
+    for (const a of list) if (a.orderNo) affected.set(`${a.orderNo}__${a.flight}`, { orderNo: a.orderNo, flight: a.flight });
+    for (const { orderNo, flight } of affected.values()) {
+      const flightAllocs = nextAllocations.filter(
+        (a) => a.orderNo === orderNo && a.flight === flight && a.status !== "Rejected",
+      );
+      if (flightAllocs.length > 0 && flightAllocs.every(isPackaged)) {
+        updateFlightOrdersWhere(
+          (o) => o.orderNo === orderNo && o.flight === flight
+            && (o.status === "Approved" || o.status === "Production"),
+          { status: "Packaged" },
+        );
+      }
+    }
     toast.success(`${ids.size} label${ids.size === 1 ? "" : "s"} printed — packaged, ready for dispatch.`);
   };
 

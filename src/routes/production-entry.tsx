@@ -1083,13 +1083,9 @@ export default function ProductionEntryPage() {
         )).sort()
       : [];
     const taggedEntry: ProductionEntry = { ...entry, servesOrderNos };
-    // Count the Approved legs this order will take into Production *before* adding
-    // it — addProductionEntry performs the actual Approved→Production advance (in
-    // the workflow store, so every creation path shares it), after which the
-    // snapshot below would already read Production.
-    const willAdvance = flightOrders.filter(
-      (o) => o.date === entry.date && o.status === "Approved",
-    ).length;
+    // Raising the order does NOT move flight orders to Production — that happens
+    // when the run actually starts (Production Initiation, in Production Entry),
+    // wired in the workflow store's updateProductionEntryStatus.
     addProductionEntry(taggedEntry);
     logAudit({
       action: "Created production order",
@@ -1097,9 +1093,6 @@ export default function ProductionEntryPage() {
       entity: entry.id,
       detail: `${entry.outputItemName ?? entry.bom} · order qty ${entry.orderQty ?? 0}${entry.date ? ` · ${entry.date}` : ""}${servesOrderNos.length ? ` · serves ${servesOrderNos.length} order(s): ${servesOrderNos.join(", ")}` : ""}`,
     });
-    if (willAdvance > 0) {
-      toast.success(`${willAdvance} flight order leg${willAdvance === 1 ? "" : "s"} for ${entry.date} moved to Production.`);
-    }
     setView("list");
     setPendingItem(undefined);
   };
