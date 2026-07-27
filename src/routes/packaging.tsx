@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/command";
 import {
   Package, PackageCheck, Printer, CheckCircle2, Eye, Boxes, Clock, Truck, Search, Plane, Plus,
-  ChevronDown, Check,
+  ChevronDown, Check, Layers, ClipboardList,
 } from "lucide-react";
 import { toast } from "sonner";
 import { usePersistedState } from "@/lib/use-persisted-state";
@@ -32,7 +32,7 @@ import {
 import { useArrivalFlash, peekArrivalRows } from "@/lib/arrival-flash";
 import { logAudit } from "@/lib/audit-log";
 import { getAuthUser } from "@/lib/auth";
-import { servedOrderNosFor, flightPortionFor, menuSpecFor, dayFromDate } from "@/lib/production-order-link";
+import { servedOrderNosFor, flightPortionFor, menuSpecFor, dayFromDate, flightTypeFromSector } from "@/lib/production-order-link";
 import { loadMealPlanningConfig } from "@/lib/meal-planning-data";
 import { meals, warehouses } from "@/lib/sample-data";
 import {
@@ -161,7 +161,7 @@ function AllocationBadge({ status }: { status: PackagingAllocationStatus }) {
 export default function PackagingPage() {
   const navigate = useNavigate();
   useArrivalFlash();
-  const { productionEntries } = useWorkflow();
+  const { productionEntries, productionEntryRecords } = useWorkflow();
   const [batches, setBatches] = usePersistedState<PackagingBatch[]>("packaging-batches", []);
   // Run × flight × quantity — what is actually being packaged, and the list's rows.
   const [allocations, setAllocations] = usePersistedState<PackagingAllocation[]>("packaging-allocations", []);
@@ -207,6 +207,19 @@ export default function PackagingPage() {
     for (const e of productionEntries) m.set(e.id, e);
     return m;
   }, [productionEntries]);
+  // Batch lots logged per production order. A single order can be produced in
+  // several Production Entries, each stamped with its own batch / lot number — so
+  // the packaging modal can show which lot(s) an item is packaged from.
+  const lotsByOrder = useMemo(() => {
+    const m = new Map<string, { batchNo: string; qty: number; expiry?: string }[]>();
+    for (const r of productionEntryRecords) {
+      if (!r.batchNo) continue;
+      const arr = m.get(r.productionOrderId) ?? [];
+      arr.push({ batchNo: r.batchNo, qty: r.producedQty, expiry: r.batchExpiry });
+      m.set(r.productionOrderId, arr);
+    }
+    return m;
+  }, [productionEntryRecords]);
   // Live Order Management order book — the source of flight numbers, sectors and
   // ETDs for the picker, and of the order a production run is tagged to.
   const flightOrders = useFlightOrders();
@@ -410,6 +423,8 @@ export default function PackagingPage() {
   // VQ-903 package opened BG-651's 502-portion manifest because both cook
   // Grilled Chicken. The allocation already knows its flight, order and qty.
   const [orderDetailAlloc, setOrderDetailAlloc] = useState<PackagingAllocation | null>(null);
+  // Flight whose menu-plan status popup is open (what's produced / packaged / left).
+  const [menuInfoGroup, setMenuInfoGroup] = useState<PkgFlightGroup | null>(null);
   const [labelOpen, setLabelOpen] = useState(false);
   // Printing labels completes packaging (no scan step is required here).
   const [printedAll, setPrintedAll] = useState(false);
@@ -496,6 +511,56 @@ export default function PackagingPage() {
   };
 
   const flightGroups = groupByFlight(rows);
+
+  // ── Flight-wise dispatch readiness ──────────────────────────────────────────
+  // A flight is Ready for Dispatch only when EVERY meal on its menu plan is
+  // produced AND packaged — not per line. We enumerate the flight's menu meals
+  // (inferring the meal service from what's already being packaged), then mark
+  // each produced / packaged and roll them up to one flight-level status.
+  const flightReadiness = (g: PkgFlightGroup) => {
+    const day = dayFromDate(g.date);
+    const order = findFlightOrder({ flight: g.flight, date: g.date, orderNo: g.orderNo });
+    const sector = g.sector ?? order?.sector ?? "";
+    const ftype = flightTypeFromSector(sector);
+    // Meal service(s) this flight actually carries — inferred from its packaged
+    // lines so we don't pull in every service on the day's menu.
+    const services = new Set(
+      g.allocations
+        .map((a) => menuSpecFor(a.item, day, menuCards)?.mealType)
+        .filter((s): s is string => !!s),
+    );
+    // Candidate menu meals for this flight type + day (+ inferred service).
+    const names = new Set<string>();
+    for (const card of menuCards) {
+      if (card.day !== day || !card.flightType.includes(ftype)) continue;
+      if (services.size > 0 && card.mealType && !services.has(card.mealType)) continue;
+      for (const ch of card.choices) for (const it of ch.items) names.add(it.name);
+      for (const sp of card.specialMeals) if (sp.enabled) for (const it of sp.items) names.add(it.name);
+      if (card.dessert?.name) names.add(card.dessert.name);
+    }
+    // Keep only meals this order actually needs a portion of; always include what
+    // is already in the run so nothing packaged is dropped.
+    let required = order
+      ? [...names].filter((n) => (flightPortionFor(n, { ...order, crew: order.crew }, menuCards) ?? 0) > 0)
+      : [...names];
+    for (const a of g.allocations) if (!required.some((r) => r.toLowerCase() === a.item.toLowerCase())) required.push(a.item);
+    if (required.length === 0) required = [...new Set(g.allocations.map((a) => a.item))];
+
+    const packagedItems = new Set(g.allocations.filter(isPackaged).map((a) => a.item.toLowerCase()));
+    const allocItems = new Set(g.allocations.map((a) => a.item.toLowerCase()));
+    const meals = required.map((n) => {
+      const key = n.toLowerCase();
+      const packaged = packagedItems.has(key);
+      const produced = allocItems.has(key)
+        || productionEntries.some((e) => (e.outputItemName ?? e.bom).toLowerCase() === key && e.producedQty > 0);
+      return { name: n, produced, packaged };
+    });
+    const notPackaged = meals.filter((m) => !m.packaged);
+    const notProduced = meals.filter((m) => !m.produced);
+    const allPackaged = meals.length > 0 && notPackaged.length === 0;
+    return { meals, allPackaged, notPackaged, notProduced };
+  };
+
   const batchById = useMemo(() => {
     const m = new Map<string, PackagingBatch>();
     for (const b of batches) m.set(b.id, b);
@@ -1194,6 +1259,8 @@ export default function PackagingPage() {
                 // The flight's load = the sum of its allocations, by definition.
                 const groupQty = g.allocations.reduce((s, a) => s + a.qty, 0);
                 const isUnassigned = g.flight === UNASSIGNED_FLIGHT;
+                // Flight-level dispatch readiness across the whole menu plan.
+                const rd = isUnassigned ? null : flightReadiness(g);
                 return [
                   /* ── Flight header — the list is arranged flight by flight ── */
                   <TableRow key={`${g.key}-head`} className="border-t-2 border-sky-100 bg-sky-50/50 hover:bg-sky-50/70">
@@ -1236,6 +1303,27 @@ export default function PackagingPage() {
                         <span className="text-[11px] font-medium text-slate-600 tabular-nums whitespace-nowrap">
                           {g.allocations.length} line{g.allocations.length === 1 ? "" : "s"} · {groupQty.toLocaleString()} portions
                         </span>
+                        {rd && rd.meals.length > 0 && (
+                          rd.allPackaged ? (
+                            <span
+                              className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 whitespace-nowrap"
+                              title={`All ${rd.meals.length} menu meal${rd.meals.length === 1 ? "" : "s"} produced & packaged`}
+                            >
+                              <CheckCircle2 className="h-3 w-3" /> Ready for Dispatch
+                            </span>
+                          ) : (
+                            <span
+                              className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 whitespace-nowrap"
+                              title={
+                                `${rd.meals.length - rd.notPackaged.length}/${rd.meals.length} meals packaged. Pending: ` +
+                                rd.notPackaged.map((m) => `${m.name}${m.produced ? " (produced, not packaged)" : " (not produced)"}`).join(", ")
+                              }
+                            >
+                              <Clock className="h-3 w-3" />
+                              Packaging {rd.meals.length - rd.notPackaged.length}/{rd.meals.length} — not ready
+                            </span>
+                          )
+                        )}
                         {pendingInGroup.length > 0 && (
                           <button
                             type="button"
@@ -1248,6 +1336,27 @@ export default function PackagingPage() {
                           </button>
                         )}
                         <span className="ml-auto flex items-center gap-2">
+                          {!isUnassigned && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 px-2.5 text-xs"
+                              onClick={() => setMenuInfoGroup(g)}
+                              title={`See ${g.flight}'s full menu — what's produced, packaged and still pending`}
+                            >
+                              <ClipboardList className="h-3.5 w-3.5 mr-1" /> Menu
+                            </Button>
+                          )}
+                          {rd?.allPackaged && (
+                            <Button
+                              size="sm"
+                              className="h-7 px-2.5 text-xs"
+                              onClick={() => navigate(`/dispatch?config=${encodeURIComponent(g.flight)}&date=${encodeURIComponent(g.date)}`)}
+                              title={`All meals packaged — configure ${g.flight}'s dispatch`}
+                            >
+                              <Truck className="h-3.5 w-3.5 mr-1" /> Dispatch
+                            </Button>
+                          )}
                           {inProgressInGroup.length > 0 && (
                             <Button
                               size="sm"
@@ -1341,11 +1450,6 @@ export default function PackagingPage() {
                     <TableCell>
                       <div className="inline-flex items-center gap-1.5 flex-wrap">
                         <AllocationBadge status={a.status} />
-                        {a.status === "Packaged" && (
-                          <span className="inline-flex items-center rounded-full border border-teal-300 bg-teal-50 px-2 py-0.5 text-[10px] font-semibold text-teal-700 whitespace-nowrap">
-                            Ready For Dispatch
-                          </span>
-                        )}
                       </div>
                     </TableCell>
                     <TableCell className="text-right">
@@ -1651,11 +1755,93 @@ export default function PackagingPage() {
         );
       })()}
 
+      {/* Menu Plan status — the flight's full menu, each meal's produce/package
+          state, so the user sees what still needs producing or packaging. */}
+      <Dialog open={!!menuInfoGroup} onOpenChange={(o) => { if (!o) setMenuInfoGroup(null); }}>
+        <DialogContent className="w-full max-w-full sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+          {menuInfoGroup && (() => {
+            const rd = flightReadiness(menuInfoGroup);
+            const packagedCount = rd.meals.length - rd.notPackaged.length;
+            return (
+              <>
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-2">
+                    <ClipboardList className="h-4 w-4" /> Menu Plan — {menuInfoGroup.flight}
+                  </DialogTitle>
+                  <DialogDescription>
+                    {[menuInfoGroup.sector, menuInfoGroup.orderNo, menuInfoGroup.date].filter(Boolean).join(" · ")}
+                    {" — "}
+                    <span className={cn("font-semibold", rd.allPackaged ? "text-emerald-700" : "text-amber-700")}>
+                      {packagedCount}/{rd.meals.length} meals packaged
+                    </span>
+                    {rd.allPackaged ? " — ready for dispatch." : " — not ready."}
+                  </DialogDescription>
+                </DialogHeader>
+
+                <div className="rounded-md border border-border overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-muted/50">
+                      <tr>
+                        <th className="p-2 text-left text-[11px] uppercase tracking-wider font-semibold">Meal</th>
+                        <th className="p-2 text-left text-[11px] uppercase tracking-wider font-semibold w-40">Production</th>
+                        <th className="p-2 text-left text-[11px] uppercase tracking-wider font-semibold w-40">Packaging</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rd.meals.map((m) => (
+                        <tr key={m.name} className="border-t border-border">
+                          <td className="p-2 font-medium">{m.name}</td>
+                          <td className="p-2">
+                            {m.produced ? (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                                <CheckCircle2 className="h-3 w-3" /> Produced
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-rose-300 bg-rose-50 px-2 py-0.5 text-[10px] font-semibold text-rose-700">
+                                <Clock className="h-3 w-3" /> Not produced
+                              </span>
+                            )}
+                          </td>
+                          <td className="p-2">
+                            {m.packaged ? (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                                <CheckCircle2 className="h-3 w-3" /> Packaged
+                              </span>
+                            ) : m.produced ? (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                                <Clock className="h-3 w-3" /> Awaiting packaging
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-muted-foreground">— produce first</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {rd.notPackaged.length > 0 && (
+                  <p className="text-[11px] text-muted-foreground">
+                    Still to package: <span className="font-medium text-foreground">{rd.notPackaged.map((m) => m.name).join(", ")}</span>.
+                    {rd.notProduced.length > 0 && <> Produce first: <span className="font-medium text-foreground">{rd.notProduced.map((m) => m.name).join(", ")}</span>.</>}
+                  </p>
+                )}
+
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setMenuInfoGroup(null)}>Close</Button>
+                </DialogFooter>
+              </>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
+
       {/* New Packaging — flight first. Pick a flight number and everything
           production sent for it (batches + the order's meal manifest) loads
           below; starting hands the ticked batches to the usual scan/print flow. */}
       <Dialog open={newOpen} onOpenChange={(o) => { if (!o) setNewOpen(false); }}>
-        <DialogContent className="w-full max-w-full sm:max-w-3xl max-h-[92vh] overflow-y-auto">
+        <DialogContent className="w-full max-w-full sm:max-w-5xl lg:max-w-6xl max-h-[92vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2"><Plane className="h-4 w-4" /> New Packaging</DialogTitle>
             <DialogDescription>
@@ -1869,6 +2055,7 @@ export default function PackagingPage() {
                               </th>
                               <th className="p-2 text-left font-semibold">Production ID</th>
                               <th className="p-2 text-left font-semibold">Meal / Item</th>
+                              <th className="p-2 text-left font-semibold">Batch / Lot</th>
                               <th className="p-2 text-left font-semibold">Type</th>
                               <th className="p-2 text-right font-semibold">For This Flight</th>
                               <th className="p-2 text-right font-semibold">Run Produced</th>
@@ -1940,6 +2127,29 @@ export default function PackagingPage() {
                                   </td>
                                   <td className="p-2">{meal?.mealName ?? batch?.item}</td>
                                   <td className="p-2">
+                                    {(() => {
+                                      const lots = batch ? (lotsByOrder.get(batch.batch) ?? []) : [];
+                                      if (lots.length === 0) {
+                                        return <span className="text-muted-foreground" title="No batch/lot recorded for this run">—</span>;
+                                      }
+                                      return (
+                                        <div className="flex flex-wrap gap-1">
+                                          {lots.map((l) => (
+                                            <span
+                                              key={l.batchNo}
+                                              title={`Lot ${l.batchNo} · ${l.qty.toLocaleString()} produced${l.expiry ? ` · exp ${l.expiry}` : ""}`}
+                                              className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-primary/30 bg-primary/5 px-1.5 py-0.5 text-[10px] font-mono text-primary"
+                                            >
+                                              <Layers className="h-3 w-3 shrink-0" />
+                                              {l.batchNo}
+                                              {lots.length > 1 && <span className="text-muted-foreground">×{l.qty.toLocaleString()}</span>}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      );
+                                    })()}
+                                  </td>
+                                  <td className="p-2">
                                     {type
                                       ? <span className={cn("px-2 py-0.5 rounded-full text-[11px] font-semibold", MEAL_TYPE_BADGE[type] ?? "bg-muted text-foreground")}>{type}</span>
                                       : <span className="text-muted-foreground">—</span>}
@@ -1980,7 +2190,7 @@ export default function PackagingPage() {
                               );
                             })}
                             <tr className="border-t-2 border-slate-300 bg-slate-50/80">
-                              <td className="p-2 font-bold" colSpan={4}>Total</td>
+                              <td className="p-2 font-bold" colSpan={5}>Total</td>
                               <td className="p-2 text-right font-bold tabular-nums">{lineQty}</td>
                               <td colSpan={4}></td>
                             </tr>

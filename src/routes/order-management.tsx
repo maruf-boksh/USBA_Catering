@@ -1844,7 +1844,7 @@ function WorkflowStrip({
       <div className="text-[11px] uppercase tracking-wider text-muted-foreground mb-2">
         Status Workflow
       </div>
-      <div className="flex items-center gap-1 overflow-x-auto">
+      <div className="flex flex-wrap items-center gap-y-1.5 gap-x-1">
         {statuses.map((s, i) => {
           const count = counts[s] ?? 0;
           const active = count > 0;
@@ -7293,7 +7293,7 @@ function FlightOrderDetailsDialog({
             />
 
             <div>
-              <div className="flex items-center justify-between mb-2">
+              <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 mb-2">
                 <div className="text-[11px] uppercase tracking-wider text-muted-foreground flex items-center gap-2">
                   Flights
                   <Badge variant="outline" className="h-5 px-1.5 text-[10px] tabular-nums">
@@ -7304,8 +7304,8 @@ function FlightOrderDetailsDialog({
                   Status advances automatically as flights move through the workflow
                 </span>
               </div>
-              <div className="border border-border rounded-md overflow-hidden max-h-[42vh] overflow-y-auto">
-                <Table>
+              <div className="border border-border rounded-md max-h-[42vh] overflow-auto">
+                <Table className="min-w-[600px]">
                   <TableHeader className="bg-muted/40 sticky top-0 z-10">
                     <TableRow>
                       <TableHead className="w-12 text-[10px] uppercase tracking-wider">#</TableHead>

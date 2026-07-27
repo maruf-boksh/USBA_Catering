@@ -1919,12 +1919,27 @@ export type ItemMaster = {
   weightG?: number;
   /** Default energy per serving in kcal. Flows to Menu Planning meal items. */
   kcal?: number;
+  /**
+   * Shelf life in days from receipt. When set, it drives the projected batch
+   * expiry (receipt date + shelfLifeDays); when unset, a category/type-based
+   * default is used. Only meaningful for batch-tracked, perishable items.
+   */
+  shelfLifeDays?: number;
   /** Per-item allocation method. Perishables → FEFO, shelf-stable → FIFO. */
   allocationMethod?: AllocationMethod;
-  /** Office that owns the default warehouse (id from `offices`). */
+  /** Primary office that owns the default warehouse (id from `offices`). Kept as
+   *  the first of `officeIds` for backward compatibility with single-location
+   *  readers. */
   officeId?: string;
-  /** Default warehouse this item is stored in (id from `warehouses`). */
+  /** Primary warehouse this item is stored in (id from `warehouses`). Kept as the
+   *  first of `warehouseIds` for backward compatibility. */
   warehouseId?: string;
+  /** All offices this item may be stocked in (ids from `offices`). `officeId`
+   *  mirrors the first entry. */
+  officeIds?: string[];
+  /** All warehouses this item may be stocked in (ids from `warehouses`), possibly
+   *  spanning multiple offices. `warehouseId` mirrors the first entry. */
+  warehouseIds?: string[];
   /** Default bin/rack/shelf location for this item. */
   binLocation?: string;
   /**
@@ -2150,6 +2165,7 @@ const RAW_ITEMS: Array<Omit<ItemMaster, "id">> = [
   { code: "FG-MEAL-CCM",  name: "Crew Combo Meal",       itemType: "Finished Good", category: "Meal",      subCategory: "Frozen", uom: "Piece", status: "Active" },
   { code: "FG-MEAL-VML",  name: "Vegetarian Meal",       itemType: "Finished Good", category: "Meal",      subCategory: "Frozen", uom: "Piece", status: "Active" },
   { code: "FG-MEAL-KSH",  name: "Kosher Meal",           itemType: "Finished Good", category: "Meal",      subCategory: "Frozen", uom: "Piece", status: "Active" },
+  { code: "FG-MEAL-NSL",  name: "Nasi Lemak",            itemType: "Finished Good", category: "Meal",      subCategory: "Fresh",  uom: "Piece", status: "Active" },
 
   // ── Finished Goods · Bakery & Snacks
   { code: "FG-BK-CROIS",  name: "Croissant",             itemType: "Finished Good", category: "Bakery",    subCategory: "Fresh",  uom: "Piece", status: "Active" },
@@ -2316,8 +2332,11 @@ function storageForItem(it: ItemMaster): "Dry" | "Cold" | "Frozen" {
   return "Dry";
 }
 
-/** Days of shelf-life used to project a synthetic batch expiry. */
+/** Days of shelf-life used to project a synthetic batch expiry. An explicit
+ *  per-item value (set in Item Profile) wins; otherwise fall back to the
+ *  category/type-based default. */
 function shelfLifeDays(it: ItemMaster): number {
+  if (it.shelfLifeDays != null && it.shelfLifeDays > 0) return it.shelfLifeDays;
   if (it.itemType === "Packaging") return 730;
   if (it.itemType === "Consumable") return 540;
   // Raw Material varies by category / subCategory

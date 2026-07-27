@@ -1,9 +1,16 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { getDemandRequests, saveDemandRequests } from "@/lib/demand-requests";
-import { requisitions as seedReqs, purchaseOrders as seedPOs } from "@/lib/sample-data";
+import {
+  requisitions as seedReqs, purchaseOrders as seedPOs,
+} from "@/lib/sample-data";
 import { updateFlightOrdersWhere, getFlightOrders } from "@/lib/flight-orders-store";
 import { servedOrderNosFor } from "@/lib/production-order-link";
+import { resolveItemMaster, isItemBatchTracked } from "@/lib/item-registry";
+import {
+  addInventoryBatchLot, applyInventoryStock,
+  hasPostedProductionStock, markPostedProductionStock,
+} from "@/lib/stock-adjustments";
 
 // ── Status enums ───────────────────────────────────────────────────────────────
 export type WfDemandStatus =
@@ -382,6 +389,11 @@ export type WfProductionEntry = {
   qcCheckedBy?: string;
   completedAt?: string;
   inventoryAdded?: boolean;
+  /** Batch/lot number + expiry for this run's output, captured at Production
+   *  Entry (auto-generated or typed) and used when the produced lot is posted to
+   *  Stock Overview. Only meaningful for batch-tracked output items. */
+  batchNo?: string;
+  batchExpiry?: string;
   qcFailedAt?: string;
   qcFailedBy?: string;
   qcFailReason?: string;
@@ -469,6 +481,7 @@ export type WfProductionEntryRecord = {
   outputItemCode?: string;
   producedQty: number;         // amount produced in this single entry
   batchNo?: string;
+  batchExpiry?: string;        // ISO date — lot expiry captured at entry (batch items)
   shift?: "Morning" | "Evening" | "Night";
   producedBy: string;
   remarks?: string;
@@ -573,6 +586,59 @@ const WorkflowContext = createContext<WorkflowCtx>({
   dispatchApprovals: [], addDispatchApproval: () => {}, updateDispatchApproval: () => {},
   maintenanceApprovals: [], addMaintenanceApproval: () => {}, updateMaintenanceApproval: () => {},
 });
+
+/**
+ * Post a produced item's quantity to Stock Overview, once per production run.
+ *
+ *   • Batch-tracked output → append a lot (batch no + expiry) to the item's batch
+ *     ladder and bump its stock. The batch no / expiry come from the Production
+ *     Entry (auto-generated or typed); they fall back to the run id + shelf-life
+ *     projection when not supplied.
+ *   • Non-batch output → bump the pooled stock only (no lot).
+ *
+ * Idempotent by production-order id so firing at both Ready for QC and Completed
+ * (and any re-fire) posts exactly once. No-op for unknown masters or zero qty.
+ */
+function postProducedBatchLot(entry: {
+  id: string;
+  bom: string;
+  outputItemName?: string;
+  outputItemCode?: string;
+  producedQty: number;
+  completedAt?: string;
+  date?: string;
+  batchNo?: string;
+  batchExpiry?: string;
+}): void {
+  const name = (entry.outputItemName ?? entry.bom) || "";
+  const code = entry.outputItemCode;
+  const master = resolveItemMaster(name, code);
+  const qty = entry.producedQty;
+  if (!master || qty <= 0) return;
+  if (hasPostedProductionStock(entry.id)) return;
+
+  if (!isItemBatchTracked(master)) {
+    // Single-bucket item — no lot, just add to the pooled on-hand stock.
+    applyInventoryStock(master.name, qty);
+    markPostedProductionStock(entry.id);
+    return;
+  }
+
+  const baseDate = (entry.completedAt ?? entry.date ?? "").slice(0, 10);
+  const base = baseDate ? new Date(baseDate) : new Date();
+  const shelf = master.shelfLifeDays && master.shelfLifeDays > 0
+    ? master.shelfLifeDays
+    : master.subCategory === "Fresh" ? 3 : master.subCategory === "Frozen" ? 90 : 30;
+  const iso = (d: Date) => d.toISOString().slice(0, 10);
+  addInventoryBatchLot(master.name, {
+    batchNo: entry.batchNo?.trim() || entry.id,
+    qty,
+    expiry: entry.batchExpiry || iso(new Date(base.getTime() + shelf * 86400000)),
+    costPrice: master.costPrice ?? 0,
+    receivedOn: baseDate || iso(base),
+  });
+  markPostedProductionStock(entry.id);
+}
 
 // ── Provider ───────────────────────────────────────────────────────────────────
 export function WorkflowProvider({ children }: { children: ReactNode }) {
@@ -910,6 +976,22 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
             );
           }
         }
+
+        // Once a batch-tracked item is fully produced (Ready for QC) or signed off
+        // (Completed), record its produced quantity as a batch lot on the Stock
+        // Overview so its batch records are maintained there. Idempotent by
+        // production-order id, so firing at both points never double-posts.
+        if ((status === "Ready for QC" || status === "Completed") && entry) {
+          postProducedBatchLot({
+            ...entry,
+            outputItemName: extra?.outputItemName ?? entry.outputItemName,
+            outputItemCode: extra?.outputItemCode ?? entry.outputItemCode,
+            producedQty: extra?.producedQty ?? entry.producedQty,
+            completedAt: extra?.completedAt ?? entry.completedAt,
+            batchNo: extra?.batchNo ?? entry.batchNo,
+            batchExpiry: extra?.batchExpiry ?? entry.batchExpiry,
+          });
+        }
       },
 
       mrpRuns,
@@ -949,9 +1031,36 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
             } else if (o.status === "In Preparation" && nextProduced >= orderTarget) {
               nextStatus = "Ready for QC";
             }
-            return { ...o, producedQty: nextProduced, status: nextStatus };
+            // Stamp the run's batch no / expiry from the first entry that carries
+            // one, so the Completed path posts the same lot (idempotent).
+            return {
+              ...o,
+              producedQty: nextProduced,
+              status: nextStatus,
+              batchNo: o.batchNo ?? record.batchNo,
+              batchExpiry: o.batchExpiry ?? record.batchExpiry,
+            };
           }),
         );
+        // If this record pushes the order to Ready for QC (full quantity made),
+        // post the produced quantity to Stock Overview now — before QC sign-off.
+        // Runs off the pre-update snapshot (same pattern the status advance uses).
+        const o = productionEntries.find((e) => e.id === record.productionOrderId);
+        if (o) {
+          const nextProduced = o.producedQty + record.producedQty;
+          const orderTarget = o.orderQty ?? nextProduced;
+          const wasBeforeQc =
+            o.status === "Pending" || o.status === "Approved" ||
+            o.status === "Production Initiation" || o.status === "In Preparation";
+          if (wasBeforeQc && nextProduced >= orderTarget) {
+            postProducedBatchLot({
+              ...o,
+              producedQty: nextProduced,
+              batchNo: record.batchNo ?? o.batchNo,
+              batchExpiry: record.batchExpiry ?? o.batchExpiry,
+            });
+          }
+        }
       },
 
       prdStatuses, prdProgress,

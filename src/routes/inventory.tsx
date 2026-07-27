@@ -7,7 +7,7 @@ import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Boxes, AlertTriangle, Eye, FileText, CalendarDays } from "lucide-react";
+import { Boxes, AlertTriangle, Eye, FileText, CalendarDays, Layers } from "lucide-react";
 import { Select as AntSelect, Button as AntButton } from "antd";
 import { AppstoreOutlined, TagsOutlined, CloseOutlined, ProfileOutlined } from "@ant-design/icons";
 import { toast } from "sonner";
@@ -537,7 +537,28 @@ export default function Inventory() {
 
   const cols: Column<Item>[] = [
     { key: "id", header: "Code", render: (r) => <span className="font-mono text-xs">{displayCode(r)}</span> },
-    { key: "name", header: "Item" },
+    {
+      key: "name", header: "Item",
+      render: (r) => {
+        const batched = isBatchTrackedForInventory(r.id);
+        return (
+          <div className="flex items-center gap-1.5">
+            <span>{r.name}</span>
+            {batched && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); openBatches(r); }}
+                title="View batch lots"
+                aria-label={`View batch lots for ${r.name}`}
+                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-primary hover:bg-primary/10"
+              >
+                <Layers className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+        );
+      },
+    },
     {
       key: "officeId" as keyof Item, header: "Office / Warehouse",
       render: (r) => <LocationCell officeId={r.officeId} warehouseId={r.warehouseId} />,
