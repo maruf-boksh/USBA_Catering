@@ -34,6 +34,8 @@ export function DataTable<T extends { id: string }>({
   title,
   selectable = true,
   flashRowId,
+  bulkActions,
+  isRowSelectable,
 }: {
   columns: Column<T>[];
   data: T[];
@@ -42,6 +44,18 @@ export function DataTable<T extends { id: string }>({
   pageSize?: number;
   title?: string;
   selectable?: boolean;
+  /** Replaces the default "Bulk Approve" button in the selection toolbar.
+   *  `selectAll` ticks every row matching the current search, across pages.
+   *  Omitted on every existing page, which keeps the default behaviour. */
+  bulkActions?: (
+    selectedIds: string[],
+    clearSelection: () => void,
+    selectAll: () => void,
+    totalRows: number,
+  ) => ReactNode;
+  /** Rows this returns false for cannot be ticked, and are skipped by selectAll.
+   *  Omitted on every existing page, so all rows stay selectable by default. */
+  isRowSelectable?: (row: T) => boolean;
   /** When set, the table jumps to the page holding this row id so a deep-link
    *  arrival highlight (see arrival-flash) can find and flash it. */
   flashRowId?: string;
@@ -77,6 +91,12 @@ export function DataTable<T extends { id: string }>({
       searchKeys.some((k) => String(r[k] ?? "").toLowerCase().includes(ql)),
     );
   }, [data, q, searchKeys]);
+
+  /** Rows that may actually be ticked — what "select all" applies to. */
+  const selectableRows = useMemo(
+    () => (isRowSelectable ? filtered.filter(isRowSelectable) : filtered),
+    [filtered, isRowSelectable],
+  );
 
   // Deep-link arrival: jump once to the page that holds the flash target so the
   // arrival-flash highlight can locate the row in the DOM. Runs per target id.
@@ -182,15 +202,24 @@ export function DataTable<T extends { id: string }>({
             <span style={{ fontSize: 13, color: "var(--color-muted-foreground)" }}>
               {selected.length} selected
             </span>
-            <Button
-              size="small"
-              onClick={() => {
-                toast.success(`Bulk action on ${selected.length} rows`);
-                setSelected([]);
-              }}
-            >
-              Bulk Approve
-            </Button>
+            {bulkActions ? (
+              bulkActions(
+                selected,
+                () => setSelected([]),
+                () => setSelected(selectableRows.map((r) => r.id)),
+                selectableRows.length,
+              )
+            ) : (
+              <Button
+                size="small"
+                onClick={() => {
+                  toast.success(`Bulk action on ${selected.length} rows`);
+                  setSelected([]);
+                }}
+              >
+                Bulk Approve
+              </Button>
+            )}
           </>
         )}
         <div style={{ marginLeft: "auto" }}>
@@ -219,6 +248,9 @@ export function DataTable<T extends { id: string }>({
             ? {
                 selectedRowKeys: selected,
                 onChange: (keys) => setSelected(keys as string[]),
+                ...(isRowSelectable
+                  ? { getCheckboxProps: (row: T) => ({ disabled: !isRowSelectable(row) }) }
+                  : {}),
               }
             : undefined
         }

@@ -61,6 +61,7 @@ import {
   Trash2,
   Replace,
   TrendingUp,
+  Hourglass,
 } from 'lucide-react';
 
 export interface NavSubItem {
@@ -154,6 +155,7 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/transfer',          label: 'Transfer',         icon: I(MoveRight) },
       { key: '/inventory',         label: 'Stock Overview',   icon: I(Package) },
       { key: '/stock-adjustment',  label: 'Stock Adjustment', icon: I(SlidersHorizontal) },
+      { key: '/stock-ageing',      label: 'Stock Ageing and Alerts', icon: I(Hourglass) },
     ],
   },
 
