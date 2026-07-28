@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { usePersistedState } from "@/lib/use-persisted-state";
-import { flagArrival } from "@/lib/arrival-flash";
+import { flagArrival, useArrivalFlash } from "@/lib/arrival-flash";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { Button } from "@/components/ui/button";
@@ -30,22 +30,27 @@ import { useRole } from "@/lib/roles";
 import { useWorkflow, type WfProductionEntry } from "@/lib/workflow-store";
 import { resolveProductionItem } from "@/lib/meal-recipe";
 import { inventory, consumableItems, activeItems, activeOffices, activeWarehousesByOffice, offices as ALL_OFFICES, warehouses as ALL_WAREHOUSES } from "@/lib/sample-data";
+import {
+  EXPIRED_QUEUE_KEY, markDisposed, pendingLots, queueCounts,
+  type ExpiredDisposalLot,
+} from "@/lib/expired-disposal";
 
 // ── Shared types (exported so approval-management can consume them) ────────────
 
-export type WastageType = "Production" | "Airport Store" | "Return Item" | "Transfer";
+export type WastageType = "Production" | "Airport Store" | "Return Item" | "Transfer" | "Expired Product";
 
 // Wastage types whose disposal is backed by an inventory stock item (item-name
 // autocomplete + stock summary + stock reduction on Final Approval).
-export const STOCK_BACKED_TYPES: WastageType[] = ["Production", "Airport Store", "Transfer"];
+export const STOCK_BACKED_TYPES: WastageType[] = ["Production", "Airport Store", "Transfer", "Expired Product"];
 export const isStockBackedType = (t: WastageType | ""): boolean =>
-  t === "Production" || t === "Airport Store" || t === "Transfer";
+  t === "Production" || t === "Airport Store" || t === "Transfer" || t === "Expired Product";
 
 // Accountability fields (Responsible Person, Correction, Corrective Action Plan,
 // Eligible for Compensation) apply to Production wastage only — they are NOT
-// captured for Galley Returns ("Airport Store") or Transfer wastage.
+// captured for Galley Returns ("Airport Store"), Transfer wastage, or Expired
+// Product Disposal (expiry is a shelf-life event, not an individual's fault).
 export const isAccountabilityType = (t: WastageType | ""): boolean =>
-  t !== "Airport Store" && t !== "Transfer";
+  t !== "Airport Store" && t !== "Transfer" && t !== "Expired Product";
 
 // Salvage-sale details captured when the Disposal Method is "Sell".
 export type WastageSaleDetails = {
@@ -76,6 +81,7 @@ const WASTAGE_TYPE_LABELS: Record<WastageType, string> = {
   "Airport Store": "Galley Return Wastage",
   "Return Item": "Return Item",
   "Transfer": "Transfer Wastage",
+  "Expired Product": "Expired Product Disposal",
 };
 function wastageTypeLabel(t: WastageType | ""): string {
   return t ? WASTAGE_TYPE_LABELS[t] : "Unspecified";
@@ -276,6 +282,8 @@ type FormState = {
   // Returned-transfer picker (Transfer type)
   selectedTransferReturnIds: string[];
   selectedTransferLineIdx: number;
+  // Escalated expired lots picked for disposal (Expired Product type)
+  selectedExpiredIds: string[];
 };
 
 const emptyForm = (): FormState => ({
@@ -310,14 +318,20 @@ const emptyForm = (): FormState => ({
   recookBatchQtys: {},
   selectedTransferReturnIds: [],
   selectedTransferLineIdx: -1,
+  selectedExpiredIds: [],
 });
 
 // ── Main Component ────────────────────────────────────────────────────────────
 
 export default function WastageManagementPage() {
+  // Blinks the disposal report row when arriving from a deep link (e.g. the
+  // WDD reference on a Stock Ageing alert).
+  useArrivalFlash();
   const { role } = useRole();
   const navigate = useNavigate();
   const [entries, setEntries] = usePersistedState<WastageEntry[]>("wastage-entries", []);
+  // Expired lots escalated from Stock Ageing & Alerts, waiting to be disposed.
+  const [expiredQueue, setExpiredQueue] = usePersistedState<ExpiredDisposalLot[]>(EXPIRED_QUEUE_KEY, []);
 
   const [activeTab, setActiveTab] = useState<"all" | WastageType>("all");
   const [search, setSearch] = useState("");
@@ -403,6 +417,8 @@ export default function WastageManagementPage() {
     const airport = airportItems.find((i) => i.name.toLowerCase() === q);
     if (type === "Airport Store") return airport?.stock ?? 0;
     if (type === "Transfer") return (kitchen ?? airport)?.stock ?? 0;
+    // Expired Product → on-hand store stock for the expired lot's item.
+    if (type === "Expired Product") return (kitchen ?? airport)?.stock ?? 0;
     // Production (default): prefer stocked inventory, else total produced FG qty.
     if (kitchen) return kitchen.stock;
     return productionEntries
@@ -456,6 +472,11 @@ export default function WastageManagementPage() {
     });
   }, [entries, activeTab, search]);
 
+  // Escalated expired lots still waiting for a disposal report, plus the
+  // disposed/remaining tracker shown on the picker.
+  const expiredPending = useMemo(() => pendingLots(expiredQueue), [expiredQueue]);
+  const expiredCounts = useMemo(() => queueCounts(expiredQueue), [expiredQueue]);
+
   const kpis = useMemo(() => {
     const pending = entries.filter((e) =>
       ["Pending In-Charge", "Pending GM", "Pending Final"].includes(e.status)
@@ -468,6 +489,87 @@ export default function WastageManagementPage() {
   // ── Submit ─────────────────────────────────────────────────────────────────
 
   const handleSubmit = () => {
+    // ── Expired Product Disposal — one report per selected escalated lot ──────
+    // Items are never typed in for this type: each lot carries its own item,
+    // batch, quantity and location from the ageing escalation. Everything else
+    // (approval chain, stock deduction on Final Approval) follows the standard
+    // wastage flow untouched.
+    if (form.wastageType === "Expired Product" && form.selectedExpiredIds.length > 0) {
+      const lots = expiredPending.filter((l) => form.selectedExpiredIds.includes(l.id));
+      if (lots.length === 0) { toast.error("Select at least one expired lot to dispose."); return; }
+      const at = nowStamp();
+      const sysDate = todayDate();
+      const sysTime = nowTime();
+      const year = new Date().getFullYear();
+      let seq = entries.reduce((m, e) => {
+        const n = parseInt(e.id.split("-").at(-1) ?? "0", 10);
+        return Number.isFinite(n) && n > m ? n : m;
+      }, 0);
+
+      const refById: Record<string, string> = {};
+      const created: WastageEntry[] = lots.map((lot) => {
+        const id = `WDD-${year}-${String(++seq).padStart(4, "0")}`;
+        refById[lot.id] = id;
+        return {
+          id,
+          reportingDate: todayDate(),
+          wastageType: "Expired Product",
+          officeId: lot.officeId,
+          warehouseId: lot.warehouseId,
+          itemName: lot.itemName,
+          packageBatchSize: "N/A",
+          batchCode: lot.batchNo,
+          productionDate: lot.receivedOn || "N/A",
+          disposalQty: lot.qty,
+          disposalQtyUnit: lot.uom,
+          disposalReason: form.disposalReason === "Other"
+            ? (form.disposalReasonCustom.trim() || "Other")
+            : (form.disposalReason || "Expired / Past Expiry Date"),
+          reprocessingPossibility: form.reprocessingPossibility,
+          disposalMethod: form.disposalMethod === "Other (Specify)"
+            ? (form.disposalMethodCustom.trim() || "N/A")
+            : (form.disposalMethod || "N/A"),
+          disposalDate: sysDate,
+          disposalTime: sysTime,
+          rootCause: form.rootCause.trim()
+            || `Expired stock — lot ${lot.batchNo} of ${lot.itemName}, expiry ${lot.expiry || "not recorded"}, `
+             + `${lot.ageDays} days in store. Escalated from Stock Ageing & Alerts ${lot.alertNo} by ${lot.escalatedBy}.`,
+          correction: "N/A",
+          correctiveActionPlan: [],
+          responsiblePersons: [],
+          eligibleForCompensation: false,
+          compensationJustification: "",
+          preparedBy: role,
+          preparedByDesignation: "Senior Executive-Food Safety & Hygiene",
+          preparedAt: at,
+          status: "Pending In-Charge",
+          approvalSteps: [
+            { step: "Prepared By", by: role, designation: "Senior Executive-Food Safety & Hygiene", action: "Submitted", at },
+          ],
+          // Stock link — deducted by the existing chain on Final Approval.
+          stockItemName: lot.itemName,
+          previousStock: stockForItem(lot.itemName, "Expired Product"),
+        };
+      });
+
+      setEntries((prev) => [...created, ...prev]);
+      setExpiredQueue((prev) => markDisposed(prev, lots.map((l) => l.id), refById, at));
+      setCreateOpen(false);
+      setEditId(null);
+      setForm(emptyForm());
+      const left = expiredPending.length - lots.length;
+      toast.success(
+        `${created.length} Expired Product Disposal report${created.length === 1 ? "" : "s"} submitted — ` +
+        `pending Production In-Charge review.${left > 0 ? ` ${left} lot${left === 1 ? "" : "s"} still queued.` : ""}`,
+      );
+      return;
+    }
+
+    if (form.wastageType === "Expired Product") {
+      toast.error("Select at least one expired lot to dispose.");
+      return;
+    }
+
     if (!form.itemName.trim()) { toast.error("Item name is required."); return; }
     if (!form.disposalQty || isNaN(Number(form.disposalQty)) || Number(form.disposalQty) <= 0) {
       toast.error("Valid disposal quantity is required."); return;
@@ -607,6 +709,7 @@ export default function WastageManagementPage() {
             <TabsTrigger value="Production"    className="text-xs px-3 h-7">Production Wastage</TabsTrigger>
             <TabsTrigger value="Airport Store" className="text-xs px-3 h-7">Galley Return Wastage</TabsTrigger>
             <TabsTrigger value="Transfer"      className="text-xs px-3 h-7">Transfer Wastage</TabsTrigger>
+            <TabsTrigger value="Expired Product" className="text-xs px-3 h-7">Expired Product Disposal</TabsTrigger>
           </TabsList>
         </Tabs>
         <div className="flex items-center gap-2">
@@ -632,7 +735,7 @@ export default function WastageManagementPage() {
       {/* Table */}
       <Card>
         <CardContent className="p-0">
-          <div className="border border-border rounded-md overflow-hidden">
+          <div data-arrival-id="wastage-list" className="border border-border rounded-md overflow-hidden">
             <Table>
               <TableHeader className="bg-muted/40">
                 <TableRow>
@@ -662,7 +765,7 @@ export default function WastageManagementPage() {
                   </TableRow>
                 ) : (
                   filtered.map((entry) => (
-                    <TableRow key={entry.id} className="hover:bg-muted/30">
+                    <TableRow key={entry.id} data-arrival-row-id={entry.id} className="hover:bg-muted/30">
                       <TableCell>
                         <button
                           className="font-mono text-xs font-semibold text-primary hover:underline"
@@ -679,6 +782,7 @@ export default function WastageManagementPage() {
                           entry.wastageType === "Airport Store" ? "bg-sky-100 text-sky-700" :
                           entry.wastageType === "Transfer"      ? "bg-teal-100 text-teal-700" :
                           entry.wastageType === "Return Item"   ? "bg-violet-100 text-violet-700" :
+                          entry.wastageType === "Expired Product" ? "bg-rose-100 text-rose-700" :
                                                                   "bg-slate-100 text-slate-600",
                         )}>
                           {wastageTypeLabel(entry.wastageType)}
@@ -760,8 +864,13 @@ export default function WastageManagementPage() {
                     recookBatchQtys: {},
                     selectedTransferReturnIds: [],
                     selectedTransferLineIdx: -1,
+                    selectedExpiredIds: [],
                     itemName: "",
                     disposalQty: "",
+                    // Expired lots always carry the same reason, so pre-fill it.
+                    ...(v === "Expired Product"
+                      ? { disposalReason: "Expired / Past Expiry Date", reprocessingPossibility: "No" as const }
+                      : {}),
                   })}
                 >
                   <SelectTrigger className="mt-1 h-9 text-sm"><SelectValue placeholder="Select type" /></SelectTrigger>
@@ -770,6 +879,7 @@ export default function WastageManagementPage() {
                     <SelectItem value="Production">Production Wastage</SelectItem>
                     <SelectItem value="Airport Store">Galley Return Wastage</SelectItem>
                     <SelectItem value="Transfer">Transfer Wastage</SelectItem>
+                    <SelectItem value="Expired Product">Expired Product Disposal</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -794,6 +904,150 @@ export default function WastageManagementPage() {
                 </Select>
               </div>
             </div>
+
+            {/* Expired Product — stock past its expiry date */}
+            {form.wastageType === "Expired Product" && (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-md flex items-start gap-2">
+                <AlertTriangle className="h-4 w-4 text-rose-700 shrink-0 mt-0.5" />
+                <p className="text-[11px] text-rose-700 leading-relaxed">
+                  <strong>Expired Product Disposal</strong> records stock that has passed its expiry date and
+                  must be removed from the store. The lots below were escalated from{" "}
+                  <strong>Stock Ageing &amp; Alerts</strong> — tick the ones to dispose now and leave the rest
+                  queued for later. Each lot's quantity is deducted from stock on Final Approval.
+                </p>
+              </div>
+            )}
+
+            {/* Escalated expired lots — the item list for this disposal type. */}
+            {form.wastageType === "Expired Product" && (() => {
+              const picked = expiredPending.filter((l) => form.selectedExpiredIds.includes(l.id));
+              const pickedQty = picked.reduce((s, l) => s + l.qty, 0);
+              const pickedValue = picked.reduce((s, l) => s + l.qty * l.unitCost, 0);
+              // Running per-item drawdown so two lots of the same item show a
+              // correctly decreasing "stock after".
+              const used: Record<string, number> = {};
+              return (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-md space-y-3">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-rose-700">
+                      01. Escalated Expired Lots <span className="text-red-500">*</span>
+                    </h4>
+                    <span className="text-[11px] text-rose-700 tabular-nums">
+                      {expiredCounts.pending} pending · {expiredCounts.disposed} disposed · {expiredCounts.total} escalated
+                    </span>
+                  </div>
+
+                  {expiredPending.length === 0 ? (
+                    <p className="text-[11px] text-amber-600 flex items-center gap-1">
+                      <AlertTriangle className="h-3 w-3 shrink-0" />
+                      No expired lots are waiting. Escalate them from Inventory &amp; Store → Stock Ageing and Alerts.
+                    </p>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Button
+                          size="sm" variant="outline" className="h-7 text-xs"
+                          onClick={() => setForm({ ...form, selectedExpiredIds: expiredPending.map((l) => l.id) })}
+                        >
+                          Select all ({expiredPending.length})
+                        </Button>
+                        <Button
+                          size="sm" variant="ghost" className="h-7 text-xs"
+                          onClick={() => setForm({ ...form, selectedExpiredIds: [] })}
+                        >
+                          Clear
+                        </Button>
+                        <span className="text-[11px] text-rose-700">
+                          {picked.length} selected · {expiredPending.length - picked.length} left for later
+                        </span>
+                      </div>
+
+                      <div className="overflow-x-auto rounded-md border border-rose-200 bg-white">
+                        <table className="w-full min-w-[820px] text-xs">
+                          <thead className="bg-rose-100/60 text-rose-800">
+                            <tr>
+                              <th className="px-2 py-1.5 w-8" />
+                              <th className="px-2 py-1.5 text-left font-semibold">Alert #</th>
+                              <th className="px-2 py-1.5 text-left font-semibold">Item</th>
+                              <th className="px-2 py-1.5 text-left font-semibold">Batch / Lot</th>
+                              <th className="px-2 py-1.5 text-left font-semibold">Expiry</th>
+                              <th className="px-2 py-1.5 text-right font-semibold">Disposal QTY</th>
+                              <th className="px-2 py-1.5 text-right font-semibold">Current QTY</th>
+                              <th className="px-2 py-1.5 text-right font-semibold">Stock After</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {expiredPending.map((lot) => {
+                              const checked = form.selectedExpiredIds.includes(lot.id);
+                              const onHand = stockForItem(lot.itemName, "Expired Product");
+                              const already = used[lot.itemName.toLowerCase()] ?? 0;
+                              if (checked) used[lot.itemName.toLowerCase()] = already + lot.qty;
+                              const after = onHand - (checked ? already + lot.qty : already);
+                              return (
+                                <tr
+                                  key={lot.id}
+                                  className={cn("border-t border-rose-100", checked ? "bg-rose-50/60" : "hover:bg-muted/20")}
+                                >
+                                  <td className="px-2 py-1.5">
+                                    <input
+                                      type="checkbox"
+                                      className="h-3.5 w-3.5 cursor-pointer accent-rose-600"
+                                      checked={checked}
+                                      onChange={(e) => setForm({
+                                        ...form,
+                                        selectedExpiredIds: e.target.checked
+                                          ? [...form.selectedExpiredIds, lot.id]
+                                          : form.selectedExpiredIds.filter((id) => id !== lot.id),
+                                      })}
+                                      aria-label={`Select ${lot.itemName} lot ${lot.batchNo}`}
+                                    />
+                                  </td>
+                                  <td className="px-2 py-1.5 font-mono text-[11px]">{lot.alertNo}</td>
+                                  <td className="px-2 py-1.5">
+                                    <div className="font-medium">{lot.itemName}</div>
+                                    <div className="text-[10px] text-muted-foreground">{lot.category}</div>
+                                  </td>
+                                  <td className="px-2 py-1.5 font-mono text-[11px]">{lot.batchNo}</td>
+                                  <td className="px-2 py-1.5 tabular-nums">
+                                    {lot.expiry || "—"}
+                                    <div className="text-[10px] text-rose-600">{lot.level}</div>
+                                  </td>
+                                  <td className="px-2 py-1.5 text-right tabular-nums font-semibold text-red-600">
+                                    −{lot.qty.toLocaleString()} {lot.uom}
+                                  </td>
+                                  <td className="px-2 py-1.5 text-right tabular-nums">{onHand.toLocaleString()}</td>
+                                  <td className={cn("px-2 py-1.5 text-right tabular-nums font-medium", checked && "text-primary")}>
+                                    {after.toLocaleString()}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                            <tr className="border-t border-rose-200 bg-rose-100/40 font-semibold">
+                              <td colSpan={5} className="px-2 py-1.5 text-right uppercase text-[10px] tracking-wider">
+                                Selected total
+                              </td>
+                              <td className="px-2 py-1.5 text-right tabular-nums text-red-600">
+                                {pickedQty > 0 ? `−${pickedQty.toLocaleString()}` : "0"}
+                              </td>
+                              <td colSpan={2} className="px-2 py-1.5 text-right tabular-nums">
+                                ৳ {Math.round(pickedValue).toLocaleString()}
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <p className="text-[11px] text-rose-700 flex items-center gap-1">
+                        <AlertTriangle className="h-3 w-3 shrink-0" />
+                        {picked.length === 0
+                          ? "Tick at least one lot — one disposal report is raised per lot."
+                          : `${picked.length} disposal report${picked.length === 1 ? "" : "s"} will be raised and sent for approval. Stock is reduced on Final Approval.`}
+                      </p>
+                    </>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Transfer — items damaged while receiving */}
             {form.wastageType === "Transfer" && (
@@ -1232,7 +1486,10 @@ export default function WastageManagementPage() {
             <div>
               <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground mb-3">Disposal Details</h4>
               <div className="grid grid-cols-2 gap-4">
-                {!(form.wastageType === "Production" && form.selectedRecookBatchIds.length > 1) && (
+                {/* Expired Product Disposal takes its items from the escalation
+                    queue above, so the manual item picker is not shown. */}
+                {!(form.wastageType === "Production" && form.selectedRecookBatchIds.length > 1)
+                  && form.wastageType !== "Expired Product" && (
                 <div className="col-span-2">
                   <Label className="text-xs">01. Item <span className="text-red-500">*</span></Label>
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-1">
@@ -1312,6 +1569,8 @@ export default function WastageManagementPage() {
                   />
                 </div>
                 )}
+                {/* Quantity comes from each escalated lot for Expired Product. */}
+                {form.wastageType !== "Expired Product" && (
                 <div>
                   <Label className="text-xs">{fieldNo(3)}. Disposal Quantity <span className="text-red-500">*</span></Label>
                   <div className="flex gap-2 mt-1">
@@ -1332,6 +1591,7 @@ export default function WastageManagementPage() {
                     />
                   </div>
                 </div>
+                )}
                 <div>
                   <Label className="text-xs">{fieldNo(4)}. Disposal Reason <span className="text-red-500">*</span></Label>
                   <Select value={form.disposalReason} onValueChange={(v) => setForm({ ...form, disposalReason: v, disposalReasonCustom: "" })}>
@@ -1403,7 +1663,8 @@ export default function WastageManagementPage() {
 
             {/* Stock QTY Summary — Galley Returns & Transfer only (Production shows
                 its per-batch QTY strip inside the Re-Cook Batches card above). */}
-            {isStockBackedType(form.wastageType) && form.wastageType !== "Production" && (() => {
+            {isStockBackedType(form.wastageType) && form.wastageType !== "Production"
+              && form.wastageType !== "Expired Product" && (() => {
               // Issued QTY is resolved live from the relevant source (inventory /
               // galley stock / production) for the selected item; falls back to
               // the captured previous stock for multi-select / manual entries.

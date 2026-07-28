@@ -1510,7 +1510,9 @@ export default function ApprovalManagementPage() {
           id: `WDD-AP-${e.id}`,
           category: "Wastage Entry" as Category,
           refId: e.id,
-          title: `${e.wastageType} Wastage — ${e.itemName}`,
+          title: e.wastageType === "Expired Product"
+            ? `Expired Product Disposal — ${e.itemName}`
+            : `${e.wastageType} Wastage — ${e.itemName}`,
           requestedBy: e.preparedBy,
           requestedAt: e.preparedAt,
           summary: `${e.disposalQty} ${e.disposalQtyUnit} · ${e.disposalReason} · ${stageLabel}`,
@@ -2083,15 +2085,22 @@ export default function ApprovalManagementPage() {
         nextStatus = "Final Approved";
         stepName = "Final Authorization";
         designation = "MD/CEO";
-        // Apply stock delta + create stock adjustments for Production, Airport Store & Transfer
-        if ((entry.wastageType === "Production" || entry.wastageType === "Airport Store" || entry.wastageType === "Transfer") && entry.stockItemName) {
-          applyStockDeltas([{
-            itemId: entry.stockItemName,
-            delta: -entry.disposalQty,
-            date: at,
-            reference: entry.id,
-            label: "Wastage Disposal",
-          }]);
+        // Apply stock delta + create stock adjustments for Production, Airport Store, Transfer & Expired Product
+        if ((entry.wastageType === "Production" || entry.wastageType === "Airport Store" || entry.wastageType === "Transfer" || entry.wastageType === "Expired Product") && entry.stockItemName) {
+          // Expired Product Disposal records the movement ONCE, through the
+          // persisted Stock Adjustment below. Adding a workflow stock delta here
+          // as well would post the same disposal twice into the item ledger —
+          // inflating Out Qty and the back-computed Opening Balance — because the
+          // ledger reads adjustments and deltas as separate movements.
+          if (entry.wastageType !== "Expired Product") {
+            applyStockDeltas([{
+              itemId: entry.stockItemName,
+              delta: -entry.disposalQty,
+              date: at,
+              reference: entry.id,
+              label: "Wastage Disposal",
+            }]);
+          }
           reduceInventoryStock(entry.stockItemName, entry.disposalQty);
           const allAdj = getStockAdjustments();
           let adjSeq = allAdj.length + 1;
@@ -2105,9 +2114,11 @@ export default function ApprovalManagementPage() {
             currentStock: entry.previousStock ?? 0,
             adjustQty: entry.disposalQty,
             adjustType: "Decrease",
-            reason: "Wastage",
+            // Expired stock is written off under the expiry reason so the Stock
+            // Adjustment record matches what the disposal actually was.
+            reason: entry.wastageType === "Expired Product" ? "Expiry Writeoff" : "Wastage",
             reference: entry.id,
-            remarks: `${entry.disposalReason} — Wastage report ${entry.id}`,
+            remarks: `${entry.disposalReason} — ${entry.wastageType === "Expired Product" ? "Expired product disposal" : "Wastage report"} ${entry.id}`,
             adjustedBy: role,
             status: "Approved",
           });
@@ -3203,19 +3214,43 @@ export default function ApprovalManagementPage() {
             const rejected = wastageEntries.filter((e) => e.status === "Rejected");
             const approved = wastageEntries.filter((e) => e.status === "Final Approved");
 
+            // Approval-item id for a wastage entry — the key the shared bulk
+            // approve / reject flow works with.
+            const apId = (e: WastageEntry) => `WDD-AP-${e.id}`;
+
             const WastageStageTable = ({
               stageEntries, stageLabel, stageColor,
             }: {
               stageEntries: WastageEntry[];
               stageLabel: string;
               stageColor: string;
-            }) => (
+            }) => {
+              const stageIds = stageEntries.map(apId);
+              const pickedHere = stageIds.filter((id) => selected.has(id));
+              const allPicked = stageIds.length > 0 && pickedHere.length === stageIds.length;
+              const toggleStage = () => setSelected((prev) => {
+                const next = new Set(prev);
+                if (allPicked) stageIds.forEach((id) => next.delete(id));
+                else stageIds.forEach((id) => next.add(id));
+                return next;
+              });
+              return (
               <div>
-                <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
                   <h3 className={`text-sm font-semibold uppercase tracking-wider flex items-center gap-2 ${stageColor}`}>
                     <Clock className="h-4 w-4" /> {stageLabel}
                   </h3>
-                  <span className="text-xs text-muted-foreground">{stageEntries.length} item{stageEntries.length !== 1 ? "s" : ""}</span>
+                  <div className="flex items-center gap-2">
+                    {stageEntries.length > 0 && (
+                      <button
+                        className="text-xs text-primary hover:underline underline-offset-2"
+                        onClick={toggleStage}
+                      >
+                        {allPicked ? "Clear selection" : `Select all (${stageIds.length})`}
+                      </button>
+                    )}
+                    <span className="text-xs text-muted-foreground">{stageEntries.length} item{stageEntries.length !== 1 ? "s" : ""}</span>
+                  </div>
                 </div>
                 {stageEntries.length === 0 ? (
                   <p className="text-sm text-muted-foreground text-center py-6">No records at this stage.</p>
@@ -3224,6 +3259,17 @@ export default function ApprovalManagementPage() {
                     <Table>
                       <TableHeader className="bg-muted/40">
                         <TableRow>
+                          <TableHead className="w-8">
+                            {/* Select-all for this stage. */}
+                            <input
+                              type="checkbox"
+                              className="h-3.5 w-3.5 cursor-pointer accent-primary"
+                              checked={allPicked}
+                              ref={(el) => { if (el) el.indeterminate = pickedHere.length > 0 && !allPicked; }}
+                              onChange={toggleStage}
+                              aria-label={`Select all ${stageEntries.length} records at this stage`}
+                            />
+                          </TableHead>
                           <TableHead className="text-xs uppercase tracking-wider">ID</TableHead>
                           <TableHead className="text-xs uppercase tracking-wider">Date</TableHead>
                           <TableHead className="text-xs uppercase tracking-wider">Type</TableHead>
@@ -3236,6 +3282,15 @@ export default function ApprovalManagementPage() {
                       <TableBody>
                         {stageEntries.map((e) => (
                           <TableRow key={e.id} className="hover:bg-muted/30">
+                            <TableCell className="w-8">
+                              <input
+                                type="checkbox"
+                                className="h-3.5 w-3.5 cursor-pointer accent-primary"
+                                checked={selected.has(apId(e))}
+                                onChange={() => toggleSelect(apId(e))}
+                                aria-label={`Select ${e.id}`}
+                              />
+                            </TableCell>
                             <TableCell className="font-mono text-xs font-semibold text-primary">{e.id}</TableCell>
                             <TableCell className="text-xs tabular-nums">{e.reportingDate}</TableCell>
                             <TableCell>
@@ -3266,11 +3321,56 @@ export default function ApprovalManagementPage() {
                   </div>
                 )}
               </div>
-            );
+              );
+            };
 
             return (
               <Card className="brand-accent-border-left">
                 <CardContent className="pt-5 space-y-6">
+                  {/* Bulk bar — same approve / reject flow as every other tab. */}
+                  {selected.size > 0 && (() => {
+                    // Every record still awaiting a decision, across all three stages.
+                    const allPendingIds = [...inCharge, ...gm, ...final].map(apId);
+                    const allPendingPicked = allPendingIds.every((id) => selected.has(id));
+                    return (
+                    <div className="flex items-center justify-between gap-3 rounded-md border border-primary/30 bg-primary/[0.06] px-3 py-2 flex-wrap">
+                      <span className="text-xs font-medium text-foreground">
+                        {selected.size} selected
+                        {!allPendingPicked && (
+                          <button
+                            className="ml-2 text-primary hover:underline underline-offset-2"
+                            onClick={() => setSelected(new Set(allPendingIds))}
+                          >
+                            Select all ({allPendingIds.length})
+                          </button>
+                        )}
+                        <button
+                          className="ml-2 text-muted-foreground hover:text-foreground underline underline-offset-2"
+                          onClick={() => setSelected(new Set())}
+                        >
+                          Clear
+                        </button>
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          size="sm"
+                          className="h-7 px-2.5 text-[11px] bg-success text-success-foreground hover:bg-success/90"
+                          onClick={bulkApprove}
+                        >
+                          <Check className="h-3 w-3 mr-1" /> Approve {selected.size}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2.5 text-[11px] border-destructive/40 text-destructive hover:bg-destructive/10"
+                          onClick={openBulkReject}
+                        >
+                          <XIcon className="h-3 w-3 mr-1" /> Reject {selected.size}
+                        </Button>
+                      </div>
+                    </div>
+                    );
+                  })()}
                   <WastageStageTable stageEntries={inCharge} stageLabel="Pending Production In-Charge Review" stageColor="text-amber-600" />
                   <WastageStageTable stageEntries={gm}       stageLabel="Pending GM Catering Review"          stageColor="text-blue-600"  />
                   <WastageStageTable stageEntries={final}    stageLabel="Pending Final Authorization"          stageColor="text-violet-600" />

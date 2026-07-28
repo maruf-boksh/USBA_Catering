@@ -18,6 +18,7 @@ import TransferRequestPage from "@/routes/transfer-request";
 import TransferPage from "@/routes/transfer";
 import InventoryPage from "@/routes/inventory";
 import StockAdjustmentPage from "@/routes/stock-adjustment";
+import StockAgeingPage from "@/routes/stock-ageing";
 import PurchaseRequisitionPage from "@/routes/purchase-requisition";
 import RequestForQuotationPage from "@/routes/request-for-quotation";
 import QuotationEntryPage from "@/routes/quotation-entry";
@@ -116,6 +117,7 @@ export function App() {
             <Route path="/transfer" element={<TransferPage />} />
             <Route path="/inventory" element={<InventoryPage />} />
             <Route path="/stock-adjustment" element={<StockAdjustmentPage />} />
+            <Route path="/stock-ageing" element={<StockAgeingPage />} />
             <Route path="/purchase-requisition" element={<PurchaseRequisitionPage />} />
             <Route path="/request-for-quotation" element={<RequestForQuotationPage />} />
             <Route path="/quotation-entry" element={<QuotationEntryPage />} />

@@ -152,7 +152,11 @@ export function collectItemMovements(
     raw.push({
       date: a.date, ts: ts(a.date),
       reference: a.reference || a.id,
-      type: `Stock Adjustment (${a.adjustType})`,
+      // Expiry write-offs are called out by name so an expired-stock disposal is
+      // unmistakable in the ledger; every other reason keeps the plain label.
+      type: a.reason === "Expiry Writeoff"
+        ? `Stock Adjustment (${a.adjustType}) — Expired`
+        : `Stock Adjustment (${a.adjustType})`,
       inQty: inc ? a.adjustQty : 0,
       outQty: inc ? 0 : a.adjustQty,
     });
