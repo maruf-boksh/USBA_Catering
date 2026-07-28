@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/command";
 import {
   Package, PackageCheck, Printer, CheckCircle2, Eye, Boxes, Clock, Truck, Search, Plane, Plus,
-  ChevronDown, Check, Layers, ClipboardList,
+  ChevronDown, Check, Layers, ClipboardList, ScanLine,
 } from "lucide-react";
 import { toast } from "sonner";
 import { usePersistedState } from "@/lib/use-persisted-state";
@@ -426,8 +426,11 @@ export default function PackagingPage() {
   // Flight whose menu-plan status popup is open (what's produced / packaged / left).
   const [menuInfoGroup, setMenuInfoGroup] = useState<PkgFlightGroup | null>(null);
   const [labelOpen, setLabelOpen] = useState(false);
-  // Printing labels completes packaging (no scan step is required here).
-  const [printedAll, setPrintedAll] = useState(false);
+  // Which labels in this session have been printed at least once. Printing is
+  // repeatable and status-neutral; SCANNING a printed label is what completes
+  // packaging (marks it Packaging Done). This tracks print state so a label can
+  // be reprinted freely and its Scan action unlocks once it has been printed.
+  const [printedIds, setPrintedIds] = useState<Set<string>>(new Set());
   // Batches initiated in the CURRENT packaging session — the label modal only
   // shows these (so a single-batch run never shows unrelated in-progress labels).
   const [sessionIds, setSessionIds] = useState<Set<string>>(new Set());
@@ -885,16 +888,7 @@ export default function PackagingPage() {
       return next;
     });
     setSelectedIds(new Set());
-    const lineCount = jobs.reduce((s, j) => s + j.lines.length, 0);
-    const total = jobs.reduce((s, j) => s + j.lines.reduce((t, l) => t + l.qty, 0), 0);
     const where = jobs.map((j) => j.leg.flight).join(" + ");
-    toast.success(
-      `${where} — ${total.toLocaleString()} portions from ${lineCount} production run${lineCount === 1 ? "" : "s"} queued as Pending Approval. Labels unlock once packaging is approved.`,
-      {
-        action: { label: "Open Approval Management", onClick: () => navigate("/approval-management") },
-        duration: 8000,
-      },
-    );
     logAudit({
       action: "Packaging run raised for approval",
       module: "Packaging",
@@ -910,7 +904,7 @@ export default function PackagingPage() {
     const pending = list.filter((a) => a.status === "In Packaging");
     if (pending.length === 0) { toast.error("Nothing is awaiting labels here."); return; }
     setSessionIds(new Set(pending.map((a) => a.id)));
-    setPrintedAll(false);
+    setPrintedIds(new Set());
     setLabelOpen(true);
   };
 
@@ -1113,16 +1107,33 @@ export default function PackagingPage() {
         );
       }
     }
-    toast.success(`${ids.size} label${ids.size === 1 ? "" : "s"} printed — packaged, ready for dispatch.`);
+    toast.success(`${ids.size} label${ids.size === 1 ? "" : "s"} scanned — Packaging Done, ready for dispatch.`);
   };
 
-  const printAll = () => { markPackaged(packagingLabels); setPrintedAll(true); };
-  const printOne = (a: PackagingAllocation) => markPackaged([a]);
+  // Printing is REPEATABLE and does not change status — reprint as many copies as
+  // needed. It only records that the label has been printed (which unlocks Scan).
+  const doPrint = (list: PackagingAllocation[]) => {
+    if (list.length === 0) { toast.error("No labels to print."); return; }
+    setPrintedIds((prev) => {
+      const next = new Set(prev);
+      for (const a of list) next.add(a.id);
+      return next;
+    });
+    toast.success(`${list.length} label${list.length === 1 ? "" : "s"} sent to printer — scan to mark Packaging Done.`);
+  };
+  const printAll = () => doPrint(packagingLabels);
+  const printOne = (a: PackagingAllocation) => doPrint([a]);
 
-  // Close the label modal. Un-printed allocations stay "In Packaging" — the run
+  // Scanning a printed label is what COMPLETES packaging — the first scan flips it
+  // to Packaging Done. Only labels already printed can be scanned.
+  const scanAll = () => markPackaged(packagingLabels.filter((a) => printedIds.has(a.id)));
+  const scanOne = (a: PackagingAllocation) => markPackaged([a]);
+
+  // Close the label modal. Un-scanned allocations stay "In Packaging" — the run
   // lives on the list page now, so closing this is pausing, not cancelling.
   const closeLabelModal = () => {
     setSessionIds(new Set());
+    setPrintedIds(new Set());
     setLabelOpen(false);
   };
 
@@ -2240,24 +2251,34 @@ export default function PackagingPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Per-batch Scan — the label for one batch; scanning marks it Packaging Done */}
-      {/* Print Labels — one card per batch; printing completes packaging (no scan) */}
+      {/* Print & Scan Labels — one card per batch. Printing is repeatable and
+          status-neutral; SCANNING a printed label marks it Packaging Done. */}
       <Dialog open={labelOpen} onOpenChange={(v) => !v && closeLabelModal()}>
         <DialogContent className="w-full max-w-full sm:max-w-3xl max-h-[100vh] sm:max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden">
           <div className="px-6 pt-5 pb-4 border-b shrink-0">
             <DialogTitle className="text-base font-semibold flex items-center gap-2">
-              <Printer className="h-4 w-4" /> Print Labels — Packaging
+              <Printer className="h-4 w-4" /> Print &amp; Scan Labels — Packaging
             </DialogTitle>
           </div>
 
-          {/* Print all — completes packaging */}
+          {/* Print (repeatable) + Scan (completes packaging) */}
           <div className="px-6 py-3 border-b bg-muted/30 shrink-0 flex items-center justify-between gap-3 flex-wrap">
             <span className="text-xs text-muted-foreground">
-              {packagingLabels.length} label{packagingLabels.length === 1 ? "" : "s"} · printing marks them <b>Packaging Done</b> (ready for dispatch).
+              {packagingLabels.length} label{packagingLabels.length === 1 ? "" : "s"} · reprint freely · <b>scanning</b> a label marks it <b>Packaging Done</b> (ready for dispatch).
             </span>
-            <Button size="sm" onClick={printAll} disabled={printedAll || packagingLabels.length <= 1}>
-              <Printer className="h-3.5 w-3.5 mr-1" /> {printedAll ? "Printed" : "Print All Labels"}
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={printAll} disabled={packagingLabels.length === 0}>
+                <Printer className="h-3.5 w-3.5 mr-1" /> {packagingLabels.every((a) => printedIds.has(a.id)) && packagingLabels.length > 0 ? "Print All Again" : "Print All Labels"}
+              </Button>
+              <Button
+                size="sm"
+                onClick={scanAll}
+                disabled={!packagingLabels.some((a) => printedIds.has(a.id))}
+                title={packagingLabels.some((a) => printedIds.has(a.id)) ? "Scan all printed labels — marks them Packaging Done" : "Print the labels first, then scan"}
+              >
+                <ScanLine className="h-3.5 w-3.5 mr-1" /> Scan All
+              </Button>
+            </div>
           </div>
 
           {/* Label cards */}
@@ -2277,7 +2298,11 @@ export default function PackagingPage() {
                         <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
                           USBA Catering · Meal Label
                         </span>
-                        <span className="text-[10px] font-bold text-amber-600">READY TO PRINT</span>
+                        {printedIds.has(a.id) ? (
+                          <span className="text-[10px] font-bold text-sky-600">PRINTED · SCAN TO COMPLETE</span>
+                        ) : (
+                          <span className="text-[10px] font-bold text-amber-600">READY TO PRINT</span>
+                        )}
                       </div>
                       <div className="flex items-baseline justify-between gap-2">
                         <span className="font-semibold text-sm">{a.item}</span>
@@ -2306,18 +2331,24 @@ export default function PackagingPage() {
                         </div>
                         <div className="text-center font-mono text-[11px] tracking-widest mt-1">{code}</div>
                       </div>
-                      {/* Per-card Print only for a single-batch run — multi-batch
-                          runs use one "Print All Labels" click (no batch-by-batch). */}
-                      {packagingLabels.length === 1 && (
-                        <div className="flex gap-2 mt-1">
-                          <Button
-                            variant="outline" size="sm" className="h-7 px-2 text-xs flex-1"
-                            onClick={() => printOne(a)}
-                          >
-                            <Printer className="h-3 w-3 mr-1" /> Print
-                          </Button>
-                        </div>
-                      )}
+                      {/* Print (repeatable) + Scan (completes this label). Scan
+                          unlocks once the label has been printed at least once. */}
+                      <div className="flex gap-2 mt-1">
+                        <Button
+                          variant="outline" size="sm" className="h-7 px-2 text-xs flex-1"
+                          onClick={() => printOne(a)}
+                        >
+                          <Printer className="h-3 w-3 mr-1" /> {printedIds.has(a.id) ? "Reprint" : "Print"}
+                        </Button>
+                        <Button
+                          size="sm" className="h-7 px-2 text-xs flex-1"
+                          onClick={() => scanOne(a)}
+                          disabled={!printedIds.has(a.id)}
+                          title={printedIds.has(a.id) ? "Scan to mark Packaging Done" : "Print the label first, then scan it"}
+                        >
+                          <ScanLine className="h-3 w-3 mr-1" /> Scan
+                        </Button>
+                      </div>
                     </div>
                   );
                 })}
@@ -2329,7 +2360,7 @@ export default function PackagingPage() {
             <p className="text-xs text-muted-foreground inline-flex items-center gap-1">
               <Truck className="h-3.5 w-3.5" />
               {packagingLabels.length > 0
-                ? "Print the labels to complete packaging — batches become Ready for Dispatch."
+                ? "Reprint labels as needed — scanning each one completes packaging (Ready for Dispatch)."
                 : "All batches packaged — forwarded to Dispatch."}
             </p>
             <Button variant="outline" onClick={closeLabelModal}>Close</Button>
