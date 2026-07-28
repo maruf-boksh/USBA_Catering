@@ -89,18 +89,25 @@ export type GalleySheetMeta = {
   sector: string;
   date: string;
   aircraft?: string;
+  aircraftType?: string;
+  aircraftModel?: string;
   pax?: number | string;
   crew?: number | string;
   status?: string;
   signOff?: { label: string; name: string; designation: string; signedAt: string }[];
   /** Meals integrated from Dispatch (scaled to the plan) — printed instead of
    *  the catalog Meals fields so print matches the on-screen sheet. */
-  meals?: {
-    paxLines: { itemName: string; percent?: number; qty: number }[];
-    crewMeals: { type: string; qty: string }[];
-    special: { vgml: number; chml: number; spml: number };
-    specialTotal: number;
-  } | null;
+  meals?: MealsSnapshot | null;
+  /** Paired return leg of the rotation, printed as its own meals block so the
+   *  sheet covers both flights. */
+  returnLeg?: { flightNo: string; sector: string; meals?: MealsSnapshot | null } | null;
+};
+
+export type MealsSnapshot = {
+  paxLines: { itemName: string; percent?: number; qty: number }[];
+  crewMeals: { type: string; qty: string }[];
+  special: { vgml: number; chml: number; spml: number };
+  specialTotal: number;
 };
 
 const esc = (s: unknown) =>
@@ -129,10 +136,9 @@ export function printGalleySheet(plan: GalleyPlan, meta: GalleySheetMeta) {
       </table>
     </div>`).join("");
 
-  const m = meta.meals;
   const mealRow = (lbl: string, qty: string | number) =>
     `<tr><td class="lbl">${esc(lbl)}</td><td class="qty">${esc(qty)}</td></tr>`;
-  const mealsHtml = m ? `
+  const mealsBlock = (m?: MealsSnapshot | null) => m ? `
     <div class="sec">
       <h3>Passenger Meals</h3>
       <table>
@@ -146,7 +152,15 @@ export function printGalleySheet(plan: GalleyPlan, meta: GalleySheetMeta) {
       ([["VGML — Veg / Vegan", m.special.vgml], ["CHML — Child", m.special.chml], ["SPML — Special", m.special.spml]] as [string, number][])
         .filter(([, q]) => q > 0).map(([lbl, q]) => mealRow(lbl, q)).join("")
       }${mealRow("Total Special", m.specialTotal)}</table></div>` : ""}
-  ` : "";
+  ` : `<div class="sec"><p class="note">No dispatch built for this leg — no meal breakdown.</p></div>`;
+  // A round trip prints both legs under their own flight heading; a single leg
+  // prints just its meals (no leg heading, unchanged from before).
+  const legHeading = (label: string, fl: string, sector: string) =>
+    `<div class="legh"><span class="tag">${esc(label)}</span> ${esc(fl)} · ${esc(sector)}</div>`;
+  const mealsHtml = meta.returnLeg
+    ? `${legHeading("Outbound", meta.flightNo, meta.sector)}${mealsBlock(meta.meals)}
+       ${legHeading("Return", meta.returnLeg.flightNo, meta.returnLeg.sector)}${mealsBlock(meta.returnLeg.meals)}`
+    : (meta.meals ? mealsBlock(meta.meals) : "");
 
   const signHtml = meta.signOff?.length ? `
     <div class="sign">
@@ -175,6 +189,9 @@ export function printGalleySheet(plan: GalleyPlan, meta: GalleySheetMeta) {
   .sec .lbl { color: #333; }
   .sec .qty { text-align: right; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .unit { color: #777; font-weight: 400; font-size: 9px; }
+  .legh { break-inside: avoid; font-size: 11px; font-weight: 700; margin: 4px 0 5px; padding-bottom: 2px; border-bottom: 1px solid #111; }
+  .legh .tag { display: inline-block; font-size: 8px; text-transform: uppercase; letter-spacing: .06em; background: #eee; border: 1px solid #ccc; border-radius: 3px; padding: 1px 5px; margin-right: 6px; vertical-align: middle; }
+  .note { color: #777; font-size: 10px; margin: 0; }
   .stowage { margin-top: 14px; break-inside: avoid; }
   .stowage h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; margin: 0 0 6px; }
   .stow { margin-bottom: 8px; }
@@ -193,8 +210,11 @@ export function printGalleySheet(plan: GalleyPlan, meta: GalleySheetMeta) {
     <div class="meta">
       <span>Flight <b>${esc(meta.flightNo)}</b></span>
       <span>Sector <b>${esc(meta.sector)}</b></span>
+      ${meta.returnLeg ? `<span>Return <b>${esc(meta.returnLeg.flightNo)} · ${esc(meta.returnLeg.sector)}</b></span>` : ""}
       <span>Date <b>${esc(meta.date)}</b></span>
       ${meta.aircraft ? `<span>Aircraft <b>${esc(meta.aircraft)}</b></span>` : ""}
+      ${meta.aircraftType ? `<span>Type <b>${esc(meta.aircraftType)}</b></span>` : ""}
+      ${meta.aircraftModel ? `<span>Model <b>${esc(meta.aircraftModel)}</b></span>` : ""}
       ${meta.pax != null ? `<span>PAX <b>${esc(meta.pax)}</b></span>` : ""}
       ${meta.crew != null ? `<span>Crew <b>${esc(meta.crew)}</b></span>` : ""}
       ${meta.status ? `<span>Status <b>${esc(meta.status)}</b></span>` : ""}

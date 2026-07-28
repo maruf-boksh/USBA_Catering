@@ -170,6 +170,15 @@ export function GalleySheetViewModal({
   const planPax = Number(rec.galleyPlan.depZenithLoad) || flight?.pax || 0;
   const planCrew = Math.max(0, (Number(rec.galleyPlan.totalMealLoad) || 0) - planPax) || flight?.crew || 0;
   const meals = scaleDispatchMeals(flight?.flight, planPax, planCrew, flight?.crew ?? planCrew)?.scaled ?? null;
+  // The plan covers the whole rotation, so resolve the paired return leg (same
+  // Order # / Trip Ref, opposite direction) and integrate ITS meals too — the
+  // read-only sheet then shows both flights, not just the outbound.
+  const orderBook = getFlightOrders();
+  const outboundOrder = resolveFlightOrder({ flight: flight?.flight, date: rec.date }, orderBook);
+  const returnLeg = resolveReturnLeg(outboundOrder, orderBook)?.order ?? null;
+  const retMeals = returnLeg
+    ? scaleDispatchMeals(returnLeg.flight, returnLeg.pax, returnLeg.crew, returnLeg.crew)?.scaled ?? null
+    : null;
   const groups = (["Beverages", "Amenities", "Equipment"] as const).map((group) => ({
     group,
     sections: allSections.filter((s) => s.group === group),
@@ -187,6 +196,62 @@ export function GalleySheetViewModal({
     { label: "Approved", at: rec.approvedAt },
   ].filter((t) => t.at);
 
+  // One leg's meal breakdown (PAX / Crew / Special), rendered per leg so the
+  // outbound and return each show their own cards.
+  const mealCards = (m: NonNullable<typeof meals>) => (
+    <div className="space-y-3">
+      <div className="rounded-lg border border-border bg-white">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-2 py-1.5 border-b border-border bg-muted/40 rounded-t-lg">
+          Passenger Meals
+        </p>
+        {m.paxLines.length === 0 ? (
+          <p className="px-2 py-1.5 text-xs text-muted-foreground">No passenger meal lines.</p>
+        ) : m.paxLines.map((l, i) => (
+          <ViewRow key={i} label={`${l.itemName}${l.percent != null ? ` · ${l.percent}%` : ""}`} value={String(l.qty)} />
+        ))}
+      </div>
+      {m.crewMeals.length > 0 && (
+        <div className="rounded-lg border border-border bg-white">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-2 py-1.5 border-b border-border bg-muted/40 rounded-t-lg">
+            Crew Meals
+          </p>
+          {m.crewMeals.map((c, i) => (
+            <ViewRow key={i} label={c.type} value={String(c.qty)} />
+          ))}
+        </div>
+      )}
+      {m.specialTotal > 0 && (
+        <div className="rounded-lg border border-border bg-white">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-2 py-1.5 border-b border-border bg-muted/40 rounded-t-lg">
+            Special Meals
+          </p>
+          {[
+            { label: "VGML — Veg / Vegan", qty: m.special.vgml },
+            { label: "CHML — Child", qty: m.special.chml },
+            { label: "SPML — Special", qty: m.special.spml },
+          ].filter((s) => s.qty > 0).map((s) => (
+            <ViewRow key={s.label} label={s.label} value={String(s.qty)} />
+          ))}
+          <ViewRow label="Total Special" value={String(m.specialTotal)} />
+        </div>
+      )}
+    </div>
+  );
+  const legHeader = (legFlight: string, legSector: string, direction: string) => (
+    <div className="flex items-center gap-2 mb-2">
+      <span className={`text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5 rounded ${direction === "Return" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
+        {direction}
+      </span>
+      <span className="text-xs font-bold text-slate-700">{legFlight}</span>
+      <span className="text-[11px] text-muted-foreground">{legSector}</span>
+    </div>
+  );
+  const noDispatchNote = (fl: string) => (
+    <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+      No dispatch has been built for <strong>{fl}</strong> — the meal breakdown integrates here once the flight is dispatched in Packaging &amp; Dispatch.
+    </div>
+  );
+
   return (
     <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
       <DialogContent className="w-full max-w-[95vw] lg:max-w-4xl max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
@@ -199,9 +264,22 @@ export function GalleySheetViewModal({
               <div className="flex flex-wrap items-center gap-2.5 mt-1 text-xs">
                 <span className="text-slate-300">{rec.date}</span>
                 {flight?.aircraft && <span className="bg-slate-600/60 px-2 py-0.5 rounded-full text-slate-100">{flight.aircraft}</span>}
+                {(rec.galleyPlan.aircraftType || rec.galleyPlan.aircraftModel) && (
+                  <span className="bg-sky-600/70 px-2 py-0.5 rounded-full text-white">
+                    ✈ {[rec.galleyPlan.aircraftType, rec.galleyPlan.aircraftModel].filter(Boolean).join(" · ")}
+                  </span>
+                )}
                 {flight && <span className="text-slate-300">PAX {flight.pax} · Crew {flight.crew}</span>}
                 {rowStatusBadge(rec.galleyStatus)}
               </div>
+              {returnLeg && (
+                <div className="flex flex-wrap items-center gap-2 mt-1 text-[11px] text-slate-300">
+                  <span className="text-[9px] font-bold uppercase tracking-widest text-amber-300">Return Leg</span>
+                  <span className="font-semibold text-slate-100">{returnLeg.flight}</span>
+                  <span>{returnLeg.sector}</span>
+                  <span>PAX {returnLeg.pax} · Crew {returnLeg.crew}</span>
+                </div>
+              )}
               {timeline.length > 0 && (
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-1.5 text-[10px] text-slate-300">
                   {timeline.map((t) => (
@@ -218,51 +296,25 @@ export function GalleySheetViewModal({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto bg-slate-50/20 px-6 py-5 space-y-6">
-          {/* Meals — integrated live from Dispatch, scaled to this plan's load. */}
+          {/* Meals — integrated live from Dispatch, scaled to this plan's load.
+              A round trip shows both legs (outbound + paired return). */}
           <div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-sky-700 mb-2">Meals</p>
-            {meals ? (
-              <div className="space-y-3">
-                <div className="rounded-lg border border-border bg-white">
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-2 py-1.5 border-b border-border bg-muted/40 rounded-t-lg">
-                    Passenger Meals
-                  </p>
-                  {meals.paxLines.length === 0 ? (
-                    <p className="px-2 py-1.5 text-xs text-muted-foreground">No passenger meal lines.</p>
-                  ) : meals.paxLines.map((l, i) => (
-                    <ViewRow key={i} label={`${l.itemName}${l.percent != null ? ` · ${l.percent}%` : ""}`} value={String(l.qty)} />
-                  ))}
+            {meals || retMeals ? (
+              <div className="space-y-4">
+                <div>
+                  {returnLeg && legHeader(flight?.flight ?? rec.flightId, flight?.sector ?? outboundOrder?.sector ?? "—", outboundOrder?.direction ?? "Outbound")}
+                  {meals ? mealCards(meals) : noDispatchNote(flight?.flight ?? rec.flightId)}
                 </div>
-                {meals.crewMeals.length > 0 && (
-                  <div className="rounded-lg border border-border bg-white">
-                    <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-2 py-1.5 border-b border-border bg-muted/40 rounded-t-lg">
-                      Crew Meals
-                    </p>
-                    {meals.crewMeals.map((c, i) => (
-                      <ViewRow key={i} label={c.type} value={String(c.qty)} />
-                    ))}
-                  </div>
-                )}
-                {meals.specialTotal > 0 && (
-                  <div className="rounded-lg border border-border bg-white">
-                    <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground px-2 py-1.5 border-b border-border bg-muted/40 rounded-t-lg">
-                      Special Meals
-                    </p>
-                    {[
-                      { label: "VGML — Veg / Vegan", qty: meals.special.vgml },
-                      { label: "CHML — Child", qty: meals.special.chml },
-                      { label: "SPML — Special", qty: meals.special.spml },
-                    ].filter((s) => s.qty > 0).map((s) => (
-                      <ViewRow key={s.label} label={s.label} value={String(s.qty)} />
-                    ))}
-                    <ViewRow label="Total Special" value={String(meals.specialTotal)} />
+                {returnLeg && (
+                  <div className="pt-3 border-t border-dashed border-slate-200">
+                    {legHeader(returnLeg.flight, returnLeg.sector, "Return")}
+                    {retMeals ? mealCards(retMeals) : noDispatchNote(returnLeg.flight)}
                   </div>
                 )}
               </div>
             ) : (
-              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
-                No dispatch has been built for <strong>{flight?.flight ?? rec.flightId}</strong> — the meal breakdown integrates here once the flight is dispatched in Packaging &amp; Dispatch.
-              </div>
+              noDispatchNote(flight?.flight ?? rec.flightId)
             )}
           </div>
 
@@ -309,6 +361,8 @@ export function GalleySheetViewModal({
                 sector: flight?.sector ?? "—",
                 date: rec.date,
                 aircraft: flight?.aircraft,
+                aircraftType: rec.galleyPlan.aircraftType || undefined,
+                aircraftModel: rec.galleyPlan.aircraftModel || undefined,
                 pax: flight?.pax,
                 crew: flight?.crew,
                 status: STATUS_LABEL[rec.galleyStatus],
@@ -318,6 +372,16 @@ export function GalleySheetViewModal({
                   crewMeals: meals.crewMeals,
                   special: meals.special,
                   specialTotal: meals.specialTotal,
+                },
+                returnLeg: returnLeg && {
+                  flightNo: returnLeg.flight,
+                  sector: returnLeg.sector,
+                  meals: retMeals && {
+                    paxLines: retMeals.paxLines,
+                    crewMeals: retMeals.crewMeals,
+                    special: retMeals.special,
+                    specialTotal: retMeals.specialTotal,
+                  },
                 },
               })
             }
@@ -934,10 +998,14 @@ export default function GalleyPlanningPage() {
                   // The paired return leg of this rotation, if the order is tagged
                   // with one — shown as a sub-row (planned together with the outbound).
                   const ret = returnLegFor(f?.flight, e.packagingDate)?.order;
+                  // A round trip is ONE job: both legs share a status and a single
+                  // action (View / Plan / Forward), which spans the two rows. The
+                  // pair is banded with a left accent so it reads as one bundle.
+                  const bundle = !!ret;
                   return (
                     <Fragment key={e.id}>
-                    <TableRow className="hover:bg-muted/30">
-                      <TableCell>
+                    <TableRow className={cn("hover:bg-muted/30", bundle && "bg-sky-50/30 border-t border-sky-200")}>
+                      <TableCell className={cn(bundle && "border-l-2 border-sky-400")}>
                         <input
                           type="checkbox"
                           className="h-3.5 w-3.5 accent-primary align-middle"
@@ -947,7 +1015,12 @@ export default function GalleyPlanningPage() {
                         />
                       </TableCell>
                       <TableCell className="tabular-nums text-muted-foreground">{idx + 1}</TableCell>
-                      <TableCell className="font-semibold">{f?.flight ?? e.flightId}</TableCell>
+                      <TableCell className="font-semibold">
+                        <span className="inline-flex items-center gap-1.5">
+                          {f?.flight ?? e.flightId}
+                          {bundle && <Badge variant="outline" className="h-4 px-1.5 text-[10px] border-emerald-300 bg-emerald-50 text-emerald-700">Outbound</Badge>}
+                        </span>
+                      </TableCell>
                       <TableCell>{f?.sector ?? "—"}</TableCell>
                       <TableCell>{airlineOf(f?.flight)}</TableCell>
                       <TableCell className="tabular-nums text-xs">{etdOf(e) || "—"}</TableCell>
@@ -962,14 +1035,14 @@ export default function GalleyPlanningPage() {
                       <TableCell className="text-right tabular-nums">{f?.pax ?? "—"}</TableCell>
                       <TableCell className="text-right tabular-nums">{f?.crew ?? "—"}</TableCell>
                       <TableCell className="text-right tabular-nums">{orderFor(f?.flight, e.packagingDate)?.specialMeals ?? "—"}</TableCell>
-                      <TableCell>{rowStatusBadge(status)}</TableCell>
-                      <TableCell>
+                      <TableCell rowSpan={bundle ? 2 : 1} className={cn(bundle && "align-middle")}>{rowStatusBadge(status)}</TableCell>
+                      <TableCell rowSpan={bundle ? 2 : 1} className={cn(bundle && "align-middle")}>
                         <div className="flex items-center gap-1.5">
                           {rec ? (
                             // Once forwarded (a galley record exists) the plan is
                             // locked — only viewable, not re-plannable.
                             <Button variant="outline" size="sm" className="h-7 px-2.5 text-xs" onClick={() => setViewEntryId(e.id)}>
-                              <Eye className="h-3 w-3 mr-1" /> View
+                              <Eye className="h-3 w-3 mr-1" /> View{bundle && " trip"}
                             </Button>
                           ) : status === "draft" ? (
                             // A saved plan can be re-opened or forwarded to aircraft.
@@ -990,29 +1063,26 @@ export default function GalleyPlanningPage() {
                       </TableCell>
                     </TableRow>
                     {ret && (
-                      <TableRow className="bg-muted/20 hover:bg-muted/30">
+                      <TableRow className="bg-sky-50/20 hover:bg-sky-50/40 border-b border-sky-200">
+                        <TableCell className="border-l-2 border-sky-400" />
                         <TableCell />
-                        <TableCell />
-                        <TableCell className="font-medium text-muted-foreground">
+                        <TableCell className="font-medium">
                           <span className="inline-flex items-center gap-1.5">
-                            <span className="text-muted-foreground/70">↳</span>
+                            <span className="text-sky-500/80" title="Return leg of this rotation">↩</span>
                             {ret.flight}
                             <Badge variant="outline" className="h-4 px-1.5 text-[10px] border-amber-300 bg-amber-50 text-amber-700">Return</Badge>
                           </span>
                         </TableCell>
-                        <TableCell className="text-muted-foreground">{ret.sector ?? "—"}</TableCell>
-                        <TableCell className="text-muted-foreground">{airlineOf(ret.flight)}</TableCell>
-                        <TableCell className="tabular-nums text-xs text-muted-foreground">{ret.etd || "—"}</TableCell>
-                        <TableCell className="tabular-nums text-xs text-muted-foreground">{ret.date ?? e.packagingDate}</TableCell>
-                        <TableCell className="text-muted-foreground">
+                        <TableCell>{ret.sector ?? "—"}</TableCell>
+                        <TableCell>{airlineOf(ret.flight)}</TableCell>
+                        <TableCell className="tabular-nums text-xs">{ret.etd || "—"}</TableCell>
+                        <TableCell className="tabular-nums text-xs">{ret.date ?? e.packagingDate}</TableCell>
+                        <TableCell>
                           {status === "not_planned" ? <span className="text-muted-foreground">—</span> : (f?.aircraft ?? "—")}
                         </TableCell>
-                        <TableCell className="text-right tabular-nums text-muted-foreground">{ret.pax ?? "—"}</TableCell>
-                        <TableCell className="text-right tabular-nums text-muted-foreground">{ret.crew ?? "—"}</TableCell>
-                        <TableCell className="text-right tabular-nums text-muted-foreground">{ret.specialMeals ?? "—"}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground italic" colSpan={2}>
-                          Planned with {f?.flight ?? e.flightId}
-                        </TableCell>
+                        <TableCell className="text-right tabular-nums">{ret.pax ?? "—"}</TableCell>
+                        <TableCell className="text-right tabular-nums">{ret.crew ?? "—"}</TableCell>
+                        <TableCell className="text-right tabular-nums">{ret.specialMeals ?? "—"}</TableCell>
                       </TableRow>
                     )}
                     </Fragment>

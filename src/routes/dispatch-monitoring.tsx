@@ -17,8 +17,9 @@ import {
   Plus, Minus, Truck, Pencil, Trash2, ThermometerSun, ShieldCheck,
   AlertOctagon, AlertTriangle, PlaneTakeoff, PlaneLanding, Warehouse,
   Clock, User, CheckCircle2, Eye, Smartphone, ChevronRight, QrCode, X as CloseIcon, Timer, Play,
-  Search, Package, ScanLine,
+  Search, Package, ScanLine, CupSoda, Sparkles, Boxes,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import {
   flights as FLIGHT_BOARD, seedFlightOrders, activeOffices, activeWarehousesByOffice,
   aircraftFleet as AIRCRAFT_SEED, airlines as AIRLINE_SEED,
@@ -3684,7 +3685,15 @@ export function GalleyPlanningModal({
   // Auto-total fields are the sum of the items that roll up to them (never
   // hand-keyed) and merged into the plan on save/forward.
   const derivedTotals = computeAutoTotals(g, galleyItems);
-  const finalPlan = (): GalleyPlan => ({ ...g, ...derivedTotals });
+  // The chosen aircraft type/model isn't a catalog line, so stash it on the plan
+  // under reserved keys — it doesn't render as a field, but the read-only Handing
+  // sheet and its printout can then show which aircraft this plan was built for.
+  const finalPlan = (): GalleyPlan => ({
+    ...g,
+    ...derivedTotals,
+    ...(aircraftType ? { aircraftType } : {}),
+    ...(aircraftModel ? { aircraftModel } : {}),
+  });
 
   // Meals integrate from Dispatch but are RESCALED to the (possibly overridden)
   // load counts: a percent-based passenger line recomputes off planPax, other
@@ -3782,11 +3791,22 @@ export function GalleyPlanningModal({
   function GF({ label, k, unit }: { label: string; k: string; unit?: string }) {
     // Load counts are adjustable with −/＋ steppers (clamped at 0) as well as by
     // typing directly. Non-numeric entries fall back to 0 when stepping.
+    // A line with a value gets a subtle sky highlight so a filled sheet reads at
+    // a glance which items are actually being loaded.
+    const active = (Number(g[k]) || 0) > 0;
     const step = (delta: number) => sg(k, String(Math.max(0, (Number(g[k]) || 0) + delta)));
-    const stepBtn = "h-7 w-7 shrink-0 flex items-center justify-center rounded-md border border-input bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors";
+    const stepBtn = "h-6 w-6 shrink-0 flex items-center justify-center rounded-md border border-input bg-muted/40 text-muted-foreground hover:bg-sky-100 hover:text-sky-700 hover:border-sky-200 active:scale-95 transition-all";
     return (
-      <div>
-        <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight mb-0.5">{label}</p>
+      <div className={cn(
+        "rounded-lg border px-2.5 py-2 transition-colors",
+        active ? "border-sky-200 bg-sky-50/50" : "border-slate-200 bg-white hover:border-slate-300",
+      )}>
+        <div className="flex items-center justify-between gap-1.5 mb-1.5">
+          <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight truncate" title={label}>{label}</p>
+          {unit && (
+            <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-wide shrink-0">{unit}</span>
+          )}
+        </div>
         <div className="flex items-center gap-1">
           <button type="button" onClick={() => step(-1)} className={stepBtn} aria-label={`Decrease ${label}`}>
             <Minus className="h-3 w-3" />
@@ -3795,35 +3815,99 @@ export function GalleyPlanningModal({
             type="text"
             value={g[k] ?? ""}
             onChange={(e) => sg(k, e.target.value)}
-            className="w-full h-7 px-2 text-xs text-center border border-input rounded-md bg-background tabular-nums focus:ring-1 focus:ring-ring focus:outline-none"
+            className={cn(
+              "w-full h-7 px-2 text-sm text-center rounded-md bg-background tabular-nums focus:ring-1 focus:ring-sky-400 focus:outline-none transition-colors",
+              active ? "border border-sky-300 text-sky-700 font-bold" : "border border-input text-slate-600",
+            )}
           />
           <button type="button" onClick={() => step(1)} className={stepBtn} aria-label={`Increase ${label}`}>
             <Plus className="h-3 w-3" />
           </button>
-          {unit && <span className="text-[10px] text-muted-foreground shrink-0">{unit}</span>}
         </div>
       </div>
     );
   }
 
-  // Renders every sheet section of an item-master group as an editable grid;
-  // auto-total fields render read-only with their computed value.
-  const renderItemGroup = (group: "Beverages" | "Amenities" | "Equipment") => (
-    <div className="space-y-5">
-      {sheetSections.filter((sec) => sec.group === group).map((sec) => (
-        <div key={sec.title}>
-          <GalleySecTitle>{sec.title}</GalleySecTitle>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {sec.fields.map((f) =>
-              f.auto
-                ? <RO key={f.k} label={`${f.label} (Auto)`} value={derivedTotals[f.k] ?? "0"} />
-                : <GF key={f.k} k={f.k} label={f.label} unit={f.unit} />,
-            )}
-          </div>
-        </div>
-      ))}
+  // A computed auto-total cell (distinct from a hand-keyed line) — shown for the
+  // rollup fields inside the item-group tabs so a total reads as "derived", not
+  // something the planner should type into.
+  const AutoTotal = ({ label, value }: { label: string; value: string | number }) => (
+    <div className="rounded-lg border border-emerald-200 bg-emerald-50/50 px-2.5 py-2">
+      <div className="flex items-center justify-between gap-1.5 mb-1.5">
+        <p className="text-[10px] text-emerald-700 uppercase tracking-wider font-semibold leading-tight truncate" title={label}>{label}</p>
+        <span className="text-[8px] font-bold text-emerald-600 bg-emerald-100 px-1 py-0.5 rounded uppercase tracking-wide shrink-0">Auto</span>
+      </div>
+      <div className="w-full h-7 px-2 text-sm font-bold border border-emerald-200 rounded-md bg-white text-emerald-700 tabular-nums flex items-center justify-center">
+        {value === "" || value == null ? "—" : value}
+      </div>
     </div>
   );
+
+  // Renders every sheet section of an item-master group as an editable grid,
+  // each section boxed as a card with a filled-lines count. A top summary strip
+  // rolls up how many lines across the whole group are loaded.
+  const GROUP_META: Record<"Beverages" | "Amenities" | "Equipment", { icon: typeof CupSoda; label: string; sub: string }> = {
+    Beverages: { icon: CupSoda, label: "Beverages & Tea", sub: "Cold drinks, juice, hot beverage & service items" },
+    Amenities: { icon: Sparkles, label: "Amenities & Consumables", sub: "Tissues, bedding, hygiene, medical kits & forms" },
+    Equipment: { icon: Boxes, label: "Equipment", sub: "Carts, ceramic, cutlery & service ware" },
+  };
+  const renderItemGroup = (group: "Beverages" | "Amenities" | "Equipment") => {
+    const secs = sheetSections.filter((sec) => sec.group === group);
+    const editableOf = (sec: (typeof secs)[number]) => sec.fields.filter((f) => !f.auto);
+    const setCountOf = (sec: (typeof secs)[number]) => editableOf(sec).filter((f) => (Number(g[f.k]) || 0) > 0).length;
+    const groupLines = secs.reduce((n, sec) => n + editableOf(sec).length, 0);
+    const groupSet = secs.reduce((n, sec) => n + setCountOf(sec), 0);
+    const meta = GROUP_META[group];
+    const GroupIcon = meta.icon;
+    return (
+      <div className="space-y-4">
+        {/* Group summary strip */}
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-sky-100 bg-gradient-to-r from-sky-50 to-transparent px-4 py-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="h-9 w-9 shrink-0 flex items-center justify-center rounded-lg bg-sky-100 text-sky-700">
+              <GroupIcon className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-bold text-slate-800 leading-tight">{meta.label}</p>
+              <p className="text-[11px] text-muted-foreground truncate">{meta.sub}</p>
+            </div>
+          </div>
+          <div className="text-right shrink-0">
+            <p className="text-lg font-bold text-sky-700 tabular-nums leading-none">
+              {groupSet}<span className="text-xs font-medium text-slate-400">/{groupLines}</span>
+            </p>
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground">lines loaded</p>
+          </div>
+        </div>
+
+        {/* One card per section */}
+        {secs.map((sec) => {
+          const editable = editableOf(sec);
+          const setCount = editable.filter((f) => (Number(g[f.k]) || 0) > 0).length;
+          return (
+            <div key={sec.title} className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-sm">
+              <div className="flex items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/70 px-4 py-2.5">
+                <span className="text-[11px] font-bold uppercase tracking-widest text-sky-700">{sec.title}</span>
+                <span className={cn(
+                  "text-[10px] font-semibold px-2 py-0.5 rounded-full tabular-nums",
+                  setCount > 0 ? "bg-sky-100 text-sky-700" : "bg-slate-100 text-slate-400",
+                )}>
+                  {setCount}/{editable.length} set
+                </span>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2.5 p-4">
+                {sec.fields.map((f) =>
+                  f.auto
+                    ? <AutoTotal key={f.k} label={f.label} value={derivedTotals[f.k] ?? "0"} />
+                    : <GF key={f.k} k={f.k} label={f.label} unit={f.unit} />,
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
 
   // Standard galley-loading sequence: load summary → meals → beverages →
   // amenities/consumables → equipment.
@@ -3841,77 +3925,80 @@ export function GalleyPlanningModal({
     );
   }
 
+  // A rotation leg rendered as a compact stat card — direction, flight, sector,
+  // date and its own PAX/Crew load. Both the outbound and return legs use it.
+  const legCard = (
+    direction: Parameters<typeof dirBadge>[0], code: string,
+    sector?: string, date?: string, pax = 0, crew = 0,
+  ) => (
+    <div className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 shadow-sm">
+      {dirBadge(direction)}
+      <span className="font-bold text-white bg-sky-600 px-2 py-0.5 rounded-full text-[11px]">{code}</span>
+      <span className="text-xs text-slate-600">{sector ?? "—"}</span>
+      {date && <span className="text-[11px] text-slate-400">{date}</span>}
+      <span className="h-3.5 w-px bg-slate-200" />
+      <span className="text-[11px] text-slate-500">PAX <b className="text-slate-800 tabular-nums">{pax}</b></span>
+      <span className="text-[11px] text-slate-500">Crew <b className="text-slate-800 tabular-nums">{crew}</b></span>
+    </div>
+  );
+
   // The sheet itself is identical in both presentations — only the shell around
   // it differs (full page section vs. dialog).
   const sheet = (
       <>
 
         {/* Header */}
-        <div className="bg-white px-6 pt-5 pb-0 shrink-0">
-          <div className="flex items-start justify-between mb-3">
-            <div>
-              <h2 className="text-lg font-bold text-slate-800">Galley Planning</h2>
-              {/* One row per leg of the rotation — this plan covers both. */}
-              <div className="mt-1 text-xs space-y-1.5">
-              <div className="flex flex-wrap items-center gap-2.5">
-                {dirBadge(order?.direction)}
-                <span className="font-bold text-white bg-sky-600 px-2 py-0.5 rounded-full">
-                  {flight?.flight ?? entry.flightId}
-                </span>
-                <span className="text-slate-600">{flight?.sector ?? "—"}</span>
-                <span className="text-slate-500">{entry.packagingDate}</span>
-                <span className="text-slate-600">PAX: {planPax}</span>
-                <span className="text-slate-600">Crew: {planCrew}</span>
-                {/* Aircraft type — editable; sets this plan's loading standard. */}
-                <span className="flex items-center gap-1">
+        <div className="bg-gradient-to-r from-sky-50 via-white to-white border-b border-slate-200 px-6 pt-5 pb-0 shrink-0">
+          <div className="flex items-start justify-between mb-3 gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2.5 mb-2.5">
+                <div className="h-9 w-9 shrink-0 flex items-center justify-center rounded-lg bg-sky-600 text-white shadow-sm">
+                  <PlaneTakeoff className="h-5 w-5" />
+                </div>
+                <div className="min-w-0">
+                  <h2 className="text-lg font-bold text-slate-800 leading-tight">Galley Planning</h2>
+                  <p className="text-[11px] text-muted-foreground leading-tight">Per-flight galley load — set counts, then forward to loading</p>
+                </div>
+              </div>
+              {/* One card per leg of the rotation — this plan covers both. */}
+              <div className="flex flex-wrap gap-2">
+                {legCard(order?.direction, flight?.flight ?? entry.flightId, flight?.sector, entry.packagingDate, planPax, planCrew)}
+                {returnOrder && legCard(returnOrder.direction, returnOrder.flight, returnOrder.sector, returnOrder.date, retPax, retCrew)}
+              </div>
+              {/* Loading standard — aircraft type sets which standard applies;
+                  model is an informational variant configured under Aircraft. */}
+              <div className="flex flex-wrap items-center gap-2 mt-2.5">
+                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Aircraft</span>
+                <select
+                  value={aircraftType}
+                  onChange={(e) => applyAircraft(e.target.value)}
+                  title="Aircraft type — sets the loading standard for this plan"
+                  className="h-7 px-2 text-[11px] rounded-md bg-white text-slate-700 border border-slate-300 focus:outline-none focus:ring-1 focus:ring-sky-400 cursor-pointer"
+                >
+                  <option value="">Select aircraft…</option>
+                  {aircraftTypes.map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+                {aircraftType && modelsForType.length > 0 && (
                   <select
-                    value={aircraftType}
-                    onChange={(e) => applyAircraft(e.target.value)}
-                    title="Aircraft type — sets the loading standard for this plan"
-                    className="bg-slate-100 text-slate-700 text-xs rounded-full pl-2 pr-1 py-0.5 border border-slate-300 focus:outline-none focus:ring-1 focus:ring-ring cursor-pointer max-w-[150px]"
+                    value={aircraftModel}
+                    onChange={(e) => setAircraftModel(e.target.value)}
+                    title="Aircraft model — configured in Configuration → Aircraft"
+                    className="h-7 px-2 text-[11px] rounded-md bg-white text-slate-700 border border-slate-300 focus:outline-none focus:ring-1 focus:ring-sky-400 cursor-pointer"
                   >
-                    <option value="" className="text-slate-800">Select aircraft…</option>
-                    {aircraftTypes.map((t) => (
-                      <option key={t} value={t} className="text-slate-800">{t}</option>
+                    <option value="">Select model…</option>
+                    {modelsForType.map((m) => (
+                      <option key={m} value={m}>{m}</option>
                     ))}
                   </select>
-                </span>
-                {/* Dependent model — the variant of the selected type, configured
-                    in Configuration → Aircraft. Only shown once a type with
-                    configured models is chosen. Informational; the loading
-                    standard keys off type. */}
-                {aircraftType && modelsForType.length > 0 && (
-                  <span className="flex items-center gap-1">
-                    <select
-                      value={aircraftModel}
-                      onChange={(e) => setAircraftModel(e.target.value)}
-                      title="Aircraft model — configured in Configuration → Aircraft"
-                      className="bg-slate-100 text-slate-700 text-xs rounded-full pl-2 pr-1 py-0.5 border border-slate-300 focus:outline-none focus:ring-1 focus:ring-ring cursor-pointer max-w-[190px]"
-                    >
-                      <option value="" className="text-slate-800">Select model…</option>
-                      {modelsForType.map((m) => (
-                        <option key={m} value={m} className="text-slate-800">{m}</option>
-                      ))}
-                    </select>
-                  </span>
+                )}
+                {!aircraftType && (
+                  <span className="text-[10px] text-amber-600 font-medium">← pick one to unlock beverages, amenities &amp; equipment</span>
                 )}
               </div>
-              {/* Return leg — its own load counts, per the same logic. */}
-              {returnOrder && (
-                <div className="flex flex-wrap items-center gap-2.5">
-                  {dirBadge(returnOrder.direction)}
-                  <span className="font-bold text-white bg-sky-600 px-2 py-0.5 rounded-full">
-                    {returnOrder.flight}
-                  </span>
-                  <span className="text-slate-600">{returnOrder.sector}</span>
-                  <span className="text-slate-500">{returnOrder.date}</span>
-                  <span className="text-slate-600">PAX: {retPax}</span>
-                  <span className="text-slate-600">Crew: {retCrew}</span>
-                </div>
-              )}
-              </div>
             </div>
-            <button onClick={onClose} className="text-slate-400 hover:text-slate-700 p-1 rounded transition-colors mt-0.5">
+            <button onClick={onClose} className="text-slate-400 hover:text-slate-700 p-1 rounded transition-colors shrink-0">
               <CloseIcon className="h-5 w-5" />
             </button>
           </div>
@@ -3920,21 +4007,18 @@ export function GalleyPlanningModal({
               <button
                 key={key}
                 onClick={() => setTab(key)}
-                className={`px-3.5 py-2 text-[11px] font-semibold border-b-2 -mb-px transition-colors ${
-                  tab === key ? "border-sky-600 text-sky-700" : "border-transparent text-slate-500 hover:text-slate-800"
+                className={`px-3.5 py-2 text-[11px] font-semibold border-b-2 -mb-px rounded-t-md transition-colors ${
+                  tab === key ? "border-sky-600 text-sky-700 bg-sky-50/70" : "border-transparent text-slate-500 hover:text-slate-800 hover:bg-slate-50"
                 }`}
               >
                 {label}
               </button>
             ))}
-            {!aircraftType && (
-              <span className="ml-2 text-[10px] text-slate-400 italic">Select an aircraft to load beverages, amenities &amp; equipment</span>
-            )}
           </div>
         </div>
 
         {/* Stock source — where the transferred consumables are drawn from */}
-        <div className="shrink-0 border-b bg-white px-6 py-2.5 flex flex-wrap items-center gap-x-5 gap-y-2">
+        <div className="shrink-0 border-b bg-slate-50/70 px-6 py-2.5 flex flex-wrap items-center gap-x-5 gap-y-2">
           <span className="text-[10px] font-bold uppercase tracking-widest text-sky-700 flex items-center gap-1.5">
             <Warehouse className="h-3.5 w-3.5" /> Transfer From
           </span>
@@ -3943,7 +4027,7 @@ export function GalleyPlanningModal({
             <select
               value={source.officeId}
               onChange={(e) => changeOffice(e.target.value)}
-              className="h-7 px-1.5 text-[11px] border border-input rounded-md bg-background focus:ring-1 focus:ring-ring focus:outline-none"
+              className="h-8 px-2 text-[11px] min-w-[150px] border border-slate-300 rounded-md bg-white focus:ring-1 focus:ring-sky-400 focus:outline-none"
             >
               {activeOffices.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
             </select>
@@ -3953,7 +4037,7 @@ export function GalleyPlanningModal({
             <select
               value={source.warehouseId}
               onChange={(e) => setSource((s) => ({ ...s, warehouseId: e.target.value }))}
-              className="h-7 px-1.5 text-[11px] border border-input rounded-md bg-background focus:ring-1 focus:ring-ring focus:outline-none"
+              className="h-8 px-2 text-[11px] min-w-[170px] border border-slate-300 rounded-md bg-white focus:ring-1 focus:ring-sky-400 focus:outline-none"
             >
               {warehouseChoices.length === 0 && <option value="">No warehouses</option>}
               {warehouseChoices.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}

@@ -22,6 +22,7 @@ import {
 } from "@/routes/galley-planning";
 import { getFlightOrders } from "@/lib/flight-orders-store";
 import { resolveFlightOrder, resolveReturnLeg } from "@/lib/order-chain";
+import { cn } from "@/lib/utils";
 
 // Loading QC — the actionable galley loading workflow: a forwarded sheet is
 // loaded (Start → Complete, timed), then sent to Approval Management where the
@@ -190,24 +191,35 @@ export default function GalleyQcPage() {
                   // The paired return leg of this rotation, if the order is tagged
                   // with one — loaded together with the outbound sheet.
                   const ret = returnLegFor(f?.flight, r.date);
+                  // One rotation = one loading job: both legs share status, load
+                  // time and action (spanning the two rows), banded as a bundle.
+                  const bundle = !!ret;
+                  // Flight number only — the sector has its own column, so the
+                  // flightLabel's "BS-105 — DAC → CXB" is trimmed to just "BS-105".
+                  const outNo = f?.flight ?? r.flightLabel.split("—")[0].trim();
                   return (
                     <Fragment key={r.id}>
-                    <TableRow className="hover:bg-muted/30">
-                      <TableCell className="font-semibold">{r.flightLabel}</TableCell>
+                    <TableRow className={cn("hover:bg-muted/30", bundle && "bg-sky-50/30 border-t border-sky-200")}>
+                      <TableCell className={cn("font-semibold", bundle && "border-l-2 border-sky-400")}>
+                        <span className="inline-flex items-center gap-1.5">
+                          {outNo}
+                          <Badge variant="outline" className="h-4 px-1.5 text-[10px] border-emerald-300 bg-emerald-50 text-emerald-700">Outbound</Badge>
+                        </span>
+                      </TableCell>
                       <TableCell>{f?.sector ?? "—"}</TableCell>
                       <TableCell className="tabular-nums text-xs">{r.date}</TableCell>
-                      <TableCell>{rowStatusBadge(r.galleyStatus)}</TableCell>
-                      <TableCell className="tabular-nums text-xs">
+                      <TableCell rowSpan={bundle ? 2 : 1} className={cn(bundle && "align-middle")}>{rowStatusBadge(r.galleyStatus)}</TableCell>
+                      <TableCell rowSpan={bundle ? 2 : 1} className={cn("tabular-nums text-xs", bundle && "align-middle")}>
                         {r.galleyStatus === "loading" && r.loadingStartedAt
                           ? <span className="text-amber-600 font-semibold flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" /> {fmtElapsed(r.loadingStartedAt)}</span>
                           : r.loadingDurationSec != null
                           ? <span className="text-muted-foreground">{fmtDuration(r.loadingDurationSec)}</span>
                           : "—"}
                       </TableCell>
-                      <TableCell>
+                      <TableCell rowSpan={bundle ? 2 : 1} className={cn(bundle && "align-middle")}>
                         <div className="flex items-center gap-1.5">
                           <Button variant="outline" size="sm" className="h-7 px-2.5 text-xs" onClick={() => setViewId(r.id)}>
-                            <Eye className="h-3 w-3 mr-1" /> View
+                            <Eye className="h-3 w-3 mr-1" /> View{bundle && " trip"}
                           </Button>
                           {r.galleyStatus === "forwarded" && (
                             <Button size="sm" className="h-7 px-2.5 text-xs bg-indigo-600 hover:bg-indigo-700" onClick={() => startLoading(r)}>
@@ -228,19 +240,16 @@ export default function GalleyQcPage() {
                       </TableCell>
                     </TableRow>
                     {ret && (
-                      <TableRow className="bg-muted/20 hover:bg-muted/30">
-                        <TableCell className="font-medium text-muted-foreground">
+                      <TableRow className="bg-sky-50/20 hover:bg-sky-50/40 border-b border-sky-200">
+                        <TableCell className="font-medium border-l-2 border-sky-400">
                           <span className="inline-flex items-center gap-1.5">
-                            <span className="text-muted-foreground/70">↳</span>
+                            <span className="text-sky-500/80" title="Return leg of this rotation">↩</span>
                             {ret.flight}
                             <Badge variant="outline" className="h-4 px-1.5 text-[10px] border-amber-300 bg-amber-50 text-amber-700">Return</Badge>
                           </span>
                         </TableCell>
-                        <TableCell className="text-muted-foreground">{ret.sector ?? "—"}</TableCell>
-                        <TableCell className="tabular-nums text-xs text-muted-foreground">{ret.date ?? r.date}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground italic" colSpan={3}>
-                          Loaded with {f?.flight ?? r.flightLabel}
-                        </TableCell>
+                        <TableCell>{ret.sector ?? "—"}</TableCell>
+                        <TableCell className="tabular-nums text-xs">{ret.date ?? r.date}</TableCell>
                       </TableRow>
                     )}
                     </Fragment>
