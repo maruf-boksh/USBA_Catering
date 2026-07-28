@@ -89,6 +89,7 @@ import AirlineEquipmentsOverviewPage from "@/routes/airline-equipments-overview"
 import MaintenanceOverviewPage from "@/routes/maintenance-overview";
 import FleetOverviewPage from "@/routes/fleet-overview";
 import WastageManagementPage from "@/routes/wastage-management";
+import WastageAnalyticsPage from "@/routes/wastage-analytics";
 import DamagedProductSalesPage from "@/routes/damaged-product-sales";
 
 const queryClient = new QueryClient({
@@ -189,6 +190,7 @@ export function App() {
             <Route path="/airline-equipments-overview" element={<AirlineEquipmentsOverviewPage />} />
             <Route path="/maintenance-overview" element={<MaintenanceOverviewPage />} />
             <Route path="/fleet-overview" element={<FleetOverviewPage />} />
+            <Route path="/wastage-analytics" element={<WastageAnalyticsPage />} />
             <Route path="/wastage-management" element={<WastageManagementPage />} />
             <Route path="/damaged-product-sales" element={<DamagedProductSalesPage />} />
           </Route>
