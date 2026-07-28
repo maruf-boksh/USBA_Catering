@@ -2,14 +2,14 @@ import { useState, useMemo, useEffect, useRef } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { type PackagingBatch } from "@/lib/packaging-batches";
 import { isPackaged, type PackagingAllocation } from "@/lib/packaging-allocations";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import {
   Truck, Package, Plus, AlertTriangle, Bell, MoreHorizontal,
   Eye, Croissant, Pill, ShieldCheck, Download,
   CheckCircle2, ThermometerSun, PlaneLanding, User, Clock, MoveRight,
-  Printer, ScanLine,
+  Printer, ScanLine, Layers,
 } from "lucide-react";
 import { flights, meals, activeWarehouses, activeOffices, activeWarehousesByOffice } from "@/lib/sample-data";
 import {
@@ -531,8 +531,21 @@ export const INITIAL_RECORDS: DispatchRecord[] = [
 export default function Dispatch() {
   useArrivalFlash();
   const navigate = useNavigate();
-  const { applyStockDeltas, addTransferNote, productionEntries, qcClearedFlights, dispatchApprovals } = useWorkflow();
+  const { applyStockDeltas, addTransferNote, productionEntries, productionEntryRecords, qcClearedFlights, dispatchApprovals } = useWorkflow();
   const flightOrders = useFlightOrders();
+  // Batch lots logged per production order (from Production Entry) — a run can be
+  // produced in several entries, each with its own batch/lot. Lets the dispatch
+  // Production Status show which lot(s) each order's meal comes from.
+  const lotsByOrder = useMemo(() => {
+    const m = new Map<string, { batchNo: string; qty: number; expiry?: string }[]>();
+    for (const r of productionEntryRecords) {
+      if (!r.batchNo) continue;
+      const arr = m.get(r.productionOrderId) ?? [];
+      arr.push({ batchNo: r.batchNo, qty: r.producedQty, expiry: r.batchExpiry });
+      m.set(r.productionOrderId, arr);
+    }
+    return m;
+  }, [productionEntryRecords]);
   // ── Dispatch records state ──────────────────────────────────────────────────
   const [records, setRecords] = usePersistedState<DispatchRecord[]>("dispatch-records", INITIAL_RECORDS);
   // Flights already configured for dispatch, keyed `flight|date`.
@@ -644,6 +657,120 @@ export default function Dispatch() {
   // only to say WHICH flights are ready to dispatch — never to raise a row.
   // Declared above the two memos below, which read it during render.
   const [packagingAllocations] = usePersistedState<PackagingAllocation[]>("packaging-allocations", []);
+  // The tabbed UI keeps this page mounted, so its usePersistedState snapshot of
+  // packaging allocations goes stale when packaging happens in another tab (writes
+  // don't propagate back). Re-read the store fresh every time the dispatch config
+  // modal opens, so packaging status/qty reflect what was just packaged.
+  const [liveAllocations, setLiveAllocations] = useState<PackagingAllocation[]>(packagingAllocations);
+  const [liveRows, setLiveRows] = useState<PackagingRow[]>(packagingRows);
+  useEffect(() => {
+    if (!configOpen) return;
+    try {
+      const raw = window.localStorage.getItem("harvest-data-v1:packaging-allocations");
+      setLiveAllocations(raw ? (JSON.parse(raw) as PackagingAllocation[]) : []);
+    } catch {
+      setLiveAllocations([]);
+    }
+    try {
+      const raw = window.localStorage.getItem("harvest-data-v1:dispatch-packaging-rows");
+      if (raw) setLiveRows(JSON.parse(raw) as PackagingRow[]);
+    } catch {
+      /* keep current rows */
+    }
+  }, [configOpen]);
+  // Quantity packaging actually packaged for a run on a flight — the flight's
+  // SHARE of the run, not the run's day total. Indexed two ways because the
+  // dispatch row's production-order id (resolved by dish name) may differ from the
+  // packaged run's id when several orders exist for the same dish; matching on
+  // flight+item then still resolves it. Used so the Production Status batch/lot
+  // reflects packaged quantity, not the whole production run.
+  const { packagedByProdFlight, packagedByFlightItem } = useMemo(() => {
+    const byPro = new Map<string, number>();
+    const byItem = new Map<string, number>();
+    for (const a of liveAllocations) {
+      if (a.status === "Rejected") continue;
+      const pk = `${a.productionId}|${a.flight}`;
+      byPro.set(pk, (byPro.get(pk) ?? 0) + a.qty);
+      const ik = `${a.flight}|${a.item}`.toLowerCase();
+      byItem.set(ik, (byItem.get(ik) ?? 0) + a.qty);
+    }
+    return { packagedByProdFlight: byPro, packagedByFlightItem: byItem };
+  }, [liveAllocations]);
+
+  // Best (most-advanced) packaging allocation for a production line, so the
+  // Production Status can show its packaging status + id and gate dispatch on it.
+  // Matched by production-order id first, then flight+item (see note above).
+  const bestPackagingForLine = useMemo(() => {
+    const rank: Record<PackagingAllocation["status"], number> = {
+      "Rejected": 0, "Pending Approval": 1, "In Packaging": 2, "Packaged": 3,
+      "Forwarded To Airport": 4, "Airport Approved": 5, "Received At Airport": 6, "Dispatched": 7,
+    };
+    const byPro = new Map<string, PackagingAllocation>();
+    const byItem = new Map<string, PackagingAllocation>();
+    const consider = (m: Map<string, PackagingAllocation>, k: string, a: PackagingAllocation) => {
+      const cur = m.get(k);
+      if (!cur || rank[a.status] > rank[cur.status]) m.set(k, a);
+    };
+    for (const a of liveAllocations) {
+      if (a.status === "Rejected") continue;
+      consider(byPro, `${a.productionId}|${a.flight}`, a);
+      consider(byItem, `${a.flight}|${a.item}`.toLowerCase(), a);
+    }
+    return (proId: string | null | undefined, flight: string, item: string): PackagingAllocation | undefined =>
+      (proId ? byPro.get(`${proId}|${flight}`) : undefined) ?? byItem.get(`${flight}|${item}`.toLowerCase());
+  }, [liveAllocations]);
+
+  // The Dispatch page keeps its OWN packaging tracking (dispatch-packaging-rows)
+  // in parallel with the Packaging module's allocations. Index it the same two
+  // ways so a line packaged through EITHER store is recognised (reconciliation).
+  const rowPackaging = useMemo(() => {
+    const rank: Record<PackagingStatus, number> = {
+      "Ready for Packaging": 1, "Packaging In Progress": 2, "Packaging Done": 3,
+      "Ready for Dispatch": 4, "Dispatched": 5,
+    };
+    const byPro = new Map<string, PackagingRow>();
+    const byMeal = new Map<string, PackagingRow>();
+    const qtyPro = new Map<string, number>();
+    const qtyMeal = new Map<string, number>();
+    const consider = (m: Map<string, PackagingRow>, k: string, r: PackagingRow) => {
+      const cur = m.get(k);
+      if (!cur || rank[r.packagingStatus] > rank[cur.packagingStatus]) m.set(k, r);
+    };
+    for (const r of liveRows) {
+      if (r.productionOrderId) {
+        const pk = `${r.productionOrderId}|${r.flight}`;
+        consider(byPro, pk, r);
+        qtyPro.set(pk, (qtyPro.get(pk) ?? 0) + r.qty);
+      }
+      const mk = `${r.flight}|${r.mealName}`.toLowerCase();
+      consider(byMeal, mk, r);
+      qtyMeal.set(mk, (qtyMeal.get(mk) ?? 0) + r.qty);
+    }
+    return { byPro, byMeal, qtyPro, qtyMeal };
+  }, [liveRows]);
+
+  // Unified packaging state for a production line, reconciled across the Packaging
+  // module (allocations) and the Dispatch page (rows). Allocation wins when both
+  // exist; else fall back to the dispatch row. Returns undefined when neither has it.
+  const ROW_DONE = new Set<PackagingStatus>(["Packaging Done", "Ready for Dispatch", "Dispatched"]);
+  const packagingOf = (
+    proId: string | null | undefined, flight: string, item: string,
+  ): { status: string; packaged: boolean; productionId?: string; qty?: number } | undefined => {
+    const alloc = bestPackagingForLine(proId, flight, item);
+    if (alloc) {
+      const qty = (proId ? packagedByProdFlight.get(`${proId}|${flight}`) : undefined)
+        ?? packagedByFlightItem.get(`${flight}|${item}`.toLowerCase());
+      return { status: alloc.status, packaged: isPackaged(alloc), productionId: alloc.productionId, qty };
+    }
+    const row = (proId ? rowPackaging.byPro.get(`${proId}|${flight}`) : undefined)
+      ?? rowPackaging.byMeal.get(`${flight}|${item}`.toLowerCase());
+    if (row) {
+      const qty = (proId ? rowPackaging.qtyPro.get(`${proId}|${flight}`) : undefined)
+        ?? rowPackaging.qtyMeal.get(`${flight}|${item}`.toLowerCase());
+      return { status: row.packagingStatus, packaged: ROW_DONE.has(row.packagingStatus), productionId: row.productionOrderId, qty };
+    }
+    return undefined;
+  };
 
   // Flights whose packaging is finished — the pool "+ New Dispatch" picks from.
   //
@@ -756,12 +883,13 @@ export default function Dispatch() {
   // (ETD, sector, PAX, crew, special-meal roster) and Menu Planning (the PAX
   // main-meal menu, split across the passenger count). The user only picks the
   // flight; everything below is filled in and remains editable.
-  const autoLoadFromFlight = (flightNo: string) => {
+  const autoLoadFromFlight = (flightNo: string, dateOverride?: string) => {
     setConfigFlight(flightNo);
     setIncludeReturn(true); // default to bundling the return leg on each new pick
     if (!flightNo) return;
+    const wantDate = dateOverride ?? configDate;
     const order =
-      flightOrders.find((o) => o.flight === flightNo && (!configDate || o.date === configDate)) ??
+      flightOrders.find((o) => o.flight === flightNo && (!wantDate || o.date === wantDate)) ??
       flightOrders.find((o) => o.flight === flightNo);
     if (!order) return;
 
@@ -805,6 +933,24 @@ export default function Dispatch() {
       setReturnPaxLines([]); setReturnCrewMeals([]); setReturnSpecialMeals([]);
     }
   };
+
+  // Deep-link from Packaging: /dispatch?config=<flight>&date=<yyyy-mm-dd> opens the
+  // Configure New Dispatch modal preloaded for that flight (packaging → dispatch
+  // handoff). Consumes the params so it fires once.
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const flight = searchParams.get("config");
+    if (!flight || flightOrders.length === 0) return;
+    const date = searchParams.get("date") ?? configDate;
+    if (date) setConfigDate(date);
+    autoLoadFromFlight(flight, date || undefined);
+    setConfigOpen(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete("config");
+    next.delete("date");
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, flightOrders]);
 
   // Production Entry linkup — every meal under this dispatch (PAX, Crew and
   // Special) is tagged with its own production order, so one dispatch bundles
@@ -894,6 +1040,17 @@ export default function Dispatch() {
   const paxLineCount = productionLines.filter((l) => l.audience === "PAX").length;
   const productionReady = paxLineCount > 0 && productionLines.every((l) => !l.blocks);
   const blockingMeals = productionLines.filter((l) => l.blocks).map((l) => l.label);
+  // Packaging readiness — every PAX line has a Packaged (or beyond) allocation for
+  // this flight. Packaging done means it can go out even if the production-order
+  // status link reads otherwise, so this drives the "ready to dispatch" note.
+  const paxLines = productionLines.filter((l) => l.audience === "PAX");
+  const packagingReady = paxLines.length > 0 && paxLines.every((l) => {
+    const pk = packagingOf(l.proId, l.legFlight, l.meal);
+    // A "packaged" record only counts when the meal was actually produced —
+    // otherwise the packaging store contradicts production and can't be trusted.
+    const produced = (l.producedQty ?? 0) > 0 || l.status === "Completed" || l.status === "Ready for QC";
+    return !!pk && pk.packaged && produced;
+  });
   const canSave = !!configFlight && productionLines.length > 0;
 
   // Combined dispatch summary — per-leg and grand totals across outbound + return.
@@ -3473,7 +3630,7 @@ export default function Dispatch() {
 
       {/* ── New Dispatch Config Modal ────────────────────────────────────────── */}
       <Dialog open={configOpen} onOpenChange={(v) => { setConfigOpen(v); if (!v) resetConfig(); }}>
-        <DialogContent className="w-full max-w-full sm:max-w-2xl max-h-[100vh] sm:max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
+        <DialogContent className="w-full max-w-full sm:max-w-4xl lg:max-w-5xl max-h-[100vh] sm:max-h-[92vh] flex flex-col gap-0 p-0 overflow-hidden">
           <div className="px-6 pt-5 pb-4 border-b shrink-0">
             <DialogTitle className="text-base font-semibold">Configure New Dispatch</DialogTitle>
             <p className="text-xs text-muted-foreground mt-0.5">Pick a date and flight — sector, departure time, PAX, crew and meals auto-load from Order Management &amp; Menu Planning.</p>
@@ -3651,6 +3808,7 @@ export default function Dispatch() {
                       <th className="p-2 text-left font-semibold w-20">For</th>
                       <th className="p-2 text-left font-semibold">Production Order</th>
                       <th className="p-2 text-left font-semibold">Meal</th>
+                      <th className="p-2 text-left font-semibold">Batch / Lot</th>
                       <th className="p-2 text-center font-semibold w-24">Required</th>
                       <th className="p-2 text-center font-semibold w-28">Batch Produced</th>
                       <th className="p-2 text-left font-semibold w-40">Status</th>
@@ -3688,6 +3846,75 @@ export default function Dispatch() {
                           )}
                         </td>
                         <td className="p-2">{p.label}</td>
+                        <td className="p-2">
+                          {(() => {
+                            const lots = p.proId ? (lotsByOrder.get(p.proId) ?? []) : [];
+                            // Packaging state for THIS flight, reconciled across the
+                            // Packaging module and the Dispatch page's own rows.
+                            const pk = packagingOf(p.proId, p.legFlight, p.meal);
+                            if (lots.length === 0 && !pk) return <span className="text-muted-foreground">—</span>;
+                            // Sanity check: packaging can't truly be done if the linked
+                            // production order never produced anything. When the store
+                            // claims "packaged" but nothing was cooked (0 produced and
+                            // not yet QC-passed), the two sources disagree — surface that
+                            // as an inconsistency instead of a reassuring green badge.
+                            const produced = (p.producedQty ?? 0) > 0 || p.status === "Completed" || p.status === "Ready for QC";
+                            const inconsistent = !!pk && pk.packaged && !produced;
+                            const badge = pk
+                              ? (inconsistent ? "bg-rose-100 text-rose-700"
+                                : pk.packaged ? "bg-emerald-100 text-emerald-700"
+                                : /progress/i.test(pk.status) ? "bg-sky-100 text-sky-700"
+                                : "bg-amber-100 text-amber-700")
+                              : "";
+                            const linkPro = pk?.productionId ?? p.proId ?? undefined;
+                            return (
+                              <div className="flex flex-col gap-1">
+                                {lots.length > 0 && (
+                                  <div className="flex flex-wrap gap-1">
+                                    {lots.map((l) => (
+                                      <span
+                                        key={l.batchNo}
+                                        title={`Lot ${l.batchNo}${l.expiry ? ` · exp ${l.expiry}` : ""} — produced ${l.qty.toLocaleString()} (run total)`}
+                                        className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-primary/30 bg-primary/5 px-1.5 py-0.5 text-[10px] font-mono text-primary"
+                                      >
+                                        <Layers className="h-3 w-3 shrink-0" />
+                                        {l.batchNo}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                {pk ? (
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    {linkPro && (
+                                      <button
+                                        type="button"
+                                        className="font-mono text-[10px] font-semibold text-primary hover:underline"
+                                        title="Open in Packaging"
+                                        onClick={() => {
+                                          flagArrival({ target: "packaging-list", ids: [linkPro] });
+                                          navigate(`/packaging?pkg=${encodeURIComponent(linkPro)}`);
+                                        }}
+                                      >
+                                        {toPackagingId(linkPro)}
+                                      </button>
+                                    )}
+                                    <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${badge}`} title={inconsistent ? `Packaging record (${pk.status}) can't be trusted — its production order hasn't produced anything yet` : undefined}>{inconsistent ? "Awaiting production" : pk.status}</span>
+                                    {!inconsistent && pk.qty != null && pk.qty > 0 && (
+                                      <span className="text-[10px] text-muted-foreground">{pk.qty.toLocaleString()} pkgd</span>
+                                    )}
+                                    {inconsistent && (
+                                      <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-rose-600" title={`A stray "${pk.status}" packaging record exists, but 0 was produced — produce & QC first`}>
+                                        <AlertTriangle className="h-3 w-3" /> not produced yet
+                                      </span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-[10px] text-amber-600">not yet packaged for this flight</span>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </td>
                         <td className="p-2 text-center tabular-nums font-medium">{p.needQty}</td>
                         <td className="p-2 text-center tabular-nums text-muted-foreground">{p.producedQty ?? "—"}</td>
                         <td className="p-2">
@@ -3699,7 +3926,9 @@ export default function Dispatch() {
                     ))}
                   </tbody>
                 </table>
-                {productionReady ? (
+                {packagingReady ? (
+                  <p className="text-[11px] font-medium text-emerald-700 mt-1.5">✓ Packaging done for every PAX meal — ready to dispatch.</p>
+                ) : productionReady ? (
                   <p className="text-[11px] font-medium text-emerald-700 mt-1.5">✓ All meals produced &amp; QC-passed — ready to dispatch.</p>
                 ) : (
                   <p className="text-[11px] font-medium text-amber-600 mt-1.5">⚠ Not yet produced &amp; QC-passed: {blockingMeals.join(", ")}. You can still dispatch, but completing production &amp; QC first is recommended.</p>

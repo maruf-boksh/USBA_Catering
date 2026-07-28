@@ -1265,6 +1265,18 @@ function OrderGroupCard({
           <span style={{ fontSize: 13, color: "var(--ink, #1a0204)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
             {l.etd}
           </span>
+          {l.status && l.status !== status && (() => {
+            const lp = aoStatusPill(l.status);
+            return (
+              <span style={{
+                fontSize: 10, fontWeight: 600, letterSpacing: ".02em", flex: "none",
+                padding: "2px 8px", borderRadius: 999, whiteSpace: "nowrap",
+                color: lp.color, background: lp.bg, border: `1px solid ${lp.border}`,
+              }}>
+                {l.status}
+              </span>
+            );
+          })()}
           <span style={{
             fontSize: 12, color: "var(--muted-foreground, #6b6b72)", fontVariantNumeric: "tabular-nums",
             width: 42, textAlign: "right", flex: "none",

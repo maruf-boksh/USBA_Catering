@@ -11,6 +11,11 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Badge } from "@/components/ui/badge";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem, CommandSeparator,
+} from "@/components/ui/command";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -20,7 +25,7 @@ import {
   Plus, ArrowLeft, Save, Tag, CheckCircle, XCircle,
   ChevronRight, ChevronDown, FolderTree,
   Boxes, Upload, Download, FileSpreadsheet, Trash2, AlertTriangle, Search,
-  Layers, Package, Sparkles, CalendarClock, ArrowDownUp, Check,
+  Layers, Package, Sparkles, CalendarClock, ArrowDownUp, Check, X,
   type LucideIcon,
 } from "lucide-react";
 import { KpiCard } from "@/components/common/KpiCard";
@@ -62,6 +67,10 @@ import {
 } from "@/lib/sample-data";
 import { usePrimaryUoms, useAltUoms, addPrimaryUom, addAltUom } from "@/lib/custom-uoms";
 import { roundQty } from "@/lib/num";
+import {
+  useBatchNumberingMode, setBatchNumberingMode, generateBatchCode,
+  type BatchNumberingMode,
+} from "@/lib/batch-numbering-settings";
 
 type ItemRow = ItemMaster;
 
@@ -214,6 +223,125 @@ function CapabilityChecks({
 }
 
 
+type LocationOption = { id: string; code: string; name: string };
+
+/** Searchable, checkable multi-select for Offices / Warehouses. Renders the
+ *  chosen entries as removable chips and supports inline "Add new". Shared by the
+ *  Create form's location pickers. */
+function LocationMultiSelect({
+  label, placeholder, emptyPlaceholder, entity, options, selectedIds, onToggle, onAddNew, disabled,
+}: {
+  label: string;
+  placeholder: string;
+  emptyPlaceholder?: string;
+  entity: string;
+  options: LocationOption[];
+  selectedIds: string[];
+  onToggle: (id: string) => void;
+  onAddNew?: (name: string) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  const selected = options.filter((o) => selectedIds.includes(o.id));
+
+  const commitAdd = () => {
+    const v = draft.trim();
+    if (!v) { toast.error(`Enter a ${entity} name.`); return; }
+    onAddNew?.(v);
+    setDraft("");
+    setAdding(false);
+  };
+
+  return (
+    <div>
+      <Label className="text-xs uppercase tracking-wider text-muted-foreground">{label}</Label>
+      <Popover open={open} onOpenChange={(o) => { setOpen(o); if (!o) setAdding(false); }}>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            disabled={disabled}
+            className={cn(selectCls, "flex items-center justify-between gap-2 text-left", disabled && "opacity-50 cursor-not-allowed")}
+          >
+            <span className={cn("truncate", selected.length === 0 && "text-muted-foreground")}>
+              {selected.length === 0
+                ? (disabled ? (emptyPlaceholder ?? placeholder) : placeholder)
+                : `${selected.length} ${entity}${selected.length === 1 ? "" : "s"} selected`}
+            </span>
+            <ChevronDown className="h-4 w-4 shrink-0 opacity-50" />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+          <Command>
+            <CommandInput placeholder={`Search ${entity}…`} />
+            <CommandList>
+              <CommandEmpty>No {entity} found.</CommandEmpty>
+              <CommandGroup>
+                {options.map((o) => {
+                  const on = selectedIds.includes(o.id);
+                  return (
+                    <CommandItem key={o.id} value={`${o.code} ${o.name}`} onSelect={() => onToggle(o.id)}>
+                      <Checkbox checked={on} className="pointer-events-none" />
+                      <span className="truncate">{o.code} — {o.name}</span>
+                      {on && <Check className="ml-auto h-4 w-4 text-primary" />}
+                    </CommandItem>
+                  );
+                })}
+              </CommandGroup>
+              {onAddNew && (
+                <>
+                  <CommandSeparator />
+                  <div className="p-1">
+                    {adding ? (
+                      <div className="flex items-center gap-1.5">
+                        <Input
+                          autoFocus
+                          value={draft}
+                          onChange={(e) => setDraft(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitAdd(); } }}
+                          placeholder={`New ${entity} name`}
+                          className="h-8"
+                        />
+                        <Button type="button" size="sm" onClick={commitAdd}>Add</Button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setAdding(true)}
+                        className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm text-muted-foreground hover:bg-accent hover:text-foreground"
+                      >
+                        <Plus className="h-4 w-4" /> Add new {entity}…
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
+      {selected.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {selected.map((o) => (
+            <Badge key={o.id} variant="secondary" className="gap-1 pr-1 font-normal">
+              <span className="font-mono text-[10px]">{o.code}</span>
+              <button
+                type="button"
+                onClick={() => onToggle(o.id)}
+                className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full hover:bg-foreground/15"
+                aria-label={`Remove ${o.name}`}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </Badge>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ConfigItemPage() {
   const [rows, setRows] = usePersistedState<ItemRow[]>("config-item-rows", MASTER_ITEMS);
   const [view, setView] = useState<"list" | "create">("list");
@@ -326,6 +454,7 @@ export default function ConfigItemPage() {
                 <KpiCard label="Active" value={activeCount} icon={CheckCircle} tone="success" />
                 <KpiCard label="Inactive" value={rows.length - activeCount} icon={XCircle} tone="warning" />
               </div>
+              <BatchNumberingSetting />
               <ItemList data={rows} onToggle={toggle} editors={rowEditors(setRows)} />
             </>
           ) : (
@@ -565,106 +694,56 @@ function TreeNode({
   );
 }
 
-function MethodToggle({ master }: { master: ItemRow }) {
-  const batched = isBatchTrackedForMaster(master.id);
-
-  if (!batched) {
-    return (
-      <span
-        className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold border border-border bg-muted/40 text-muted-foreground"
-        title="Single-item — FIFO/FEFO not applicable."
-      >
-        N/A
-      </span>
-    );
-  }
-
-  // "Auto" = follow the system's smart default (no explicit override). FEFO/FIFO
-  // set an explicit override. `resolved` is what Auto currently maps to.
-  const choice = getAllocationChoiceForMaster(master.id);
-  const resolved = getAllocationMethodForMaster(master.id);
-  const setChoice = (c: "Auto" | AllocationMethod) => {
-    if (c === choice) return;
-    if (c === "Auto") {
-      clearAllocationOverride(master.id);
-      toast.success(`${master.name} set to Auto (${resolved}).`);
-    } else {
-      setAllocationMethod(master.id, c);
-      toast.success(`${master.name} switched to ${c}.`);
-    }
-  };
-  const titleFor = (c: "Auto" | AllocationMethod) =>
-    c === "Auto" ? `Auto — resolves to ${resolved} by item type/category`
-      : c === "FEFO" ? "First-Expiry-First-Out"
-      : "First-In-First-Out";
-  return (
-    <div
-      className="inline-flex items-center rounded-md border border-input bg-background p-0.5 shadow-sm"
-      role="group"
-      aria-label={`Allocation method for ${master.name}`}
-    >
-      {(["Auto", "FEFO", "FIFO"] as const).map((m) => {
-        const active = choice === m;
-        return (
-          <button
-            key={m}
-            type="button"
-            onClick={() => setChoice(m)}
-            className={cn(
-              "px-2 py-0.5 text-[10px] font-semibold rounded-sm transition-colors",
-              active
-                ? "bg-primary/10 text-primary"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-            title={titleFor(m)}
-          >
-            {m === "Auto" ? "AUTO" : m}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-function BatchToggle({ master }: { master: ItemRow }) {
-  const current = isBatchTrackedForMaster(master.id);
-  const toggle = (next: boolean) => {
-    if (next === current) return;
-    persistBatchTracked(master.id, next);
-    toast.success(`${master.name} is now ${next ? "batch-tracked" : "a single item"}.`);
+// Global batch-code numbering policy for all batch-tracked items — Manual (the
+// receiver types the batch/LOT no) or Auto (the system generates it on receipt).
+function BatchNumberingSetting() {
+  const mode = useBatchNumberingMode();
+  const set = (next: BatchNumberingMode) => {
+    if (next === mode) return;
+    setBatchNumberingMode(next);
+    toast.success(`Batch codes are now ${next === "auto" ? "auto-generated" : "entered manually"}.`);
   };
   return (
-    <div
-      className="inline-flex items-center rounded-md border border-input bg-background p-0.5 shadow-sm"
-      role="group"
-      aria-label={`Batch tracking for ${master.name}`}
-    >
-      {([
-        { label: "Batch",  value: true  },
-        { label: "Single", value: false },
-      ] as const).map((opt) => {
-        const active = current === opt.value;
-        return (
-          <button
-            key={String(opt.value)}
-            type="button"
-            onClick={() => toggle(opt.value)}
-            className={cn(
-              "px-2 py-0.5 text-[10px] font-semibold rounded-sm transition-colors",
-              active
-                ? "bg-primary/10 text-primary"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-            title={
-              opt.value
-                ? "Tracked as discrete batches with expiry, FIFO/FEFO applies"
-                : "Single non-batched stock; no batch lot, no FIFO/FEFO"
-            }
-          >
-            {opt.label}
-          </button>
-        );
-      })}
+    <div className="mb-4 rounded-lg border border-border bg-card p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <Layers className="h-4 w-4 text-primary shrink-0" />
+            <span className="text-sm font-semibold">Batch Code Numbering</span>
+          </div>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Applies to every batch-tracked item on receipt.{" "}
+            {mode === "auto"
+              ? <>System generates the code (e.g. <span className="font-mono">{generateBatchCode()}</span>); the receiver enters only the expiry.</>
+              : <>The receiver types the batch / LOT number.</>}
+          </p>
+        </div>
+        <div
+          className="inline-flex items-center rounded-md border border-input bg-background p-0.5 shadow-sm shrink-0"
+          role="group"
+          aria-label="Batch code numbering mode"
+        >
+          {([
+            { label: "Manual", value: "manual" as const },
+            { label: "Auto-generate", value: "auto" as const },
+          ]).map((opt) => {
+            const active = mode === opt.value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => set(opt.value)}
+                className={cn(
+                  "px-3 py-1 text-xs font-semibold rounded-sm transition-colors",
+                  active ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }
@@ -678,14 +757,19 @@ function ItemProfileView({ row }: { row: ItemRow }) {
   const allocation = getAllocationMethodForMaster(row.id);
   const batchTracked = isBatchTrackedForMaster(row.id);
 
-  const wh = row.warehouseId
-    ? ALL_WAREHOUSES.find((w) => w.id === row.warehouseId) ?? customWarehousesRegistry.find((w) => w.id === row.warehouseId)
-    : undefined;
-  const officeId = row.officeId ?? wh?.officeId;
-  const off = officeId
-    ? ALL_OFFICES.find((o) => o.id === officeId) ?? customOfficesRegistry.find((o) => o.id === officeId)
-    : undefined;
-  const hasLocation = !!(off || wh || row.binLocation);
+  const findWh = (id: string) =>
+    ALL_WAREHOUSES.find((w) => w.id === id) ?? customWarehousesRegistry.find((w) => w.id === id);
+  const findOff = (id: string) =>
+    ALL_OFFICES.find((o) => o.id === id) ?? customOfficesRegistry.find((o) => o.id === id);
+
+  // Prefer the multi-location arrays; fall back to the legacy single fields.
+  const whIds = row.warehouseIds?.length ? row.warehouseIds : (row.warehouseId ? [row.warehouseId] : []);
+  const whs = whIds.map(findWh).filter(Boolean) as Warehouse[];
+  const offIds = row.officeIds?.length
+    ? row.officeIds
+    : (row.officeId ? [row.officeId] : whs.map((w) => w.officeId));
+  const offs = Array.from(new Set(offIds)).map(findOff).filter(Boolean) as Office[];
+  const hasLocation = offs.length > 0 || whs.length > 0 || !!row.binLocation;
 
   const Field = ({ label, children }: { label: string; children?: ReactNode }) => (
     <div className="min-w-0">
@@ -746,6 +830,7 @@ function ItemProfileView({ row }: { row: ItemRow }) {
       <Section title="Inventory & Tracking">
         <Field label="Allocation Method">{allocation}</Field>
         <Field label="Batch Tracked">{batchTracked ? "Yes" : "No"}</Field>
+        <Field label="Shelf Life">{row.shelfLifeDays ? `${row.shelfLifeDays} day${row.shelfLifeDays === 1 ? "" : "s"}` : ""}</Field>
         <Field label="Storage">{row.storage}</Field>
         {row.currentStock != null && <Field label="Current Stock">{`${row.currentStock} ${row.uom}`}</Field>}
         {row.reorderLevel != null && <Field label="Reorder Level">{`${row.reorderLevel} ${row.uom}`}</Field>}
@@ -753,8 +838,12 @@ function ItemProfileView({ row }: { row: ItemRow }) {
 
       {hasLocation && (
         <Section title="Default Location">
-          <Field label="Office">{off ? `${off.code} — ${off.name}` : ""}</Field>
-          <Field label="Warehouse">{wh ? `${wh.code} — ${wh.name}` : ""}</Field>
+          <Field label={offs.length > 1 ? "Offices" : "Office"}>
+            {offs.length ? offs.map((o) => `${o.code} — ${o.name}`).join(", ") : ""}
+          </Field>
+          <Field label={whs.length > 1 ? "Warehouses" : "Warehouse"}>
+            {whs.length ? whs.map((w) => `${w.code} — ${w.name}`).join(", ") : ""}
+          </Field>
           <Field label="Bin">{row.binLocation}</Field>
         </Section>
       )}
@@ -780,6 +869,12 @@ function ItemList({
     { key: "itemType", header: "Type" },
     { key: "category", header: "Category" },
     {
+      key: "subCategory",
+      header: "Sub Category",
+      render: (r) =>
+        r.subCategory ? r.subCategory : <span className="text-muted-foreground text-xs">—</span>,
+    },
+    {
       key: "uom",
       header: "UOM",
       render: (r) => (
@@ -797,80 +892,14 @@ function ItemList({
       ),
     },
     {
-      key: "code" as keyof ItemRow,
-      header: "BOM",
-      render: (r) => {
-        const requiresBom = BOM_REQUIRED_ITEM_TYPES.includes(r.itemType);
-        if (!requiresBom) return <span className="text-muted-foreground text-xs">—</span>;
-        const bom = bomForItemCode(r.code);
-        if (bom) {
-          return (
-            <button
-              type="button"
-              onClick={() => navigate("/bom")}
-              className="inline-flex items-center gap-1.5 rounded border border-success/30 bg-success/5 px-1.5 py-0.5 text-[10px] font-semibold text-success hover:bg-success/10"
-              title={`Linked to ${bom.name} (${bom.version})`}
-            >
-              <CheckCircle className="h-3 w-3" />
-              <span className="font-mono">{bom.id}</span>
-            </button>
-          );
-        }
-        return (
-          <div className="flex items-center gap-1.5">
-            <span className="inline-flex items-center gap-1 rounded border border-destructive/30 bg-destructive/5 px-1.5 py-0.5 text-[10px] font-semibold text-destructive">
-              <AlertTriangle className="h-3 w-3" /> Missing
-            </span>
-            <button
-              type="button"
-              onClick={() => navigate("/bom")}
-              className="text-[10px] font-semibold text-primary hover:underline"
-            >
-              Create BOM
-            </button>
-          </div>
-        );
-      },
-    },
-    {
-      key: "warehouseId" as keyof ItemRow,
-      header: "Office / Warehouse",
-      render: (r) => {
-        const wh = r.warehouseId
-          ? ALL_WAREHOUSES.find((w) => w.id === r.warehouseId) ?? customWarehousesRegistry.find((w) => w.id === r.warehouseId)
-          : undefined;
-        const officeId = r.officeId ?? wh?.officeId;
-        const off = officeId
-          ? ALL_OFFICES.find((o) => o.id === officeId) ?? customOfficesRegistry.find((o) => o.id === officeId)
-          : undefined;
-        if (!off && !wh) return <span className="text-muted-foreground text-xs">—</span>;
-        return (
-          <div className="text-xs leading-tight">
-            <div>{off ? `${off.code} — ${off.name}` : <span className="text-muted-foreground">—</span>}</div>
-            <div className="text-muted-foreground">{wh ? `${wh.code} — ${wh.name}` : "—"}</div>
-          </div>
-        );
-      },
-    },
-    {
-      key: "binLocation",
-      header: "Bin",
+      key: "currentStock",
+      header: "Current Stock",
       render: (r) =>
-        r.binLocation ? (
-          <span className="font-mono text-[11px]">{r.binLocation}</span>
+        r.currentStock != null ? (
+          <span className="tabular-nums">{roundQty(r.currentStock)} <span className="text-muted-foreground text-xs">{r.uom}</span></span>
         ) : (
           <span className="text-muted-foreground text-xs">—</span>
         ),
-    },
-    {
-      key: "batchTracked" as keyof ItemRow,
-      header: "Tracking",
-      render: (r) => <BatchToggle master={r} />,
-    },
-    {
-      key: "allocationMethod" as keyof ItemRow,
-      header: "Method",
-      render: (r) => <MethodToggle master={r} />,
     },
     {
       key: "status",
@@ -932,6 +961,7 @@ function ItemEditForm({
     row.weightG == null ? "" : String(roundQty(row.weightG / weightGramsPerUnit(row.uom ?? UOMS[0]))),
   );
   const [kcal, setKcal] = useState(String(row.kcal ?? ""));
+  const [shelfLife, setShelfLife] = useState(String(row.shelfLifeDays ?? ""));
   const [allocation, setAllocation] = useState<"Auto" | AllocationMethod>(getAllocationChoiceForMaster(row.id));
   const [batchTracked, setBatchTracked] = useState(isBatchTrackedForMaster(row.id));
   // Capability flags — seed from the row's effective values (explicit flag, else
@@ -1015,6 +1045,7 @@ function ItemEditForm({
       costPrice: Number(costPrice) || 0,
       weightG: (Number(weightVal) * weightGramsPerUnit(uom)) || 0,
       kcal: Number(kcal) || 0,
+      shelfLifeDays: Number(shelfLife) > 0 ? Number(shelfLife) : undefined,
       canPurchase,
       canProduce,
       canSell,
@@ -1137,6 +1168,11 @@ function ItemEditForm({
             <option value="FEFO">FEFO</option>
             <option value="FIFO">FIFO</option>
           </select>
+        </div>
+        <div>
+          <Label className={lbl}>Shelf Life (days)</Label>
+          <Input type="number" min={0} value={shelfLife} onChange={(e) => setShelfLife(e.target.value)} placeholder="Category default" className="mt-1" />
+          <div className="mt-1 text-[11px] text-muted-foreground">Drives projected batch expiry (receipt + shelf life). Leave blank for the category default.</div>
         </div>
       </div>
 
@@ -1344,90 +1380,83 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
   const [kcal, setKcal] = useState("");
 
   // Stock & storage
+  const [shelfLife, setShelfLife] = useState("");
   const [reorderLevel, setReorderLevel] = useState("0");
   const [thresholdPct, setThresholdPct] = useState("20");
-  const [officeId, setOfficeId] = useState("");
-  const [warehouseId, setWarehouseId] = useState("");
-
-  // Office / Warehouse — "Other" reveals a dynamic text entry to add a new
-  // office, and (once an office is selected) a matching dynamic entry for its
-  // warehouse. Additive only: the predefined office/warehouse lists keep
-  // working through the normal selects.
-  const OTHER_OFFICE = "__other_office__";
-  const OTHER_WAREHOUSE = "__other_warehouse__";
+  // Office / Warehouse — multi-select. An item may be stocked in several offices
+  // and several warehouses (which can span offices). The first of each list is
+  // mirrored to the legacy single `officeId`/`warehouseId` on save so every
+  // single-location reader keeps working.
+  const [officeIds, setOfficeIds] = useState<string[]>([]);
+  const [warehouseIds, setWarehouseIds] = useState<string[]>([]);
   const [customOffices, setCustomOffices] = useState<Office[]>([]);
-  const [addingOffice, setAddingOffice] = useState(false);
-  const [newOfficeName, setNewOfficeName] = useState("");
   const [customWarehouses, setCustomWarehouses] = useState<Warehouse[]>([]);
-  const [addingWarehouse, setAddingWarehouse] = useState(false);
-  const [newWarehouseName, setNewWarehouseName] = useState("");
 
   const officeOptions = useMemo(
     () => [...activeOffices, ...customOffices],
     [customOffices],
   );
 
+  // Warehouses across every selected office (deduped), so multi-office items can
+  // pick warehouses from any of their offices.
   const warehouseOptions = useMemo(() => {
-    if (!officeId) return [];
-    return [...activeWarehousesByOffice(officeId), ...customWarehouses.filter((w) => w.officeId === officeId)];
-  }, [officeId, customWarehouses]);
+    if (officeIds.length === 0) return [];
+    const pool = [
+      ...officeIds.flatMap((oid) => activeWarehousesByOffice(oid)),
+      ...customWarehouses.filter((w) => officeIds.includes(w.officeId)),
+    ];
+    return Array.from(new Map(pool.map((w) => [w.id, w])).values());
+  }, [officeIds, customWarehouses]);
 
-  const handleOfficeChange = (next: string) => {
-    if (next === OTHER_OFFICE) { setAddingOffice(true); return; }
-    setOfficeId(next);
-    // Drop the warehouse selection if it no longer belongs to the new office.
-    if (warehouseId && ![...ALL_WAREHOUSES, ...customWarehouses].some((w) => w.id === warehouseId && w.officeId === next)) {
-      setWarehouseId("");
-    }
+  const toggleOffice = (id: string) => {
+    const next = officeIds.includes(id) ? officeIds.filter((x) => x !== id) : [...officeIds, id];
+    setOfficeIds(next);
+    // Drop any selected warehouse whose office is no longer selected.
+    setWarehouseIds((whs) => whs.filter((wid) => {
+      const w = [...ALL_WAREHOUSES, ...customWarehouses].find((x) => x.id === wid);
+      return !!w && next.includes(w.officeId);
+    }));
   };
 
-  const commitNewOffice = () => {
-    const val = newOfficeName.trim();
-    if (!val) { toast.error("Enter an office name."); return; }
+  const toggleWarehouse = (id: string) => {
+    setWarehouseIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
+  };
+
+  const addNewOffice = (val: string) => {
     const existing = officeOptions.find((o) => o.name.toLowerCase() === val.toLowerCase());
     if (existing) {
-      handleOfficeChange(existing.id);
-    } else {
-      const office: Office = {
-        id: `OFF-CUSTOM-${Date.now()}`,
-        code: val.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 12) || "OTHER",
-        name: val, companyId: "", address: "—", city: "—", manager: "—", phone: "—", status: "Active",
-      };
-      setCustomOffices((prev) => [...prev, office]);
-      customOfficesRegistry.push(office);
-      setOfficeId(office.id);
-      setWarehouseId("");
-      toast.success(`Office "${val}" added.`);
+      if (!officeIds.includes(existing.id)) setOfficeIds((p) => [...p, existing.id]);
+      return;
     }
-    setNewOfficeName("");
-    setAddingOffice(false);
+    const office: Office = {
+      id: `OFF-CUSTOM-${Date.now()}`,
+      code: val.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 12) || "OTHER",
+      name: val, companyId: "", address: "—", city: "—", manager: "—", phone: "—", status: "Active",
+    };
+    setCustomOffices((prev) => [...prev, office]);
+    customOfficesRegistry.push(office);
+    setOfficeIds((p) => [...p, office.id]);
+    toast.success(`Office "${val}" added.`);
   };
 
-  const handleWarehouseChange = (next: string) => {
-    if (next === OTHER_WAREHOUSE) { setAddingWarehouse(true); return; }
-    setWarehouseId(next);
-  };
-
-  const commitNewWarehouse = () => {
-    const val = newWarehouseName.trim();
-    if (!val) { toast.error("Enter a warehouse name."); return; }
-    if (!officeId) { toast.error("Select an office first."); return; }
+  const addNewWarehouse = (val: string) => {
+    if (officeIds.length === 0) { toast.error("Select an office first."); return; }
     const existing = warehouseOptions.find((w) => w.name.toLowerCase() === val.toLowerCase());
     if (existing) {
-      setWarehouseId(existing.id);
-    } else {
-      const warehouse: Warehouse = {
-        id: `WH-CUSTOM-${Date.now()}`,
-        code: val.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 12) || "OTHER",
-        name: val, officeId, type: "Warehouse", address: "—", city: "—", manager: "—", phone: "—", status: "Active",
-      };
-      setCustomWarehouses((prev) => [...prev, warehouse]);
-      customWarehousesRegistry.push(warehouse);
-      setWarehouseId(warehouse.id);
-      toast.success(`Warehouse "${val}" added.`);
+      if (!warehouseIds.includes(existing.id)) setWarehouseIds((p) => [...p, existing.id]);
+      return;
     }
-    setNewWarehouseName("");
-    setAddingWarehouse(false);
+    // New warehouses attach to the first selected office.
+    const officeId = officeIds[0];
+    const warehouse: Warehouse = {
+      id: `WH-CUSTOM-${Date.now()}`,
+      code: val.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 12) || "OTHER",
+      name: val, officeId, type: "Warehouse", address: "—", city: "—", manager: "—", phone: "—", status: "Active",
+    };
+    setCustomWarehouses((prev) => [...prev, warehouse]);
+    customWarehousesRegistry.push(warehouse);
+    setWarehouseIds((p) => [...p, warehouse.id]);
+    toast.success(`Warehouse "${val}" added.`);
   };
   // Allocation method: "Auto" lets the smart default kick in based on item type/category.
   const [allocationChoice, setAllocationChoice] = useState<"Auto" | AllocationMethod>("Auto");
@@ -1506,10 +1535,13 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
       status: fgWithoutBom ? "Inactive" : "Active",
       weightG: (Number(weightVal) * weightGramsPerUnit(uom)) || undefined,
       kcal: Number(kcal) || undefined,
+      shelfLifeDays: Number(shelfLife) > 0 ? Number(shelfLife) : undefined,
       reorderLevel: reorder,
       thresholdPct: threshold,
-      officeId: officeId || undefined,
-      warehouseId: warehouseId || undefined,
+      officeId: officeIds[0] || undefined,
+      warehouseId: warehouseIds[0] || undefined,
+      officeIds: officeIds.length > 0 ? officeIds : undefined,
+      warehouseIds: warehouseIds.length > 0 ? warehouseIds : undefined,
       allocationMethod: allocationChoice === "Auto" ? undefined : allocationChoice,
       batchTracked: batchTrackedChoice,
       altUoms: altUoms.length > 0 ? altUoms : undefined,
@@ -1822,6 +1854,12 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
           </div>
 
           <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Shelf Life (days)</Label>
+            <Input type="number" min={0} value={shelfLife} onChange={(e) => setShelfLife(e.target.value)} placeholder="Category default" className="mt-1 tabular-nums" />
+            <div className="mt-1 text-[11px] text-muted-foreground">Drives projected batch expiry (receipt + shelf life). Leave blank for the category default.</div>
+          </div>
+
+          <div>
             <Label className="text-xs uppercase tracking-wider text-muted-foreground">Reorder Level ({uom})</Label>
             <div className="relative mt-1">
               <Input type="number" min={0} value={reorderLevel} onChange={(e) => setReorderLevel(e.target.value)} className="tabular-nums pr-16" />
@@ -1842,71 +1880,28 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
               </div>
             </div>
           </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Office</Label>
-            <select
-              value={officeId}
-              onChange={(e) => handleOfficeChange(e.target.value)}
-              className={selectCls}
-            >
-              <option value="">Select office…</option>
-              {officeOptions.map((o) => (
-                <option key={o.id} value={o.id}>
-                  {o.code} — {o.name}
-                </option>
-              ))}
-              <option value={OTHER_OFFICE}>Other (add new office)…</option>
-            </select>
-            {addingOffice && (
-              <div className="mt-2 flex items-center gap-2">
-                <Input
-                  autoFocus
-                  value={newOfficeName}
-                  onChange={(e) => setNewOfficeName(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewOffice(); } }}
-                  placeholder="New office name"
-                  className="h-9"
-                />
-                <Button type="button" size="sm" onClick={commitNewOffice}>Add</Button>
-                <Button type="button" size="sm" variant="outline" onClick={() => { setAddingOffice(false); setNewOfficeName(""); }}>Cancel</Button>
-              </div>
-            )}
-          </div>
-          <div>
-            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Warehouse</Label>
-            <select
-              value={warehouseId}
-              onChange={(e) => handleWarehouseChange(e.target.value)}
-              disabled={!officeId}
-              className={selectCls}
-            >
-              <option value="">
-                {officeId ? "Select warehouse…" : "Select office first"}
-              </option>
-              {warehouseOptions.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.code} — {w.name}
-                </option>
-              ))}
-              {officeId && <option value={OTHER_WAREHOUSE}>Other (add new warehouse)…</option>}
-            </select>
-            {addingWarehouse && (
-              <div className="mt-2 flex items-center gap-2">
-                <Input
-                  autoFocus
-                  value={newWarehouseName}
-                  onChange={(e) => setNewWarehouseName(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewWarehouse(); } }}
-                  placeholder="New warehouse name"
-                  className="h-9"
-                />
-                <Button type="button" size="sm" onClick={commitNewWarehouse}>Add</Button>
-                <Button type="button" size="sm" variant="outline" onClick={() => { setAddingWarehouse(false); setNewWarehouseName(""); }}>Cancel</Button>
-              </div>
-            )}
-          </div>
+          <LocationMultiSelect
+            label="Office"
+            entity="office"
+            placeholder="Select offices…"
+            options={officeOptions}
+            selectedIds={officeIds}
+            onToggle={toggleOffice}
+            onAddNew={addNewOffice}
+          />
+          <LocationMultiSelect
+            label="Warehouse"
+            entity="warehouse"
+            placeholder="Select warehouses…"
+            emptyPlaceholder="Select an office first"
+            options={warehouseOptions}
+            selectedIds={warehouseIds}
+            onToggle={toggleWarehouse}
+            onAddNew={addNewWarehouse}
+            disabled={officeIds.length === 0}
+          />
           <div className="md:col-span-2 -mt-1 text-[11px] text-muted-foreground">
-            Default office + warehouse for this item. Used to group stock and prefill location pickers.
+            Offices + warehouses this item may be stocked in — pick as many as apply. Used to group stock and prefill location pickers.
           </div>
 
           <div className="md:col-span-2">

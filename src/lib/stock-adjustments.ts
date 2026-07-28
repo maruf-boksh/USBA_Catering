@@ -133,3 +133,76 @@ export function applyInventoryStock(idOrName: string, delta: number): void {
 export function reduceInventoryStock(itemName: string, qty: number): void {
   applyInventoryStock(itemName, -qty);
 }
+
+/** One received/produced lot appended to an inventory row's batch ladder. */
+export type InventoryBatchLotInput = {
+  batchNo: string;
+  qty: number;
+  expiry: string;
+  costPrice: number;
+  receivedOn: string;
+  binLocation?: string;
+};
+
+/**
+ * Append a batch lot to an inventory item's `batches` ladder AND bump its
+ * on-hand `stock` by the lot quantity, matched by item code (id) OR name. This
+ * is how a produced batch-tracked finished good gets its lot recorded in the
+ * Stock Overview batch popup while keeping the Stock column reconciled with the
+ * lot ladder.
+ *
+ * Idempotent by `batchNo`: if a lot with the same batch number already exists on
+ * the item, the call is a no-op — so re-firing a completion event never
+ * double-posts. Safe no-op if the item isn't in the persisted stock master.
+ */
+export function addInventoryBatchLot(idOrName: string, lot: InventoryBatchLotInput): void {
+  try {
+    const raw = window.localStorage.getItem(INV_KEY);
+    if (!raw) return;
+    const key = idOrName.toLowerCase();
+    const items = JSON.parse(raw) as Array<{
+      id?: string; name: string; stock: number; batches?: InventoryBatchLotInput[]; [k: string]: unknown;
+    }>;
+    let matched = false;
+    let already = false;
+    const updated = items.map((i) => {
+      if (!(i.id === idOrName || i.name.toLowerCase() === key)) return i;
+      matched = true;
+      const batches = Array.isArray(i.batches) ? i.batches : [];
+      if (batches.some((b) => b.batchNo === lot.batchNo)) { already = true; return i; }
+      return {
+        ...i,
+        batches: [...batches, lot],
+        stock: roundQty(Math.max(0, (i.stock as number) + lot.qty)),
+      };
+    });
+    if (matched && !already) window.localStorage.setItem(INV_KEY, JSON.stringify(updated));
+  } catch {}
+}
+
+// ── Produced-run stock idempotency ──────────────────────────────────────────
+// A production run can hit the "post to stock" point more than once (Ready for
+// QC, then Completed, and each may re-fire). We record which run ids have already
+// posted their produced quantity so the stock/lot is written exactly once,
+// keyed by production-order id. Persisted so a reload can't re-post either.
+const POSTED_KEY = "harvest-data-v1:production-stock-posted";
+
+export function hasPostedProductionStock(runId: string): boolean {
+  try {
+    const raw = window.localStorage.getItem(POSTED_KEY);
+    if (!raw) return false;
+    const arr = JSON.parse(raw) as string[];
+    return Array.isArray(arr) && arr.includes(runId);
+  } catch {
+    return false;
+  }
+}
+
+export function markPostedProductionStock(runId: string): void {
+  try {
+    const raw = window.localStorage.getItem(POSTED_KEY);
+    const arr = raw ? (JSON.parse(raw) as string[]) : [];
+    if (!Array.isArray(arr) || arr.includes(runId)) return;
+    window.localStorage.setItem(POSTED_KEY, JSON.stringify([...arr, runId]));
+  } catch {}
+}

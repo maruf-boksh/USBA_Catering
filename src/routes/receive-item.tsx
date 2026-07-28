@@ -24,6 +24,7 @@ import { toast } from "sonner";
 import { useWorkflow, type WfGRN, type WfGRNLine, type WfPurchaseOrder, type WfPOLineItem, type WfPOStatus } from "@/lib/workflow-store";
 import { addDirectReceiptApproval } from "@/lib/direct-receipt-approvals";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
+import { useBatchNumberingMode, generateBatchCode } from "@/lib/batch-numbering-settings";
 
 type SeedGRN = (typeof receiveItems)[number];
 
@@ -334,6 +335,18 @@ export default function ReceiveItem() {
     if (batchEdit.scope === "grn") updateLine(batchEdit.id, field, value);
     else dpUpdateLine(batchEdit.id, field, value);
   };
+  // Global batch-numbering policy (Configuration → Item Profile). In "auto" the
+  // batch/LOT code is system-generated; in "manual" the receiver types it.
+  const batchMode = useBatchNumberingMode();
+  // When the popup opens for a batch item in auto mode, stamp a generated code
+  // (once) so the receiver only supplies the expiry.
+  useEffect(() => {
+    if (!batchEdit || batchMode !== "auto") return;
+    if (batchEditLine && !batchEditLine.batchNo?.trim()) {
+      setBatchField("batchNo", generateBatchCode());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batchEdit, batchMode]);
   const dpItemOptions = useMemo(
     () => itemMaster.filter((i) => i.status === "Active" && itemCanPurchase(i)).slice(0, 120),
     [itemMaster],
@@ -427,12 +440,18 @@ export default function ReceiveItem() {
   const submitForApproval = () => {
     if (!dpVendor) { toast.error("Select a vendor."); return; }
     if (!dpDate) { toast.error("Receipt date is required."); return; }
-    // Batch-tracked items require a batch no + expiry; single items don't.
+    // Batch-tracked items require expiry; the batch no is required only in manual
+    // numbering (auto mode fills it on commit). Single items need neither.
     const dpBatchIncomplete = dpLines.find(
-      (l) => (Number(l.qty) || 0) > 0 && isBatchItem(l.name) && (!l.batchNo?.trim() || !l.expiry),
+      (l) => (Number(l.qty) || 0) > 0 && isBatchItem(l.name)
+        && (!l.expiry || (batchMode === "manual" && !l.batchNo?.trim())),
     );
     if (dpBatchIncomplete) {
-      toast.error(`Batch no & expiry are required for ${dpBatchIncomplete.name || "batch items"}.`);
+      toast.error(
+        batchMode === "auto"
+          ? `Expiry is required for ${dpBatchIncomplete.name || "batch items"}.`
+          : `Batch no & expiry are required for ${dpBatchIncomplete.name || "batch items"}.`,
+      );
       setBatchEdit({ scope: "direct", id: dpBatchIncomplete.id });
       return;
     }
@@ -450,7 +469,8 @@ export default function ReceiveItem() {
     const attachNote = attachments.length ? ` · ${attachments.length} attachment(s): ${attachments.join(", ")}` : "";
     const grnLines: WfGRNLine[] = dpLines.map(l => ({
       itemId: l.id, name: l.name, qty: l.qty, uom: l.uom, temp: "", expiry: l.expiry, qcStatus: "Pending",
-      batchNo: l.batchNo?.trim() || undefined,
+      batchNo: l.batchNo?.trim()
+        || (batchMode === "auto" && isBatchItem(l.name) ? generateBatchCode() : undefined),
       rate: Number(l.rate) || 0,
     }));
     // Fully-formed GRN payload — recorded verbatim by Approval Management on approval.
@@ -574,10 +594,15 @@ export default function ReceiveItem() {
     // ahead of the other required fields so a batch row with missing details
     // reports the batch error rather than an unrelated field.
     const grnBatchIncomplete = formLines.find(
-      (l) => (Number(l.qty) || 0) > 0 && isBatchItem(l.name) && (!l.batchNo?.trim() || !l.expiry),
+      (l) => (Number(l.qty) || 0) > 0 && isBatchItem(l.name)
+        && (!l.expiry || (batchMode === "manual" && !l.batchNo?.trim())),
     );
     if (grnBatchIncomplete) {
-      toast.error(`Batch no & expiry are required for ${grnBatchIncomplete.name || "batch items"}.`);
+      toast.error(
+        batchMode === "auto"
+          ? `Expiry is required for ${grnBatchIncomplete.name || "batch items"}.`
+          : `Batch no & expiry are required for ${grnBatchIncomplete.name || "batch items"}.`,
+      );
       setBatchEdit({ scope: "grn", id: grnBatchIncomplete.id });
       return;
     }
@@ -600,7 +625,8 @@ export default function ReceiveItem() {
       uom: l.uom,
       temp: "",
       expiry: l.expiry,
-      batchNo: l.batchNo?.trim() || undefined,
+      batchNo: l.batchNo?.trim()
+        || (batchMode === "auto" && isBatchItem(l.name) ? generateBatchCode() : undefined),
       qcStatus: "Pending",
       rate: l.rate || undefined,
     }));
@@ -1377,17 +1403,40 @@ export default function ReceiveItem() {
           {batchEditLine && (
             <div className="space-y-4">
               <p className="text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">{batchEditLine.name || "This item"}</span> is batch-tracked — a batch no and expiry are required.
+                <span className="font-medium text-foreground">{batchEditLine.name || "This item"}</span> is batch-tracked — {batchMode === "auto" ? "the batch no is auto-generated; enter the expiry." : "a batch no and expiry are required."}
               </p>
               <div>
                 <Label>Batch / LOT No <span className="text-destructive">*</span></Label>
-                <Input
-                  value={batchEditLine.batchNo ?? ""}
-                  onChange={(e) => setBatchField("batchNo", e.target.value)}
-                  className="mt-1"
-                  placeholder="e.g. BR-2406"
-                  autoFocus
-                />
+                {batchMode === "auto" ? (
+                  <div className="mt-1 flex items-center gap-2">
+                    <Input
+                      value={batchEditLine.batchNo ?? ""}
+                      readOnly
+                      className="font-mono text-xs bg-muted/40"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-9 shrink-0 text-xs"
+                      onClick={() => setBatchField("batchNo", generateBatchCode())}
+                      title="Generate a new code"
+                    >
+                      Regenerate
+                    </Button>
+                  </div>
+                ) : (
+                  <Input
+                    value={batchEditLine.batchNo ?? ""}
+                    onChange={(e) => setBatchField("batchNo", e.target.value)}
+                    className="mt-1"
+                    placeholder="e.g. BR-2406"
+                    autoFocus
+                  />
+                )}
+                {batchMode === "auto" && (
+                  <p className="text-[11px] text-muted-foreground mt-1">Auto-generated — change the policy in Configuration → Item Profile.</p>
+                )}
               </div>
               <div>
                 <Label>Expiry Date <span className="text-destructive">*</span></Label>
@@ -1396,6 +1445,7 @@ export default function ReceiveItem() {
                   value={batchEditLine.expiry}
                   onChange={(e) => setBatchField("expiry", e.target.value)}
                   className="mt-1"
+                  autoFocus={batchMode === "auto"}
                 />
               </div>
             </div>
@@ -1404,8 +1454,8 @@ export default function ReceiveItem() {
             <Button variant="outline" onClick={() => setBatchEdit(null)}>Cancel</Button>
             <Button
               onClick={() => {
-                if (!batchEditLine?.batchNo?.trim() || !batchEditLine?.expiry) {
-                  toast.error("Enter both the batch no and expiry.");
+                if (!batchEditLine?.expiry || (batchMode === "manual" && !batchEditLine?.batchNo?.trim())) {
+                  toast.error(batchMode === "auto" ? "Enter the expiry date." : "Enter both the batch no and expiry.");
                   return;
                 }
                 setBatchEdit(null);

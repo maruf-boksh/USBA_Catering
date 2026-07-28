@@ -1,4 +1,4 @@
-import { useMemo, useState, Fragment } from "react";
+import { useEffect, useMemo, useState, Fragment } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
 import { DataTable, type Column } from "@/components/common/DataTable";
@@ -16,7 +16,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
-  Plus, ArrowLeft, Save, ClipboardCheck, CheckCircle2, AlertCircle, Factory, Users, Eye, Package, PackageOpen, Wrench,
+  Plus, ArrowLeft, Save, ClipboardCheck, CheckCircle2, AlertCircle, Factory, Users, Eye, Package, PackageOpen, Wrench, RefreshCw, Layers,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -25,7 +25,12 @@ import { LocationPicker, LocationFilter, LocationCell } from "@/components/commo
 import { PRODUCTION_ITEMS, type RecipeItem } from "@/routes/production-entry";
 import { resolveProductionItem } from "@/lib/meal-recipe";
 import { usePersistedState } from "@/lib/use-persisted-state";
-import { inventory, warehouses, type InventoryItem } from "@/lib/sample-data";
+import {
+  inventory, warehouses,
+  type InventoryItem, type ItemMaster,
+} from "@/lib/sample-data";
+import { resolveItemMaster, ensureProductionItemRegistered, isItemBatchTracked } from "@/lib/item-registry";
+import { useBatchNumberingMode, generateBatchCode } from "@/lib/batch-numbering-settings";
 import { roundQty, fmtQty } from "@/lib/num";
 
 const SHIFTS = ["Morning", "Evening", "Night"] as const;
@@ -236,6 +241,8 @@ function CreateEntry({
   const [orderId, setOrderId] = useState("");
   const [qty, setQty] = useState("");
   const [batch, setBatch] = useState("");
+  const [expiry, setExpiry] = useState("");
+  const batchMode = useBatchNumberingMode();
   const [shift, setShift] = useState<typeof SHIFTS[number]>("Morning");
   const [producer, setProducer] = useState(PRODUCERS[0]);
   const [officeId, setOfficeId] = useState("OFF-001");
@@ -271,6 +278,39 @@ function CreateEntry({
     ? Math.max(0, (selectedOrder.orderQty ?? selectedOrder.producedQty) - selectedOrder.producedQty)
     : 0;
 
+  // Resolve the output item's master (static seed + persisted Item Profile) to
+  // know whether it's batch-tracked and to project a shelf-life expiry. An
+  // unregistered output is treated as a new batch-tracked Finished Good — it gets
+  // registered on save — so the batch fields still show and can be filled.
+  const outputMaster = useMemo<ItemMaster | undefined>(() => {
+    if (!selectedOrder) return undefined;
+    return resolveItemMaster(
+      selectedOrder.outputItemName ?? selectedOrder.bom,
+      selectedOrder.outputItemCode,
+    );
+  }, [selectedOrder]);
+  const isRegistered = !!outputMaster;
+  // Batch-tracking is an Item Profile attribute — the form only reflects it.
+  // A not-yet-registered output takes the Item Profile default (batch-tracked);
+  // change it in Item Profile if it should be a single item.
+  const effectiveIsBatch = outputMaster ? isItemBatchTracked(outputMaster) : true;
+
+  const projectedExpiry = (m?: ItemMaster): string => {
+    const shelf = m?.shelfLifeDays && m.shelfLifeDays > 0
+      ? m.shelfLifeDays
+      : m?.subCategory === "Frozen" ? 90 : m?.subCategory === "Fresh" ? 3 : m ? 30 : 3;
+    return new Date(Date.now() + shelf * 86400000).toISOString().slice(0, 10);
+  };
+
+  // Prefill the lot fields for a batch-tracked output: auto-generate the batch no
+  // when the global policy is "auto", and project the expiry from shelf life.
+  // Only fills blanks, so a user's manual edits are never clobbered.
+  useEffect(() => {
+    if (!selectedOrder || !effectiveIsBatch) return;
+    if (batchMode === "auto") setBatch((b) => b || generateBatchCode());
+    setExpiry((e) => e || projectedExpiry(outputMaster));
+  }, [selectedOrder, effectiveIsBatch, batchMode, outputMaster]);
+
   // BOM materials for the selected order's output item, tagged with their BOM
   // bucket (raw / packaging / other consumption) so the table can segregate them.
   // Quantities are per-unit here; the table scales them by produced qty.
@@ -294,6 +334,8 @@ function CreateEntry({
     setActuals({}); // clear any actual-qty overrides from the previous order
     setReasons({}); // clear any variance reasons from the previous order
     setDemandRaised(null); // reset the Re-Cook demand button for the new order
+    setBatch("");   // clear lot fields — the effect re-prefills for the new order
+    setExpiry("");
     const o = orders.find((x) => x.id === id);
     if (o) {
       // Pre-fill warehouse from the order
@@ -317,6 +359,24 @@ function CreateEntry({
     if (!producer.trim()) { toast.error("Produced By is required."); return; }
     if (!officeId) { toast.error("Office is required."); return; }
     if (!warehouseId) { toast.error("Warehouse is required."); return; }
+    if (effectiveIsBatch) {
+      if (!batch.trim()) { toast.error("Batch No. is required for a batch-tracked item."); return; }
+      if (!expiry) { toast.error("Expiry date is required for a batch-tracked item."); return; }
+    }
+
+    // Register the output item in the Item Profile / Stock Overview if it isn't
+    // already, so its produced quantity can post as stock and the run can move to
+    // the next stage.
+    if (!isRegistered) {
+      ensureProductionItemRegistered({
+        name: selectedOrder.outputItemName ?? selectedOrder.bom,
+        code: selectedOrder.outputItemCode,
+        uom: "Piece",
+        officeId,
+        warehouseId,
+      });
+      toast.success(`"${selectedOrder.outputItemName ?? selectedOrder.bom}" added to Item Profile.`);
+    }
 
     // Snapshot the Input Materials (BOM vs actual, variance, reason) onto the
     // record so the entry's View dialog can show exactly what was captured here.
@@ -349,7 +409,8 @@ function CreateEntry({
       outputItemName: selectedOrder.outputItemName,
       outputItemCode: selectedOrder.outputItemCode,
       producedQty: q,
-      batchNo: batch.trim() || undefined,
+      batchNo: effectiveIsBatch ? (batch.trim() || undefined) : undefined,
+      batchExpiry: effectiveIsBatch ? (expiry || undefined) : undefined,
       shift,
       producedBy: producer.trim(),
       officeId,
@@ -524,15 +585,68 @@ function CreateEntry({
             </div>
 
             <div>
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-                Batch No.
-              </Label>
-              <Input
-                value={batch}
-                onChange={(e) => setBatch(e.target.value)}
-                placeholder="e.g. BCB-20A"
-                className="mt-1 font-mono"
-              />
+              {!selectedOrder ? (
+                <>
+                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">Batch No.</Label>
+                  <Input disabled placeholder="Select an order first" className="mt-1 font-mono" />
+                </>
+              ) : effectiveIsBatch ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <Label className="text-xs uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+                      <Layers className="h-3.5 w-3.5 text-primary" /> Batch No.
+                      <span className="text-destructive">*</span>
+                      {batchMode === "auto" && (
+                        <Badge variant="outline" className="text-[9px] font-normal">Auto</Badge>
+                      )}
+                    </Label>
+                    {batchMode === "auto" ? (
+                      <div className="mt-1 flex items-center gap-1.5">
+                        <Input value={batch} readOnly className="font-mono bg-muted/40" />
+                        <Button
+                          type="button" variant="outline" size="icon"
+                          className="h-9 w-9 shrink-0"
+                          title="Regenerate batch code"
+                          onClick={() => setBatch(generateBatchCode())}
+                        >
+                          <RefreshCw className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    ) : (
+                      <Input
+                        value={batch}
+                        onChange={(e) => setBatch(e.target.value)}
+                        placeholder="e.g. BCB-20A"
+                        className="mt-1 font-mono"
+                      />
+                    )}
+                  </div>
+                  <div>
+                    <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+                      Expiry <span className="text-destructive">*</span>
+                    </Label>
+                    <Input
+                      type="date"
+                      value={expiry}
+                      onChange={(e) => setExpiry(e.target.value)}
+                      className="mt-1 tabular-nums"
+                    />
+                  </div>
+                  <p className="sm:col-span-2 -mt-1 text-[11px] text-muted-foreground">
+                    {batchMode === "auto"
+                      ? "Batch code auto-generated (policy: Configuration → Item Profile). "
+                      : "Enter the lot / batch number. "}
+                    This lot is recorded on Stock Overview when the run is produced.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <Label className="text-xs uppercase tracking-wider text-muted-foreground">Batch No.</Label>
+                  <div className="mt-1 rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                    Single item (set in Item Profile) — stored as one pooled stock, no lot / expiry. Produced qty adds to Stock Overview.
+                  </div>
+                </>
+              )}
             </div>
 
             <div>
@@ -910,6 +1024,7 @@ function ProductionEntryDetailDialog({
                 <DetailRow label="Output Item"       value={entry.outputItemName ?? "—"} />
                 <DetailRow label="Office / Warehouse" value={<LocationCell officeId={entry.officeId} warehouseId={entry.warehouseId} />} />
                 <DetailRow label="Batch No"          value={entry.batchNo ?? "—"} />
+                <DetailRow label="Batch Expiry"      value={entry.batchExpiry ? <span className="tabular-nums">{entry.batchExpiry}</span> : "—"} />
                 <DetailRow label="Shift"             value={entry.shift ?? "—"} />
                 <DetailRow label="Produced By"       value={entry.producedBy} />
                 {entry.remarks && (
