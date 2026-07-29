@@ -1251,24 +1251,35 @@ export default function ApprovalManagementPage() {
         id: `PKR-AP-${a.id}`,
         category: "Packaging" as Category,
         refId: a.id,
-        title: `${a.flight} — packaging run (${a.item})`,
+        title: `${a.flight} — packaging run (${a.setCode ? `${a.setCode} · ${a.item}` : a.item})`,
         requestedBy: a.createdBy ?? "Packaging",
         requestedAt: a.createdAt,
-        summary: `${a.qty.toLocaleString()} portions of ${a.item} for ${a.flight}${a.depTime ? " dep " + a.depTime : ""} on ${a.date} · run ${a.productionId}`,
-        itemsCount: 1,
+        // A special-meal package is an assembled MEAL — several production runs
+        // combined into one meal. Signing it off approves all of them, so the
+        // approver is shown meals and the runs behind them, not one run's share.
+        summary: a.setCode
+          ? `${a.qty.toLocaleString()} ${a.setCode} meal${a.qty === 1 ? "" : "s"} (${a.item}) for ${a.flight}${a.depTime ? " dep " + a.depTime : ""} on ${a.date} · assembled from ${a.components?.length ?? 1} runs`
+          : `${a.qty.toLocaleString()} portions of ${a.item} for ${a.flight}${a.depTime ? " dep " + a.depTime : ""} on ${a.date} · run ${a.productionId}`,
+        itemsCount: a.setCode ? (a.components?.length ?? 1) : 1,
         status,
         processedBy: a.approvedBy,
         processedAt: a.approvedAt,
-        lines: [{ name: a.item, qty: a.qty, uom: "portions", note: `${a.flight} · ${a.productionId}` }],
+        lines: a.components?.length
+          ? a.components.map((c) => ({ name: c.item, qty: c.qty, uom: "portions", note: `${a.flight} · ${c.productionId}` }))
+          : [{ name: a.item, qty: a.qty, uom: "portions", note: `${a.flight} · ${a.productionId}` }],
         fields: [
           { label: "Packaging ID", value: a.packagingId },
-          { label: "Production ID", value: a.productionId },
+          ...(a.setCode ? [{ label: "Special Meal Set", value: `${a.setCode} · ${a.components?.length ?? 0} items per meal` }] : []),
+          {
+            label: a.components?.length ? "Production IDs" : "Production ID",
+            value: a.components?.length ? a.components.map((c) => c.productionId).join(", ") : a.productionId,
+          },
           { label: "Item", value: a.item },
           { label: "Flight", value: a.flight },
           { label: "Order", value: a.orderNo ?? "—" },
           { label: "Flight Date", value: a.date },
           { label: "Dep Time", value: a.depTime ?? "—" },
-          { label: "Qty For Flight", value: `${a.qty.toLocaleString()} portions` },
+          { label: "Qty For Flight", value: `${a.qty.toLocaleString()} ${a.setCode ? `meal${a.qty === 1 ? "" : "s"}` : "portions"}` },
           { label: "Raised By", value: a.createdBy ?? "—" },
           { label: "Raised At", value: a.createdAt },
           { label: "Run Status", value: a.status },

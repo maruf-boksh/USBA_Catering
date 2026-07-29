@@ -1,4 +1,24 @@
-export type MealItem = { name: string; weight: number; calories: number };
+export type MealItem = {
+  name: string;
+  weight: number;
+  calories: number;
+  /**
+   * Portions of this dish that go into ONE unit of the line it belongs to.
+   * Only meaningful inside a special meal, where the item list is an assembly
+   * bill: VGML = { Plain Polao ×1, Mixed Veg Curry ×1, Mug Dal Vuna ×1 }. A
+   * dish served twice over (two rotis) sets 2. Absent ⇒ 1.
+   *
+   * This is what turns "5 VGML" into a demand of 5 portions on each component
+   * pool, and what packaging reserves out of those pools when it assembles.
+   */
+  qtyPerMeal?: number;
+};
+
+/** Portions of a component dish per one assembled meal (defaults to 1). */
+export function perMealQty(item: Pick<MealItem, "qtyPerMeal">): number {
+  const n = item.qtyPerMeal;
+  return typeof n === "number" && n > 0 ? n : 1;
+}
 export type MealChoice = { label: string; percentage: number; items: MealItem[] };
 export type SpecialMeal = {
   type: string;

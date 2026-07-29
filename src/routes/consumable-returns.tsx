@@ -487,36 +487,41 @@ function ReturnList({
             ) : (
               filteredReturns.map((r) => (
                 <Fragment key={r.id}>
+                  {/* One return, N item lines. The return-level cells SPAN their
+                      item rows instead of being blanked out on every line after
+                      the first — a continuation row used to read as a stray
+                      record with an empty id, date, flight and status. */}
                   {r.lines.map((l, li) => (
                     <TableRow
                       key={`${r.id}-L${li}`}
                       className={cn(
                         "hover:bg-muted/30 transition-colors",
-                        li === 0 ? "border-t-2 border-t-primary/20" : "border-t border-t-border/40",
+                        li === 0 ? "border-t-2 border-t-primary/20" : "border-t border-t-border/30",
                       )}
                       style={r.id === highlightId ? { animation: "returnRowBlink 0.65s ease-in-out 3" } : undefined}
                     >
-                      {/* Return ID — only first line */}
-                      <TableCell>
-                        {li === 0 && (
-                          <span className="font-mono text-xs font-semibold text-primary">{r.id}</span>
-                        )}
-                      </TableCell>
-
-                      {/* Date — only first line */}
-                      <TableCell className="tabular-nums text-xs text-muted-foreground">
-                        {li === 0 ? r.date : ""}
-                      </TableCell>
-
-                      {/* Flight — only first line */}
-                      <TableCell>
-                        {li === 0 && <span className="font-semibold text-sm">{r.flight}</span>}
-                      </TableCell>
-
-                      {/* Sector — only first line */}
-                      <TableCell className="text-xs text-muted-foreground">
-                        {li === 0 ? r.sector : ""}
-                      </TableCell>
+                      {li === 0 && (
+                        <>
+                          {/* Return ID — spans the whole return */}
+                          <TableCell rowSpan={r.lines.length} className="align-top border-l-2 border-l-primary/40 bg-muted/10">
+                            <span className="font-mono text-xs font-semibold text-primary">{r.id}</span>
+                            {r.lines.length > 1 && (
+                              <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                                {r.lines.length} items
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell rowSpan={r.lines.length} className="align-top tabular-nums text-xs text-muted-foreground bg-muted/10">
+                            {r.date}
+                          </TableCell>
+                          <TableCell rowSpan={r.lines.length} className="align-top bg-muted/10">
+                            <span className="font-semibold text-sm">{r.flight}</span>
+                          </TableCell>
+                          <TableCell rowSpan={r.lines.length} className="align-top text-xs text-muted-foreground bg-muted/10">
+                            {r.sector}
+                          </TableCell>
+                        </>
+                      )}
 
                       {/* Item — always shown */}
                       <TableCell>
@@ -529,42 +534,48 @@ function ReturnList({
                         {l.issuedQty != null ? `${l.issuedQty} ${l.uom}` : "—"}
                       </TableCell>
 
-                      {/* Return QTY — always shown */}
-                      <TableCell className="tabular-nums text-xs font-semibold whitespace-nowrap">
+                      {/* Return QTY — a nil return is stated plainly rather than
+                          emphasised like a real quantity. */}
+                      <TableCell className={cn(
+                        "tabular-nums text-xs whitespace-nowrap",
+                        l.qty > 0 ? "font-semibold" : "text-muted-foreground",
+                      )}>
                         {l.qty} {l.uom}
                       </TableCell>
 
-                      {/* Status — only first line (Pending before approval, Approved after) */}
-                      <TableCell>
-                        {li === 0 && (() => {
-                          const st = approvalFor(r)?.status ?? "Pending";
-                          const tone =
-                            st === "Approved" ? "border-emerald-300 bg-emerald-50 text-emerald-700"
-                            : st === "Declined" ? "border-rose-300 bg-rose-50 text-rose-700"
-                            : "border-amber-300 bg-amber-50 text-amber-700";
-                          return (
-                            <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold", tone)}>
-                              {st}
-                            </span>
-                          );
-                        })()}
-                      </TableCell>
+                      {li === 0 && (
+                        <>
+                          {/* Status — one per return (Pending before approval, Approved after) */}
+                          <TableCell rowSpan={r.lines.length} className="align-top bg-muted/10">
+                            {(() => {
+                              const st = approvalFor(r)?.status ?? "Pending";
+                              const tone =
+                                st === "Approved" ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                                : st === "Declined" ? "border-rose-300 bg-rose-50 text-rose-700"
+                                : "border-amber-300 bg-amber-50 text-amber-700";
+                              return (
+                                <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold", tone)}>
+                                  {st}
+                                </span>
+                              );
+                            })()}
+                          </TableCell>
 
-                      {/* Actions — only first line */}
-                      <TableCell className="text-right">
-                        {li === 0 && (
-                          <div className="flex items-center justify-end gap-2">
-                            <button
-                              type="button"
-                              title="View"
-                              onClick={() => setViewRecord(r)}
-                              className="text-muted-foreground hover:text-primary transition-colors"
-                            >
-                              <Eye className="h-4 w-4" />
-                            </button>
-                          </div>
-                        )}
-                      </TableCell>
+                          {/* Actions — one per return */}
+                          <TableCell rowSpan={r.lines.length} className="align-top text-right bg-muted/10">
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                type="button"
+                                title="View"
+                                onClick={() => setViewRecord(r)}
+                                className="text-muted-foreground hover:text-primary transition-colors"
+                              >
+                                <Eye className="h-4 w-4" />
+                              </button>
+                            </div>
+                          </TableCell>
+                        </>
+                      )}
                     </TableRow>
                   ))}
                 </Fragment>

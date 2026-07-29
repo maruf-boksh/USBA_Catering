@@ -3577,6 +3577,16 @@ export function GalleyPlanningModal({
   const [retCrew, setRetCrew] = useState<number>(returnOrder?.crew ?? 0);
   const [retSpecialMeals, setRetSpecialMeals] = useState<number>(retSpecialTotal || returnOrder?.specialMeals || 0);
 
+  // ── Plan the outbound only ──────────────────────────────────────────────────
+  // A rotation is normally planned once, covering both legs. But the return is
+  // not always ours to load: it can be catered down-route, cancelled, or simply
+  // planned separately. Unticking this drops the arrival half from the sheet —
+  // its load counts, meals, standards-driven quantities and the forwarded plan —
+  // without touching the pairing itself, so it can be brought back at any point.
+  const [includeReturn, setIncludeReturn] = useState(true);
+  /** The return leg AS PLANNED — undefined when the planner excluded it. */
+  const planReturn = includeReturn ? returnOrder : undefined;
+
   // Aircraft type for this plan — drives which loading standard fills the
   // beverage/amenity/equipment quantities. Editable from the header, and a new
   // aircraft can be registered on the fly (shared with Configuration > Aircraft).
@@ -3613,7 +3623,7 @@ export function GalleyPlanningModal({
     pax: number, crew: number, aircraft: string,
     // Defaults to the currently selected return leg, so every existing caller
     // keeps re-deriving the arrival half against it.
-    ret: { pax: number; crew: number } | undefined = returnOrder ? { pax: retPax, crew: retCrew } : undefined,
+    ret: { pax: number; crew: number } | undefined = planReturn ? { pax: retPax, crew: retCrew } : undefined,
   ) => {
     const effFlight = {
       ...(flight ?? {}),
@@ -3704,10 +3714,10 @@ export function GalleyPlanningModal({
   );
   // …and the same for the return leg, scaled to ITS load counts.
   const retScaledMeals = useMemo(
-    () => returnOrder
-      ? scaleDispatchMeals(returnOrder.flight, retPax, retCrew, returnOrder.crew || retCrew)?.scaled ?? null
+    () => planReturn
+      ? scaleDispatchMeals(planReturn.flight, retPax, retCrew, planReturn.crew || retCrew)?.scaled ?? null
       : null,
-    [returnOrder, retPax, retCrew],
+    [planReturn, retPax, retCrew],
   );
 
   // Read-only field (connected value, not editable) for the connected tabs.
@@ -3960,11 +3970,47 @@ export function GalleyPlanningModal({
                   <p className="text-[11px] text-muted-foreground leading-tight">Per-flight galley load — set counts, then forward to loading</p>
                 </div>
               </div>
-              {/* One card per leg of the rotation — this plan covers both. */}
-              <div className="flex flex-wrap gap-2">
+              {/* One card per leg of the rotation. The plan covers both by
+                  default; the return can be dropped when it is not ours to
+                  load (catered down-route, cancelled, or planned separately). */}
+              <div className="flex flex-wrap items-center gap-2">
                 {legCard(order?.direction, flight?.flight ?? entry.flightId, flight?.sector, entry.packagingDate, planPax, planCrew)}
-                {returnOrder && legCard(returnOrder.direction, returnOrder.flight, returnOrder.sector, returnOrder.date, retPax, retCrew)}
+                {returnOrder && (
+                  <div className={cn("flex items-center gap-2", !includeReturn && "opacity-50")}>
+                    {legCard(returnOrder.direction, returnOrder.flight, returnOrder.sector, returnOrder.date, retPax, retCrew)}
+                  </div>
+                )}
               </div>
+              {returnOrder && (
+                <label
+                  className="mt-2 inline-flex cursor-pointer items-center gap-2 text-[11px] text-slate-600"
+                  title={includeReturn
+                    ? `${returnOrder.flight} (${returnOrder.sector}) is planned with this rotation. Untick to plan ${flight?.flight ?? entry.flightId} on its own — the return's load, meals and standards drop out of the sheet.`
+                    : `Only ${flight?.flight ?? entry.flightId} is being planned. Tick to bring ${returnOrder.flight} back into this plan.`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={includeReturn}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setIncludeReturn(on);
+                      // Re-derive the sheet immediately: the arrival half's
+                      // quantities come from the return's load, so the standards
+                      // must be re-applied with (or without) it.
+                      rebuildPlan(planPax, planCrew, aircraftType, on ? { pax: retPax, crew: retCrew } : undefined);
+                    }}
+                    className="h-3.5 w-3.5 cursor-pointer accent-sky-600"
+                  />
+                  <span>
+                    Plan the return leg <b className="text-slate-800">{returnOrder.flight}</b> with this rotation
+                    {!includeReturn && (
+                      <span className="ml-1 rounded-full border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                        outbound only
+                      </span>
+                    )}
+                  </span>
+                </label>
+              )}
               {/* Loading standard — aircraft type sets which standard applies;
                   model is an informational variant configured under Aircraft. */}
               <div className="flex flex-wrap items-center gap-2 mt-2.5">
@@ -4109,23 +4155,24 @@ export function GalleyPlanningModal({
                     </div>
                     </div>
 
-                    {/* The return leg of this rotation — planned on the same sheet. */}
-                    {returnOrder && (
+                    {/* The return leg of this rotation — planned on the same
+                        sheet, unless the planner excluded it in the header. */}
+                    {planReturn && (
                       <div className="mt-5">
                         <div className="flex items-center gap-2 mb-1.5">
-                          {dirBadge(returnOrder.direction)}
-                          <span className="text-xs font-semibold text-slate-700">{returnOrder.flight}</span>
-                          <span className="text-[11px] text-muted-foreground">{returnOrder.sector}</span>
+                          {dirBadge(planReturn.direction)}
+                          <span className="text-xs font-semibold text-slate-700">{planReturn.flight}</span>
+                          <span className="text-[11px] text-muted-foreground">{planReturn.sector}</span>
                         </div>
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                          <RO label="Order #" value={returnOrder.orderNo} />
-                          <RO label="Flight" value={returnOrder.flight} />
-                          <RO label="Airline" value={returnOrder.airline} />
-                          <RO label="Status" value={returnOrder.status} />
-                          <RO label="Sector" value={returnOrder.sector} />
-                          <RO label="Direction" value={returnOrder.direction} />
-                          <RO label="Date" value={returnOrder.date} />
-                          <RO label="ETD" value={returnOrder.etd} />
+                          <RO label="Order #" value={planReturn.orderNo} />
+                          <RO label="Flight" value={planReturn.flight} />
+                          <RO label="Airline" value={planReturn.airline} />
+                          <RO label="Status" value={planReturn.status} />
+                          <RO label="Sector" value={planReturn.sector} />
+                          <RO label="Direction" value={planReturn.direction} />
+                          <RO label="Date" value={planReturn.date} />
+                          <RO label="ETD" value={planReturn.etd} />
                         </div>
 
                         <div className="mt-4">
@@ -4185,14 +4232,20 @@ export function GalleyPlanningModal({
                 </div>
                 {mealsBlock(dispatchSection ? scaledMeals : null, order?.flight ?? flightNo)}
               </div>
-              {returnOrder && (
+              {planReturn && (
                 <div>
                   <div className="flex items-center gap-2 mb-2">
-                    {dirBadge(returnOrder.direction)}
-                    <span className="text-xs font-semibold text-slate-700">{returnOrder.flight}</span>
-                    <span className="text-[11px] text-muted-foreground">{returnOrder.sector}</span>
+                    {dirBadge(planReturn.direction)}
+                    <span className="text-xs font-semibold text-slate-700">{planReturn.flight}</span>
+                    <span className="text-[11px] text-muted-foreground">{planReturn.sector}</span>
                   </div>
-                  {mealsBlock(retScaledMeals, returnOrder.flight)}
+                  {mealsBlock(retScaledMeals, planReturn.flight)}
+                </div>
+              )}
+              {returnOrder && !includeReturn && (
+                <div className="rounded-md border border-dashed border-amber-300 bg-amber-50/60 px-3 py-2 text-[11px] text-amber-800">
+                  <b>{returnOrder.flight}</b> ({returnOrder.sector}) is paired with this rotation but excluded from
+                  this plan — its meals are not loaded here. Tick <b>Plan the return leg</b> in the header to include it.
                 </div>
               )}
             </div>

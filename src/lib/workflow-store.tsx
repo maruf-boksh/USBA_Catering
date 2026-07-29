@@ -1,9 +1,11 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { getDemandRequests, saveDemandRequests } from "@/lib/demand-requests";
 import {
-  requisitions as seedReqs, purchaseOrders as seedPOs,
+  requisitions as seedReqs, purchaseOrders as seedPOs, cookingTempLogs,
 } from "@/lib/sample-data";
+import { loadMealPlanningConfig } from "@/lib/meal-planning-data";
+import { planSpecialMealDemoProduction } from "@/lib/demo-special-meal-production";
 import { updateFlightOrdersWhere, getFlightOrders } from "@/lib/flight-orders-store";
 import { servedOrderNosFor } from "@/lib/production-order-link";
 import { resolveItemMaster, isItemBatchTracked } from "@/lib/item-registry";
@@ -858,6 +860,64 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       remarks: "Second run after material top-up.",
     },
   ]);
+
+  // ── Demo top-up: production behind the day's special meals ──────────────────
+  // The demo order book carries special meals, but nothing cooks their component
+  // dishes — so Packaging had trays it could never assemble. This fills that gap
+  // once per load: it works out the day's shortfall from the live order book and
+  // menu plan, adds the runs + entry records, and writes their QC passes into
+  // the cooking-temp store (which is what promotes them into Packaging).
+  //
+  // Purely additive and keyed by deterministic ids: a dish already produced in
+  // sufficient quantity is skipped, so production entered through the app is
+  // never duplicated or overwritten.
+  const demoTopUpDone = useRef(false);
+  useEffect(() => {
+    if (demoTopUpDone.current) return;
+    demoTopUpDone.current = true;
+    const date = new Date().toISOString().slice(0, 10);
+    const producedFor = (item: string, on: string) =>
+      productionEntries
+        .filter((e) => e.date === on && (e.outputItemName ?? e.bom) === item)
+        .reduce((s, e) => s + (e.producedQty ?? 0), 0);
+    const plan = planSpecialMealDemoProduction({
+      date,
+      orders: getFlightOrders(),
+      cards: loadMealPlanningConfig(),
+      producedFor,
+      existingIds: new Set(productionEntries.map((e) => e.id)),
+    });
+    if (plan.entries.length === 0) return;
+    setProductionEntries((prev) => {
+      const have = new Set(prev.map((e) => e.id));
+      const add = plan.entries.filter((e) => !have.has(e.id));
+      return add.length ? [...add, ...prev] : prev;
+    });
+    setProductionEntryRecords((prev) => {
+      const have = new Set(prev.map((r) => r.id));
+      const add = plan.records.filter((r) => !have.has(r.id));
+      return add.length ? [...add, ...prev] : prev;
+    });
+    // QC lives in its own persisted store, read straight from localStorage by the
+    // packaging pipeline. Seed it the way Cooking Temp would if it has never been
+    // opened, so the demo passes land alongside the existing log rather than
+    // replacing it.
+    try {
+      const KEY = "harvest-data-v1:cooking-temp-records";
+      const raw = window.localStorage.getItem(KEY);
+      const existing: { id: string }[] = raw
+        ? JSON.parse(raw)
+        : cookingTempLogs.map((r) => ({ ...r, date: "2026-05-22" }));
+      const have = new Set((Array.isArray(existing) ? existing : []).map((r) => r.id));
+      const add = plan.qc.filter((r) => !have.has(r.id));
+      if (add.length > 0 || !raw) {
+        window.localStorage.setItem(KEY, JSON.stringify([...add, ...(Array.isArray(existing) ? existing : [])]));
+      }
+    } catch {
+      // localStorage unavailable — the demo top-up is best-effort.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [mrpRuns, setMrpRuns] = useState<WfMrpRun[]>([]);
   const [qcClearedFlights, setQcClearedFlights] = useState<Record<string, string>>({});

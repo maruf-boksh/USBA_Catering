@@ -1302,6 +1302,9 @@ type SummaryLine = {
   specialPax: number;
   specialCrew: number;
   baseTotal: number;
+  /** The Order #s rolled into this line — bulk upload puts a whole date's
+   *  flights on one Order #, so a line usually has one or two. Sorted. */
+  orderNos: string[];
 };
 
 function OrderSummaryView({
@@ -1320,14 +1323,19 @@ function OrderSummaryView({
 
   const lines = useMemo<SummaryLine[]>(() => {
     const map = new Map<string, SummaryLine>();
+    // Order #s per line, collected as a set — one Order # covers many flights,
+    // so it would otherwise repeat once per flight in the group.
+    const nos = new Map<string, Set<string>>();
     for (const o of orders) {
       const flightType: FlightTypeScope = isDomesticSector(o.sector) ? "Domestic" : "International";
       const key = `${o.date}__${flightType}`;
       let r = map.get(key);
       if (!r) {
-        r = { date: o.date, flightType, flights: 0, passengers: 0, crew: 0, specialPax: 0, specialCrew: 0, baseTotal: 0 };
+        r = { date: o.date, flightType, flights: 0, passengers: 0, crew: 0, specialPax: 0, specialCrew: 0, baseTotal: 0, orderNos: [] };
         map.set(key, r);
+        nos.set(key, new Set());
       }
+      if (o.orderNo) nos.get(key)!.add(o.orderNo);
       const sp = splitSpecialMeals(o);
       r.flights += 1;
       r.passengers += o.pax;
@@ -1336,6 +1344,7 @@ function OrderSummaryView({
       r.specialCrew += sp.crew;
       r.baseTotal += o.pax + (o.crew ?? 0) + o.specialMeals;
     }
+    for (const [key, r] of map) r.orderNos = [...(nos.get(key) ?? [])].sort();
     return Array.from(map.values()).sort(
       (a, b) => a.date.localeCompare(b.date) || a.flightType.localeCompare(b.flightType),
     );
@@ -1390,6 +1399,7 @@ function OrderSummaryView({
               <TableHeader className="bg-muted/40">
                 <TableRow>
                   <TableHead className="text-[10px] uppercase tracking-wider">Date</TableHead>
+                  <TableHead className="text-[10px] uppercase tracking-wider">Order #</TableHead>
                   <TableHead className="text-[10px] uppercase tracking-wider">Flight Type</TableHead>
                   <TableHead className="text-[10px] uppercase tracking-wider text-right">Flights</TableHead>
                   <TableHead className="text-[10px] uppercase tracking-wider text-right">Passengers</TableHead>
@@ -1408,6 +1418,25 @@ function OrderSummaryView({
                   return (
                     <TableRow key={`${r.date}-${r.flightType}`} className="hover:bg-muted/20">
                       <TableCell className="font-medium tabular-nums">{r.date}</TableCell>
+                      {/* The Order #s behind the line. One Order # commonly spans
+                          a whole date's flights, so this is usually one or two
+                          chips — the link back from an aggregate to its orders. */}
+                      <TableCell>
+                        {r.orderNos.length === 0 ? (
+                          <span className="text-[11px] text-muted-foreground">—</span>
+                        ) : (
+                          <div className="flex flex-wrap gap-1">
+                            {r.orderNos.map((no) => (
+                              <span
+                                key={no}
+                                className="inline-flex items-center rounded-full border border-primary/30 bg-primary/5 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-primary whitespace-nowrap"
+                              >
+                                {no}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </TableCell>
                       <TableCell>
                         <Badge variant="outline" className={cn("text-[10px] font-normal", r.flightType === "Domestic" ? "border-success/30 bg-success/5 text-success" : "border-navy/30 bg-navy/5 text-navy")}>
                           <Plane className="h-2.5 w-2.5 mr-1" /> {r.flightType}
@@ -1453,7 +1482,7 @@ function OrderSummaryView({
                   );
                 })}
                 <TableRow className="bg-muted/30 font-semibold">
-                  <TableCell colSpan={2} className="text-right uppercase text-[10px] tracking-wider">Grand Total</TableCell>
+                  <TableCell colSpan={3} className="text-right uppercase text-[10px] tracking-wider">Grand Total</TableCell>
                   <TableCell className="text-right tabular-nums">{totals.flights}</TableCell>
                   <TableCell className="text-right tabular-nums">{totals.passengers.toLocaleString()}</TableCell>
                   <TableCell className="text-right tabular-nums">{totals.crew.toLocaleString()}</TableCell>

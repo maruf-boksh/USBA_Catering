@@ -59,6 +59,7 @@ import {
   gmOrderSummary,
   mealCards,
   loadMealPlanningConfig,
+  perMealQty,
   type FlightType,
   type MealCard,
 } from "@/lib/meal-planning-data";
@@ -3335,9 +3336,9 @@ function MealCardView({
                   <ul className="space-y-1.5">
                     {s.items.map((item, i) => {
                       const code = `MP-${slugifyItem(item.name)}`;
-                      // Special-meal portions can come from the meal-plan
-                      // template; if it's a fixed number use that, otherwise
-                      // fall back to the special-meals count from flight orders.
+                      // A special meal is a KIT, not a cook: this line is the
+                      // dish's CONTRIBUTION to its own pool — meals of this code
+                      // × portions per meal — not a production order of its own.
                       const explicitPortions = typeof s.portions === "number" ? s.portions : 0;
                       const computed = computeMealQty({
                         requirements,
@@ -3346,21 +3347,24 @@ function MealCardView({
                         forType: meal.forType,
                         kind: "Special",
                       });
-                      const qty = explicitPortions > 0 ? explicitPortions : computed.qty;
-                      const breakdown = explicitPortions > 0
-                        ? `${explicitPortions} portion${explicitPortions === 1 ? "" : "s"} configured for ${s.type}`
-                        : computed.breakdown;
+                      const mealCount = explicitPortions > 0 ? explicitPortions : computed.qty;
+                      const per = perMealQty(item);
+                      const qty = mealCount * per;
+                      const breakdown = `${mealCount} ${s.type} × ${per} = ${qty}`;
                       return (
                         <li key={i} className="text-[11px] flex items-center gap-2">
                           <div className="flex-1 min-w-0">
                             <div className="text-foreground truncate">{item.name}</div>
                             <div className="text-[10px] text-muted-foreground">
-                              {item.weight}g · {item.calories} kcal
+                              {item.weight}g · {item.calories} kcal · ×{per}/meal
                               {qty > 0 && (
                                 <>
                                   {" · "}
-                                  <span className="text-primary font-medium tabular-nums">
-                                    {qty.toLocaleString()} pcs
+                                  <span
+                                    className="text-primary font-medium tabular-nums"
+                                    title={`${breakdown} — added to ${item.name}'s production pool, not cooked separately`}
+                                  >
+                                    +{qty.toLocaleString()} to pool
                                   </span>
                                 </>
                               )}
@@ -3524,8 +3528,25 @@ function MealPlanningDetailsDialog({
   // meal cards, attaching the computed qty. Items with qty <= 0 are dropped.
   // Used by the "Create All Orders" bulk action below.
   const availableItems = useMemo<MealPlanPickItem[]>(() => {
+    // ── One dish = ONE pool ───────────────────────────────────────────────────
+    // A dish is cooked once and drawn down by everything that contains it: its
+    // own choice lines, the dessert slot, and every special meal whose recipe
+    // includes it. Listing those consumers separately raised two production
+    // orders for the same dish and under-cooked each of them; the shares are
+    // summed here instead, so one order covers the whole day's demand.
     const out: MealPlanPickItem[] = [];
+    const pool = new Map<string, { item: MealPlanPickItem; qty: number; parts: string[] }>();
+    const addToPool = (name: string, qty: number, part: string, fallback?: MealPlanPickItem) => {
+      if (qty <= 0) return;
+      const code = `MP-${slugifyItem(name)}`;
+      const base = itemByCode.get(code) ?? fallback;
+      if (!base) return;
+      const hit = pool.get(code);
+      if (hit) { hit.qty += qty; hit.parts.push(part); }
+      else pool.set(code, { item: base, qty, parts: [part] });
+    };
     for (const [, meals] of byDay) {
+      const rosterCodes = orderedSpecialsByDay.get(meals[0]?.day ?? "");
       for (const meal of meals) {
         for (const choice of meal.choices) {
           for (const it of choice.items) {
@@ -3537,29 +3558,32 @@ function MealPlanningDetailsDialog({
               kind: "Choice",
               percentage: choice.percentage,
             });
-            if (qty <= 0) continue;
-            const base = itemByCode.get(`MP-${slugifyItem(it.name)}`);
-            if (base) out.push({ ...base, computedQty: qty, qtyBreakdown: breakdown });
+            addToPool(it.name, qty * perMealQty(it), breakdown);
           }
         }
         for (const sp of meal.specialMeals) {
           if (!sp.enabled) continue;
+          // Meals of THIS code — the roster is the truth when the orders carry
+          // one; else the card's planned portions; else the day's special total.
+          const computed = computeMealQty({
+            requirements,
+            day: meal.day,
+            flightTypes: meal.flightType,
+            forType: meal.forType,
+            kind: "Special",
+          });
+          const fromRoster = rosterCodes?.get(sp.type) ?? 0;
+          const explicitPortions = typeof sp.portions === "number" ? sp.portions : 0;
+          const mealCount = fromRoster > 0 ? fromRoster : explicitPortions > 0 ? explicitPortions : computed.qty;
+          if (mealCount <= 0) continue;
           for (const it of sp.items) {
-            const explicitPortions = typeof sp.portions === "number" ? sp.portions : 0;
-            const computed = computeMealQty({
-              requirements,
-              day: meal.day,
-              flightTypes: meal.flightType,
-              forType: meal.forType,
-              kind: "Special",
-            });
-            const qty = explicitPortions > 0 ? explicitPortions : computed.qty;
-            if (qty <= 0) continue;
-            const breakdown = explicitPortions > 0
-              ? `${explicitPortions} portion${explicitPortions === 1 ? "" : "s"} configured for ${sp.type}`
-              : computed.breakdown;
-            const base = itemByCode.get(`MP-${slugifyItem(it.name)}`);
-            if (base) out.push({ ...base, computedQty: qty, qtyBreakdown: breakdown });
+            // The kit recipe: portions of this dish in ONE such meal.
+            const per = perMealQty(it);
+            addToPool(
+              it.name,
+              mealCount * per,
+              `${(mealCount * per).toLocaleString()} for ${sp.type} (${mealCount} × ${per})`,
+            );
           }
         }
         // Dessert — served to the whole audience for this card.
@@ -3572,10 +3596,19 @@ function MealPlanningDetailsDialog({
             kind: "Choice",
             percentage: 100,
           });
-          const base = itemByCode.get(`MP-${slugifyItem(meal.dessert.name)}`);
-          if (base && qty > 0) out.push({ ...base, computedQty: qty, qtyBreakdown: breakdown });
+          addToPool(meal.dessert.name, qty * perMealQty(meal.dessert), breakdown);
         }
       }
+      for (const { item, qty, parts } of pool.values()) {
+        out.push({
+          ...item,
+          computedQty: qty,
+          // Say what the pool is made of when more than one line feeds it —
+          // "101 pax × 60% + 8 for VGML" is the number the planner must trust.
+          qtyBreakdown: parts.length > 1 ? `${parts.join(" + ")} = ${qty.toLocaleString()}` : parts[0],
+        });
+      }
+      pool.clear();
 
       // Ordered special meals (roster codes not in the template) — once per day.
       const orderedMap = orderedSpecialsByDay.get(meals[0]?.day ?? "");

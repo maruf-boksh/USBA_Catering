@@ -20,13 +20,19 @@ import { MEAL_PLAN_CONFIG_KEY, mealCards as seedMealCards, cardMatchesDate } fro
 // Resolve a meal item's serving weight/kcal. The Item Profile (config-item) is
 // the source of truth when configured; the static FOOD_ITEMS/DESSERT_ITEMS entry
 // is the fallback for dishes not yet in the profile master.
-function withProfile(found?: { name: string; weight: number; calories: number }) {
-  if (!found) return { name: "", weight: 0, calories: 0 };
+function withProfile(
+  found?: { name: string; weight: number; calories: number },
+  /** Portions per meal to carry over — swapping the dish must not reset it. */
+  qtyPerMeal?: number,
+) {
+  const qty = qtyPerMeal && qtyPerMeal > 0 ? { qtyPerMeal } : {};
+  if (!found) return { name: "", weight: 0, calories: 0, ...qty };
   const p = resolveItemProfile(found.name);
   return {
     name: found.name,
     weight: p?.weightG ?? found.weight,
     calories: p?.kcal ?? found.calories,
+    ...qty,
   };
 }
 
@@ -34,6 +40,13 @@ interface MealItem {
   name: string;
   weight: number;
   calories: number;
+  /**
+   * Portions of this dish in ONE meal of the line it belongs to. A special meal
+   * is assembled from its items, so this is the assembly quantity: 2 rotis in a
+   * meal means 2 portions are reserved out of the Roti pool per meal ordered.
+   * Absent ⇒ 1.
+   */
+  qtyPerMeal?: number;
 }
 
 interface MealChoice {
@@ -1627,6 +1640,7 @@ export default function MealPlanning() {
                                 </div>
                                 <div className="flex gap-2 items-center text-xs font-semibold text-muted-foreground border-b pb-1">
                                   <div className="flex-1">Item</div>
+                                  <div className="w-16 text-center" title="Portions of this item in ONE meal">Qty / meal</div>
                                   <div className="w-20 text-center">Weight (g)</div>
                                   <div className="w-16 text-center">Kcal</div>
                                   <div className="w-16" />
@@ -1639,7 +1653,7 @@ export default function MealPlanning() {
                                         const found = (FOOD_ITEMS[type] || []).find((fi) => fi.name === e.target.value);
                                         const copy = { ...createData };
                                         const updatedSMs = (copy.specialMealsByType[type] || []).map((sm, si) =>
-                                          si === smIdx ? { ...sm, items: (sm.items || []).map((it, ii) => ii === itemIdx ? (withProfile(found)) : it) } : sm
+                                          si === smIdx ? { ...sm, items: (sm.items || []).map((it, ii) => ii === itemIdx ? (withProfile(found, it.qtyPerMeal)) : it) } : sm
                                         );
                                         copy.specialMealsByType = { ...copy.specialMealsByType, [type]: updatedSMs };
                                         setCreateData(copy);
@@ -1651,6 +1665,27 @@ export default function MealPlanning() {
                                         <option key={fi.name} value={fi.name}>{fi.name}</option>
                                       ))}
                                     </select>
+                                    {/* Assembly quantity — how many portions of this
+                                        dish go into one such meal. Production sizes
+                                        the dish's pool by it, and packaging reserves
+                                        that many per meal it assembles. */}
+                                    <input
+                                      type="number"
+                                      min={1}
+                                      step={1}
+                                      value={item.qtyPerMeal ?? 1}
+                                      onChange={(e) => {
+                                        const value = Math.max(1, Math.round(Number(e.target.value) || 1));
+                                        const copy = { ...createData };
+                                        const updatedSMs = (copy.specialMealsByType[type] || []).map((sm, si) =>
+                                          si === smIdx ? { ...sm, items: (sm.items || []).map((it, ii) => ii === itemIdx ? { ...it, qtyPerMeal: value } : it) } : sm
+                                        );
+                                        copy.specialMealsByType = { ...copy.specialMealsByType, [type]: updatedSMs };
+                                        setCreateData(copy);
+                                      }}
+                                      title={`${item.qtyPerMeal ?? 1} portion(s) of ${item.name || "this item"} per ${sel.code || "meal"}`}
+                                      className="w-16 rounded border border-border bg-background px-2 py-1.5 text-sm text-center tabular-nums"
+                                    />
                                     <div className="w-20 rounded border border-border bg-muted/30 px-2 py-1.5 text-sm text-center tabular-nums text-muted-foreground">
                                       {item.weight > 0 ? `${item.weight}g` : "—"}
                                     </div>
@@ -1679,7 +1714,7 @@ export default function MealPlanning() {
                                   onClick={() => {
                                     const copy = { ...createData };
                                     const updatedSMs = (copy.specialMealsByType[type] || []).map((sm, si) =>
-                                      si === smIdx ? { ...sm, items: [...(sm.items || []), { name: "", weight: 0, calories: 0 }] } : sm
+                                      si === smIdx ? { ...sm, items: [...(sm.items || []), { name: "", weight: 0, calories: 0, qtyPerMeal: 1 }] } : sm
                                     );
                                     copy.specialMealsByType = { ...copy.specialMealsByType, [type]: updatedSMs };
                                     setCreateData(copy);
@@ -1734,6 +1769,7 @@ export default function MealPlanning() {
                                       <Label className="text-xs mb-2 block">Items</Label>
                                       <div className="flex gap-2 items-center text-xs font-semibold text-muted-foreground border-b pb-1 mb-2">
                                         <div className="flex-1">Item</div>
+                                        <div className="w-16 text-center" title="Portions of this item in ONE meal">Qty / meal</div>
                                         <div className="w-20 text-center">Weight (g)</div>
                                         <div className="w-16 text-center">Kcal</div>
                                         <div className="w-16" />
@@ -1747,7 +1783,7 @@ export default function MealPlanning() {
                                               setPendingSpecialMeal({
                                                 ...pendingSpecialMeal,
                                                 items: (pendingSpecialMeal.items || []).map((it, ii) =>
-                                                  ii === itemIdx ? (withProfile(found)) : it
+                                                  ii === itemIdx ? (withProfile(found, it.qtyPerMeal)) : it
                                                 ),
                                               });
                                             }}
@@ -1758,6 +1794,25 @@ export default function MealPlanning() {
                                               <option key={fi.name} value={fi.name}>{fi.name}</option>
                                             ))}
                                           </select>
+                                          {/* Assembly quantity — portions of this dish
+                                              per one meal of this code. */}
+                                          <input
+                                            type="number"
+                                            min={1}
+                                            step={1}
+                                            value={item.qtyPerMeal ?? 1}
+                                            onChange={(e) => {
+                                              const value = Math.max(1, Math.round(Number(e.target.value) || 1));
+                                              setPendingSpecialMeal({
+                                                ...pendingSpecialMeal,
+                                                items: (pendingSpecialMeal.items || []).map((it, ii) =>
+                                                  ii === itemIdx ? { ...it, qtyPerMeal: value } : it
+                                                ),
+                                              });
+                                            }}
+                                            title={`${item.qtyPerMeal ?? 1} portion(s) of ${item.name || "this item"} per ${pendingSpecialMeal.code || "meal"}`}
+                                            className="w-16 rounded border border-border bg-background px-2 py-1.5 text-sm text-center tabular-nums"
+                                          />
                                           <div className="w-20 rounded border border-border bg-muted/30 px-2 py-1.5 text-sm text-center tabular-nums text-muted-foreground">
                                             {item.weight > 0 ? `${item.weight}g` : "—"}
                                           </div>
@@ -1776,7 +1831,7 @@ export default function MealPlanning() {
                                       <button
                                         type="button"
                                         className="text-blue-600 text-sm"
-                                        onClick={() => setPendingSpecialMeal({ ...pendingSpecialMeal, items: [...(pendingSpecialMeal.items || []), { name: "", weight: 0, calories: 0 }] })}
+                                        onClick={() => setPendingSpecialMeal({ ...pendingSpecialMeal, items: [...(pendingSpecialMeal.items || []), { name: "", weight: 0, calories: 0, qtyPerMeal: 1 }] })}
                                       >
                                         + Add Item
                                       </button>
@@ -3168,6 +3223,14 @@ export default function MealPlanning() {
                                             {sm.items.map((item, idx) => (
                                               <li key={idx} className="leading-relaxed">
                                                 <span className="font-medium">{item.name}</span>
+                                                {(item.qtyPerMeal ?? 1) > 1 && (
+                                                  <span
+                                                    className="ml-1 font-semibold text-purple-700"
+                                                    title={`${item.qtyPerMeal} portions of ${item.name} per ${sm.type}`}
+                                                  >
+                                                    ×{item.qtyPerMeal}
+                                                  </span>
+                                                )}
                                                 {item.weight > 0 && <span className="text-muted-foreground"> – {item.weight}g</span>}
                                               </li>
                                             ))}
@@ -3416,6 +3479,9 @@ export default function MealPlanning() {
               <div className="space-y-3">
                 <div className="flex gap-2 items-center text-xs font-semibold text-muted-foreground border-b pb-1">
                   <div className="flex-1">Name</div>
+                  {editingChoice.kind === "specialMeal" && (
+                    <div className="w-16 text-center" title="Portions of this item in ONE meal">Qty / meal</div>
+                  )}
                   <div className="w-20">Weight (g)</div>
                   <div className="w-16">Kcal</div>
                   <div className="w-16" />
@@ -3433,6 +3499,23 @@ export default function MealPlanning() {
                       }}
                       className="flex-1 rounded border px-2 py-1 text-sm"
                     />
+                    {/* Assembly quantity — only a special meal is assembled from
+                        its items, so only that kind carries a per-meal count. */}
+                    {editingChoice.kind === "specialMeal" && (
+                      <input
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={item.qtyPerMeal ?? 1}
+                        onChange={(e) => {
+                          const value = Math.max(1, Math.round(Number(e.target.value) || 1));
+                          const updated = editingChoice.items.map((it, i) => i === idx ? { ...it, qtyPerMeal: value } : it);
+                          setEditingChoice({ ...editingChoice, items: updated });
+                        }}
+                        title={`${item.qtyPerMeal ?? 1} portion(s) of ${item.name || "this item"} per meal`}
+                        className="w-16 rounded border px-2 py-1 text-sm text-center tabular-nums"
+                      />
+                    )}
                     <input
                       type="number"
                       placeholder="g"
@@ -3466,7 +3549,7 @@ export default function MealPlanning() {
                 <button
                   type="button"
                   className="text-blue-600 text-sm"
-                  onClick={() => setEditingChoice({ ...editingChoice, items: [...editingChoice.items, { name: "", weight: 0, calories: 0 }] })}
+                  onClick={() => setEditingChoice({ ...editingChoice, items: [...editingChoice.items, { name: "", weight: 0, calories: 0, ...(editingChoice.kind === "specialMeal" ? { qtyPerMeal: 1 } : {}) }] })}
                 >
                   + Add Item
                 </button>
