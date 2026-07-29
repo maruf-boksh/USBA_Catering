@@ -542,6 +542,37 @@ export default function MealPlanning() {
     servingTimes: {} as Record<string, { start: string; end: string }>,
   });
 
+  /**
+   * Blank config pre-opened on ONE meal type — what a row's "+ Add New" gives you.
+   *
+   * Selecting a meal type from the chip row scaffolds that type's per-type slots
+   * (a starter item row per choice, the choice split, serving time, and the empty
+   * add-on buckets). Jumping straight in from a row header skipped all of it, so
+   * the type opened with no item row to type into and no choice split — the
+   * config could not be completed. This seeds the same slots so both entry
+   * points behave identically.
+   */
+  const getInitialCreateDataForType = (day: string, mealType: string) => {
+    const base = getInitialCreateData(day);
+    return {
+      ...base,
+      mealTypes: [mealType],
+      choiceItems: base.choiceItems.map((rec) => ({
+        ...rec,
+        [mealType]: rec[mealType]?.length ? rec[mealType] : [{ name: "", weight: 0, calories: 0 }],
+      })),
+      choicePercentagesByType: { [mealType]: defaultChoicePercs(base.choiceItems.length) },
+      servingTimes: { [mealType]: defaultServingFor(mealType) },
+      dessertByType: { [mealType]: [] },
+      dessertAllocationByType: { [mealType]: [] },
+      saladsByType: { [mealType]: [] },
+      saladAllocationByType: { [mealType]: [] },
+      freshFruitsByType: { [mealType]: [] },
+      freshFruitAllocationByType: { [mealType]: [] },
+      specialMealsByType: { [mealType]: [] },
+    };
+  };
+
   const [createData, setCreateData] = useState(getInitialCreateData(selectedDay));
   const [createErrors, setCreateErrors] = useState<string[]>([]);
   const [daySelectionOpen, setDaySelectionOpen] = useState(false);
@@ -585,6 +616,22 @@ export default function MealPlanning() {
   const totalChoicePercent = effectiveChoicePercentType
     ? (createData.choicePercentagesByType[effectiveChoicePercentType] ?? defaultChoicePercs(createData.choiceItems.length)).reduce((a, b) => a + b, 0)
     : 100;
+  /**
+   * The serving time actually in force for a meal type. The inputs show the slot
+   * default whenever nothing has been entered, so an untouched field is not
+   * "missing" — it is the default. Resolving it in one place keeps what the user
+   * sees, what gets validated and what gets saved in agreement; reading raw
+   * state instead made a filled-in form fail validation.
+   *
+   * Nothing here is unique per meal type — two meals may share the same serving
+   * window.
+   */
+  const servingTimeFor = (type: string): { start: string; end: string } => {
+    const fallback = defaultServingFor(type);
+    const set = createData.servingTimes[type];
+    return { start: set?.start || fallback.start, end: set?.end || fallback.end };
+  };
+
   const stepValid: Record<number, boolean> = {
     1: createData.flightType.length > 0 && createData.forType !== "",
     2: createData.mealTypes.length > 0 && createData.mealTypes.every((t) =>
@@ -594,7 +641,7 @@ export default function MealPlanning() {
       const p = createData.choicePercentagesByType[t];
       return !!p && p.reduce((a, b) => a + b, 0) === 100;
     }),
-    4: createData.mealTypes.every((t) => Boolean(createData.servingTimes[t]?.start) && Boolean(createData.servingTimes[t]?.end)),
+    4: createData.mealTypes.every((t) => Boolean(servingTimeFor(t).start) && Boolean(servingTimeFor(t).end)),
     5: true,
   };
 
@@ -633,7 +680,8 @@ export default function MealPlanning() {
         const items = (rec[t] || []).filter((it) => it.name.trim() !== "");
         if (items.length === 0) errors.push(`${choiceLabel(idx)}: At least one item required for ${t}.`);
       });
-      if (!createData.servingTimes[t]?.start || !createData.servingTimes[t]?.end) errors.push(`Serving time required for ${t}.`);
+      const serving = servingTimeFor(t);
+      if (!serving.start || !serving.end) errors.push(`Serving time required for ${t}.`);
     });
 
     if (errors.length > 0) {
@@ -645,7 +693,7 @@ export default function MealPlanning() {
     // No routes picked → a single shared "All routes" copy (route: undefined).
     const routeList: (string | undefined)[] = createData.routes.length > 0 ? createData.routes : [undefined];
     const newMeals: MealCard[] = createData.days.flatMap((day) => routeList.flatMap((route) => createData.mealTypes.map((mealType) => {
-      const servingTime = createData.servingTimes[mealType] ?? { start: "11:00", end: "14:00" };
+      const servingTime = servingTimeFor(mealType);
       const typePercs = createData.choicePercentagesByType[mealType] ?? defaultChoicePercs(createData.choiceItems.length);
       const choices = createData.choiceItems.map((rec, choiceIdx) => ({
         label: choiceLabel(choiceIdx),
@@ -848,7 +896,13 @@ export default function MealPlanning() {
 
   const mealMatchesFilters = (meal: MealCard) => {
     const flightTypeMatch = meal.flightType.some((ft) => (ft === "Domestic" && activeFilters.domestic) || (ft === "International" && activeFilters.international));
-    const audienceMatch = (meal.forType === "Passengers" && activeFilters.passenger) || (meal.forType === "Crew" && activeFilters.crew);
+    // "For" offers Passengers / Crew / Both. A "Both" card serves either
+    // audience, so it belongs in the list whenever either audience filter is on
+    // — matching it against the two named values alone hid it from every view,
+    // which read as a config that saved but never appeared.
+    const audienceMatch = meal.forType === "Both"
+      ? (activeFilters.passenger || activeFilters.crew)
+      : (meal.forType === "Passengers" && activeFilters.passenger) || (meal.forType === "Crew" && activeFilters.crew);
     return flightTypeMatch && audienceMatch;
   };
 
@@ -1549,15 +1603,19 @@ export default function MealPlanning() {
                             <Label className="text-xs shrink-0">Start</Label>
                             <Input
                               type="time"
-                              value={createData.servingTimes[type]?.start ?? defaultServingFor(type).start}
-                              onChange={(e) => setCreateData({ ...createData, servingTimes: { ...createData.servingTimes, [type]: { ...(createData.servingTimes[type] || {}), start: e.target.value } } })}
+                              value={servingTimeFor(type).start}
+                              // Write the resolved pair, not a partial patch: editing
+                              // only Start used to leave End undefined in state while
+                              // the field still displayed the default, which then
+                              // failed the "serving time required" check on save.
+                              onChange={(e) => setCreateData({ ...createData, servingTimes: { ...createData.servingTimes, [type]: { ...servingTimeFor(type), start: e.target.value } } })}
                               className="h-8 w-32"
                             />
                             <Label className="text-xs shrink-0">End</Label>
                             <Input
                               type="time"
-                              value={createData.servingTimes[type]?.end ?? defaultServingFor(type).end}
-                              onChange={(e) => setCreateData({ ...createData, servingTimes: { ...createData.servingTimes, [type]: { ...(createData.servingTimes[type] || {}), end: e.target.value } } })}
+                              value={servingTimeFor(type).end}
+                              onChange={(e) => setCreateData({ ...createData, servingTimes: { ...createData.servingTimes, [type]: { ...servingTimeFor(type), end: e.target.value } } })}
                               className="h-8 w-32"
                             />
                           </div>
@@ -3052,7 +3110,7 @@ export default function MealPlanning() {
                           variant="outline"
                           className="h-7 text-xs"
                           onClick={() => {
-                            setCreateData({ ...getInitialCreateData(day), mealTypes: [mealType] });
+                            setCreateData(getInitialCreateDataForType(day, mealType));
                             setActiveChoiceForItems(0);
                             setPendingSpecialMeal(null);
                             setPendingSpecialMealForType(null);

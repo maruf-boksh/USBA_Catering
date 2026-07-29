@@ -23,6 +23,8 @@ import {
 } from "@/lib/production-items";
 import {
   billOfMaterials,
+  itemCanProduce,
+  items as ITEM_MASTER,
   type BillOfMaterial,
   type BomInputMaterial,
 } from "@/lib/sample-data";
@@ -153,4 +155,28 @@ export function hasMasterRecipe(meal: { name?: string; code?: string; bom?: stri
   return billOfMaterials.some(
     (b) => (meal.code && b.itemCode === meal.code) || b.name === name || b.itemName === name || b.name === meal.bom,
   );
+}
+
+/**
+ * True when an item is something the kitchen actually MAKES, as opposed to
+ * something bought in ready to load (bottled water, juice boxes, snack packs,
+ * pre-made meal boxes).
+ *
+ * Two independent signals, either of which is enough:
+ *   • it has a real recipe in a master (curated or BOM), or
+ *   • the item master positively says it is producible (Finished /
+ *     Semi-Finished Good, or an explicit `canProduce`).
+ *
+ * The default is deliberately permissive: an item in neither master is only
+ * rejected when nothing vouches for it. A Finished Good that has not had its
+ * BOM written yet still passes on the second signal, so this can never hide a
+ * genuine production order.
+ */
+export function isProducedItem(meal: { name?: string; code?: string; bom?: string }): boolean {
+  if (hasMasterRecipe(meal)) return true;
+  const name = (meal.name ?? meal.bom ?? "").trim().toLowerCase();
+  const master = ITEM_MASTER.find(
+    (i) => (meal.code && i.code === meal.code) || i.name.trim().toLowerCase() === name,
+  );
+  return master ? itemCanProduce(master) : false;
 }

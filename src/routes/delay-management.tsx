@@ -17,22 +17,34 @@ import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import { KpiCard } from "@/components/common/KpiCard";
 import {
   Clock, Plus, ArrowLeft, CheckCircle2, AlertTriangle, Truck, ShoppingCart,
   PackageOpen, Send, Timer, Eye, ChevronRight, ChevronDown,
   ExternalLink, Trash2, PlusCircle, ListChecks, Zap, History, X, ChefHat,
+  ArrowLeftRight, Factory,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { roundQty } from "@/lib/num";
 import { toast } from "sonner";
+import { flagArrival } from "@/lib/arrival-flash";
+import { addPurchaseRequisition, type PRLineItem } from "@/lib/purchase-requisitions";
 import { useFlightOrders } from "@/lib/flight-orders-store";
-import { vendors } from "@/lib/sample-data";
+import { vendors, warehouses as ALL_WAREHOUSES } from "@/lib/sample-data";
 import { LocationPicker } from "@/components/common/LocationPicker";
 import { useWorkflow, type WfGRN, type WfGRNLine, type StockDelta, type WfProductionEntry } from "@/lib/workflow-store";
 import { reduceInventoryStock } from "@/lib/stock-adjustments";
+import { useRole } from "@/lib/roles";
+import { TR_SEED } from "@/routes/transfer-request";
+import {
+  DPF_KEY, DPF_LOG_KEY, buildProductionAvailability, committedByProduction,
+  readTransferRequests, allocateToBatches, shortfallOf, sourceOf,
+  type DelayProductionFulfillment, type DpfLogEntry, type FulfilSource,
+  type ItemAvailability, type PlanLine, type ProductionBatchOption,
+} from "@/lib/delay-production-fulfillment";
+import { isProducedItem } from "@/lib/meal-recipe";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -48,7 +60,7 @@ export type DelayStatus =
   | "Dispatched"
   | "Closed";
 
-export type FulfillmentType = "Instant Purchase" | "Direct Receive";
+export type FulfillmentType = "Instant Purchase" | "Direct Receive" | "From Production";
 
 export type DrItem = { name: string; qty: number; unitCost: number };
 
@@ -106,6 +118,52 @@ export type DelayEvent = {
   /** Production Orders (WfProductionEntry ids) raised for this delay's food
    *  items when they are cooked fresh rather than bought/received. */
   productionOrderIds?: string[];
+  /** Set when the delay was met from meals ALREADY produced for the scheduled
+   *  flights. No new production order and no spot buy — the finished meals move
+   *  to the airport store on the linked Transfer Request, which carries the
+   *  approval and the stock movement. */
+  productionFulfillment?: {
+    id: string;
+    /** One request per sending warehouse — a pull can span Hot and Cold Kitchen. */
+    transferRequestIds: string[];
+    totalQty: number;
+    raisedAt: string;
+  };
+  /** Events logged together in one submission share a batch id, so the
+   *  production check can present the whole delayed set as one worklist. */
+  batchId?: string;
+  /** Every routing decision taken for this delay — which items went to stock,
+   *  to the kitchen, or out to be bought, and the document each raised. The
+   *  View modal reads this to show the full fulfilment breakdown. */
+  fulfilmentRefs?: {
+    source: "Stock" | "Production" | "Instant Purchase";
+    /** Document id(s) raised — comma-joined when a route produced several. */
+    ref: string;
+    refKind: "delay-approval" | "production-order" | "purchase-requisition";
+    items: { name: string; qty: number; uom: string }[];
+    at: string;
+  }[];
+  /** Agreed sourcing for this flight, set when "Fulfill from Production" is
+   *  raised. Survives the approval so "Transfer to Airport" knows exactly which
+   *  batches to move. Quantities it could not cover stay as `purchaseQty` and
+   *  still go through the existing instant-purchase route. */
+  productionPlan?: {
+    id: string;
+    createdAt: string;
+    createdBy: string;
+    lines: {
+      itemName: string;
+      uom: string;
+      requiredQty: number;
+      productionQty: number;
+      stockQty: number;
+      purchaseQty: number;
+      batches: { productionId: string; qty: number; warehouseId?: string }[];
+    }[];
+    totalProduction: number;
+    totalStock: number;
+    totalPurchase: number;
+  };
 };
 
 export type DelayApprovalRecord = {
@@ -188,6 +246,10 @@ type DrFormLine = {
 };
 
 const DR_RECEIVERS = ["M. Karim", "S. Ahmed", "F. Begum", "K. Rahman", "N. Islam"] as const;
+
+/** Warehouse display name for an id — used by the production-fulfilment views. */
+const warehouseNameOf = (id?: string): string =>
+  ALL_WAREHOUSES.find((w) => w.id === id)?.name ?? "—";
 
 type MealCardMinimal = {
   day: string;
@@ -555,6 +617,19 @@ export default function DelayManagementPage() {
   const activeEvent    = delayEvents.find((e) => e.id === activeEventId) ?? null;
   const viewModalEvent = delayEvents.find((e) => e.id === viewModalEventId) ?? null;
 
+  /**
+   * The flights the production check works on: everything logged in the same
+   * submission that is still awaiting fulfilment. Events from before batches
+   * were recorded stand alone, so the check degrades to a single-flight list.
+   */
+  const batchEvents = useMemo(() => {
+    if (!activeEvent) return [];
+    if (!activeEvent.batchId) return [activeEvent];
+    return delayEvents.filter(
+      (e) => e.batchId === activeEvent.batchId && e.status === "Fulfillment Pending",
+    );
+  }, [delayEvents, activeEvent]);
+
   // "Fulfil" re-enters the flow at the Production / Stock Availability check
   // (view "production") — from there Forward to Production or Forward to Instant
   // Purchase continue the flow, so the rest is unchanged.
@@ -645,6 +720,9 @@ export default function DelayManagementPage() {
       warehouseId: string;
       lines: Array<{ name: string; qty: number; code?: string }>;
     },
+    /** `silent` skips the navigation + toast so several flights can be raised
+     *  in one go from the availability plan. Single-flight callers are unchanged. */
+    opts?: { silent?: boolean },
   ) => {
     const event = delayEvents.find((e) => e.id === eventId);
     if (!event) return;
@@ -667,24 +745,161 @@ export default function DelayManagementPage() {
       addProductionEntry(order);
       orderIds.push(id);
     });
+    const prodRef: NonNullable<DelayEvent["fulfilmentRefs"]>[number] = {
+      source: "Production",
+      ref: orderIds.join(", "),
+      refKind: "production-order",
+      items: config.lines.map((l) => ({ name: l.name, qty: l.qty, uom: "portion" })),
+      at: stamp(),
+    };
     setDelayEvents((prev) =>
       prev.map((e) =>
         e.id === eventId
           ? {
               ...e,
               productionOrderIds: [...(e.productionOrderIds ?? []), ...orderIds],
+              fulfilmentRefs: [...(e.fulfilmentRefs ?? []), prodRef],
               status: "Sent To Production",
               updatedAt: stamp(),
             }
           : e,
       ),
     );
+    if (opts?.silent) return;
     setActiveEventId(eventId);
     setView("detail");
     toast.success(
       `${orderIds.length} production order${orderIds.length === 1 ? "" : "s"} raised for ${eventId} — pending approval in Approval Management.`,
     );
   };
+
+  /**
+   * "Fulfill from Production" for one or more delayed flights. Each flight gets
+   * its own Delay Refreshment approval — the same record and queue the other
+   * fulfilment routes use — plus the agreed sourcing plan. Nothing moves yet:
+   * the stock only leaves the kitchen once the approval clears and the flight is
+   * transferred to the airport store.
+   */
+  const fulfilFromProduction = (
+    plans: { eventId: string; plan: NonNullable<DelayEvent["productionPlan"]>; approval: DelayApprovalRecord }[],
+  ) => {
+    if (plans.length === 0) return;
+    const at = stamp();
+    const byEvent = new Map(plans.map((p) => [p.eventId, p]));
+    setDelayEvents((prev) =>
+      prev.map((e) => {
+        const p = byEvent.get(e.id);
+        if (!p) return e;
+        // Stock-sourced plans move nothing from the kitchen; production ones do.
+        const fromStock = p.plan.totalProduction === 0 && p.plan.totalStock > 0;
+        const ref: NonNullable<DelayEvent["fulfilmentRefs"]>[number] = {
+          source: fromStock ? "Stock" : "Production",
+          ref: p.approval.id,
+          refKind: "delay-approval",
+          items: p.approval.items.map((i) => ({ name: i.name, qty: i.qty, uom: "portion" })),
+          at,
+        };
+        return {
+          ...e,
+          productionPlan: p.plan,
+          approvalId: p.approval.id,
+          fulfilmentRefs: [...(e.fulfilmentRefs ?? []), ref],
+          status: "Approval Pending" as DelayStatus,
+          updatedAt: at,
+        };
+      }),
+    );
+    setDelayApprovals((prev) => [...plans.map((p) => p.approval), ...prev]);
+    // Deliberately no view change — the Production Availability modal stays open
+    // so the purchase balance can be forwarded from the same plan.
+    toast.success(
+      plans.length === 1
+        ? `${plans[0].approval.id} submitted — pending Delay Refreshment approval.`
+        : `${plans.length} fulfilment requests submitted — pending Delay Refreshment approval.`,
+    );
+  };
+
+  /** Append one routing decision to a delay event's fulfilment breakdown. */
+  const recordFulfilment = (
+    eventId: string,
+    entry: NonNullable<DelayEvent["fulfilmentRefs"]>[number],
+  ) => {
+    setDelayEvents((prev) =>
+      prev.map((e) =>
+        e.id === eventId
+          ? { ...e, fulfilmentRefs: [...(e.fulfilmentRefs ?? []), entry] }
+          : e,
+      ),
+    );
+  };
+
+  /**
+   * Raise Production Orders for items marked in the availability plan, across
+   * however many flights they span. Reuses `sentToProduction` per flight — the
+   * same records, the same Production approval queue, the same release to the
+   * floor — but without navigating, so the plan modal stays open.
+   */
+  const sendMarkedToProduction = (
+    groups: { eventId: string; date: string; lines: { name: string; qty: number }[] }[],
+  ) => {
+    if (groups.length === 0) return;
+    groups.forEach((g) =>
+      sentToProduction(g.eventId, {
+        date: g.date,
+        officeId: "OFF-001",
+        warehouseId: "WH-003",
+        lines: g.lines,
+      }, { silent: true }),
+    );
+    const orders = groups.reduce((s, g) => s + g.lines.length, 0);
+    toast.success(
+      `${orders} production order${orders === 1 ? "" : "s"} raised across ` +
+      `${groups.length} flight${groups.length === 1 ? "" : "s"} — pending approval in Approval Management.`,
+    );
+  };
+
+  /**
+   * Spot-buy the balance production could not cover. Reopens the flight's
+   * fulfilment screen with the existing Direct Receive modal already showing —
+   * the instant-purchase flow itself is untouched. Stays available after the
+   * meals are dispatched, because the purchased balance is a separate errand.
+   */
+  const [autoOpenDrFor, setAutoOpenDrFor] = useState<string | null>(null);
+  const openInstantPurchase = (ev: DelayEvent) => {
+    setActiveEventId(ev.id);
+    setAutoOpenDrFor(ev.id);
+    setView("production");
+  };
+
+  /**
+   * Advance an event once the Transfer Request approver signs off: the meals are
+   * released to move, so the delay is Approved and "Send to Dispatch" opens up.
+   * Read-only on the Transfer Request store — approval itself happens there.
+   * Only ever touches events that carry a production-fulfilment link.
+   */
+  useEffect(() => {
+    const approved = new Set(
+      readTransferRequests(TR_SEED)
+        .filter((r) => r.status === "Approved" || r.status === "Completed")
+        .map((r) => r.id),
+    );
+    setDelayEvents((prev) => {
+      let changed = false;
+      const next = prev.map((e) => {
+        if (
+          e.status !== "Approval Pending" ||
+          !e.productionFulfillment ||
+          // Every request must clear before the meals are fully released.
+          !e.productionFulfillment.transferRequestIds.every((id) => approved.has(id))
+        ) return e;
+        changed = true;
+        return { ...e, status: "Approved" as DelayStatus, updatedAt: stamp() };
+      });
+      return changed ? next : prev;
+    });
+    // Approval happens on the Approval Management page, so returning here always
+    // remounts — a read on mount is enough to pick the decision up.
+  }, [setDelayEvents]);
 
   const sendToDispatch = (event: DelayEvent) => {
     if (event.status !== "Approved" && event.status !== "Sent To Production") return;
@@ -825,6 +1040,7 @@ export default function DelayManagementPage() {
           events={delayEvents}
           approvals={delayApprovals}
           onOpenFulfillment={openFulfillment}
+          onInstantPurchase={openInstantPurchase}
           onOpenModal={setViewModalEventId}
           onNavigate={navigate}
         />
@@ -836,6 +1052,13 @@ export default function DelayManagementPage() {
           onProceed={(id) => setEventFulfillmentAndGo(id, "Instant Purchase")}
           onNeedsPurchase={(id, fulfillment, approval) => submitFulfillment(id, fulfillment, approval)}
           onSentToProduction={sentToProduction}
+          batchEvents={batchEvents}
+          onFulfilFromProduction={fulfilFromProduction}
+          onSelectEvent={setActiveEventId}
+          onSendToProduction={sendMarkedToProduction}
+          onRecordFulfilment={recordFulfilment}
+          autoOpenPurchase={autoOpenDrFor === activeEvent.id}
+          onAutoOpenPurchaseDone={() => setAutoOpenDrFor(null)}
           onCancel={() => setView("list")}
           nextDrId={nextDrId}
           nextDaId={nextDaId}
@@ -929,11 +1152,12 @@ export default function DelayManagementPage() {
 // ─── Delay List / Dashboard ───────────────────────────────────────────────────
 
 function DelayList({
-  events, approvals, onOpenFulfillment, onOpenModal, onNavigate,
+  events, approvals, onOpenFulfillment, onInstantPurchase, onOpenModal, onNavigate,
 }: {
   events: DelayEvent[];
   approvals: DelayApprovalRecord[];
   onOpenFulfillment: (id: string) => void;
+  onInstantPurchase: (ev: DelayEvent) => void;
   onOpenModal: (id: string) => void;
   onNavigate: ReturnType<typeof useNavigate>;
 }) {
@@ -952,6 +1176,24 @@ function DelayList({
       return true;
     });
   }, [events, search, filterStatus, filterFrom, filterTo]);
+
+  /** Every Production Order raised for this delay has finished cooking. */
+  const { productionEntries: allProductionOrders } = useWorkflow();
+  const productionDone = (ev: DelayEvent) => {
+    const ids = ev.productionOrderIds ?? [];
+    if (ids.length === 0) return false;
+    return ids.every((id) => allProductionOrders.find((o) => o.id === id)?.status === "Completed");
+  };
+
+  // ── Pagination ────────────────────────────────────────────────────────────
+  const PAGE_SIZE = 10;
+  const [page, setPage] = useState(1);
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  // Filtering can shrink the list under the current page — step back rather
+  // than render an empty table.
+  useEffect(() => { setPage(1); }, [search, filterStatus, filterFrom, filterTo]);
+  const safePage = Math.min(page, pageCount);
+  const paged = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   const active     = events.filter(isActiveDelayEvent).length;
   const pending    = events.filter((e) => e.status === "Approval Pending").length;
@@ -1094,7 +1336,7 @@ function DelayList({
                 </TableCell>
               </TableRow>
             ) : (
-              filtered.map((ev) => (
+              paged.map((ev) => (
                 <TableRow
                   key={ev.id}
                   className="hover:bg-muted/30 cursor-pointer"
@@ -1122,7 +1364,23 @@ function DelayList({
                           Fulfil <ChevronRight className="h-3 w-3 ml-0.5" />
                         </Button>
                       )}
-                      {ev.status === "Approved" && (
+                      {/* Approved production fulfilment — the meals still have to
+                          reach the airport store, which is a normal transfer. */}
+                      {/* The balance production couldn't cover is bought separately,
+                          so this stays available after the meals are dispatched. */}
+                      {(ev.status === "Approved" || ev.status === "Sent To Dispatch")
+                        && (ev.productionPlan?.totalPurchase ?? 0) > 0 && (
+                        <Button size="sm" variant="outline"
+                          className="h-7 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                          onClick={() => onInstantPurchase(ev)}
+                          title="Spot-buy the quantities production could not cover">
+                          <ShoppingCart className="h-3 w-3 mr-1" /> Instant Purchase
+                        </Button>
+                      )}
+                      {/* Dispatchable once the fulfilment is approved, or once
+                          everything sent to the kitchen has finished cooking. */}
+                      {(ev.status === "Approved"
+                        || (ev.status === "Sent To Production" && productionDone(ev))) && (
                         <Button size="sm" className="h-7 text-xs bg-teal-600 text-white hover:bg-teal-700"
                           onClick={() => onOpenModal(ev.id)}>
                           Dispatch <Truck className="h-3 w-3 ml-1" />
@@ -1139,6 +1397,33 @@ function DelayList({
             )}
           </TableBody>
         </Table>
+
+        {filtered.length > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2">
+            <span className="text-xs text-muted-foreground tabular-nums">
+              Showing {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, filtered.length)} of {filtered.length}
+            </span>
+            <div className="flex items-center gap-1">
+              <Button
+                size="sm" variant="outline" className="h-7 text-xs"
+                disabled={safePage <= 1}
+                onClick={() => setPage(safePage - 1)}
+              >
+                Previous
+              </Button>
+              <span className="px-2 text-xs text-muted-foreground tabular-nums">
+                Page {safePage} of {pageCount}
+              </span>
+              <Button
+                size="sm" variant="outline" className="h-7 text-xs"
+                disabled={safePage >= pageCount}
+                onClick={() => setPage(safePage + 1)}
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
     </>
   );
@@ -1267,6 +1552,9 @@ function DelayCreate({
     // selected meal types — a combined label plus the aggregated menu items — so a
     // single Delay ID covers the flight's whole refreshment requirement.
     const events: DelayEvent[] = [];
+    // Everything logged in this submission shares a batch, so the production
+    // check can work the whole delayed set as one list.
+    const batchId = `DBT-${Date.now().toString(36).slice(-6).toUpperCase()}`;
     let k = 0;
     for (const order of selectedOrders) {
       const pax  = order.pax ?? 0;
@@ -1293,6 +1581,7 @@ function DelayCreate({
         status: "Fulfillment Pending",
         createdAt: now,
         updatedAt: now,
+        batchId,
         mealType: mealLabel,
         originalEtd: etd ?? undefined,
         menuItems: aggItems,
@@ -1646,9 +1935,14 @@ function DelayCreate({
 // ─── Delay Production Screen ──────────────────────────────────────────────────
 
 function DelayProductionScreen({
-  event, onProceed, onNeedsPurchase, onSentToProduction, onCancel, nextDrId, nextDaId,
+  event, batchEvents, onProceed, onNeedsPurchase, onSentToProduction,
+  onFulfilFromProduction, onSelectEvent, onSendToProduction, onRecordFulfilment,
+  autoOpenPurchase, onAutoOpenPurchaseDone,
+  onCancel, nextDrId, nextDaId,
 }: {
   event: DelayEvent;
+  /** Every flight delayed in the same submission — the production worklist. */
+  batchEvents: DelayEvent[];
   onProceed: (id: string) => void;
   onNeedsPurchase: (id: string, fulfillment: DelayFulfillment, approval: DelayApprovalRecord) => void;
   onSentToProduction: (
@@ -1660,11 +1954,31 @@ function DelayProductionScreen({
       lines: Array<{ name: string; qty: number; code?: string }>;
     },
   ) => void;
+  onFulfilFromProduction: (
+    plans: { eventId: string; plan: NonNullable<DelayEvent["productionPlan"]>; approval: DelayApprovalRecord }[],
+  ) => void;
+  /** Switch which flight the Stock Availability check below is showing. */
+  onSelectEvent: (eventId: string) => void;
+  /** Raise Production Orders for marked items across one or more flights. */
+  onSendToProduction: (
+    groups: { eventId: string; date: string; lines: { name: string; qty: number }[] }[],
+  ) => void;
+  /** Log where a set of items was routed, for the event's View breakdown. */
+  onRecordFulfilment: (
+    eventId: string,
+    entry: NonNullable<DelayEvent["fulfilmentRefs"]>[number],
+  ) => void;
+  /** Open the Direct Receive (instant purchase) modal as soon as we mount —
+   *  set when the user picks Instant Purchase from the events list. */
+  autoOpenPurchase?: boolean;
+  onAutoOpenPurchaseDone?: () => void;
   onCancel: () => void;
   nextDrId: string;
   nextDaId: string;
 }) {
-  const { addGRN } = useWorkflow();
+  const { addGRN, productionEntries } = useWorkflow();
+  const { role } = useRole();
+  const navigate = useNavigate();
   const [inventoryItems, setInventoryItems] = usePersistedState<InventoryItemMinimal[]>("inventory-items", []);
   const [drLog, setDrLog]                   = usePersistedState<DrLogEntry[]>("delay-dr-log", []);
 
@@ -1687,8 +2001,11 @@ function DelayProductionScreen({
 
   const items = event.menuItems ?? [];
 
-  const openProdModal = () => {
-    setProdLines(items.map((mi, i) => ({ id: `pl-${i}`, name: mi.name, qty: mi.requiredQty })));
+  /** `seed` narrows the modal to specific items (marked in the View detail);
+   *  omitted, it pre-fills the flight's whole menu as before. */
+  const openProdModal = (seed?: { name: string; qty: number }[]) => {
+    const src = seed ?? items.map((mi) => ({ name: mi.name, qty: mi.requiredQty }));
+    setProdLines(src.map((l, i) => ({ id: `pl-${i}`, name: l.name, qty: l.qty })));
     setProdDate(event.flightDate);
     setProdOfficeId("OFF-001");
     setProdWarehouseId("WH-003");
@@ -1722,7 +2039,545 @@ function DelayProductionScreen({
     });
   }, [items, inventoryItems]);
 
-  const allSufficient = stockCheck.length > 0 && stockCheck.every((i) => i.sufficient);
+
+  // ── Fulfil from existing production ───────────────────────────────────────
+  // Meals cooked for the day's scheduled flights can feed a delayed one. This
+  // path raises no production order and buys nothing — it moves finished meals
+  // from the kitchen to the airport store on a normal Transfer Request.
+
+  const [dpfRecords, setDpfRecords] = usePersistedState<DelayProductionFulfillment[]>(DPF_KEY, []);
+  const [dpfLog, setDpfLog] = usePersistedState<DpfLogEntry[]>(DPF_LOG_KEY, []);
+  const committed = useMemo(() => committedByProduction(dpfRecords), [dpfRecords]);
+
+  /** QC-passed production per delayed flight, scoped to that flight's own day. */
+  const availabilityByEvent = useMemo(() => {
+    const m = new Map<string, ItemAvailability[]>();
+    for (const ev of batchEvents) {
+      m.set(ev.id, buildProductionAvailability(ev.menuItems ?? [], productionEntries, committed, ev.flightDate));
+    }
+    return m;
+  }, [batchEvents, productionEntries, committed]);
+
+  /** On-hand stock by item name — what a bought-in consumable draws on. */
+  const stockByName = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const it of inventoryItems) m.set(it.name.trim().toLowerCase(), it.stock);
+    return m;
+  }, [inventoryItems]);
+
+  // Flight picking. "Production Availability" unlocks once every delayed flight
+  // in the list is ticked, so a plan always covers the whole delayed set.
+  const [selectedFlightIds, setSelectedFlightIds] = useState<string[]>([]);
+  const selectableFlights = batchEvents.filter((e) => !e.productionPlan);
+  const allFlightsSelected = selectableFlights.length > 0
+    && selectableFlights.every((e) => selectedFlightIds.includes(e.id));
+  const toggleFlight = (id: string) =>
+    setSelectedFlightIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
+
+  const [planOpen, setPlanOpen] = useState(false);
+  const [planLines, setPlanLines] = useState<PlanLine[]>([]);
+  /** Snapshot of the flights in the open plan. Held separately because raising
+   *  the fulfilment flips them out of "Fulfillment Pending", which would empty
+   *  `batchEvents` and blank the modal while it is still on screen. */
+  const [planFlights, setPlanFlights] = useState<DelayEvent[]>([]);
+  const [planToOfficeId, setPlanToOfficeId] = useState("OFF-001");
+  const [planToWarehouseId, setPlanToWarehouseId] = useState("WH-001");
+  /** Lines the user has marked — every action works on this selection. */
+  const [planPicked, setPlanPicked] = useState<string[]>([]);
+  /**
+   * Lines already sent somewhere, and where they went. A line is actioned once:
+   * its checkbox locks so the same quantity can't be raised twice, while the
+   * three buttons stay available for whatever is still unmarked.
+   */
+  const [planDone, setPlanDone] = useState<Record<string, FulfilSource>>({});
+  const isLocked = (key: string) => key in planDone;
+  const togglePlanLine = (key: string) => {
+    if (isLocked(key)) return;
+    setPlanPicked((prev) => prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]);
+  };
+  /** Lock what was just raised and clear the marks, so the buttons re-arm. */
+  const commitLines = (keys: string[], to: FulfilSource) => {
+    setPlanDone((prev) => ({ ...prev, ...Object.fromEntries(keys.map((k) => [k, to])) }));
+    setPlanPicked((prev) => prev.filter((k) => !keys.includes(k)));
+  };
+  /** Flight shown in the per-flight detail modal opened from the View action. */
+  const [viewFlight, setViewFlight] = useState<DelayEvent | null>(null);
+  /** Items marked inside that modal — the actions work on this selection. */
+  const [viewPicked, setViewPicked] = useState<string[]>([]);
+  /** Items already routed from this modal, and where they went. */
+  const [viewDone, setViewDone] = useState<Record<string, FulfilSource>>({});
+  const isViewLocked = (name: string) => name in viewDone;
+  const toggleViewItem = (name: string) => {
+    if (isViewLocked(name)) return;
+    setViewPicked((prev) => prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]);
+  };
+  /** Lock what was just sent and clear the marks, so the button greys out. */
+  const commitViewItems = (names: string[], to: FulfilSource) => {
+    setViewDone((prev) => ({ ...prev, ...Object.fromEntries(names.map((n) => [n, to])) }));
+    setViewPicked((prev) => prev.filter((n) => !names.includes(n)));
+  };
+  const openViewFlight = (ev: DelayEvent) => {
+    setViewPicked([]);
+    setViewDone({});
+    setViewFlight(ev);
+  };
+
+  /**
+   * Review step between marking items and routing them. Shows exactly what is
+   * about to be sent and in what quantity, so nothing reaches an approval queue
+   * unseen. `run` carries the already-bound action for the chosen route.
+   */
+  const [confirmRoute, setConfirmRoute] = useState<{
+    source: FulfilSource;
+    flight: string;
+    rows: { name: string; qty: number; uom: string; requiredQty: number }[];
+    run: () => void;
+  } | null>(null);
+
+  /**
+   * The View modal's three routes. Each submits straight to its own approval
+   * queue and leaves the modal open — only Close leaves. The items just sent
+   * lock, which drops the button's count to zero and greys it out until fresh
+   * items are marked.
+   */
+  const viewSendToProduction = (
+    ev: DelayEvent,
+    marked: { name: string; shortfall: number }[],
+  ) => {
+    if (marked.length === 0) return;
+    onSendToProduction([{
+      eventId: ev.id,
+      date: ev.flightDate,
+      lines: marked.map((r) => ({ name: r.name, qty: r.shortfall })),
+    }]);
+    commitViewItems(marked.map((r) => r.name), "Production");
+  };
+
+  const viewForwardToPurchase = (
+    ev: DelayEvent,
+    marked: { name: string; shortfall: number; uom: string }[],
+  ) => {
+    if (marked.length === 0) return;
+    const now = stamp();
+    const pr = addPurchaseRequisition({
+      date: stamp().slice(0, 10),
+      officeId: "OFF-001",
+      warehouseId: "WH-001",
+      requestedBy: role,
+      requiredBy: ev.flightDate,
+      priority: "Urgent",
+      justification: `Delay refreshment shortfall — ${ev.flightNumber} (${ev.flightDate}), ${ev.id}.`,
+      lines: marked.map((r, i) => ({
+        id: `L${i + 1}`,
+        itemName: r.name,
+        description: `Delay refreshment — ${ev.flightNumber}`,
+        qty: r.shortfall,
+        uom: r.uom,
+        rate: (ev.menuItems ?? []).find((m) => m.name === r.name)?.unitCost ?? 0,
+      })),
+      status: "Pending Approval",
+    });
+    commitViewItems(marked.map((r) => r.name), "Instant Purchase");
+    onRecordFulfilment(ev.id, {
+      source: "Instant Purchase",
+      ref: pr.id,
+      refKind: "purchase-requisition",
+      items: marked.map((r) => ({ name: r.name, qty: r.shortfall, uom: r.uom })),
+      at: now,
+    });
+    toast.success(`${pr.id} raised — pending approval under Purchase Req.`);
+  };
+
+  const viewFulfilFromStock = (
+    ev: DelayEvent,
+    marked: { name: string; onHand: number; requiredQty: number; uom: string }[],
+  ) => {
+    if (marked.length === 0) return;
+    const now = stamp();
+    const items: DrItem[] = marked.map((r) => ({
+      name: r.name,
+      qty: Math.min(r.requiredQty, r.onHand),
+      unitCost: (ev.menuItems ?? []).find((m) => m.name === r.name)?.unitCost ?? 0,
+    }));
+    onFulfilFromProduction([{
+      eventId: ev.id,
+      plan: {
+        id: bumpSeq("DPP-0001", dpfRecords.length),
+        createdAt: now,
+        createdBy: role,
+        lines: marked.map((r) => ({
+          itemName: r.name,
+          uom: r.uom,
+          requiredQty: r.requiredQty,
+          productionQty: 0,
+          stockQty: Math.min(r.requiredQty, r.onHand),
+          purchaseQty: Math.max(0, r.requiredQty - r.onHand),
+          batches: [],
+        })),
+        totalProduction: 0,
+        totalStock: items.reduce((s, i) => s + i.qty, 0),
+        totalPurchase: marked.reduce((s, r) => s + Math.max(0, r.requiredQty - r.onHand), 0),
+      },
+      approval: {
+        id: nextDaId,
+        delayEventId: ev.id,
+        flightNumber: ev.flightNumber,
+        flightDate: ev.flightDate,
+        sector: ev.sector,
+        paxCount: ev.paxCount,
+        crewCount: ev.crewCount,
+        delayDurationHours: ev.delayDurationHours,
+        submittedBy: role,
+        submittedAt: now,
+        status: "Pending",
+        fulfillmentType: "Direct Receive",
+        items,
+        totalCost: items.reduce((s, i) => s + i.qty * i.unitCost, 0),
+        notes: "Fulfilled from on-hand kitchen stock.",
+      },
+    }]);
+    commitViewItems(marked.map((r) => r.name), "Stock");
+  };
+
+  /** Coverage summary for one flight — drives the Check Production column. */
+  const coverageFor = (ev: DelayEvent) => {
+    const av = availabilityByEvent.get(ev.id) ?? [];
+    const cooked = av.filter((a) => isProducedItem({ name: a.itemName }));
+    return {
+      items: av.length,
+      cooked: cooked.length,
+      covered: cooked.filter((a) => a.covered).length,
+      availableQty: cooked.reduce((s, a) => s + a.availableQty, 0),
+    };
+  };
+
+  /**
+   * Build the sourcing plan for the picked flights. Kitchen items draw on that
+   * day's QC-passed production; bought-in consumables come off the shelf when
+   * there is stock. Whatever neither covers is left for instant purchase, so a
+   * part-production / part-purchase fulfilment is the normal case, not an edge.
+   */
+  const openPlanModal = () => {
+    const lines: PlanLine[] = [];
+    const flights = batchEvents.filter((e) => selectedFlightIds.includes(e.id));
+    setPlanFlights(flights);
+    setPlanPicked([]);
+    setPlanDone({});
+    for (const ev of flights) {
+      const av = availabilityByEvent.get(ev.id) ?? [];
+      for (const mi of ev.menuItems ?? []) {
+        const a = av.find((x) => x.itemName === mi.name);
+        const produced = isProducedItem({ name: mi.name });
+        const availableProduction = produced ? (a?.availableQty ?? 0) : 0;
+        const availableStock = produced ? 0 : (stockByName.get(mi.name.trim().toLowerCase()) ?? 0);
+        lines.push({
+          key: `${ev.id}::${mi.name}`,
+          eventId: ev.id,
+          flightNumber: ev.flightNumber,
+          itemName: mi.name,
+          uom: mi.uom,
+          requiredQty: mi.requiredQty,
+          produced,
+          availableProduction,
+          availableStock,
+          productionQty: Math.min(mi.requiredQty, availableProduction),
+          stockQty: Math.min(mi.requiredQty, availableStock),
+          batches: a?.batches ?? [],
+        });
+      }
+    }
+    setPlanLines(lines);
+    setPlanToOfficeId("OFF-001");
+    setPlanToWarehouseId("WH-001");
+    setPlanOpen(true);
+  };
+
+  /**
+   * Cook what is not already made. Marked kitchen items with a shortfall raise a
+   * Production Order each — exactly the record the "Send to Production" screen
+   * creates today — so they land in Approval Management's Production queue and,
+   * once approved, are released to the Production Entry floor as usual.
+   *
+   * Bought-in consumables are skipped: there is no recipe to cook them.
+   */
+  const submitSendToProduction = () => {
+    const cookable = picked.filter((l) => l.produced && shortfallOf(l) > 0);
+    if (cookable.length === 0) {
+      toast.error("Mark at least one kitchen item that production has not covered.");
+      return;
+    }
+    const byEvent = new Map<string, PlanLine[]>();
+    cookable.forEach((l) => byEvent.set(l.eventId, [...(byEvent.get(l.eventId) ?? []), l]));
+
+    const groups: { eventId: string; date: string; lines: { name: string; qty: number }[] }[] = [];
+    byEvent.forEach((lines, eventId) => {
+      const ev = planFlights.find((e) => e.id === eventId);
+      if (!ev) return;
+      groups.push({
+        eventId,
+        date: ev.flightDate,
+        lines: lines.map((l) => ({ name: l.itemName, qty: shortfallOf(l) })),
+      });
+    });
+
+    commitLines(cookable.map((l) => l.key), "Production");
+    onSendToProduction(groups);
+  };
+
+  /**
+   * Forward the uncovered balance for buying. Everything production and stock
+   * could not cover — bought-in consumables plus any meal the kitchen came up
+   * short on — is raised as one Purchase Requisition, which lands in Approval
+   * Management under Purchase Req and then follows the existing purchase flow.
+   */
+  const submitPurchase = () => {
+    const shortLines = picked.filter((l) => shortfallOf(l) > 0);
+    if (shortLines.length === 0) { toast.error("Nothing left to purchase."); return; }
+
+    // Merge the same item across flights into one requisition line.
+    const byItem = new Map<string, PRLineItem>();
+    shortLines.forEach((l, i) => {
+      const key = l.itemName.toLowerCase();
+      const existing = byItem.get(key);
+      const qty = shortfallOf(l);
+      if (existing) existing.qty += qty;
+      else byItem.set(key, {
+        id: `L${i + 1}`,
+        itemName: l.itemName,
+        description: `Delay refreshment — ${l.flightNumber}`,
+        qty,
+        uom: l.uom,
+        rate: (planFlights.find((e) => e.id === l.eventId)?.menuItems ?? [])
+          .find((m) => m.name === l.itemName)?.unitCost ?? 0,
+      });
+    });
+
+    const flights = Array.from(new Set(shortLines.map((l) => l.flightNumber)));
+    const pr = addPurchaseRequisition({
+      date: stamp().slice(0, 10),
+      officeId: planToOfficeId,
+      warehouseId: planToWarehouseId,
+      requestedBy: role,
+      requiredBy: planFlights[0]?.flightDate ?? stamp().slice(0, 10),
+      priority: "Urgent",
+      justification:
+        `Delay refreshment shortfall — ${flights.join(", ")}. ` +
+        `Not covered by the day's production or on-hand stock.`,
+      lines: Array.from(byItem.values()),
+      status: "Pending Approval",
+    });
+
+    commitLines(shortLines.map((l) => l.key), "Instant Purchase");
+    // One requisition can span flights — record it against each of them.
+    new Set(shortLines.map((l) => l.eventId)).forEach((eventId) => {
+      onRecordFulfilment(eventId, {
+        source: "Instant Purchase",
+        ref: pr.id,
+        refKind: "purchase-requisition",
+        items: shortLines
+          .filter((l) => l.eventId === eventId)
+          .map((l) => ({ name: l.itemName, qty: shortfallOf(l), uom: l.uom })),
+        at: stamp(),
+      });
+    });
+    toast.success(`${pr.id} raised — pending approval under Purchase Req.`);
+  };
+
+  const setPlanQty = (key: string, value: string) =>
+    setPlanLines((prev) => prev.map((l) => l.key === key
+      ? { ...l, productionQty: Math.max(0, roundQty(Number(value) || 0)) }
+      : l));
+
+  /**
+   * Open a production order from its id — jumps to the Production Order list and
+   * flashes that row, the same deep-link highlight the dashboard quick-links use.
+   * The look-up is auditable, so it is written to the fulfilment log first.
+   */
+  const goToProductionOrder = (batch: ProductionBatchOption) => {
+    setDpfLog((prev) => [
+      {
+        at: stamp(),
+        by: role,
+        action: "Production Batch Viewed",
+        detail: `${batch.productionId} (${batch.outputItemName}) opened from ${event.id} — ${event.flightNumber}`,
+        productionId: batch.productionId,
+        eventId: event.id,
+      },
+      ...prev,
+    ]);
+    flagArrival({ target: "production-list", ids: [batch.productionId] });
+    navigate("/production-entry");
+  };
+
+  /**
+   * The three routes, scored over the marked lines only. A line can feed more
+   * than one: a meal that is half-cooked can be pulled from production AND have
+   * the balance cooked or bought, which is why the counts overlap rather than
+   * partition.
+   */
+  const picked = planLines.filter((l) => planPicked.includes(l.key) && !isLocked(l.key));
+  /** Lines still open to marking — what select-all applies to. */
+  const selectableLines = planLines.filter((l) => !isLocked(l.key));
+  const planTotals = {
+    production: picked.reduce((s, l) => s + l.productionQty, 0),
+    stock: picked.reduce((s, l) => s + l.stockQty, 0),
+    // Only the kitchen can make a meal, so a shortfall on a producible item is
+    // cookable; a bought-in consumable's shortfall can only be purchased.
+    cook: picked.filter((l) => l.produced).reduce((s, l) => s + shortfallOf(l), 0),
+    purchase: picked.reduce((s, l) => s + shortfallOf(l), 0),
+  };
+  const planOverdrawn = picked.filter((l) => l.productionQty > l.availableProduction);
+  /** Local id bumper — the parent hands us one next-id per series. */
+  const bumpSeq = (baseId: string, offset: number) => {
+    const m = baseId.match(/^(.*?)(\d+)$/);
+    if (!m) return `${baseId}-${offset + 1}`;
+    return `${m[1]}${String(Number(m[2]) + offset).padStart(m[2].length, "0")}`;
+  };
+
+  /**
+   * Submit the plan. Each flight raises its own Delay Refreshment approval —
+   * the existing record and queue — carrying the agreed sourcing. Nothing moves
+   * yet: the meals only leave the kitchen once that approval clears and the
+   * flight is transferred to the airport store.
+   *
+   * The drawn batches are committed here rather than at transfer time, so a
+   * second delayed flight cannot be promised the same meals while this one is
+   * still waiting for a decision.
+   */
+  const submitPlan = (from: "Production" | "Stock" = "Production") => {
+    const qtyOf = (l: PlanLine) => (from === "Stock" ? l.stockQty : l.productionQty);
+    const acting = picked.filter((l) => qtyOf(l) > 0);
+    if (acting.length === 0) {
+      toast.error(from === "Stock"
+        ? "Mark at least one item that on-hand stock can cover."
+        : "Enter a production quantity for at least one meal.");
+      return;
+    }
+    if (from === "Production" && planOverdrawn.length > 0) {
+      const o = planOverdrawn[0];
+      toast.error(`${o.itemName}: exceeds the ${o.availableProduction} ${o.uom} available from production.`);
+      return;
+    }
+    if (!planToWarehouseId) { toast.error("Select the receiving warehouse."); return; }
+
+    const now = stamp();
+    const byEvent = new Map<string, PlanLine[]>();
+    acting.forEach((l) => byEvent.set(l.eventId, [...(byEvent.get(l.eventId) ?? []), l]));
+
+    const submissions: {
+      eventId: string;
+      plan: NonNullable<DelayEvent["productionPlan"]>;
+      approval: DelayApprovalRecord;
+    }[] = [];
+    const newDpf: DelayProductionFulfillment[] = [];
+
+    byEvent.forEach((lines, eventId) => {
+      const ev = planFlights.find((e) => e.id === eventId);
+      if (!ev || lines.every((l) => qtyOf(l) <= 0)) return;
+      const k = submissions.length;
+      // Stock is issued straight from the shelf, so it draws on no batch.
+      const drawn = from === "Stock"
+        ? []
+        : lines.flatMap((l) => allocateToBatches(l).map((b) => ({ line: l, ...b })));
+      const items: DrItem[] = lines
+        .filter((l) => qtyOf(l) > 0)
+        .map((l) => ({
+          name: l.itemName,
+          qty: qtyOf(l),
+          unitCost: (ev.menuItems ?? []).find((m) => m.name === l.itemName)?.unitCost ?? 0,
+        }));
+
+      submissions.push({
+        eventId: ev.id,
+        plan: {
+          id: bumpSeq("DPP-0001", dpfRecords.length + k),
+          createdAt: now,
+          createdBy: role,
+          lines: lines.map((l) => ({
+            itemName: l.itemName,
+            uom: l.uom,
+            requiredQty: l.requiredQty,
+            productionQty: l.productionQty,
+            stockQty: l.stockQty,
+            purchaseQty: shortfallOf(l),
+            batches: allocateToBatches(l).map((b) => ({
+              productionId: b.batch.productionId,
+              qty: b.qty,
+              warehouseId: b.batch.warehouseId,
+            })),
+          })),
+          totalProduction: lines.reduce((s, l) => s + l.productionQty, 0),
+          totalStock: lines.reduce((s, l) => s + l.stockQty, 0),
+          totalPurchase: lines.reduce((s, l) => s + shortfallOf(l), 0),
+        },
+        approval: {
+          id: bumpSeq(nextDaId, k),
+          delayEventId: ev.id,
+          flightNumber: ev.flightNumber,
+          flightDate: ev.flightDate,
+          sector: ev.sector,
+          paxCount: ev.paxCount,
+          crewCount: ev.crewCount,
+          delayDurationHours: ev.delayDurationHours,
+          submittedBy: role,
+          submittedAt: now,
+          status: "Pending",
+          fulfillmentType: from === "Stock" ? "Direct Receive" : "From Production",
+          items,
+          totalCost: items.reduce((s, i) => s + i.qty * i.unitCost, 0),
+          notes: from === "Stock"
+            ? "Fulfilled from on-hand kitchen stock."
+            : `Fulfilled from ${ev.flightDate} production — QC-passed batches only.`,
+        },
+      });
+
+      newDpf.push({
+        id: bumpSeq("DPF-0001", dpfRecords.length + k),
+        eventId: ev.id,
+        flightNumber: ev.flightNumber,
+        flightDate: ev.flightDate,
+        transferRequestId: "",
+        fromOfficeId: "OFF-001",
+        fromWarehouse: warehouseNameOf(drawn[0]?.batch.warehouseId),
+        toOfficeId: planToOfficeId,
+        toWarehouse: warehouseNameOf(planToWarehouseId),
+        lines: drawn.map((d) => ({
+          itemName: d.line.itemName,
+          uom: d.line.uom,
+          requiredQty: d.qty,
+          productionId: d.batch.productionId,
+          bom: d.batch.bom,
+          producedQty: d.batch.producedQty,
+          productionDate: d.batch.productionDate,
+          completedAt: d.batch.completedAt,
+        })),
+        totalQty: lines.reduce((s, l) => s + l.productionQty, 0),
+        raisedBy: role,
+        raisedAt: now,
+      });
+    });
+
+    if (submissions.length === 0) { toast.error("Nothing to fulfil from production."); return; }
+
+    setDpfRecords((prev) => [...newDpf, ...prev]);
+    setDpfLog((prev) => [
+      {
+        at: now,
+        by: role,
+        action: "Fulfilment Raised",
+        detail:
+          `${submissions.length} flight(s) — ${planTotals.production} unit(s) from production, ` +
+          `${planTotals.stock} from stock, ${planTotals.purchase} left to buy.`,
+        eventId: event.id,
+        ref: submissions.map((s) => s.approval.id).join(", "),
+      },
+      ...prev,
+    ]);
+    commitLines(acting.map((l) => l.key), from === "Stock" ? "Stock" : "Production");
+    // The modal stays open so the purchase balance can be raised from the same
+    // plan; only Close leaves it.
+    onFulfilFromProduction(submissions);
+  };
 
   const openDrModal = (insufficient: typeof stockCheck) => {
     const lines: DrFormLine[] = insufficient.map((sc, i) => ({
@@ -1745,6 +2600,31 @@ function DelayProductionScreen({
     setDrJustification("");
     setDrOpen(true);
   };
+
+  /**
+   * Arriving from the list's Instant Purchase action: open the existing Direct
+   * Receive modal straight away, pre-loaded with the quantities the approved
+   * production plan could not cover (falling back to whatever stock is short).
+   */
+  useEffect(() => {
+    if (!autoOpenPurchase) return;
+    const plan = event.productionPlan;
+    const short = plan
+      ? plan.lines
+          .filter((l) => l.purchaseQty > 0)
+          .map((l) => ({
+            name: l.itemName,
+            requiredQty: l.purchaseQty,
+            uom: l.uom,
+            onHand: 0,
+            sufficient: false,
+          }))
+      : stockCheck.filter((i) => !i.sufficient);
+    openDrModal(short as typeof stockCheck);
+    onAutoOpenPurchaseDone?.();
+    // Fires once per arrival — the parent clears the flag straight after.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpenPurchase]);
 
   const updateDrLine = <K extends keyof DrFormLine>(id: string, field: K, value: DrFormLine[K]) => {
     setDrLines((prev) => prev.map((l) => l.id === id ? { ...l, [field]: value } : l));
@@ -1858,151 +2738,351 @@ function DelayProductionScreen({
 
   return (
     <div className="space-y-5">
+      {/* ── Production check worklist — one row per delayed flight ─────────── */}
       <Card>
-        <CardContent className="pt-5">
-          <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
-            Production Check — {event.id}
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-            {[
-              ["Flight",    event.flightNumber],
-              ["Date",      event.flightDate],
-              ["Sector",    event.sector],
-              ["Meal Type", event.mealType ?? "—"],
-              ["Pax",       String(event.paxCount)],
-              ["Crew",      String(event.crewCount)],
-              ["Delay",     `${event.delayDurationHours}h`],
-              ["Reported By", event.reportedBy],
-            ].map(([label, val]) => (
-              <div key={label}>
-                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
-                <div className="mt-0.5 font-medium">{val}</div>
+        <CardContent className="pt-5 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Production Check
               </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent className="pt-5 space-y-4">
-          <h3 className="text-sm font-semibold uppercase tracking-wider">Stock Availability Check</h3>
-
-          {items.length === 0 ? (
-            <div className="text-sm text-muted-foreground py-6 text-center">
-              No items derived from meal plan. Go back and select a different meal type.
+              <div className="text-[11px] text-muted-foreground mt-0.5">
+                {batchEvents.length} delayed flight{batchEvents.length === 1 ? "" : "s"} ·
+                select every flight to plan against the day&apos;s production
+              </div>
             </div>
-          ) : (
-            <>
-              <div className="border border-border rounded-md overflow-hidden">
-                <Table>
-                  <TableHeader className="bg-muted/40">
-                    <TableRow>
-                      <TableHead className="text-xs uppercase tracking-wider">Item Name</TableHead>
-                      <TableHead className="text-xs uppercase tracking-wider text-right w-32">Required Qty</TableHead>
-                      <TableHead className="text-xs uppercase tracking-wider text-right w-32">Current Stock</TableHead>
-                      <TableHead className="text-xs uppercase tracking-wider w-20">UoM</TableHead>
-                      <TableHead className="text-xs uppercase tracking-wider text-center w-32">Status</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {stockCheck.map((item, idx) => (
-                      <TableRow key={idx}>
-                        <TableCell className="font-medium text-sm">{item.name}</TableCell>
-                        <TableCell className="text-right tabular-nums text-sm">{item.requiredQty}</TableCell>
-                        <TableCell className="text-right">
-                          <button
-                            type="button"
-                            title="Click to view stock log"
-                            className={cn(
-                              "tabular-nums text-sm font-semibold underline decoration-dotted underline-offset-2 hover:opacity-80",
-                              item.onHand === 0 ? "text-muted-foreground" :
-                              item.sufficient ? "text-emerald-600" : "text-red-600",
-                            )}
-                            onClick={() => {
-                              setStockLogLine({
-                                id: item.name,
-                                name: item.name,
-                                qty: item.requiredQty,
-                                unitCost: 0,
-                                uom: item.uom,
-                                expiry: "",
-                                stockBefore: item.onHand,
-                              });
-                              setStockLogOpen(true);
-                            }}
-                          >
-                            {item.onHand}
-                          </button>
+            <Button
+              size="sm"
+              className={cn(
+                "bg-emerald-600 hover:bg-emerald-700 text-white",
+                allFlightsSelected && "production-available-blink",
+              )}
+              disabled={!allFlightsSelected}
+              onClick={openPlanModal}
+              title={allFlightsSelected
+                ? "Plan these flights against the day's QC-passed production"
+                : "Select every flight in the list to continue"}
+            >
+              <Factory className="h-3.5 w-3.5 mr-1.5" /> Production Availability
+            </Button>
+          </div>
+
+          <div className="overflow-x-auto -mx-1 px-1">
+            <div className="min-w-[1080px] border border-border rounded-md overflow-hidden">
+              <Table>
+                <TableHeader className="bg-muted/40">
+                  <TableRow>
+                    <TableHead className="w-10">
+                      <Checkbox
+                        checked={allFlightsSelected}
+                        onCheckedChange={(v) => setSelectedFlightIds(
+                          v ? selectableFlights.map((e) => e.id) : [],
+                        )}
+                        aria-label="Select all delayed flights"
+                      />
+                    </TableHead>
+                    {["Flight", "Sector", "Delay", "Dep Time (After Delay)", "PAX", "Crew", "Meals", "Date", "Check Production", "Action"].map((h) => (
+                      <TableHead key={h} className="text-xs uppercase tracking-wider whitespace-nowrap">{h}</TableHead>
+                    ))}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {batchEvents.map((ev) => {
+                    const cov = coverageFor(ev);
+                    const delayedEtd = ev.originalEtd
+                      ? to12h(addHoursToEtd(ev.originalEtd, ev.delayDurationHours))
+                      : "—";
+                    const planned = !!ev.productionPlan;
+                    return (
+                      <TableRow
+                        key={ev.id}
+                        className={cn(ev.id === event.id && "bg-sky-50/60")}
+                      >
+                        <TableCell>
+                          <Checkbox
+                            checked={selectedFlightIds.includes(ev.id)}
+                            disabled={planned}
+                            onCheckedChange={() => toggleFlight(ev.id)}
+                            aria-label={`Select ${ev.flightNumber}`}
+                          />
                         </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">{item.uom}</TableCell>
-                        <TableCell className="text-center">
-                          {item.sufficient ? (
-                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">
-                              <CheckCircle2 className="h-3 w-3" /> Sufficient
+                        <TableCell className="text-sm font-semibold whitespace-nowrap">
+                          {ev.flightNumber}
+                          <div className="font-mono text-[10px] font-normal text-muted-foreground">{ev.id}</div>
+                        </TableCell>
+                        <TableCell className="text-xs whitespace-nowrap">{ev.sector}</TableCell>
+                        <TableCell className="text-xs tabular-nums">{ev.delayDurationHours}h</TableCell>
+                        <TableCell className="text-xs tabular-nums whitespace-nowrap">{delayedEtd}</TableCell>
+                        <TableCell className="text-xs tabular-nums">{ev.paxCount}</TableCell>
+                        <TableCell className="text-xs tabular-nums">{ev.crewCount}</TableCell>
+                        <TableCell className="text-xs max-w-[150px] truncate" title={ev.mealType}>
+                          {ev.mealType ?? "—"}
+                        </TableCell>
+                        <TableCell className="text-xs tabular-nums whitespace-nowrap">{ev.flightDate}</TableCell>
+                        <TableCell className="whitespace-nowrap">
+                          {planned ? (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                              <CheckCircle2 className="h-3 w-3" /> Planned
                             </span>
-                          ) : item.onHand > 0 ? (
-                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
-                              <AlertTriangle className="h-3 w-3" /> Short {item.requiredQty - item.onHand}
+                          ) : cov.covered > 0 ? (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                              <Factory className="h-3 w-3" /> {cov.covered}/{cov.cooked} covered · {cov.availableQty}
                             </span>
                           ) : (
-                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full">
-                              <AlertTriangle className="h-3 w-3" /> Not In Stock
+                            <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                              <AlertTriangle className="h-3 w-3" /> None produced
                             </span>
                           )}
                         </TableCell>
+                        <TableCell>
+                          <Button
+                            size="sm" variant="outline" className="h-7 text-xs"
+                            onClick={() => { onSelectEvent(ev.id); openViewFlight(ev); }}
+                            title="Open this flight's availability detail"
+                          >
+                            <Eye className="h-3.5 w-3.5 mr-1" /> View
+                          </Button>
+                        </TableCell>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-
-              <div className={cn(
-                "rounded-md p-4 border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4",
-                allSufficient ? "bg-emerald-50 border-emerald-200" : "bg-amber-50 border-amber-200",
-              )}>
-                <div>
-                  {allSufficient ? (
-                    <p className="text-sm font-semibold text-emerald-800">
-                      All items available in kitchen stock — no external procurement needed.
-                    </p>
-                  ) : (
-                    <p className="text-sm font-semibold text-amber-800">
-                      Some items are insufficient. External procurement required.
-                    </p>
-                  )}
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {allSufficient
-                      ? "Proceed from kitchen inventory — no external procurement needed."
-                      : `${stockCheck.filter(i => !i.sufficient).length} insufficient item(s) will be forwarded for instant purchase.`}
-                  </p>
-                </div>
-                <div className="flex flex-wrap gap-2 shrink-0">
-                  <Button variant="outline" size="sm" onClick={onCancel}>
-                    <ArrowLeft className="h-3.5 w-3.5 mr-1" /> Cancel
-                  </Button>
-                  <Button variant="outline" size="sm"
-                    className="border-indigo-300 text-indigo-700 hover:bg-indigo-50"
-                    onClick={openProdModal}>
-                    <ChefHat className="h-3.5 w-3.5 mr-1.5" /> Send to Production
-                  </Button>
-                  {allSufficient ? (
-                    <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700 text-white"
-                      onClick={() => onProceed(event.id)}>
-                      <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" /> Proceed — Kitchen Stock
-                    </Button>
-                  ) : (
-                    <Button size="sm" className="bg-amber-600 hover:bg-amber-700 text-white"
-                      onClick={() => openDrModal(stockCheck.filter(i => !i.sufficient))}>
-                      <ShoppingCart className="h-3.5 w-3.5 mr-1.5" /> Forward to Instant Purchase
-                    </Button>
-                  )}
-                </div>
-              </div>
-            </>
-          )}
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
+      {/* ─── Per-flight availability detail (View) ─────────────────────────── */}
+      <Dialog open={!!viewFlight} onOpenChange={(v) => { if (!v) setViewFlight(null); }}>
+        <DialogContent className="w-full max-w-[95vw] sm:max-w-6xl max-h-[90vh] overflow-y-auto">
+          {viewFlight && (() => {
+            const av = availabilityByEvent.get(viewFlight.id) ?? [];
+            const rows = (viewFlight.menuItems ?? []).map((mi) => {
+              const a = av.find((x) => x.itemName === mi.name);
+              const cooked = isProducedItem({ name: mi.name });
+              const onHand = stockByName.get(mi.name.trim().toLowerCase()) ?? 0;
+              const fromProduction = cooked ? (a?.availableQty ?? 0) : 0;
+              const shortfall = Math.max(0, mi.requiredQty - fromProduction - (cooked ? 0 : onHand));
+              return { ...mi, cooked, onHand, fromProduction, shortfall, batches: a?.batches ?? [] };
+            });
+            // What still needs sourcing, split by how it can be sourced: meals the
+            // kitchen makes can be cooked, bought-in consumables can only be bought.
+            const unmet = rows.filter((r) => r.shortfall > 0);
+            const cookable = unmet.filter((r) => r.cooked);
+            const buyable = unmet.filter((r) => !r.cooked);
+            // What the footer buttons will actually act on.
+            const markedUnmet = unmet.filter((r) => viewPicked.includes(r.name) && !isViewLocked(r.name));
+            const markedCookable = markedUnmet.filter((r) => r.cooked);
+            // Items on-hand stock can contribute to — issuable without buying.
+            const stockable = rows.filter((r) => r.onHand > 0);
+            const markedStockable = stockable.filter(
+              (r) => viewPicked.includes(r.name) && !isViewLocked(r.name),
+            );
+            /** Every row still open to marking — what select-all covers. */
+            const actionable = rows.filter(
+              (r) => (r.shortfall > 0 || r.onHand > 0) && !isViewLocked(r.name),
+            );
+            return (
+              <>
+                <DialogHeader>
+                  <DialogTitle className="flex flex-wrap items-center gap-2">
+                    <Factory className="h-4 w-4 text-emerald-600" />
+                    {viewFlight.flightNumber} — {viewFlight.sector}
+                    <span className="font-mono text-xs font-normal text-muted-foreground">{viewFlight.id}</span>
+                  </DialogTitle>
+                </DialogHeader>
+
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 rounded-md border border-border bg-muted/20 p-3 text-sm">
+                  {[
+                    ["Date", viewFlight.flightDate],
+                    ["Meal Type", viewFlight.mealType ?? "—"],
+                    ["Delay", `${viewFlight.delayDurationHours}h`],
+                    ["Dep Time (After Delay)", viewFlight.originalEtd
+                      ? to12h(addHoursToEtd(viewFlight.originalEtd, viewFlight.delayDurationHours))
+                      : "—"],
+                    ["Pax", String(viewFlight.paxCount)],
+                    ["Crew", String(viewFlight.crewCount)],
+                    ["Reported By", viewFlight.reportedBy],
+                    ["Status", viewFlight.status],
+                  ].map(([label, val]) => (
+                    <div key={label}>
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
+                      <div className="mt-0.5 font-medium">{val}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="overflow-x-auto">
+                  <div className="min-w-[720px] border border-border rounded-md overflow-hidden">
+                    <Table>
+                      <TableHeader className="bg-muted/40">
+                        <TableRow>
+                          <TableHead className="w-10">
+                            <Checkbox
+                              checked={actionable.length > 0 && actionable.every((r) => viewPicked.includes(r.name))}
+                              disabled={actionable.length === 0}
+                              onCheckedChange={(v) => setViewPicked(v ? actionable.map((r) => r.name) : [])}
+                              aria-label="Select all actionable items"
+                            />
+                          </TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider">Item Name</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider text-right w-28">Required Qty</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider text-right w-28">Current Stock</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider text-right w-32">From Production</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider w-20">UoM</TableHead>
+                          <TableHead className="text-xs uppercase tracking-wider text-center w-36">Status</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {rows.length === 0 ? (
+                          <TableRow>
+                            <TableCell colSpan={7} className="text-center text-sm text-muted-foreground py-10">
+                              No items derived from the meal plan for this flight.
+                            </TableCell>
+                          </TableRow>
+                        ) : rows.map((r, i) => (
+                          <TableRow key={`${r.name}-${i}`}>
+                            {/* Markable when there is something to act on: a
+                                shortfall to cook or buy, or stock to issue. */}
+                            <TableCell>
+                              <Checkbox
+                                checked={viewPicked.includes(r.name) || isViewLocked(r.name)}
+                                disabled={isViewLocked(r.name) || (r.shortfall === 0 && r.onHand === 0)}
+                                onCheckedChange={() => toggleViewItem(r.name)}
+                                aria-label={`Select ${r.name}`}
+                              />
+                            </TableCell>
+                            <TableCell className="text-sm font-medium">
+                              {r.name}
+                              <div className="text-[10px] text-muted-foreground">
+                                {r.cooked ? "kitchen item" : "bought-in consumable"}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums text-sm">{r.requiredQty}</TableCell>
+                            <TableCell className="text-right tabular-nums text-sm text-sky-700">
+                              {r.onHand > 0 ? r.onHand : 0}
+                            </TableCell>
+                            <TableCell className="text-right tabular-nums text-sm text-emerald-700">
+                              {r.cooked ? r.fromProduction : "—"}
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">{r.uom}</TableCell>
+                            <TableCell className="text-center">
+                              {isViewLocked(r.name) ? (
+                                <span className="inline-flex items-center gap-1 rounded-full border border-slate-300 bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600">
+                                  <CheckCircle2 className="h-3 w-3" /> Sent · {viewDone[r.name]}
+                                </span>
+                              ) : r.shortfall === 0 ? (
+                                <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                                  <CheckCircle2 className="h-3 w-3" /> Available
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-700">
+                                  <AlertTriangle className="h-3 w-3" /> Short {r.shortfall}
+                                </span>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+
+                {unmet.length === 0 ? (
+                  <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+                    Every item is covered from the day&apos;s production or from stock — use
+                    <strong> Production Availability</strong> to plan the quantities.
+                  </div>
+                ) : (
+                  <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    <div className="font-semibold">Not available: {unmet.map((r) => r.name).join(", ")}</div>
+                    <div className="mt-0.5">
+                      {cookable.length > 0 && (
+                        <>{cookable.length} kitchen item(s) can be cooked. </>
+                      )}
+                      {buyable.length > 0 && (
+                        <>{buyable.length} bought-in consumable(s) can only be purchased.</>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setViewFlight(null)}>Close</Button>
+                  {/* Every action works on the marked items. Only meals the kitchen
+                      makes can be cooked; a bought-in consumable has no recipe,
+                      so it is filtered out of the production route. */}
+                  {stockable.length > 0 && (
+                    <Button
+                      className="bg-sky-600 hover:bg-sky-700 text-white"
+                      disabled={markedStockable.length === 0}
+                      title={markedStockable.length === 0
+                        ? "Mark at least one item that on-hand stock can cover"
+                        : `Issue ${markedStockable.length} marked item(s) from stock`}
+                      onClick={() => setConfirmRoute({
+                        source: "Stock",
+                        flight: `${viewFlight.flightNumber} — ${viewFlight.sector}`,
+                        rows: markedStockable.map((r) => ({
+                          name: r.name,
+                          qty: Math.min(r.requiredQty, r.onHand),
+                          uom: r.uom,
+                          requiredQty: r.requiredQty,
+                        })),
+                        run: () => viewFulfilFromStock(viewFlight, markedStockable),
+                      })}
+                    >
+                      <PackageOpen className="h-4 w-4 mr-1.5" />
+                      Fulfill from Stock ({markedStockable.length})
+                    </Button>
+                  )}
+                  {cookable.length > 0 && (
+                    <Button
+                      variant="outline"
+                      className="border-indigo-300 text-indigo-700 hover:bg-indigo-50"
+                      disabled={markedCookable.length === 0}
+                      title={markedCookable.length === 0
+                        ? "Mark at least one short kitchen item"
+                        : `Cook ${markedCookable.length} marked item(s)`}
+                      onClick={() => setConfirmRoute({
+                        source: "Production",
+                        flight: `${viewFlight.flightNumber} — ${viewFlight.sector}`,
+                        rows: markedCookable.map((r) => ({
+                          name: r.name, qty: r.shortfall, uom: r.uom, requiredQty: r.requiredQty,
+                        })),
+                        run: () => viewSendToProduction(viewFlight, markedCookable),
+                      })}
+                    >
+                      <ChefHat className="h-4 w-4 mr-1.5" />
+                      Send to Production ({markedCookable.length})
+                    </Button>
+                  )}
+                  {unmet.length > 0 && (
+                    <Button
+                      className="bg-amber-600 hover:bg-amber-700 text-white"
+                      disabled={markedUnmet.length === 0}
+                      title={markedUnmet.length === 0
+                        ? "Mark at least one short item"
+                        : `Buy ${markedUnmet.length} marked item(s)`}
+                      onClick={() => setConfirmRoute({
+                        source: "Instant Purchase",
+                        flight: `${viewFlight.flightNumber} — ${viewFlight.sector}`,
+                        rows: markedUnmet.map((r) => ({
+                          name: r.name, qty: r.shortfall, uom: r.uom, requiredQty: r.requiredQty,
+                        })),
+                        run: () => viewForwardToPurchase(viewFlight, markedUnmet),
+                      })}
+                    >
+                      <ShoppingCart className="h-4 w-4 mr-1.5" />
+                      Forward to Instant Purchase ({markedUnmet.length})
+                    </Button>
+                  )}
+                </DialogFooter>
+              </>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
       {/* ─── Direct Receive – Spot Buy Modal ──────────────────────────────── */}
       <Dialog open={drOpen} onOpenChange={(v) => { if (!v) setDrOpen(false); }}>
         <DialogContent className="w-full max-w-2xl max-h-[90vh] overflow-y-auto">
@@ -2143,6 +3223,329 @@ function DelayProductionScreen({
         </DialogContent>
       </Dialog>
 
+      {/* ─── Route confirmation — quantities before anything is raised ─────── */}
+      <Dialog open={!!confirmRoute} onOpenChange={(v) => { if (!v) setConfirmRoute(null); }}>
+        <DialogContent className="w-full max-w-[95vw] sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+          {confirmRoute && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  {confirmRoute.source === "Stock" ? <PackageOpen className="h-4 w-4 text-sky-600" />
+                    : confirmRoute.source === "Production" ? <ChefHat className="h-4 w-4 text-indigo-600" />
+                    : <ShoppingCart className="h-4 w-4 text-amber-600" />}
+                  {confirmRoute.source === "Stock" ? "Fulfill from Stock"
+                    : confirmRoute.source === "Production" ? "Send to Production"
+                    : "Forward to Instant Purchase"}
+                </DialogTitle>
+                <DialogDescription>
+                  {confirmRoute.flight} — review the quantities below. Confirming sends them to{" "}
+                  {confirmRoute.source === "Instant Purchase"
+                    ? "Approval Management under Purchase Req"
+                    : confirmRoute.source === "Production"
+                      ? "Approval Management under Production"
+                      : "Approval Management under Delay Refreshment"}.
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="overflow-x-auto">
+                <div className="min-w-[420px] border border-border rounded-md overflow-hidden">
+                  <Table>
+                    <TableHeader className="bg-muted/40">
+                      <TableRow>
+                        <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider text-right w-28">Required</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider text-right w-28">
+                          {confirmRoute.source === "Stock" ? "Issue Qty"
+                            : confirmRoute.source === "Production" ? "Cook Qty" : "Buy Qty"}
+                        </TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider w-20">UoM</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {confirmRoute.rows.map((r) => (
+                        <TableRow key={r.name}>
+                          <TableCell className="text-sm font-medium">{r.name}</TableCell>
+                          <TableCell className="text-right tabular-nums text-sm text-muted-foreground">
+                            {r.requiredQty}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums text-sm font-semibold">{r.qty}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground">{r.uom}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+
+              <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                <strong className="text-foreground tabular-nums">
+                  {confirmRoute.rows.reduce((s, r) => s + r.qty, 0)}
+                </strong>{" "}
+                unit(s) across {confirmRoute.rows.length} item(s).
+              </div>
+
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setConfirmRoute(null)}>Cancel</Button>
+                <Button
+                  className={cn(
+                    "text-white",
+                    confirmRoute.source === "Stock" ? "bg-sky-600 hover:bg-sky-700"
+                      : confirmRoute.source === "Production" ? "bg-indigo-600 hover:bg-indigo-700"
+                      : "bg-amber-600 hover:bg-amber-700",
+                  )}
+                  onClick={() => { confirmRoute.run(); setConfirmRoute(null); }}
+                >
+                  Confirm &amp; Send for Approval
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* ─── Production Availability Modal ─────────────────────────────────── */}
+      <Dialog open={planOpen} onOpenChange={(v) => { if (!v) setPlanOpen(false); }}>
+        <DialogContent className="w-full max-w-[95vw] sm:max-w-7xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Factory className="h-4 w-4 text-emerald-600" /> Production Availability
+            </DialogTitle>
+          </DialogHeader>
+
+          <p className="text-xs text-muted-foreground">
+            Quantities cooked and QC-passed on each flight&apos;s own day. Edit the
+            <strong className="text-foreground"> Req Qty</strong> to take less than the
+            full requirement — produced quantities are a snapshot and cannot be edited.
+            Anything production and stock cannot cover is left for instant purchase.
+          </p>
+
+          <div className="overflow-x-auto">
+            <div className="min-w-[900px] border border-border rounded-md overflow-hidden">
+              <Table>
+                <TableHeader className="bg-muted/40">
+                  <TableRow>
+                    <TableHead className="w-10">
+                      <Checkbox
+                        checked={selectableLines.length > 0
+                          && selectableLines.every((l) => planPicked.includes(l.key))}
+                        disabled={selectableLines.length === 0}
+                        onCheckedChange={(v) => setPlanPicked(v ? selectableLines.map((l) => l.key) : [])}
+                        aria-label="Select all lines"
+                      />
+                    </TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Meal Item</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Production Batch</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right w-28">Produced Qty</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right w-24">Required</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right w-28">Req Qty</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right w-24">Stock</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right w-24">To Buy</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider w-32">Source</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {planLines.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={9} className="text-center text-sm text-muted-foreground py-10">
+                        Nothing to plan — no meal items on the selected flights.
+                      </TableCell>
+                    </TableRow>
+                  ) : planFlights
+                    .filter((ev) => planLines.some((l) => l.eventId === ev.id))
+                    .flatMap((ev) => {
+                      const rows = planLines.filter((l) => l.eventId === ev.id);
+                      return [
+                        <TableRow key={`hdr-${ev.id}`} className="bg-sky-50/70">
+                          <TableCell colSpan={9} className="py-1.5">
+                            <span className="text-xs font-semibold text-sky-900">
+                              {ev.flightNumber} — {ev.sector}
+                            </span>
+                            <span className="ml-2 text-[11px] text-sky-800">
+                              {ev.flightDate} · {ev.delayDurationHours}h delay · {ev.paxCount + ev.crewCount} pax+crew
+                            </span>
+                          </TableCell>
+                        </TableRow>,
+                        ...rows.map((l) => {
+                          const over = l.productionQty > l.availableProduction;
+                          const short = shortfallOf(l);
+                          return (
+                            <TableRow key={l.key} className={cn(isLocked(l.key) && "opacity-55")}>
+                              <TableCell>
+                                <Checkbox
+                                  checked={planPicked.includes(l.key) || isLocked(l.key)}
+                                  disabled={isLocked(l.key)}
+                                  onCheckedChange={() => togglePlanLine(l.key)}
+                                  aria-label={`Select ${l.itemName}`}
+                                />
+                              </TableCell>
+                              <TableCell className="text-sm font-medium">
+                                {l.itemName}
+                                {!l.produced && (
+                                  <div className="text-[10px] text-muted-foreground">bought-in consumable</div>
+                                )}
+                              </TableCell>
+                              <TableCell>
+                                {l.batches.length === 0 ? (
+                                  <span className="text-[11px] text-muted-foreground">—</span>
+                                ) : l.batches.map((b) => (
+                                  <button
+                                    key={b.productionId}
+                                    type="button"
+                                    className="block font-mono text-[11px] font-semibold text-primary underline decoration-dotted underline-offset-2 hover:opacity-80"
+                                    title="Open this production order"
+                                    onClick={() => goToProductionOrder(b)}
+                                  >
+                                    {b.productionId}
+                                  </button>
+                                ))}
+                              </TableCell>
+                              {/* Produced Qty is the order's own output, as it reads
+                                  on the Production Order list. */}
+                              <TableCell className="text-right tabular-nums text-sm text-muted-foreground">
+                                {l.produced && l.batches.length > 0
+                                  ? l.batches.reduce((s, b) => s + b.producedQty, 0)
+                                  : "—"}
+                              </TableCell>
+                              <TableCell className="text-right tabular-nums text-sm">{l.requiredQty}</TableCell>
+                              <TableCell className="text-right">
+                                <Input
+                                  type="number"
+                                  min={0}
+                                  max={l.availableProduction}
+                                  value={l.productionQty}
+                                  disabled={!l.produced || l.availableProduction === 0}
+                                  onChange={(e) => setPlanQty(l.key, e.target.value)}
+                                  className={cn(
+                                    "h-8 text-right tabular-nums",
+                                    over && "border-destructive focus-visible:ring-destructive",
+                                  )}
+                                />
+                              </TableCell>
+                              <TableCell className="text-right tabular-nums text-sm text-sky-700">
+                                {l.stockQty > 0 ? l.stockQty : "—"}
+                              </TableCell>
+                              <TableCell className={cn(
+                                "text-right tabular-nums text-sm",
+                                short > 0 ? "text-amber-700 font-semibold" : "text-muted-foreground",
+                              )}>
+                                {short > 0 ? short : "—"}
+                              </TableCell>
+                              <TableCell>
+                                {isLocked(l.key) ? (
+                                  <span className="inline-flex items-center gap-1 rounded-full border border-slate-300 bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600 whitespace-nowrap">
+                                    <CheckCircle2 className="h-3 w-3" /> Sent · {planDone[l.key]}
+                                  </span>
+                                ) : (
+                                  <span className={cn(
+                                    "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold whitespace-nowrap",
+                                    sourceOf(l) === "Production" ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                    : sourceOf(l) === "Stock" ? "bg-sky-50 text-sky-700 border-sky-200"
+                                    : "bg-amber-50 text-amber-700 border-amber-200",
+                                  )}>
+                                    {sourceOf(l)}
+                                  </span>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        }),
+                      ];
+                    })}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+
+          {/* Destination — the airport-side store the meals move to on approval. */}
+          <LocationPicker
+            officeId={planToOfficeId}
+            warehouseId={planToWarehouseId}
+            onChange={(n) => { setPlanToOfficeId(n.officeId); setPlanToWarehouseId(n.warehouseId); }}
+          />
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {[
+              ["From Production", planTotals.production, "text-emerald-700"],
+              ["From Stock", planTotals.stock, "text-sky-700"],
+              ["Instant Purchase", planTotals.purchase, "text-amber-700"],
+            ].map(([label, val, cls]) => (
+              <div key={label as string} className="rounded-md border border-border bg-muted/20 px-3 py-2">
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label as string}</div>
+                <div className={cn("mt-0.5 text-lg font-semibold tabular-nums", cls as string)}>{val as number}</div>
+              </div>
+            ))}
+          </div>
+
+          {planTotals.purchase > 0 && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              <strong>{planTotals.purchase} unit(s)</strong> cannot be covered from production or
+              stock. Forward them for instant purchase — they are raised as a Purchase Requisition
+              and picked up in Approval Management under Purchase Req.
+            </div>
+          )}
+
+          {/* Two independent routes, each auto-counted from the tagged lines.
+              All three stay available for the whole plan. Each is gated on the
+              CURRENT marks only, so raising one greys it out until fresh items
+              are marked — and the lines just raised lock so they can't be sent
+              twice. */}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setPlanOpen(false);
+                if (Object.keys(planDone).length > 0) onCancel();
+              }}
+            >
+              Close
+            </Button>
+            <Button
+              className="bg-emerald-600 hover:bg-emerald-700 text-white"
+              onClick={() => submitPlan("Production")}
+              disabled={planTotals.production <= 0 || planOverdrawn.length > 0}
+              title={planTotals.production <= 0
+                ? "Mark items that production can cover"
+                : "Send the marked production-sourced quantities for approval"}
+            >
+              <ArrowLeftRight className="h-4 w-4 mr-1.5" />
+              Fulfill from Production ({planTotals.production})
+            </Button>
+            <Button
+              className="bg-sky-600 hover:bg-sky-700 text-white"
+              onClick={() => submitPlan("Stock")}
+              disabled={planTotals.stock <= 0}
+              title={planTotals.stock <= 0
+                ? "Mark items that on-hand stock can cover"
+                : "Issue the marked quantities from existing stock"}
+            >
+              <PackageOpen className="h-4 w-4 mr-1.5" />
+              Fulfill from Stock ({planTotals.stock})
+            </Button>
+            <Button
+              className="bg-indigo-600 hover:bg-indigo-700 text-white"
+              onClick={submitSendToProduction}
+              disabled={planTotals.cook <= 0}
+              title={planTotals.cook <= 0
+                ? "Mark kitchen items the day's production has not covered"
+                : "Raise Production Orders for the marked items"}
+            >
+              <ChefHat className="h-4 w-4 mr-1.5" />
+              Send to Production ({planTotals.cook})
+            </Button>
+            <Button
+              className="bg-amber-600 hover:bg-amber-700 text-white"
+              onClick={submitPurchase}
+              disabled={planTotals.purchase <= 0}
+              title={planTotals.purchase <= 0
+                ? "Mark items with a balance to buy"
+                : "Raise a Purchase Requisition for the marked balance"}
+            >
+              <ShoppingCart className="h-4 w-4 mr-1.5" />
+              Forward to Instant Purchase ({planTotals.purchase})
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {/* ─── Send to Production Modal ──────────────────────────────────────── */}
       <Dialog open={prodOpen} onOpenChange={(v) => { if (!v) setProdOpen(false); }}>
         <DialogContent className="w-full max-w-[95vw] sm:max-w-2xl max-h-[90vh] overflow-y-auto">
@@ -2556,6 +3959,9 @@ function DelayDetailScreen({
   const [detailStockLog, setDetailStockLog] = useState<{ item: DrItem; log: DrLogEntry[] } | null>(null);
   const { productionEntries } = useWorkflow();
   const [allDispatchRecords] = usePersistedState<DispatchRecordLike[]>("dispatch-records", []);
+  // Production-fulfilment records — read-only here, for the summary card below.
+  const [dpfRecords] = usePersistedState<DelayProductionFulfillment[]>(DPF_KEY, []);
+  const dpf = dpfRecords.find((r) => r.id === event.productionFulfillment?.id);
 
   const f  = event.fulfillment;
   const dr = f?.directReceive;
@@ -2711,6 +4117,140 @@ function DelayDetailScreen({
           )}
         </CardContent>
       </Card>
+
+      {/* Fulfilled from production — no production order, no purchase; the meals
+          move on the linked Transfer Request(s). */}
+      {/* ── Fulfilment breakdown — where each item was routed ──────────────── */}
+      {(event.fulfilmentRefs ?? []).length > 0 && (() => {
+        const refs = event.fulfilmentRefs ?? [];
+        const SOURCES: NonNullable<DelayEvent["fulfilmentRefs"]>[number]["source"][] =
+          ["Stock", "Production", "Instant Purchase"];
+        const tone: Record<string, string> = {
+          "Stock": "border-sky-200 bg-sky-50 text-sky-800",
+          "Production": "border-indigo-200 bg-indigo-50 text-indigo-800",
+          "Instant Purchase": "border-amber-200 bg-amber-50 text-amber-800",
+        };
+        /** Open the document a route raised, flashing its row on arrival. */
+        const openRef = (kind: string, id: string) => {
+          const first = id.split(",")[0].trim();
+          if (kind === "production-order") {
+            flagArrival({ target: "production-list", ids: id.split(",").map((s) => s.trim()) });
+            onNavigate("/production-entry");
+          } else if (kind === "purchase-requisition") {
+            flagArrival({ target: "pr-list", ids: [first] });
+            onNavigate("/purchase-requisition");
+          } else {
+            onNavigate("/approval-management");
+          }
+        };
+        return (
+          <Card>
+            <CardContent className="pt-4 space-y-3">
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Fulfilment Breakdown
+              </div>
+              {SOURCES.filter((s) => refs.some((r) => r.source === s)).map((s) => {
+                const group = refs.filter((r) => r.source === s);
+                return (
+                  <div key={s} className={cn("rounded-md border p-3", tone[s])}>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs font-semibold">
+                        {s === "Stock" ? "Fulfilled From Stock"
+                          : s === "Production" ? "Sent To Production"
+                          : "Forwarded To Instant Purchase"}
+                      </span>
+                      <span className="text-[11px] opacity-80">
+                        {group.reduce((n, r) => n + r.items.length, 0)} item(s)
+                      </span>
+                    </div>
+                    {group.map((r, gi) => (
+                      <div key={`${r.ref}-${gi}`} className="mt-2 border-t border-current/15 pt-2 first:mt-1 first:border-0 first:pt-0">
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <span className="text-[10px] uppercase tracking-wider opacity-70">Reference</span>
+                          {r.ref.split(",").map((id) => (
+                            <button
+                              key={id.trim()}
+                              type="button"
+                              onClick={() => openRef(r.refKind, id.trim())}
+                              className="font-mono text-xs font-semibold underline decoration-dotted underline-offset-2 hover:opacity-70"
+                              title="Open this document"
+                            >
+                              {id.trim()}
+                            </button>
+                          ))}
+                          <span className="ml-auto text-[10px] tabular-nums opacity-70">{r.at}</span>
+                        </div>
+                        <div className="mt-1 text-[11px]">
+                          {r.items.map((i) => `${i.name} — ${i.qty} ${i.uom}`).join(" · ")}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+            </CardContent>
+          </Card>
+        );
+      })()}
+
+      {dpf && (
+        <Card>
+          <CardContent className="pt-4 space-y-3">
+            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+              <Factory className="h-3.5 w-3.5 text-emerald-600" /> Fulfilled From Production — {dpf.id}
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+              {[
+                ["Transfer Request", dpf.transferRequestId],
+                ["From", dpf.fromWarehouse || "—"],
+                ["To", dpf.toWarehouse || "—"],
+                ["Total Qty", String(dpf.totalQty)],
+                ["Raised By", dpf.raisedBy],
+                ["Raised At", dpf.raisedAt],
+              ].map(([label, val]) => (
+                <div key={label}>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div>
+                  <div className="mt-0.5 font-medium text-sm">{val}</div>
+                </div>
+              ))}
+            </div>
+            <div className="overflow-x-auto">
+              <div className="min-w-[520px] border border-border rounded-md overflow-hidden">
+                <Table>
+                  <TableHeader className="bg-muted/40">
+                    <TableRow>
+                      <TableHead className="text-xs uppercase tracking-wider">Meal Item</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider">Production Batch</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider">Produced At</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Produced Qty</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right">Transferred</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {dpf.lines.map((l, i) => (
+                      <TableRow key={`${l.productionId}-${i}`}>
+                        <TableCell className="text-sm font-medium">{l.itemName}</TableCell>
+                        <TableCell>
+                          <div className="font-mono text-xs font-semibold">{l.productionId}</div>
+                          <div className="text-[10px] text-muted-foreground">{l.bom}</div>
+                        </TableCell>
+                        <TableCell className="text-xs tabular-nums">{l.completedAt ?? l.productionDate}</TableCell>
+                        <TableCell className="text-right tabular-nums text-xs text-muted-foreground">{l.producedQty}</TableCell>
+                        <TableCell className="text-right tabular-nums text-sm font-semibold">
+                          {l.requiredQty} {l.uom}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+            <Button size="sm" variant="outline" onClick={() => onNavigate("/transfer")}>
+              <ExternalLink className="h-3.5 w-3.5 mr-1.5" /> View in Transfer
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Fulfillment details */}
       {f && (

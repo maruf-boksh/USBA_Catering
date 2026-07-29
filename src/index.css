@@ -570,6 +570,34 @@ html[data-theme="dark"] {
     padding-left: calc(0.5rem - 3px);
 }
 
+/* ── Production-available blink ────────────────────────────────────────────
+ * Continuous attention pulse for the "Available In Production" action on the
+ * Delay Management fulfilment card. Unlike the arrival flashes above this one
+ * loops, because it marks a standing opportunity (meals already cooked) rather
+ * than a one-off arrival. Honours prefers-reduced-motion.
+ */
+@keyframes production-available-blink {
+    0%, 100% {
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55);
+        transform: scale(1);
+    }
+    50% {
+        box-shadow: 0 0 0 7px rgba(16, 185, 129, 0);
+        transform: scale(1.025);
+    }
+}
+
+.production-available-blink {
+    animation: production-available-blink 1.5s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .production-available-blink {
+        animation: none;
+        box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.45);
+    }
+}
+
 /* ── Brand logo animation — ported from Vizyon HRM design system ──────────── */
 
 /* Container: rotating conic shimmer (same as Vizyon's sb-brand-rotate) */

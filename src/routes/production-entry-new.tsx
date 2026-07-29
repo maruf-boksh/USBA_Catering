@@ -23,7 +23,7 @@ import { cn } from "@/lib/utils";
 import { useWorkflow, type WfProductionEntryRecord, type WfProductionInputMaterial, type WfDemandRequest } from "@/lib/workflow-store";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import { PRODUCTION_ITEMS, type RecipeItem } from "@/routes/production-entry";
-import { resolveProductionItem } from "@/lib/meal-recipe";
+import { isProducedItem, resolveProductionItem } from "@/lib/meal-recipe";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { inventory, warehouses, type InventoryItem } from "@/lib/sample-data";
 import { roundQty, fmtQty } from "@/lib/num";
@@ -52,6 +52,18 @@ export default function ProductionEntryPage() {
           o.status === "In Preparation",
       ),
     [productionEntries],
+  );
+
+  /**
+   * What the entry form may log against. Bought-in items (bottled water, juice
+   * boxes, snack packs, pre-made meal boxes) are never cooked, so they have no
+   * production entry to record even when an order exists for them — those
+   * arrive through purchasing, not the production floor. Filtered here rather
+   * than in `fulfillableOrders` so the order counts above stay as they were.
+   */
+  const producibleOrders = useMemo(
+    () => fulfillableOrders.filter((o) => isProducedItem({ name: o.outputItemName, code: o.outputItemCode, bom: o.bom })),
+    [fulfillableOrders],
   );
 
   const filteredRecords = productionEntryRecords.filter((r) => {
@@ -206,7 +218,7 @@ export default function ProductionEntryPage() {
         </>
       ) : (
         <CreateEntry
-          orders={fulfillableOrders}
+          orders={producibleOrders}
           onSave={(record) => {
             addProductionEntryRecord(record);
             setView("list");
