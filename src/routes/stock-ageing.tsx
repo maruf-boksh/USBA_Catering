@@ -23,11 +23,10 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
 import {
-  Plus, Hourglass, TimerReset, CalendarClock, BellRing, Eye, Trash2,
+  Hourglass, TimerReset, CalendarClock, BellRing, Eye, Trash2,
   Search, CalendarDays, AlertTriangle, SlidersHorizontal, Send, History,
 } from "lucide-react";
 import { Select as AntSelect, Button as AntButton } from "antd";
@@ -198,6 +197,514 @@ const emptyForm = (today: string): FormState => ({
 
 const SELECT_CLS = "w-full mt-1 rounded-md border border-input bg-background px-3 py-2 text-sm";
 
+/**
+ * The "New Ageing Record" and "Alert Configuration" entry panels — formerly the
+ * Stock Ageing page's Add New dialog, now hosted as sub-tabs inside Item
+ * Configuration → Create Item. Self-contained: it owns the same persisted
+ * stores ("stock-ageing-manual", "stock-ageing-alert-config") the Stock Ageing
+ * page reads, so records and rules saved here surface there unchanged.
+ */
+export function AgeingAddPanels({ panel, onClose }: {
+  panel: "record" | "config";
+  /** Cancel / Close — the host decides where to return to. */
+  onClose?: () => void;
+}) {
+  const today = useMemo(() => todayIso(), []);
+  const staff = useMemo(() => getActiveStaff(), []);
+  const master = useMemo(() => readInventoryMaster(), []);
+
+  const [, setManual] = usePersistedState<ManualAgeingEntry[]>("stock-ageing-manual", []);
+  const [configs, setConfigs] = usePersistedState<Record<string, ItemAlertConfig>>("stock-ageing-alert-config", {});
+
+  const [form, setForm] = useState<FormState>(() => emptyForm(today));
+  const [cfgItem, setCfgItem] = useState("");
+  const [cfg, setCfg] = useState<ItemAlertConfig | null>(null);
+
+  // ── New-lot form helpers ──────────────────────────────────────────────────
+  const f = (field: keyof FormState, value: string) => setForm((p) => ({ ...p, [field]: value }));
+  const selectedItem = useMemo(() => master.find((i) => i.id === form.itemCode), [master, form.itemCode]);
+
+  // Live classification preview so the storekeeper sees the alert the entry will
+  // raise before saving — same policy the tracker applies to system rows.
+  const preview = useMemo(() => {
+    if (!isDate(form.receivedOn)) return null;
+    // Use the item's own alert configuration when it has one.
+    const config = configs[form.itemCode];
+    const t = thresholdsFor(config);
+    const ageDays = Math.max(0, daysBetween(form.receivedOn, today));
+    const dte = isDate(form.expiry) ? daysBetween(today, form.expiry) : null;
+    const level = levelOf(ageDays, dte, t);
+    const expiry = isDate(form.expiry) ? form.expiry : "";
+    const alertSince = alertSinceOf(level, form.receivedOn, expiry, t);
+    const slaTargetDays = slaTargetFor(level, config);
+    const slaDueDate = isDate(alertSince) && slaTargetDays !== null ? addDays(alertSince, slaTargetDays) : "";
+    const status: AlertStatus = isAlert(level) ? "Open" : "No Alert";
+    const { sla, slaDelta } = slaStateOf(slaDueDate, status, "", today);
+    return {
+      ageDays, bucket: bucketOf(ageDays), dte, level, action: ACTION_BY_LEVEL[level],
+      alertSince, slaTargetDays, slaDueDate, sla, slaDelta,
+      responsible: config?.responsible ?? "",
+      configured: !!config,
+    };
+  }, [form.receivedOn, form.expiry, form.itemCode, configs, today]);
+
+  // ── Alert configuration tab ───────────────────────────────────────────────
+  /** Load an item's saved configuration, or start from the house defaults. */
+  const pickConfigItem = (itemCode: string) => {
+    setCfgItem(itemCode);
+    if (!itemCode) { setCfg(null); return; }
+    const inv = master.find((i) => i.id === itemCode);
+    setCfg(configs[itemCode] ?? defaultAlertConfig(itemCode, inv?.name ?? itemCode));
+  };
+
+  const setCfgField = <K extends keyof ItemAlertConfig>(field: K, value: ItemAlertConfig[K]) =>
+    setCfg((p) => (p ? { ...p, [field]: value } : p));
+
+  const setCfgNumber = (field: "expiryCritical" | "expiryWarning" | "slowMoving" | "obsolete" | "escalateAfter", value: string) =>
+    setCfg((p) => (p ? { ...p, [field]: value === "" ? NaN : Number(value) } : p));
+
+  const setCfgSla = (level: Exclude<AlertLevel, "Healthy">, value: string) =>
+    setCfg((p) => (p ? { ...p, sla: { ...p.sla, [level]: value === "" ? NaN : Number(value) } } : p));
+
+  const toggleMethod = (method: NotifyMethod, on: boolean) =>
+    setCfg((p) => {
+      if (!p) return p;
+      const methods = on ? [...p.methods, method] : p.methods.filter((m) => m !== method);
+      return { ...p, methods: NOTIFY_METHODS.filter((m) => methods.includes(m)) };
+    });
+
+  const cfgErrors = useMemo(() => (cfg ? validateAlertConfig(cfg) : []), [cfg]);
+
+  const saveConfig = () => {
+    if (!cfg) { toast.error("Choose an item to configure."); return; }
+    const errors = validateAlertConfig(cfg);
+    if (errors.length > 0) { toast.error(errors[0]); return; }
+    const saved: ItemAlertConfig = { ...cfg, updatedBy: cfg.responsible || "Store", updatedAt: today };
+    setConfigs((prev) => ({ ...prev, [cfg.itemCode]: saved }));
+    setCfg(saved);
+    toast.success(`Alert configuration saved for ${cfg.itemName}.`);
+  };
+
+  const resetConfig = () => {
+    if (!cfg) return;
+    setCfg(defaultAlertConfig(cfg.itemCode, cfg.itemName));
+    toast.info("Reset to the standard settings — not saved yet.");
+  };
+
+  const removeConfig = (itemCode: string) => {
+    setConfigs((prev) => {
+      const next = { ...prev };
+      delete next[itemCode];
+      return next;
+    });
+    if (cfgItem === itemCode) pickConfigItem("");
+    toast.success("Configuration removed — this item is back on the standard settings.");
+  };
+
+  const saveNew = () => {
+    if (!form.itemCode) { toast.error("Item is required."); return; }
+    if (!form.batchNo.trim()) { toast.error("Batch / Lot No. is required."); return; }
+    if (!isDate(form.receivedOn)) { toast.error("Received Date is required."); return; }
+    const qty = Number(form.qty);
+    if (!(qty > 0)) { toast.error("Quantity must be greater than zero."); return; }
+    if (isDate(form.expiry) && form.expiry < form.receivedOn) {
+      toast.error("Expiry Date cannot be earlier than the Received Date.");
+      return;
+    }
+    if (!form.raisedBy) { toast.error("Raised By is required."); return; }
+
+    const inv = selectedItem;
+    const entry: ManualAgeingEntry = {
+      id: `AGE-MAN-${Date.now()}`,
+      itemCode: form.itemCode,
+      item: inv?.name ?? form.itemCode,
+      category: inv?.category ?? "—",
+      uom: inv?.uom ?? "—",
+      batchNo: form.batchNo.trim(),
+      binLocation: form.binLocation.trim(),
+      officeId: form.officeId,
+      warehouseId: form.warehouseId,
+      storage: inv?.storage ?? "Dry",
+      receivedOn: form.receivedOn,
+      expiry: isDate(form.expiry) ? form.expiry : "",
+      qty,
+      unitCost: Number(form.unitCost) || 0,
+      assignedTo: form.assignedTo,
+      remarks: form.remarks.trim(),
+      status: preview && isAlert(preview.level) ? "Open" : "No Alert",
+      raisedBy: form.raisedBy,
+      raisedOn: today,
+    };
+    setManual((prev) => [entry, ...prev]);
+    setForm(emptyForm(today));
+    toast.success(`Ageing record logged for ${entry.item} — lot ${entry.batchNo}.`);
+  };
+
+  return (
+    <div className="max-w-3xl">
+      {panel === "record" && (
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="sm:col-span-2">
+          <Label>Item *</Label>
+          <select value={form.itemCode} onChange={(e) => f("itemCode", e.target.value)} className={SELECT_CLS}>
+            <option value="">Select inventory item</option>
+            {master.map((i) => (
+              <option key={i.id} value={i.id}>
+                {i.id} — {i.name} (Stock: {i.stock} {i.uom})
+              </option>
+            ))}
+          </select>
+          {selectedItem && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Category: {selectedItem.category} · UOM: {selectedItem.uom} · Storage: {selectedItem.storage}
+            </p>
+          )}
+        </div>
+
+        <div>
+          <Label>Batch / Lot No. *</Label>
+          <Input
+            value={form.batchNo}
+            onChange={(e) => f("batchNo", e.target.value)}
+            placeholder="e.g. BR-2406"
+            list="ageing-known-lots"
+            className="mt-1"
+          />
+          <datalist id="ageing-known-lots">
+            {(selectedItem?.batches ?? []).map((b) => <option key={b.batchNo} value={b.batchNo} />)}
+          </datalist>
+        </div>
+        <div>
+          <Label>Bin / Rack Location</Label>
+          <Input
+            value={form.binLocation}
+            onChange={(e) => f("binLocation", e.target.value)}
+            placeholder="e.g. A1-R3-S2"
+            className="mt-1"
+          />
+        </div>
+
+        <div>
+          <Label>Received Date *</Label>
+          <Input type="date" max={today} value={form.receivedOn} onChange={(e) => f("receivedOn", e.target.value)} className="mt-1" />
+        </div>
+        <div>
+          <Label>Expiry Date</Label>
+          <Input type="date" value={form.expiry} onChange={(e) => f("expiry", e.target.value)} className="mt-1" />
+          <p className="mt-1 text-[11px] text-muted-foreground">Leave blank for items with no shelf life.</p>
+        </div>
+
+        <div>
+          <Label>Quantity ({selectedItem?.uom ?? "UOM"}) *</Label>
+          <Input type="number" min={0} value={form.qty} onChange={(e) => f("qty", e.target.value)} placeholder="0" className="mt-1" />
+        </div>
+        <div>
+          <Label>Unit Cost (৳)</Label>
+          <Input type="number" min={0} value={form.unitCost} onChange={(e) => f("unitCost", e.target.value)} placeholder="0" className="mt-1" />
+        </div>
+
+        <LocationPicker
+          officeId={form.officeId}
+          warehouseId={form.warehouseId}
+          onChange={(n) => setForm((p) => ({ ...p, officeId: n.officeId, warehouseId: n.warehouseId }))}
+        />
+
+        <div>
+          <Label>Assign To</Label>
+          <select value={form.assignedTo} onChange={(e) => f("assignedTo", e.target.value)} className={SELECT_CLS}>
+            <option value="">Unassigned</option>
+            {staff.map((s) => <option key={s.id} value={s.fullName}>{s.fullName} — {s.role}</option>)}
+          </select>
+        </div>
+        <div>
+          <Label>Raised By *</Label>
+          <select value={form.raisedBy} onChange={(e) => f("raisedBy", e.target.value)} className={SELECT_CLS}>
+            <option value="">Select staff</option>
+            {staff.map((s) => <option key={s.id} value={s.fullName}>{s.fullName} — {s.role}</option>)}
+          </select>
+        </div>
+
+        <div className="sm:col-span-2">
+          <Label>Remarks</Label>
+          <Textarea
+            value={form.remarks}
+            onChange={(e) => f("remarks", e.target.value)}
+            rows={2}
+            placeholder="Why this lot is being tracked — storage issue, held stock, off-system holding…"
+            className="mt-1"
+          />
+        </div>
+
+        {/* Live classification — the alert this entry will raise. */}
+        {preview && (
+          <div className="sm:col-span-2 rounded-md border border-border bg-muted/30 px-3 py-2.5">
+            <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+              Alert Preview
+            </p>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
+              <span>Age: <strong className="tabular-nums">{preview.ageDays} d</strong></span>
+              <span>Bucket: <strong className={BUCKET_STYLE[preview.bucket]}>{preview.bucket}</strong></span>
+              <span>
+                Shelf life:{" "}
+                <strong className="tabular-nums">
+                  {preview.dte === null ? "—" : preview.dte < 0 ? `${Math.abs(preview.dte)} d overdue` : `${preview.dte} d left`}
+                </strong>
+              </span>
+              <Pill text={preview.level} cls={LEVEL_STYLE[preview.level]} />
+              <Pill text={`SLA: ${preview.sla}`} cls={SLA_STYLE[preview.sla]} />
+            </div>
+            <p className="mt-1.5 text-[11px] text-muted-foreground">{preview.action}</p>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              {preview.slaTargetDays === null
+                ? "No SLA clock — healthy lot."
+                : `SLA ${preview.slaTargetDays} day(s) from ${preview.alertSince} → due ${preview.slaDueDate} (${slaCaption(preview.sla, preview.slaDelta, preview.slaDueDate)}).`}
+            </p>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              {preview.configured
+                ? `Using this item's own alert settings${preview.responsible ? ` · owner: ${preview.responsible}` : ""}.`
+                : "Using the standard alert settings — open the Alert Configuration tab to set this item's own rules."}
+            </p>
+          </div>
+        )}
+      </div>
+      )}
+
+      {/* ── Alert Configuration tab ──────────────────────────────────── */}
+      {panel === "config" && (
+        <div className="space-y-4">
+          <div>
+            <Label>Set Up Alerts For *</Label>
+            <select value={cfgItem} onChange={(e) => pickConfigItem(e.target.value)} className={SELECT_CLS}>
+              <option value="">Select inventory item</option>
+              {master.map((i) => (
+                <option key={i.id} value={i.id}>
+                  {i.id} — {i.name}{configs[i.id] ? "  ✓ already set up" : ""}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+              Items you do not set up here follow the standard rules: warn {AGEING_POLICY.expiryWarning} days
+              before expiry, urgent {AGEING_POLICY.expiryCritical} days before, slow moving after{" "}
+              {AGEING_POLICY.slowMoving} days in store, very old after {AGEING_POLICY.obsolete} days.
+            </p>
+          </div>
+
+          {!cfg ? (
+            <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-6 text-center text-xs text-muted-foreground">
+              Choose an item above to set up its alert rules.
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2.5">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">Alerts for {cfg.itemName}</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    Turn this off and the item still appears in the ageing list, but it raises no alert and no SLA clock runs.
+                  </p>
+                </div>
+                <Switch checked={cfg.enabled} onCheckedChange={(v) => setCfgField("enabled", v)} />
+              </div>
+
+              <CfgSection
+                title="When should an alert be raised?"
+                hint="Counted in days. Expiry rules look ahead to the expiry date; store-age rules count from the day the stock arrived."
+              >
+                <CfgNumber
+                  label="Warn before expiry (days)"
+                  hint="Raises a “Near Expiry” alert this many days before the expiry date."
+                  value={cfg.expiryWarning}
+                  onChange={(v) => setCfgNumber("expiryWarning", v)}
+                />
+                <CfgNumber
+                  label="Urgent before expiry (days)"
+                  hint="Raises a “Critical” alert this many days before the expiry date."
+                  value={cfg.expiryCritical}
+                  onChange={(v) => setCfgNumber("expiryCritical", v)}
+                />
+                <CfgNumber
+                  label="Slow moving after (days in store)"
+                  hint="Stock sitting unused for longer than this is flagged as slow moving."
+                  value={cfg.slowMoving}
+                  onChange={(v) => setCfgNumber("slowMoving", v)}
+                />
+                <CfgNumber
+                  label="Very old after (days in store)"
+                  hint="Stock sitting unused for longer than this is flagged as obsolete risk."
+                  value={cfg.obsolete}
+                  onChange={(v) => setCfgNumber("obsolete", v)}
+                />
+              </CfgSection>
+
+              <CfgSection
+                title="How quickly must it be dealt with? (SLA)"
+                hint="Working days allowed to act once the alert is raised. Miss it and the row shows as an SLA breach."
+              >
+                {ALERTABLE_LEVELS.map((level) => (
+                  <CfgNumber
+                    key={level}
+                    label={`${level} — days to act`}
+                    value={cfg.sla[level]}
+                    onChange={(v) => setCfgSla(level, v)}
+                  />
+                ))}
+              </CfgSection>
+
+              <CfgSection title="How should people be told?" hint="Pick at least one way to send the alert.">
+                <div className="sm:col-span-2 flex flex-wrap items-center gap-x-5 gap-y-2">
+                  {NOTIFY_METHODS.map((m) => (
+                    <label key={m} className="flex cursor-pointer items-center gap-2 text-xs">
+                      <Checkbox
+                        checked={cfg.methods.includes(m)}
+                        onCheckedChange={(v) => toggleMethod(m, v === true)}
+                      />
+                      {m}
+                    </label>
+                  ))}
+                </div>
+                <div className="sm:col-span-2">
+                  <Label>Repeat the reminder</Label>
+                  <select
+                    value={cfg.reminder}
+                    onChange={(e) => setCfgField("reminder", e.target.value as ReminderFrequency)}
+                    className={SELECT_CLS}
+                  >
+                    {REMINDER_FREQUENCIES.map((r) => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                  <p className="mt-1 text-[11px] text-muted-foreground">
+                    How often the reminder is sent again while the alert is still open.
+                  </p>
+                </div>
+              </CfgSection>
+
+              <CfgSection title="Who is responsible?" hint="The owner sees the alert first; the escalation contact is told if the SLA is missed.">
+                <div>
+                  <Label>Responsible person *</Label>
+                  <select
+                    value={cfg.responsible}
+                    onChange={(e) => setCfgField("responsible", e.target.value)}
+                    className={SELECT_CLS}
+                  >
+                    <option value="">Select staff</option>
+                    {staff.map((s) => <option key={s.id} value={s.fullName}>{s.fullName} — {s.role}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <Label>Escalate to</Label>
+                  <select
+                    value={cfg.escalateTo}
+                    onChange={(e) => setCfgField("escalateTo", e.target.value)}
+                    className={SELECT_CLS}
+                  >
+                    <option value="">Nobody</option>
+                    {staff.map((s) => <option key={s.id} value={s.fullName}>{s.fullName} — {s.role}</option>)}
+                  </select>
+                </div>
+                <CfgNumber
+                  label="Escalate after (days past due)"
+                  hint="0 means escalate on the day the SLA is missed."
+                  value={cfg.escalateAfter}
+                  min={0}
+                  onChange={(v) => setCfgNumber("escalateAfter", v)}
+                />
+              </CfgSection>
+
+              {cfgErrors.length > 0 && (
+                <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2">
+                  <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-red-700">
+                    Please fix before saving
+                  </p>
+                  <ul className="list-disc space-y-0.5 pl-4 text-[11px] text-red-700">
+                    {cfgErrors.map((e) => <li key={e}>{e}</li>)}
+                  </ul>
+                </div>
+              )}
+
+              {cfg.updatedAt && (
+                <p className="text-[11px] text-muted-foreground">
+                  Last saved by <span className="font-medium text-foreground">{cfg.updatedBy || "—"}</span> on {cfg.updatedAt}
+                </p>
+              )}
+            </>
+          )}
+
+          {/* Items already carrying their own rules. */}
+          {Object.keys(configs).length > 0 && (
+            <div>
+              <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+                Items already set up ({Object.keys(configs).length})
+              </p>
+              <div className="overflow-x-auto rounded-md border border-border">
+                <table className="w-full min-w-[560px] text-xs">
+                  <thead className="bg-muted/40">
+                    <tr>
+                      <th className="px-2 py-1.5 text-left font-semibold">Item</th>
+                      <th className="px-2 py-1.5 text-left font-semibold">Expiry warn / urgent</th>
+                      <th className="px-2 py-1.5 text-left font-semibold">Slow / very old</th>
+                      <th className="px-2 py-1.5 text-left font-semibold">Responsible</th>
+                      <th className="px-2 py-1.5 text-left font-semibold">Notify</th>
+                      <th className="px-2 py-1.5 text-left font-semibold">On</th>
+                      <th className="px-2 py-1.5" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.values(configs).map((c) => (
+                      <tr key={c.itemCode} className="border-t border-border/60 hover:bg-muted/20">
+                        <td className="px-2 py-1.5">
+                          <div className="font-medium">{c.itemName}</div>
+                          <div className="font-mono text-[10px] text-muted-foreground">{c.itemCode}</div>
+                        </td>
+                        <td className="px-2 py-1.5 tabular-nums">{c.expiryWarning} / {c.expiryCritical} d</td>
+                        <td className="px-2 py-1.5 tabular-nums">{c.slowMoving} / {c.obsolete} d</td>
+                        <td className="px-2 py-1.5">{c.responsible || "—"}</td>
+                        <td className="px-2 py-1.5">{c.methods.join(", ") || "—"}</td>
+                        <td className="px-2 py-1.5">{c.enabled ? "Yes" : "No"}</td>
+                        <td className="px-2 py-1.5 text-right">
+                          <div className="flex items-center justify-end gap-1">
+                            <Button
+                              size="icon" variant="outline" className="h-6 w-6"
+                              onClick={() => pickConfigItem(c.itemCode)}
+                              title="Edit these settings"
+                            >
+                              <SlidersHorizontal className="h-3 w-3" />
+                            </Button>
+                            <Button
+                              size="icon" variant="ghost"
+                              className="h-6 w-6 text-muted-foreground hover:text-destructive"
+                              onClick={() => removeConfig(c.itemCode)}
+                              title="Remove — go back to the standard rules"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-border pt-4">
+        {panel === "record" ? (
+          <>
+            {onClose && <Button variant="outline" onClick={onClose}>Cancel</Button>}
+            <Button onClick={saveNew}>Save Record</Button>
+          </>
+        ) : (
+          <>
+            {onClose && <Button variant="outline" onClick={onClose}>Close</Button>}
+            {cfg && <Button variant="outline" onClick={resetConfig}>Reset to Standard</Button>}
+            <Button onClick={saveConfig} disabled={!cfg}>Save Configuration</Button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function StockAgeingAlerts() {
   const { role } = useRole();
   const navigate = useNavigate();
@@ -239,7 +746,7 @@ export default function StockAgeingAlerts() {
   const [manual, setManual] = usePersistedState<ManualAgeingEntry[]>("stock-ageing-manual", []);
   const [reviews, setReviews] = usePersistedState<Record<string, AgeingReview>>("stock-ageing-reviews", {});
   // Per-item alert configuration. Items without an entry follow the house policy.
-  const [configs, setConfigs] = usePersistedState<Record<string, ItemAlertConfig>>("stock-ageing-alert-config", {});
+  const [configs] = usePersistedState<Record<string, ItemAlertConfig>>("stock-ageing-alert-config", {});
   // Escalated lots waiting to be turned into disposal reports in Wastage
   // Management (shared queue — that page reads and clears it).
   const [queue, setQueue] = usePersistedState<ExpiredDisposalLot[]>(EXPIRED_QUEUE_KEY, []);
@@ -253,11 +760,6 @@ export default function StockAgeingAlerts() {
   const [statusFilter, setStatusFilter] = useState("");
   const [ageFilter, setAgeFilter] = useState("");
 
-  const [newOpen, setNewOpen] = useState(false);
-  const [addTab, setAddTab] = useState<"record" | "config">("record");
-  const [form, setForm] = useState<FormState>(() => emptyForm(today));
-  const [cfgItem, setCfgItem] = useState("");
-  const [cfg, setCfg] = useState<ItemAlertConfig | null>(null);
   const [viewRow, setViewRow] = useState<AgeingRow | null>(null);
   const [reviewRemarks, setReviewRemarks] = useState("");
   /** Queue entry for the open row, plus the legacy direct-report reference. */
@@ -361,132 +863,6 @@ export default function StockAgeingAlerts() {
   const filtersActive = !!(search || fromDate || toDate || levelFilter || statusFilter || ageFilter);
   /** Bulk action offered for the filtered level (none = no row ticking). */
   const bulkAction = levelFilter ? BULK_ACTION_BY_LEVEL[levelFilter] : undefined;
-
-  // ── New-lot form helpers ──────────────────────────────────────────────────
-  const f = (field: keyof FormState, value: string) => setForm((p) => ({ ...p, [field]: value }));
-  const selectedItem = useMemo(() => master.find((i) => i.id === form.itemCode), [master, form.itemCode]);
-
-  // Live classification preview so the storekeeper sees the alert the entry will
-  // raise before saving — same policy the tracker applies to system rows.
-  const preview = useMemo(() => {
-    if (!isDate(form.receivedOn)) return null;
-    // Use the item's own alert configuration when it has one.
-    const config = configs[form.itemCode];
-    const t = thresholdsFor(config);
-    const ageDays = Math.max(0, daysBetween(form.receivedOn, today));
-    const dte = isDate(form.expiry) ? daysBetween(today, form.expiry) : null;
-    const level = levelOf(ageDays, dte, t);
-    const expiry = isDate(form.expiry) ? form.expiry : "";
-    const alertSince = alertSinceOf(level, form.receivedOn, expiry, t);
-    const slaTargetDays = slaTargetFor(level, config);
-    const slaDueDate = isDate(alertSince) && slaTargetDays !== null ? addDays(alertSince, slaTargetDays) : "";
-    const status: AlertStatus = isAlert(level) ? "Open" : "No Alert";
-    const { sla, slaDelta } = slaStateOf(slaDueDate, status, "", today);
-    return {
-      ageDays, bucket: bucketOf(ageDays), dte, level, action: ACTION_BY_LEVEL[level],
-      alertSince, slaTargetDays, slaDueDate, sla, slaDelta,
-      responsible: config?.responsible ?? "",
-      configured: !!config,
-    };
-  }, [form.receivedOn, form.expiry, form.itemCode, configs, today]);
-
-  const openNew = () => {
-    setForm(emptyForm(today));
-    setAddTab("record");
-    setNewOpen(true);
-  };
-
-  // ── Alert configuration tab ───────────────────────────────────────────────
-  /** Load an item's saved configuration, or start from the house defaults. */
-  const pickConfigItem = (itemCode: string) => {
-    setCfgItem(itemCode);
-    if (!itemCode) { setCfg(null); return; }
-    const inv = master.find((i) => i.id === itemCode);
-    setCfg(configs[itemCode] ?? defaultAlertConfig(itemCode, inv?.name ?? itemCode));
-  };
-
-  const setCfgField = <K extends keyof ItemAlertConfig>(field: K, value: ItemAlertConfig[K]) =>
-    setCfg((p) => (p ? { ...p, [field]: value } : p));
-
-  const setCfgNumber = (field: "expiryCritical" | "expiryWarning" | "slowMoving" | "obsolete" | "escalateAfter", value: string) =>
-    setCfg((p) => (p ? { ...p, [field]: value === "" ? NaN : Number(value) } : p));
-
-  const setCfgSla = (level: Exclude<AlertLevel, "Healthy">, value: string) =>
-    setCfg((p) => (p ? { ...p, sla: { ...p.sla, [level]: value === "" ? NaN : Number(value) } } : p));
-
-  const toggleMethod = (method: NotifyMethod, on: boolean) =>
-    setCfg((p) => {
-      if (!p) return p;
-      const methods = on ? [...p.methods, method] : p.methods.filter((m) => m !== method);
-      return { ...p, methods: NOTIFY_METHODS.filter((m) => methods.includes(m)) };
-    });
-
-  const cfgErrors = useMemo(() => (cfg ? validateAlertConfig(cfg) : []), [cfg]);
-
-  const saveConfig = () => {
-    if (!cfg) { toast.error("Choose an item to configure."); return; }
-    const errors = validateAlertConfig(cfg);
-    if (errors.length > 0) { toast.error(errors[0]); return; }
-    const saved: ItemAlertConfig = { ...cfg, updatedBy: cfg.responsible || "Store", updatedAt: today };
-    setConfigs((prev) => ({ ...prev, [cfg.itemCode]: saved }));
-    setCfg(saved);
-    toast.success(`Alert configuration saved for ${cfg.itemName}.`);
-  };
-
-  const resetConfig = () => {
-    if (!cfg) return;
-    setCfg(defaultAlertConfig(cfg.itemCode, cfg.itemName));
-    toast.info("Reset to the standard settings — not saved yet.");
-  };
-
-  const removeConfig = (itemCode: string) => {
-    setConfigs((prev) => {
-      const next = { ...prev };
-      delete next[itemCode];
-      return next;
-    });
-    if (cfgItem === itemCode) pickConfigItem("");
-    toast.success("Configuration removed — this item is back on the standard settings.");
-  };
-
-  const saveNew = () => {
-    if (!form.itemCode) { toast.error("Item is required."); return; }
-    if (!form.batchNo.trim()) { toast.error("Batch / Lot No. is required."); return; }
-    if (!isDate(form.receivedOn)) { toast.error("Received Date is required."); return; }
-    const qty = Number(form.qty);
-    if (!(qty > 0)) { toast.error("Quantity must be greater than zero."); return; }
-    if (isDate(form.expiry) && form.expiry < form.receivedOn) {
-      toast.error("Expiry Date cannot be earlier than the Received Date.");
-      return;
-    }
-    if (!form.raisedBy) { toast.error("Raised By is required."); return; }
-
-    const inv = selectedItem;
-    const entry: ManualAgeingEntry = {
-      id: `AGE-MAN-${Date.now()}`,
-      itemCode: form.itemCode,
-      item: inv?.name ?? form.itemCode,
-      category: inv?.category ?? "—",
-      uom: inv?.uom ?? "—",
-      batchNo: form.batchNo.trim(),
-      binLocation: form.binLocation.trim(),
-      officeId: form.officeId,
-      warehouseId: form.warehouseId,
-      storage: inv?.storage ?? "Dry",
-      receivedOn: form.receivedOn,
-      expiry: isDate(form.expiry) ? form.expiry : "",
-      qty,
-      unitCost: Number(form.unitCost) || 0,
-      assignedTo: form.assignedTo,
-      remarks: form.remarks.trim(),
-      status: preview && isAlert(preview.level) ? "Open" : "No Alert",
-      raisedBy: form.raisedBy,
-      raisedOn: today,
-    };
-    setManual((prev) => [entry, ...prev]);
-    setNewOpen(false);
-    toast.success(`Ageing record logged for ${entry.item} — lot ${entry.batchNo}.`);
-  };
 
   // ── Review trail ──────────────────────────────────────────────────────────
   const openView = (row: AgeingRow) => {
@@ -816,14 +1192,11 @@ export default function StockAgeingAlerts() {
 
   return (
     <>
+      {/* Ageing records and alert rules are entered from Item Configuration →
+          Create Item → Ageing Record / Alert Configuration. */}
       <PageHeader
         title="Stock Ageing & Alerts"
         subtitle="Batch-lot ageing, shelf-life alerts and slow-moving stock — measured from receipt date and expiry, with the action each lot needs"
-        actions={
-          <Button onClick={openNew}>
-            <Plus className="h-4 w-4 mr-1" /> Add New
-          </Button>
-        }
       />
 
       {/* ── KPI cards ─────────────────────────────────────────────────────── */}
@@ -1102,384 +1475,6 @@ export default function StockAgeingAlerts() {
           />
         </div>
       </div>
-
-      {/* ── Add New ───────────────────────────────────────────────────────── */}
-      <Dialog open={newOpen} onOpenChange={setNewOpen}>
-        <DialogContent className="max-w-[95vw] sm:max-w-2xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            {/* The headline itself is the tab strip — record entry on the left,
-                the item's alert configuration beside it. */}
-            <DialogTitle asChild>
-              <Tabs value={addTab} onValueChange={(v) => setAddTab(v as "record" | "config")}>
-                <TabsList className="h-9">
-                  <TabsTrigger value="record">New Ageing Record</TabsTrigger>
-                  <TabsTrigger value="config">Alert Configuration</TabsTrigger>
-                </TabsList>
-              </Tabs>
-            </DialogTitle>
-          </DialogHeader>
-
-          {addTab === "record" && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="sm:col-span-2">
-              <Label>Item *</Label>
-              <select value={form.itemCode} onChange={(e) => f("itemCode", e.target.value)} className={SELECT_CLS}>
-                <option value="">Select inventory item</option>
-                {master.map((i) => (
-                  <option key={i.id} value={i.id}>
-                    {i.id} — {i.name} (Stock: {i.stock} {i.uom})
-                  </option>
-                ))}
-              </select>
-              {selectedItem && (
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Category: {selectedItem.category} · UOM: {selectedItem.uom} · Storage: {selectedItem.storage}
-                </p>
-              )}
-            </div>
-
-            <div>
-              <Label>Batch / Lot No. *</Label>
-              <Input
-                value={form.batchNo}
-                onChange={(e) => f("batchNo", e.target.value)}
-                placeholder="e.g. BR-2406"
-                list="ageing-known-lots"
-                className="mt-1"
-              />
-              <datalist id="ageing-known-lots">
-                {(selectedItem?.batches ?? []).map((b) => <option key={b.batchNo} value={b.batchNo} />)}
-              </datalist>
-            </div>
-            <div>
-              <Label>Bin / Rack Location</Label>
-              <Input
-                value={form.binLocation}
-                onChange={(e) => f("binLocation", e.target.value)}
-                placeholder="e.g. A1-R3-S2"
-                className="mt-1"
-              />
-            </div>
-
-            <div>
-              <Label>Received Date *</Label>
-              <Input type="date" max={today} value={form.receivedOn} onChange={(e) => f("receivedOn", e.target.value)} className="mt-1" />
-            </div>
-            <div>
-              <Label>Expiry Date</Label>
-              <Input type="date" value={form.expiry} onChange={(e) => f("expiry", e.target.value)} className="mt-1" />
-              <p className="mt-1 text-[11px] text-muted-foreground">Leave blank for items with no shelf life.</p>
-            </div>
-
-            <div>
-              <Label>Quantity ({selectedItem?.uom ?? "UOM"}) *</Label>
-              <Input type="number" min={0} value={form.qty} onChange={(e) => f("qty", e.target.value)} placeholder="0" className="mt-1" />
-            </div>
-            <div>
-              <Label>Unit Cost (৳)</Label>
-              <Input type="number" min={0} value={form.unitCost} onChange={(e) => f("unitCost", e.target.value)} placeholder="0" className="mt-1" />
-            </div>
-
-            <LocationPicker
-              officeId={form.officeId}
-              warehouseId={form.warehouseId}
-              onChange={(n) => setForm((p) => ({ ...p, officeId: n.officeId, warehouseId: n.warehouseId }))}
-            />
-
-            <div>
-              <Label>Assign To</Label>
-              <select value={form.assignedTo} onChange={(e) => f("assignedTo", e.target.value)} className={SELECT_CLS}>
-                <option value="">Unassigned</option>
-                {staff.map((s) => <option key={s.id} value={s.fullName}>{s.fullName} — {s.role}</option>)}
-              </select>
-            </div>
-            <div>
-              <Label>Raised By *</Label>
-              <select value={form.raisedBy} onChange={(e) => f("raisedBy", e.target.value)} className={SELECT_CLS}>
-                <option value="">Select staff</option>
-                {staff.map((s) => <option key={s.id} value={s.fullName}>{s.fullName} — {s.role}</option>)}
-              </select>
-            </div>
-
-            <div className="sm:col-span-2">
-              <Label>Remarks</Label>
-              <Textarea
-                value={form.remarks}
-                onChange={(e) => f("remarks", e.target.value)}
-                rows={2}
-                placeholder="Why this lot is being tracked — storage issue, held stock, off-system holding…"
-                className="mt-1"
-              />
-            </div>
-
-            {/* Live classification — the alert this entry will raise. */}
-            {preview && (
-              <div className="sm:col-span-2 rounded-md border border-border bg-muted/30 px-3 py-2.5">
-                <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
-                  Alert Preview
-                </p>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
-                  <span>Age: <strong className="tabular-nums">{preview.ageDays} d</strong></span>
-                  <span>Bucket: <strong className={BUCKET_STYLE[preview.bucket]}>{preview.bucket}</strong></span>
-                  <span>
-                    Shelf life:{" "}
-                    <strong className="tabular-nums">
-                      {preview.dte === null ? "—" : preview.dte < 0 ? `${Math.abs(preview.dte)} d overdue` : `${preview.dte} d left`}
-                    </strong>
-                  </span>
-                  <Pill text={preview.level} cls={LEVEL_STYLE[preview.level]} />
-                  <Pill text={`SLA: ${preview.sla}`} cls={SLA_STYLE[preview.sla]} />
-                </div>
-                <p className="mt-1.5 text-[11px] text-muted-foreground">{preview.action}</p>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  {preview.slaTargetDays === null
-                    ? "No SLA clock — healthy lot."
-                    : `SLA ${preview.slaTargetDays} day(s) from ${preview.alertSince} → due ${preview.slaDueDate} (${slaCaption(preview.sla, preview.slaDelta, preview.slaDueDate)}).`}
-                </p>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  {preview.configured
-                    ? `Using this item's own alert settings${preview.responsible ? ` · owner: ${preview.responsible}` : ""}.`
-                    : "Using the standard alert settings — open the Alert Configuration tab to set this item's own rules."}
-                </p>
-              </div>
-            )}
-          </div>
-          )}
-
-          {/* ── Alert Configuration tab ──────────────────────────────────── */}
-          {addTab === "config" && (
-            <div className="space-y-4">
-              <div>
-                <Label>Set Up Alerts For *</Label>
-                <select value={cfgItem} onChange={(e) => pickConfigItem(e.target.value)} className={SELECT_CLS}>
-                  <option value="">Select inventory item</option>
-                  {master.map((i) => (
-                    <option key={i.id} value={i.id}>
-                      {i.id} — {i.name}{configs[i.id] ? "  ✓ already set up" : ""}
-                    </option>
-                  ))}
-                </select>
-                <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                  Items you do not set up here follow the standard rules: warn {AGEING_POLICY.expiryWarning} days
-                  before expiry, urgent {AGEING_POLICY.expiryCritical} days before, slow moving after{" "}
-                  {AGEING_POLICY.slowMoving} days in store, very old after {AGEING_POLICY.obsolete} days.
-                </p>
-              </div>
-
-              {!cfg ? (
-                <div className="rounded-md border border-dashed border-border bg-muted/20 px-3 py-6 text-center text-xs text-muted-foreground">
-                  Choose an item above to set up its alert rules.
-                </div>
-              ) : (
-                <>
-                  <div className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2.5">
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium">Alerts for {cfg.itemName}</p>
-                      <p className="text-[11px] text-muted-foreground">
-                        Turn this off and the item still appears in the ageing list, but it raises no alert and no SLA clock runs.
-                      </p>
-                    </div>
-                    <Switch checked={cfg.enabled} onCheckedChange={(v) => setCfgField("enabled", v)} />
-                  </div>
-
-                  <CfgSection
-                    title="When should an alert be raised?"
-                    hint="Counted in days. Expiry rules look ahead to the expiry date; store-age rules count from the day the stock arrived."
-                  >
-                    <CfgNumber
-                      label="Warn before expiry (days)"
-                      hint="Raises a “Near Expiry” alert this many days before the expiry date."
-                      value={cfg.expiryWarning}
-                      onChange={(v) => setCfgNumber("expiryWarning", v)}
-                    />
-                    <CfgNumber
-                      label="Urgent before expiry (days)"
-                      hint="Raises a “Critical” alert this many days before the expiry date."
-                      value={cfg.expiryCritical}
-                      onChange={(v) => setCfgNumber("expiryCritical", v)}
-                    />
-                    <CfgNumber
-                      label="Slow moving after (days in store)"
-                      hint="Stock sitting unused for longer than this is flagged as slow moving."
-                      value={cfg.slowMoving}
-                      onChange={(v) => setCfgNumber("slowMoving", v)}
-                    />
-                    <CfgNumber
-                      label="Very old after (days in store)"
-                      hint="Stock sitting unused for longer than this is flagged as obsolete risk."
-                      value={cfg.obsolete}
-                      onChange={(v) => setCfgNumber("obsolete", v)}
-                    />
-                  </CfgSection>
-
-                  <CfgSection
-                    title="How quickly must it be dealt with? (SLA)"
-                    hint="Working days allowed to act once the alert is raised. Miss it and the row shows as an SLA breach."
-                  >
-                    {ALERTABLE_LEVELS.map((level) => (
-                      <CfgNumber
-                        key={level}
-                        label={`${level} — days to act`}
-                        value={cfg.sla[level]}
-                        onChange={(v) => setCfgSla(level, v)}
-                      />
-                    ))}
-                  </CfgSection>
-
-                  <CfgSection title="How should people be told?" hint="Pick at least one way to send the alert.">
-                    <div className="sm:col-span-2 flex flex-wrap items-center gap-x-5 gap-y-2">
-                      {NOTIFY_METHODS.map((m) => (
-                        <label key={m} className="flex cursor-pointer items-center gap-2 text-xs">
-                          <Checkbox
-                            checked={cfg.methods.includes(m)}
-                            onCheckedChange={(v) => toggleMethod(m, v === true)}
-                          />
-                          {m}
-                        </label>
-                      ))}
-                    </div>
-                    <div className="sm:col-span-2">
-                      <Label>Repeat the reminder</Label>
-                      <select
-                        value={cfg.reminder}
-                        onChange={(e) => setCfgField("reminder", e.target.value as ReminderFrequency)}
-                        className={SELECT_CLS}
-                      >
-                        {REMINDER_FREQUENCIES.map((r) => <option key={r} value={r}>{r}</option>)}
-                      </select>
-                      <p className="mt-1 text-[11px] text-muted-foreground">
-                        How often the reminder is sent again while the alert is still open.
-                      </p>
-                    </div>
-                  </CfgSection>
-
-                  <CfgSection title="Who is responsible?" hint="The owner sees the alert first; the escalation contact is told if the SLA is missed.">
-                    <div>
-                      <Label>Responsible person *</Label>
-                      <select
-                        value={cfg.responsible}
-                        onChange={(e) => setCfgField("responsible", e.target.value)}
-                        className={SELECT_CLS}
-                      >
-                        <option value="">Select staff</option>
-                        {staff.map((s) => <option key={s.id} value={s.fullName}>{s.fullName} — {s.role}</option>)}
-                      </select>
-                    </div>
-                    <div>
-                      <Label>Escalate to</Label>
-                      <select
-                        value={cfg.escalateTo}
-                        onChange={(e) => setCfgField("escalateTo", e.target.value)}
-                        className={SELECT_CLS}
-                      >
-                        <option value="">Nobody</option>
-                        {staff.map((s) => <option key={s.id} value={s.fullName}>{s.fullName} — {s.role}</option>)}
-                      </select>
-                    </div>
-                    <CfgNumber
-                      label="Escalate after (days past due)"
-                      hint="0 means escalate on the day the SLA is missed."
-                      value={cfg.escalateAfter}
-                      min={0}
-                      onChange={(v) => setCfgNumber("escalateAfter", v)}
-                    />
-                  </CfgSection>
-
-                  {cfgErrors.length > 0 && (
-                    <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2">
-                      <p className="mb-1 text-[10px] font-bold uppercase tracking-wider text-red-700">
-                        Please fix before saving
-                      </p>
-                      <ul className="list-disc space-y-0.5 pl-4 text-[11px] text-red-700">
-                        {cfgErrors.map((e) => <li key={e}>{e}</li>)}
-                      </ul>
-                    </div>
-                  )}
-
-                  {cfg.updatedAt && (
-                    <p className="text-[11px] text-muted-foreground">
-                      Last saved by <span className="font-medium text-foreground">{cfg.updatedBy || "—"}</span> on {cfg.updatedAt}
-                    </p>
-                  )}
-                </>
-              )}
-
-              {/* Items already carrying their own rules. */}
-              {Object.keys(configs).length > 0 && (
-                <div>
-                  <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
-                    Items already set up ({Object.keys(configs).length})
-                  </p>
-                  <div className="overflow-x-auto rounded-md border border-border">
-                    <table className="w-full min-w-[560px] text-xs">
-                      <thead className="bg-muted/40">
-                        <tr>
-                          <th className="px-2 py-1.5 text-left font-semibold">Item</th>
-                          <th className="px-2 py-1.5 text-left font-semibold">Expiry warn / urgent</th>
-                          <th className="px-2 py-1.5 text-left font-semibold">Slow / very old</th>
-                          <th className="px-2 py-1.5 text-left font-semibold">Responsible</th>
-                          <th className="px-2 py-1.5 text-left font-semibold">Notify</th>
-                          <th className="px-2 py-1.5 text-left font-semibold">On</th>
-                          <th className="px-2 py-1.5" />
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {Object.values(configs).map((c) => (
-                          <tr key={c.itemCode} className="border-t border-border/60 hover:bg-muted/20">
-                            <td className="px-2 py-1.5">
-                              <div className="font-medium">{c.itemName}</div>
-                              <div className="font-mono text-[10px] text-muted-foreground">{c.itemCode}</div>
-                            </td>
-                            <td className="px-2 py-1.5 tabular-nums">{c.expiryWarning} / {c.expiryCritical} d</td>
-                            <td className="px-2 py-1.5 tabular-nums">{c.slowMoving} / {c.obsolete} d</td>
-                            <td className="px-2 py-1.5">{c.responsible || "—"}</td>
-                            <td className="px-2 py-1.5">{c.methods.join(", ") || "—"}</td>
-                            <td className="px-2 py-1.5">{c.enabled ? "Yes" : "No"}</td>
-                            <td className="px-2 py-1.5 text-right">
-                              <div className="flex items-center justify-end gap-1">
-                                <Button
-                                  size="icon" variant="outline" className="h-6 w-6"
-                                  onClick={() => pickConfigItem(c.itemCode)}
-                                  title="Edit these settings"
-                                >
-                                  <SlidersHorizontal className="h-3 w-3" />
-                                </Button>
-                                <Button
-                                  size="icon" variant="ghost"
-                                  className="h-6 w-6 text-muted-foreground hover:text-destructive"
-                                  onClick={() => removeConfig(c.itemCode)}
-                                  title="Remove — go back to the standard rules"
-                                >
-                                  <Trash2 className="h-3 w-3" />
-                                </Button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          <DialogFooter className="mt-2">
-            {addTab === "record" ? (
-              <>
-                <Button variant="outline" onClick={() => setNewOpen(false)}>Cancel</Button>
-                <Button onClick={saveNew}>Save Record</Button>
-              </>
-            ) : (
-              <>
-                <Button variant="outline" onClick={() => setNewOpen(false)}>Close</Button>
-                {cfg && <Button variant="outline" onClick={resetConfig}>Reset to Standard</Button>}
-                <Button onClick={saveConfig} disabled={!cfg}>Save Configuration</Button>
-              </>
-            )}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* ── View & review ─────────────────────────────────────────────────── */}
       {viewRow && (

@@ -209,6 +209,8 @@ export type PlanLine = {
   itemName: string;
   uom: string;
   requiredQty: number;
+  /** The flight's original requirement — kept when Req Qty is edited down. */
+  origRequiredQty?: number;
   /** Whether this is a kitchen output or a bought-in consumable. */
   produced: boolean;
   /** QC-passed quantity cooked for the day, before this plan draws on it. */

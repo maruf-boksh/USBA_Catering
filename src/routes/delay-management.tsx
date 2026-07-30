@@ -24,15 +24,15 @@ import {
   Clock, Plus, ArrowLeft, CheckCircle2, AlertTriangle, Truck, ShoppingCart,
   PackageOpen, Send, Timer, Eye, ChevronRight, ChevronDown,
   ExternalLink, Trash2, PlusCircle, ListChecks, Zap, History, X, ChefHat,
-  ArrowLeftRight, Factory,
+  ArrowLeftRight, Factory, Pencil, GripVertical,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { roundQty } from "@/lib/num";
 import { toast } from "sonner";
 import { flagArrival } from "@/lib/arrival-flash";
-import { addPurchaseRequisition, type PRLineItem } from "@/lib/purchase-requisitions";
+import { addPurchaseRequisition, getPurchaseRequisitions, type PRLineItem } from "@/lib/purchase-requisitions";
 import { useFlightOrders } from "@/lib/flight-orders-store";
-import { vendors, warehouses as ALL_WAREHOUSES } from "@/lib/sample-data";
+import { activeItems, vendors, warehouses as ALL_WAREHOUSES } from "@/lib/sample-data";
 import { LocationPicker } from "@/components/common/LocationPicker";
 import { useWorkflow, type WfGRN, type WfGRNLine, type StockDelta, type WfProductionEntry } from "@/lib/workflow-store";
 import { reduceInventoryStock } from "@/lib/stock-adjustments";
@@ -409,6 +409,130 @@ function menuItemsFromPlan(
   return items.length > 0 ? items : defaultMenuItems(mealType, totalPax);
 }
 
+// ─── Menu item picker ─────────────────────────────────────────────────────────
+
+/** One selectable meal / beverage offered by the delay menu dropdowns. */
+type MenuItemOption = { name: string; uom: string; unitCost: number };
+
+const optKey = (name: string) => name.trim().toLowerCase();
+
+/**
+ * Everything that can be served to a delayed flight: the meals, bakery and
+ * beverages on the Item Profile, plus whatever the day-wise Menu Planning cards
+ * configure. Raw materials, packaging and assets are not servable, so they are
+ * left out of the picker.
+ */
+function buildMenuItemOptions(cards: MealCardMinimal[]): MenuItemOption[] {
+  const out: MenuItemOption[] = [];
+  const seen = new Set<string>();
+  const push = (name: string, uom: string, unitCost: number) => {
+    const key = optKey(name);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push({ name: name.trim(), uom, unitCost });
+  };
+  activeItems
+    .filter((i) => i.itemType === "Finished Good"
+      || i.itemType === "Semi-Finished Good"
+      || i.category === "Beverage")
+    .forEach((i) => push(i.name, i.uom, i.costPrice ?? 0));
+  // Plan-configured dishes ("Aloo Paratha", "Chicken Korma", …) are served by the
+  // portion, and may not exist on the Item Profile at all.
+  cards.forEach((c) => c.choices.forEach((ch) => ch.items.forEach((it) => push(it.name, "portion", 0))));
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Items servable under ONE meal type — the dishes the Menu Planning cards
+ * configure for that type across every weekday, plus the type's default items.
+ * Mirrors the meal-configuration pickers: a Breakfast dropdown only offers
+ * breakfast dishes, never the whole master list.
+ */
+function mealTypeItemOptions(mealType: string, cards: MealCardMinimal[]): MenuItemOption[] {
+  const out: MenuItemOption[] = [];
+  const seen = new Set<string>();
+  const costOf = (name: string) =>
+    activeItems.find((i) => optKey(i.name) === optKey(name))?.costPrice ?? 0;
+  const push = (name: string, uom: string) => {
+    const key = optKey(name);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push({ name: name.trim(), uom, unitCost: costOf(name) });
+  };
+  cards
+    .filter((c) => c.mealType.toLowerCase() === mealType.toLowerCase())
+    .forEach((c) => c.choices.forEach((ch) => ch.items.forEach((it) => push(it.name, "portion"))));
+  // Only the menu-configuration dishes; the type's defaults are offered solely
+  // when nothing at all is configured for it (mirrors menuItemsFromPlan).
+  if (out.length === 0) defaultMenuItems(mealType, 1).forEach((it) => push(it.name, it.uom));
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Searchable item dropdown. `multi` keeps the list open with a checkbox per
+ * option (pick several); otherwise picking one option closes the list.
+ */
+function ItemDropdown({
+  options, selected, label, multi, onPick, triggerClassName,
+}: {
+  options: MenuItemOption[];
+  /** Lower-cased names already chosen — ticked when `multi`, disabled when not. */
+  selected: string[];
+  label: string;
+  multi?: boolean;
+  onPick: (o: MenuItemOption) => void;
+  triggerClassName?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const needle = query.trim().toLowerCase();
+  const shown = needle ? options.filter((o) => o.name.toLowerCase().includes(needle)) : options;
+  const isOn = (o: MenuItemOption) => selected.includes(optKey(o.name));
+  return (
+    <Popover open={open} onOpenChange={(v) => { setOpen(v); if (!v) setQuery(""); }}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            "h-8 w-full flex items-center justify-between gap-2 rounded-md border border-input bg-background px-2 text-sm",
+            triggerClassName,
+          )}
+        >
+          <span className="truncate">{label}</span>
+          <ChevronDown className="h-3.5 w-3.5 opacity-60 shrink-0" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-72 p-1">
+        <Input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search items…"
+          className="h-8 text-sm mb-1"
+        />
+        {/* overscroll-contain + stopPropagation keep the wheel on this list —
+            without them the dialog behind the popover scrolls instead. */}
+        <div className="max-h-56 overflow-y-auto overscroll-contain" onWheel={(e) => e.stopPropagation()}>
+          {shown.length === 0 ? (
+            <div className="px-2 py-2 text-xs text-muted-foreground">No matching item.</div>
+          ) : shown.map((o) => (
+            <button
+              key={o.name}
+              type="button"
+              disabled={!multi && isOn(o)}
+              className="w-full flex items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted/60 disabled:opacity-40"
+              onClick={() => { onPick(o); if (!multi) { setOpen(false); setQuery(""); } }}
+            >
+              {multi && <Checkbox checked={isOn(o)} className="pointer-events-none" />}
+              <span className="flex-1 truncate">{o.name}</span>
+              <span className="text-[10px] text-muted-foreground shrink-0">{o.uom}</span>
+            </button>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 // ─── Seed data ────────────────────────────────────────────────────────────────
 
 const SEED_EVENTS: DelayEvent[] = [
@@ -706,6 +830,45 @@ export default function DelayManagementPage() {
   };
 
   /**
+   * Instant purchase from the production screen: raise the approval and come
+   * straight back to the LIST — no detour through the detail view. The event
+   * carries an Instant Purchase ref so the Purchase Status column tracks it:
+   * Purchase Req Pending → (approval) → Purchase Req Approved.
+   */
+  const submitInstantPurchase = (
+    eventId: string,
+    fulfillment: DelayFulfillment,
+    approvalRecord: DelayApprovalRecord,
+  ) => {
+    const at = stamp();
+    const ref: NonNullable<DelayEvent["fulfilmentRefs"]>[number] = {
+      source: "Instant Purchase",
+      ref: approvalRecord.id,
+      refKind: "delay-approval",
+      items: approvalRecord.items.map((i) => ({ name: i.name, qty: i.qty, uom: "pcs" })),
+      at,
+    };
+    setDelayEvents((prev) =>
+      prev.map((e) =>
+        e.id === eventId
+          ? {
+              ...e,
+              fulfillment,
+              approvalId: approvalRecord.id,
+              fulfilmentRefs: [...(e.fulfilmentRefs ?? []), ref],
+              status: "Approval Pending",
+              updatedAt: at,
+            }
+          : e,
+      ),
+    );
+    setDelayApprovals((prev) => [approvalRecord, ...prev]);
+    setView("list");
+    setActiveEventId(null);
+    toast.success(`${approvalRecord.id} submitted — pending approval.`);
+  };
+
+  /**
    * Route the delay's food items to the kitchen: raise one Production Order
    * (WfProductionEntry, status "Pending") per item via the shared workflow
    * store. Pending orders are projected straight into Approval Management's
@@ -866,6 +1029,77 @@ export default function DelayManagementPage() {
    */
   const [autoOpenDrFor, setAutoOpenDrFor] = useState<string | null>(null);
   const openInstantPurchase = (ev: DelayEvent) => {
+    const refs = ev.fulfilmentRefs ?? [];
+    // Only references whose record still EXISTS count — a ghost ref (its
+    // requisition/approval cleared from storage) must not block the flow.
+    const prStore = getPurchaseRequisitions();
+    const prRefs = refs.filter((r) => r.refKind === "purchase-requisition"
+      && prStore.some((p) => p.id === r.ref));
+    const ipRefs = refs.filter((r) => r.refKind === "delay-approval" && r.source === "Instant Purchase"
+      && delayApprovals.some((a) => a.id === r.ref));
+
+    // No live requisition — raise one for the plan's uncovered balance. It lands
+    // in Approval Management under Purchase Req; the spot buy follows approval.
+    if (prRefs.length === 0 && ipRefs.length === 0) {
+      const lines = (ev.productionPlan?.lines ?? []).filter((l) => l.purchaseQty > 0);
+      if (lines.length === 0) { toast.error("Nothing left to purchase for this flight."); return; }
+      const now = stamp();
+      const pr = addPurchaseRequisition({
+        date: now.slice(0, 10),
+        officeId: "OFF-001",
+        warehouseId: "WH-001",
+        requestedBy: ev.reportedBy,
+        requiredBy: ev.flightDate,
+        priority: "Urgent",
+        justification:
+          `Delay refreshment shortfall — ${ev.flightNumber} (${ev.flightDate}), ${ev.id}. ` +
+          `Not covered by the approved fulfilment plan.`,
+        lines: lines.map((l, i) => ({
+          id: `L${i + 1}`,
+          itemName: l.itemName,
+          description: `Delay refreshment — ${ev.flightNumber}`,
+          qty: l.purchaseQty,
+          uom: l.uom,
+          rate: (ev.menuItems ?? []).find((m) => m.name === l.itemName)?.unitCost ?? 0,
+        })),
+        status: "Pending Approval",
+      });
+      setDelayEvents((prev) => prev.map((e) => e.id === ev.id
+        ? {
+            ...e,
+            fulfilmentRefs: [...(e.fulfilmentRefs ?? []), {
+              source: "Instant Purchase",
+              ref: pr.id,
+              refKind: "purchase-requisition",
+              items: lines.map((l) => ({ name: l.itemName, qty: l.purchaseQty, uom: l.uom })),
+              at: now,
+            }],
+            updatedAt: now,
+          }
+        : e));
+      // Verify the write actually landed before claiming success.
+      if (!getPurchaseRequisitions().some((p) => p.id === pr.id)) {
+        toast.error("Could not save the requisition — browser storage unavailable.");
+        return;
+      }
+      toast.success(`${pr.id} raised — pending approval under Purchase Req.`);
+      return;
+    }
+
+    // A requisition exists — the spot buy only unlocks once it is approved.
+    const prPending = prRefs.some((r) => {
+      const p = prStore.find((x) => x.id === r.ref);
+      return !p || /pending|draft/i.test(p.status);
+    });
+    const ipPending = ipRefs.some((r) => {
+      const a = delayApprovals.find((x) => x.id === r.ref);
+      return !a || a.status === "Pending";
+    });
+    if (prPending || ipPending) {
+      toast.info("Purchase Req is still pending approval — the spot buy opens once it is approved.");
+      return;
+    }
+
     setActiveEventId(ev.id);
     setAutoOpenDrFor(ev.id);
     setView("production");
@@ -901,8 +1135,17 @@ export default function DelayManagementPage() {
     // remounts — a read on mount is enough to pick the decision up.
   }, [setDelayEvents]);
 
-  const sendToDispatch = (event: DelayEvent) => {
-    if (event.status !== "Approved" && event.status !== "Sent To Production") return;
+  const sendToDispatch = (
+    event: DelayEvent,
+    /** Offset for the DSP id when several flights dispatch in one tick — the
+     *  event list is read from a closure, so back-to-back calls would other-
+     *  wise mint the same id. */
+    seqOffset = 0,
+  ) => {
+    // "Approval Pending" is allowed through: the list only offers Dispatch once
+    // every routed approval has actually cleared — the raw label can lag when
+    // several fulfilments were raised on the same event.
+    if (!["Approved", "Sent To Production", "Approval Pending"].includes(event.status)) return;
     const now = stamp();
     const today = now.slice(0, 10);
     // Compute delayed dep time in airline 12h standard (original ETD + delay hours)
@@ -919,7 +1162,7 @@ export default function DelayManagementPage() {
     const maxSeq = dispatchRecords
       .filter((d) => d.flightNos.includes(event.flightNumber))
       .reduce((m, d) => Math.max(m, d.dispatch_sequence ?? 1), 0);
-    const newDspId = `DSP-DEL-${String(delayEvents.filter((e) => e.dispatchId).length + 1).padStart(3, "0")}`;
+    const newDspId = `DSP-DEL-${String(delayEvents.filter((e) => e.dispatchId).length + 1 + seqOffset).padStart(3, "0")}`;
 
     const sourceItems: Array<{ name: string; qty: number }> =
       event.fulfillment?.directReceive?.items ??
@@ -1001,6 +1244,17 @@ export default function DelayManagementPage() {
     setTimeout(() => navigate("/dispatch"), 0);
   };
 
+  /** Combined dispatch: every marked flight goes out in one click, each with
+   *  its own dispatch record — the same records a single dispatch creates. */
+  const dispatchMarked = (ids: string[]) => {
+    const ready = ids
+      .map((id) => delayEvents.find((e) => e.id === id))
+      .filter((e): e is DelayEvent =>
+        !!e && ["Approved", "Sent To Production", "Approval Pending"].includes(e.status));
+    if (ready.length === 0) return;
+    ready.forEach((ev, i) => sendToDispatch(ev, i));
+  };
+
   const closeEvent = (eventId: string) => {
     setDelayEvents((prev) =>
       prev.map((e) => e.id === eventId ? { ...e, status: "Closed", updatedAt: stamp() } : e),
@@ -1013,9 +1267,12 @@ export default function DelayManagementPage() {
     ? dispatchRecords.find((d) => d.id === activeEvent.dispatchId)
     : undefined;
 
-  const modalDispatchRecord = viewModalEvent?.dispatchId
-    ? dispatchRecords.find((d) => d.id === viewModalEvent.dispatchId)
-    : undefined;
+  // The View modal covers the WHOLE submission: every flight logged under the
+  // same delay id renders its own detail block.
+  const viewModalBatch = viewModalEvent
+    ? delayEvents.filter((e) =>
+        viewModalEvent.batchId ? e.batchId === viewModalEvent.batchId : e.id === viewModalEvent.id)
+    : [];
 
   return (
     <>
@@ -1043,6 +1300,7 @@ export default function DelayManagementPage() {
           onInstantPurchase={openInstantPurchase}
           onOpenModal={setViewModalEventId}
           onNavigate={navigate}
+          onDispatchMarked={dispatchMarked}
         />
       )}
 
@@ -1050,7 +1308,7 @@ export default function DelayManagementPage() {
         <DelayProductionScreen
           event={activeEvent}
           onProceed={(id) => setEventFulfillmentAndGo(id, "Instant Purchase")}
-          onNeedsPurchase={(id, fulfillment, approval) => submitFulfillment(id, fulfillment, approval)}
+          onNeedsPurchase={(id, fulfillment, approval) => submitInstantPurchase(id, fulfillment, approval)}
           onSentToProduction={sentToProduction}
           batchEvents={batchEvents}
           onFulfilFromProduction={fulfilFromProduction}
@@ -1115,33 +1373,47 @@ export default function DelayManagementPage() {
           <DialogHeader className="px-6 pt-5 pb-3 border-b border-border sticky top-0 bg-background z-10">
             <DialogTitle className="flex items-center gap-3 text-base">
               <span className="font-mono">{viewModalEvent?.id}</span>
-              {viewModalEvent && delayBadge(viewModalEvent.status)}
+              {viewModalEvent && viewModalBatch.length <= 1 && delayBadge(viewModalEvent.status)}
               <span className="font-normal text-sm text-muted-foreground ml-1">
-                {viewModalEvent?.flightNumber} · {viewModalEvent?.sector}
+                {viewModalBatch.length > 1
+                  ? `${viewModalBatch.length} flights — ${viewModalBatch.map((e) => e.flightNumber).join(", ")}`
+                  : `${viewModalEvent?.flightNumber} · ${viewModalEvent?.sector}`}
               </span>
             </DialogTitle>
           </DialogHeader>
           <div className="px-6 py-4">
-            {viewModalEvent && (
-              <DelayDetailScreen
-                event={viewModalEvent}
-                approval={delayApprovals.find((a) => a.id === viewModalEvent.approvalId)}
-                dispatchRecord={modalDispatchRecord}
-                onOpenFulfillment={() => {
-                  setViewModalEventId(null);
-                  openFulfillment(viewModalEvent.id);
-                }}
-                onSendToDispatch={() => {
-                  setViewModalEventId(null);
-                  sendToDispatch(viewModalEvent);
-                }}
-                onClose={() => {
-                  setViewModalEventId(null);
-                  closeEvent(viewModalEvent.id);
-                }}
-                onNavigate={(path) => { setViewModalEventId(null); navigate(path); }}
-              />
-            )}
+            {/* One detail block per flight in the submission. */}
+            {viewModalBatch.map((ev, i) => (
+              <div key={ev.id} className={i > 0 ? "mt-8 pt-6 border-t-2 border-border" : undefined}>
+                {viewModalBatch.length > 1 && (
+                  <div className="mb-3 flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-semibold">{ev.flightNumber} · {ev.sector}</span>
+                    <span className="font-mono text-xs text-muted-foreground">{ev.id}</span>
+                    {delayBadge(ev.status)}
+                  </div>
+                )}
+                <DelayDetailScreen
+                  event={ev}
+                  approval={delayApprovals.find((a) => a.id === ev.approvalId)}
+                  dispatchRecord={ev.dispatchId
+                    ? dispatchRecords.find((d) => d.id === ev.dispatchId)
+                    : undefined}
+                  onOpenFulfillment={() => {
+                    setViewModalEventId(null);
+                    openFulfillment(ev.id);
+                  }}
+                  onSendToDispatch={() => {
+                    setViewModalEventId(null);
+                    sendToDispatch(ev);
+                  }}
+                  onClose={() => {
+                    setViewModalEventId(null);
+                    closeEvent(ev.id);
+                  }}
+                  onNavigate={(path) => { setViewModalEventId(null); navigate(path); }}
+                />
+              </div>
+            ))}
           </div>
         </DialogContent>
       </Dialog>
@@ -1152,7 +1424,7 @@ export default function DelayManagementPage() {
 // ─── Delay List / Dashboard ───────────────────────────────────────────────────
 
 function DelayList({
-  events, approvals, onOpenFulfillment, onInstantPurchase, onOpenModal, onNavigate,
+  events, approvals, onOpenFulfillment, onInstantPurchase, onOpenModal, onNavigate, onDispatchMarked,
 }: {
   events: DelayEvent[];
   approvals: DelayApprovalRecord[];
@@ -1160,6 +1432,8 @@ function DelayList({
   onInstantPurchase: (ev: DelayEvent) => void;
   onOpenModal: (id: string) => void;
   onNavigate: ReturnType<typeof useNavigate>;
+  /** Dispatch every marked (ready) flight in one go — same records as a single dispatch. */
+  onDispatchMarked: (ids: string[]) => void;
 }) {
   const [search, setSearch]       = useState("");
   const [filterStatus, setFilterStatus] = useState("all");
@@ -1177,23 +1451,182 @@ function DelayList({
     });
   }, [events, search, filterStatus, filterFrom, filterTo]);
 
-  /** Every Production Order raised for this delay has finished cooking. */
   const { productionEntries: allProductionOrders } = useWorkflow();
-  const productionDone = (ev: DelayEvent) => {
-    const ids = ev.productionOrderIds ?? [];
-    if (ids.length === 0) return false;
-    return ids.every((id) => allProductionOrders.find((o) => o.id === id)?.status === "Completed");
+
+  // One row per delay submission: flights logged together share a batchId, so
+  // they show under ONE delay id with a single Fulfil action for the whole set.
+  const groups = useMemo(() => {
+    const map = new Map<string, DelayEvent[]>();
+    const order: string[] = [];
+    for (const e of filtered) {
+      const key = e.batchId ?? e.id;
+      if (!map.has(key)) { map.set(key, []); order.push(key); }
+      map.get(key)!.push(e);
+    }
+    return order.map((k) => ({ key: k, events: map.get(k)! }));
+  }, [filtered]);
+
+  // ── Derived status: which approval queues the event still waits on ────────
+  // Routed parts each carry an approval somewhere else in the system — Delay
+  // Refreshment (stock / production fulfilment), Production Order, Purchase
+  // Req. While any is undecided the row reads "Pending (…)"; each clears on its
+  // own approval, and when none remain the event reads Approved.
+  const prs = getPurchaseRequisitions();
+  const pendingSources = (ev: DelayEvent): string[] => {
+    const out = new Set<string>();
+    for (const r of ev.fulfilmentRefs ?? []) {
+      if (r.refKind === "delay-approval") {
+        const a = approvals.find((x) => x.id === r.ref);
+        // A ghost instant-purchase approval (record cleared) doesn't block —
+        // the flow re-raises a real requisition instead.
+        if (!a && r.source === "Instant Purchase") continue;
+        if (!a || a.status === "Pending") {
+          out.add(r.source === "Stock" ? "Stock" : r.source === "Instant Purchase" ? "Purchase" : "Production");
+        }
+      } else if (r.refKind === "production-order") {
+        const ids = r.ref.split(",").map((s) => s.trim()).filter(Boolean);
+        if (ids.some((id) => allProductionOrders.find((o) => o.id === id)?.status === "Pending")) {
+          out.add("Production");
+        }
+      } else if (r.refKind === "purchase-requisition") {
+        // Ghost refs (requisition cleared from storage) don't block dispatch.
+        const pr = prs.find((p) => p.id === r.ref);
+        if (pr && /pending|draft/i.test(pr.status)) out.add("Purchase");
+      }
+    }
+    return Array.from(out);
   };
+  const chip = (label: string, cls: string) => (
+    <span className={cn(
+      "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap",
+      cls,
+    )}>
+      {label}
+    </span>
+  );
+  const CHIP_PENDING  = "border-amber-200 bg-amber-50 text-amber-700";
+  const CHIP_DONE     = "border-emerald-200 bg-emerald-50 text-emerald-700";
+  const CHIP_WORKING  = "border-indigo-200 bg-indigo-50 text-indigo-700";
+
+  /** Was the referenced Delay Refreshment approval decided yet? */
+  const approvalPending = (refIds: { ref: string }[]) =>
+    refIds.some((r) => {
+      const a = approvals.find((x) => x.id === r.ref);
+      return !a || a.status === "Pending";
+    });
+
+  /** Column 1 — the STOCK leg only: stock fulfilment Pending → Approved;
+   *  other stages fall back to the base badge. */
+  const stockLabelsOf = (ev: DelayEvent): string[] => {
+    // Dispatch states live in the Dispatch Status column, not here.
+    if (ev.status === "Sent To Dispatch" || ev.status === "Dispatched") return [];
+    const inFlight = ["Approval Pending", "Sent To Production", "Approved"].includes(ev.status);
+    if (!inFlight) return [ev.status];
+    const refs = (ev.fulfilmentRefs ?? []).filter(
+      (r) => r.refKind === "delay-approval" && r.source === "Stock",
+    );
+    if (refs.length > 0) {
+      return [`Stock Fulfillment ${approvalPending(refs) ? "Pending" : "Completed"}`];
+    }
+    // Routed elsewhere (production / purchase) — this column has nothing to
+    // add; those columns tell the story. Unrouted events show their own state.
+    return (ev.fulfilmentRefs ?? []).length > 0 ? [] : [ev.status];
+  };
+
+  /** Column 2 — everything production: fulfilment from finished production
+   *  (Pending → Approved) and the production-order route (approval → cooking
+   *  → done, QC incl.). Empty when the flight has no production leg. */
+  const productionLabelsOf = (ev: DelayEvent): string[] => {
+    const out: string[] = [];
+    const pf = (ev.fulfilmentRefs ?? []).filter(
+      (r) => r.refKind === "delay-approval" && r.source === "Production",
+    );
+    if (pf.length > 0) {
+      out.push(`Prod. Fulfillment ${approvalPending(pf) ? "Pending" : "Completed"}`);
+    }
+    const refs = (ev.fulfilmentRefs ?? []).filter((r) => r.refKind === "production-order");
+    if (refs.length > 0) {
+      const ids = refs.flatMap((r) => r.ref.split(",").map((s) => s.trim()).filter(Boolean));
+      const orders = ids.map((id) => allProductionOrders.find((o) => o.id === id));
+      if (orders.some((o) => !o || o.status === "Pending")) out.push("Production Pending");
+      else if (orders.every((o) => o!.status === "Completed" && !!o!.qcPassedAt)) out.push("Production Completed");
+      else out.push("In Production");
+    }
+    return out;
+  };
+
+  /** Column 3 — the purchase route: requisition OR instant-purchase approval,
+   *  pending → approved. */
+  const purchaseLabelsOf = (ev: DelayEvent): string[] => {
+    // Ghost refs (their record cleared from storage) are ignored — otherwise a
+    // lost requisition would read "Pending" forever with nothing in the queue.
+    const prRefs = (ev.fulfilmentRefs ?? []).filter((r) => r.refKind === "purchase-requisition"
+      && prs.some((p) => p.id === r.ref));
+    const ipRefs = (ev.fulfilmentRefs ?? []).filter(
+      (r) => r.refKind === "delay-approval" && r.source === "Instant Purchase"
+        && approvals.some((a) => a.id === r.ref),
+    );
+    if (prRefs.length === 0 && ipRefs.length === 0) return [];
+    const pending =
+      prRefs.some((r) => {
+        const pr = prs.find((p) => p.id === r.ref);
+        return !pr || /pending|draft/i.test(pr.status);
+      })
+      || approvalPending(ipRefs);
+    return [pending ? "Purchase Req Pending" : "Purchase Req Completed"];
+  };
+
+  /** One renderer for every status label — chips for the routed states, the
+   *  standard badge for base flow states. */
+  const STATUS_CHIP_CLS: Record<string, string> = {
+    "Stock Fulfillment Pending": CHIP_PENDING,
+    "Stock Fulfillment Completed": CHIP_DONE,
+    "Prod. Fulfillment Pending": CHIP_PENDING,
+    "Prod. Fulfillment Completed": CHIP_DONE,
+    "Production Pending": CHIP_PENDING,
+    "In Production": CHIP_WORKING,
+    "Production Completed": CHIP_DONE,
+    "Purchase Req Pending": CHIP_PENDING,
+    "Purchase Req Completed": CHIP_DONE,
+    "Pending": CHIP_PENDING,
+  };
+  const renderStatus = (label: string) =>
+    STATUS_CHIP_CLS[label] ? chip(label, STATUS_CHIP_CLS[label]) : delayBadge(label as DelayStatus);
+
+  /**
+   * Dispatchable ONLY when every routed approval has cleared AND every
+   * production order raised for the flight is Completed with QC passed —
+   * preparing production can never be dispatched. Packaging then happens on the
+   * Dispatch page exactly as today.
+   */
+  const readyToDispatch = (ev: DelayEvent): boolean => {
+    // Any in-flight state qualifies — the routed approvals are the truth, not
+    // the raw label (which can lag when several fulfilments were raised).
+    if (!["Approved", "Sent To Production", "Approval Pending"].includes(ev.status)) return false;
+    if (pendingSources(ev).length > 0) return false;
+    const ids = ev.productionOrderIds ?? [];
+    if (ids.length > 0) {
+      return ids.every((id) => {
+        const o = allProductionOrders.find((x) => x.id === id);
+        return o?.status === "Completed" && !!o.qcPassedAt;
+      });
+    }
+    // No production route — dispatchable once its approvals are all decided.
+    return (ev.fulfilmentRefs ?? []).length > 0 || ev.status === "Approved";
+  };
+
+  // ── Marked dispatch: tick several ready flights → one combined Dispatch ───
+  const [markedDispatch, setMarkedDispatch] = useState<string[]>([]);
 
   // ── Pagination ────────────────────────────────────────────────────────────
   const PAGE_SIZE = 10;
   const [page, setPage] = useState(1);
-  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pageCount = Math.max(1, Math.ceil(groups.length / PAGE_SIZE));
   // Filtering can shrink the list under the current page — step back rather
   // than render an empty table.
   useEffect(() => { setPage(1); }, [search, filterStatus, filterFrom, filterTo]);
   const safePage = Math.min(page, pageCount);
-  const paged = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  const paged = groups.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
 
   const active     = events.filter(isActiveDelayEvent).length;
   const pending    = events.filter((e) => e.status === "Approval Pending").length;
@@ -1314,8 +1747,23 @@ function DelayList({
         )}
       </div>
 
-      <div className="border border-border rounded-md overflow-hidden">
-        <Table>
+      {/* Combined dispatch for the marked ready flights — one click, every
+          marked flight goes to the Dispatch table exactly as a single one. */}
+      {markedDispatch.length > 0 && (
+        <div className="flex justify-end mb-2">
+          <Button
+            className="h-8 text-xs bg-teal-600 text-white hover:bg-teal-700"
+            onClick={() => { onDispatchMarked(markedDispatch); setMarkedDispatch([]); }}
+          >
+            <Truck className="h-3.5 w-3.5 mr-1.5" /> Dispatch ({markedDispatch.length})
+          </Button>
+        </div>
+      )}
+
+      <div className="border border-border rounded-md overflow-x-auto">
+        {/* Tighter cell padding — the eleven columns should fit a normal
+            desktop width without a horizontal scroll. */}
+        <Table className="[&_th]:px-2 [&_td]:px-2">
           <TableHeader className="bg-muted/40">
             <TableRow>
               <TableHead className="text-xs uppercase tracking-wider w-28">Event ID</TableHead>
@@ -1324,76 +1772,219 @@ function DelayList({
               <TableHead className="text-xs uppercase tracking-wider">Sector</TableHead>
               <TableHead className="text-xs uppercase tracking-wider text-center">Delay</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Meal Type</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">Status</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">Stock Status</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">Production Status</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">Purchase Status</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">Dispatch Status</TableHead>
               <TableHead className="text-xs uppercase tracking-wider text-right">Action</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-10">
+                <TableCell colSpan={11} className="text-center text-sm text-muted-foreground py-10">
                   No delay events found.
                 </TableCell>
               </TableRow>
             ) : (
-              paged.map((ev) => (
+              paged.map((g) => {
+                const ev0 = g.events[0];
+                const multi = g.events.length > 1;
+                // ONE Fulfil for the whole submission — it opens the production
+                // check worklist covering every flight in the batch.
+                const pendingFulfil = g.events.find((e) => e.status === "Fulfillment Pending");
+                const canPurchase = (e: DelayEvent) =>
+                  (e.status === "Approved" || e.status === "Sent To Dispatch")
+                  && ((e.productionPlan?.totalPurchase ?? 0) > 0);
+                // The delay id's marking box covers every dispatch-ready flight
+                // under it — tick the id, the whole submission joins the
+                // combined dispatch.
+                const readyIds = g.events.filter(readyToDispatch).map((e) => e.id);
+                const allMarked = readyIds.length > 0 && readyIds.every((id) => markedDispatch.includes(id));
+                return (
                 <TableRow
-                  key={ev.id}
+                  key={g.key}
                   className="hover:bg-muted/30 cursor-pointer"
-                  onClick={() => onOpenModal(ev.id)}
+                  onClick={() => onOpenModal(ev0.id)}
                 >
-                  <TableCell className="font-mono text-xs font-semibold text-primary">{ev.id}</TableCell>
-                  <TableCell>
-                    <div className="font-medium">{ev.flightNumber}</div>
-                    <div className="text-[10px] text-muted-foreground font-mono">{ev.orderNo}</div>
+                  <TableCell className="font-mono text-xs font-semibold text-primary align-top">
+                    <div className="flex items-start gap-2">
+                      <span onClick={(e) => e.stopPropagation()}>
+                        <Checkbox
+                          checked={allMarked}
+                          disabled={readyIds.length === 0}
+                          onCheckedChange={(v) => setMarkedDispatch((prev) => v === true
+                            ? [...prev, ...readyIds.filter((id) => !prev.includes(id))]
+                            : prev.filter((id) => !readyIds.includes(id)))}
+                          aria-label={`Mark ${ev0.id} for combined dispatch`}
+                          title={readyIds.length === 0
+                            ? "Available once every approval has cleared and production is complete"
+                            : "Mark for combined dispatch"}
+                        />
+                      </span>
+                      <span className="whitespace-nowrap">
+                        {ev0.id}
+                        {multi && (
+                          <div className="font-sans font-normal text-[10px] text-muted-foreground">
+                            {g.events.length} flights
+                          </div>
+                        )}
+                      </span>
+                    </div>
                   </TableCell>
-                  <TableCell className="tabular-nums text-xs">{ev.flightDate}</TableCell>
-                  <TableCell className="text-xs">{ev.sector}</TableCell>
-                  <TableCell className="text-center tabular-nums font-semibold text-warning">
-                    {ev.delayDurationHours}h
+                  {/* Per-flight blocks share a fixed min height so every column's
+                      lines stay level with the flight they belong to. */}
+                  <TableCell className="align-top">
+                    {g.events.map((ev) => (
+                      <div key={ev.id} className="min-h-[2.25rem] whitespace-nowrap leading-tight flex flex-col justify-center">
+                        <div className="font-medium">{ev.flightNumber}</div>
+                        <div className="text-[10px] text-muted-foreground font-mono">{ev.orderNo}</div>
+                      </div>
+                    ))}
                   </TableCell>
-                  <TableCell>
-                    <span className="text-xs text-muted-foreground">{ev.mealType ?? "—"}</span>
+                  <TableCell className="tabular-nums text-xs align-top">
+                    {g.events.map((ev) => (
+                      <div key={ev.id} className="min-h-[2.25rem] whitespace-nowrap flex items-center">{ev.flightDate}</div>
+                    ))}
                   </TableCell>
-                  <TableCell>{delayBadge(ev.status)}</TableCell>
-                  <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                    <div className="flex items-center justify-end gap-1.5">
-                      {ev.status === "Fulfillment Pending" && (
+                  <TableCell className="text-xs align-top">
+                    {g.events.map((ev) => (
+                      <div key={ev.id} className="min-h-[2.25rem] whitespace-nowrap flex items-center">{ev.sector}</div>
+                    ))}
+                  </TableCell>
+                  <TableCell className="text-center tabular-nums font-semibold text-warning align-top">
+                    {g.events.map((ev) => (
+                      <div key={ev.id} className="min-h-[2.25rem] flex items-center justify-center">{ev.delayDurationHours}h</div>
+                    ))}
+                  </TableCell>
+                  <TableCell className="align-top">
+                    {g.events.map((ev) => (
+                      <div key={ev.id} className="min-h-[2.25rem] text-xs text-muted-foreground flex items-center">
+                        {ev.mealType ?? "—"}
+                      </div>
+                    ))}
+                  </TableCell>
+                  {/* Three status columns — one chip per distinct state across
+                      the batch, no flight labels. A column with no routed
+                      flight shows a plain dash. */}
+                  <TableCell className="align-top">
+                    {(() => {
+                      const labels = Array.from(new Set(g.events.flatMap(stockLabelsOf)));
+                      return labels.length === 0
+                        ? <span className="text-xs text-muted-foreground">—</span>
+                        : labels.map((l) => (
+                          <div key={l} className="mb-1 last:mb-0">{renderStatus(l)}</div>
+                        ));
+                    })()}
+                  </TableCell>
+                  <TableCell className="align-top">
+                    {(() => {
+                      const labels = Array.from(new Set(g.events.flatMap(productionLabelsOf)));
+                      return labels.length === 0
+                        ? <span className="text-xs text-muted-foreground">—</span>
+                        : labels.map((l) => (
+                          <div key={l} className="mb-1 last:mb-0">{renderStatus(l)}</div>
+                        ));
+                    })()}
+                  </TableCell>
+                  <TableCell className="align-top">
+                    {(() => {
+                      // The balance production couldn't cover is bought separately,
+                      // so this stays available after the meals are dispatched.
+                      const buyable = g.events.filter(canPurchase);
+                      // The Instant Purchase button REPLACES the completed chip —
+                      // the action is the status once the requisition clears. A
+                      // still-pending requisition keeps its chip visible.
+                      const labels = Array.from(new Set(
+                        g.events.flatMap((e) => {
+                          const ls = purchaseLabelsOf(e);
+                          return canPurchase(e) ? ls.filter((l) => l === "Purchase Req Pending") : ls;
+                        }),
+                      ));
+                      if (labels.length === 0 && buyable.length === 0) {
+                        return <span className="text-xs text-muted-foreground">—</span>;
+                      }
+                      return (
+                        <>
+                          {labels.map((l) => (
+                            <div key={l} className="mb-1 last:mb-0">{renderStatus(l)}</div>
+                          ))}
+                          {buyable.map((ev) => (
+                            <div key={ev.id} className="mt-1.5" onClick={(e) => e.stopPropagation()}>
+                              <Button size="sm" variant="outline"
+                                className="h-7 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
+                                onClick={() => onInstantPurchase(ev)}
+                                title={`Spot-buy the uncovered balance — ${ev.flightNumber}`}>
+                                <ShoppingCart className="h-3 w-3 mr-1" />
+                                Instant Purchase{multi ? ` · ${ev.flightNumber}` : ""}
+                              </Button>
+                            </div>
+                          ))}
+                        </>
+                      );
+                    })()}
+                  </TableCell>
+                  {/* Dispatch Status — dispatch-stage chips plus the per-flight
+                      Dispatch buttons. Marking the row for the combined dispatch
+                      disables the individual buttons. */}
+                  <TableCell className="align-top">
+                    {(() => {
+                      const chips = Array.from(new Set(g.events
+                        .filter((e) => e.status === "Sent To Dispatch" || e.status === "Dispatched")
+                        .map((e) => e.status)));
+                      const ready = g.events.filter(readyToDispatch);
+                      // Pending until every routed status has completed — only
+                      // then does the chip give way to the Dispatch button.
+                      const stillPending = g.events.some((e) =>
+                        !["Sent To Dispatch", "Dispatched", "Rejected", "Closed"].includes(e.status)
+                        && !readyToDispatch(e));
+                      if (chips.length === 0 && ready.length === 0 && !stillPending) {
+                        return <span className="text-xs text-muted-foreground">—</span>;
+                      }
+                      return (
+                        <>
+                          {stillPending && (
+                            <div className="mb-1 last:mb-0">{renderStatus("Pending")}</div>
+                          )}
+                          {chips.map((l) => (
+                            <div key={l} className="mb-1 last:mb-0">{delayBadge(l as DelayStatus)}</div>
+                          ))}
+                          {/* Dispatchable ONLY once every approval has cleared and
+                              production (incl. QC) is complete. */}
+                          {ready.map((ev) => (
+                            <div key={ev.id} className="mt-1.5 first:mt-0" onClick={(e) => e.stopPropagation()}>
+                              <Button size="sm" className="h-7 text-xs bg-teal-600 text-white hover:bg-teal-700"
+                                disabled={markedDispatch.includes(ev.id)}
+                                onClick={() => onOpenModal(ev.id)}
+                                title={markedDispatch.includes(ev.id)
+                                  ? "Included in the combined dispatch"
+                                  : `Dispatch ${ev.flightNumber}`}>
+                                Dispatch{multi ? ` · ${ev.flightNumber}` : ""} <Truck className="h-3 w-3 ml-1" />
+                              </Button>
+                            </div>
+                          ))}
+                        </>
+                      );
+                    })()}
+                  </TableCell>
+                  {/* Action — Fulfil (whole submission) then View, on one line. */}
+                  <TableCell className="text-right align-top" onClick={(e) => e.stopPropagation()}>
+                    <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
+                      {pendingFulfil && (
                         <Button size="sm" className="h-7 text-xs"
-                          onClick={() => onOpenFulfillment(ev.id)}>
+                          onClick={() => onOpenFulfillment(pendingFulfil.id)}>
                           Fulfil <ChevronRight className="h-3 w-3 ml-0.5" />
                         </Button>
                       )}
-                      {/* Approved production fulfilment — the meals still have to
-                          reach the airport store, which is a normal transfer. */}
-                      {/* The balance production couldn't cover is bought separately,
-                          so this stays available after the meals are dispatched. */}
-                      {(ev.status === "Approved" || ev.status === "Sent To Dispatch")
-                        && (ev.productionPlan?.totalPurchase ?? 0) > 0 && (
-                        <Button size="sm" variant="outline"
-                          className="h-7 text-xs border-amber-300 text-amber-700 hover:bg-amber-50"
-                          onClick={() => onInstantPurchase(ev)}
-                          title="Spot-buy the quantities production could not cover">
-                          <ShoppingCart className="h-3 w-3 mr-1" /> Instant Purchase
-                        </Button>
-                      )}
-                      {/* Dispatchable once the fulfilment is approved, or once
-                          everything sent to the kitchen has finished cooking. */}
-                      {(ev.status === "Approved"
-                        || (ev.status === "Sent To Production" && productionDone(ev))) && (
-                        <Button size="sm" className="h-7 text-xs bg-teal-600 text-white hover:bg-teal-700"
-                          onClick={() => onOpenModal(ev.id)}>
-                          Dispatch <Truck className="h-3 w-3 ml-1" />
-                        </Button>
-                      )}
-                      <Button size="icon" variant="outline" className="h-7 w-7"
-                        onClick={() => onOpenModal(ev.id)} title="View details">
-                        <Eye className="h-3.5 w-3.5" />
+                      <Button size="sm" variant="outline" className="h-7 text-xs"
+                        onClick={() => onOpenModal(ev0.id)} title="View details">
+                        <Eye className="h-3.5 w-3.5 mr-1" /> View
                       </Button>
                     </div>
                   </TableCell>
                 </TableRow>
-              ))
+                );
+              })
             )}
           </TableBody>
         </Table>
@@ -1401,7 +1992,7 @@ function DelayList({
         {filtered.length > 0 && (
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-2">
             <span className="text-xs text-muted-foreground tabular-nums">
-              Showing {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, filtered.length)} of {filtered.length}
+              Showing {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, groups.length)} of {groups.length}
             </span>
             <div className="flex items-center gap-1">
               <Button
@@ -1482,10 +2073,26 @@ function DelayCreate({
   const [reasonCustomByFlight, setReasonCustomByFlight] = useState<Record<string, string>>({});
   const [reportedBy, setReportedBy]             = useState("");
 
-  // Dynamic items for "Other" meal type
-  const [otherItems, setOtherItems] = useState<Array<{ name: string; qty: number; unitCost: number }>>([
+  // Dynamic items for "Other" meal type — each row is picked from the item
+  // dropdown, which also brings the item's UoM and cost price with it.
+  const [otherItems, setOtherItems] = useState<Array<{ name: string; qty: number; unitCost: number; uom?: string }>>([
     { name: "", qty: 0, unitCost: 0 },
   ]);
+
+  /** Everything servable — the pool behind every item dropdown on this form. */
+  const itemOptions = useMemo(() => buildMenuItemOptions(mealPlanCards), [mealPlanCards]);
+
+  // Per-flight menu override, set only when the user edits the menu in Change
+  // Menu. Absent → the day-wise plan derivation is used exactly as before.
+  const [menuOverride, setMenuOverride] = useState<Record<string, DelayMenuItem[]>>({});
+  // How the override splits across meal types — mirrors the Change Menu cards
+  // (incl. drags) so the preview shows segregated sections, not one flat list.
+  const [menuOverrideGroups, setMenuOverrideGroups] = useState<Record<string, Array<{ type: string; items: DelayMenuItem[] }>>>({});
+  /** Flight order id whose Change Menu modal is open. */
+  const [menuEditor, setMenuEditor] = useState<string | null>(null);
+  const [menuDraft, setMenuDraft] = useState<DelayMenuItem[]>([]);
+  /** "Configure Items" modal for the Other meal type. */
+  const [otherConfigOpen, setOtherConfigOpen] = useState(false);
 
   // Multiple flights + meal types can be selected. The "primary" (first) of each
   // drives the live preview; on save we fan out one delay event per flight × meal
@@ -1518,16 +2125,129 @@ function DelayCreate({
   // preview logic: "Other" draws from the manual item rows, otherwise from plan.
   const itemsFor = (order: typeof dispatched[number], meal: string, tp: number): DelayMenuItem[] =>
     meal === "Other"
-      ? otherItems.filter((i) => i.name.trim() !== "").map((i) => ({ name: i.name.trim(), requiredQty: i.qty, uom: "pcs", unitCost: i.unitCost }))
+      ? otherItems.filter((i) => i.name.trim() !== "").map((i) => ({ name: i.name.trim(), requiredQty: i.qty, uom: i.uom ?? "pcs", unitCost: i.unitCost }))
       : (tp > 0 ? menuItemsFromPlan(meal, order.date, tp, mealPlanCards) : []);
 
-  const updateOtherItem = (idx: number, field: "name" | "qty" | "unitCost", val: string) => {
-    setOtherItems((prev) => prev.map((it, i) =>
-      i === idx ? { ...it, [field]: field === "name" ? val : Number(val) || 0 } : it,
-    ));
+  const updateOtherItem = (idx: number, field: "qty" | "unitCost", val: string) => {
+    setOtherItems((prev) => prev.map((it, i) => (i === idx ? { ...it, [field]: Number(val) || 0 } : it)));
   };
-  const addOtherItem    = () => setOtherItems((prev) => [...prev, { name: "", qty: 0, unitCost: 0 }]);
   const removeOtherItem = (idx: number) => setOtherItems((prev) => prev.filter((_, i) => i !== idx));
+
+  /** Largest headcount among the selected flights — the "Other" qty prefill. */
+  const maxHeadcount = selectedOrders.reduce((m, o) => Math.max(m, (o.pax ?? 0) + (o.crew ?? 0)), 0);
+  const otherNames = otherItems.map((i) => optKey(i.name));
+
+  /** Point an existing "Other" row at a different item from the dropdown. */
+  const pickOtherItem = (idx: number, o: MenuItemOption) => {
+    setOtherItems((prev) => prev.map((it, i) => (i === idx
+      ? { name: o.name, uom: o.uom, unitCost: it.unitCost || o.unitCost, qty: it.qty || maxHeadcount }
+      : it)));
+  };
+
+  /** Tick an item in the dropdown → add a row; untick → drop its row. */
+  const toggleOtherOption = (o: MenuItemOption) => {
+    setOtherItems((prev) => {
+      const at = prev.findIndex((i) => optKey(i.name) === optKey(o.name));
+      if (at >= 0) return prev.filter((_, i) => i !== at);
+      // Reuse a still-blank row rather than leaving it stranded above the pick.
+      const blank = prev.findIndex((i) => i.name.trim() === "");
+      const row = { name: o.name, uom: o.uom, qty: maxHeadcount, unitCost: o.unitCost };
+      return blank >= 0 ? prev.map((it, i) => (i === blank ? row : it)) : [...prev, row];
+    });
+  };
+
+  // ── Change Menu ─────────────────────────────────────────────────────────────
+
+  /** A flight's menu as it stands: the edited override, else the plan derivation. */
+  const menuForFlight = (order: typeof dispatched[number], tp: number): DelayMenuItem[] =>
+    menuOverride[order.id] ?? mealsFor(order.id).flatMap((meal) => itemsFor(order, meal, tp));
+
+  // Cross-type drag & drop inside the Change Menu modal: per-group visual
+  // additions and removals made by dragging a meal onto another type's card.
+  const [groupExtras, setGroupExtras] = useState<Record<string, DelayMenuItem[]>>({});
+  const [groupRemovals, setGroupRemovals] = useState<Record<string, string[]>>({});
+  const [dragOverType, setDragOverType] = useState<string | null>(null);
+
+  const openMenuEditor = (order: typeof dispatched[number], tp: number) => {
+    setMenuDraft(menuForFlight(order, tp));
+    setGroupExtras({});
+    setGroupRemovals({});
+    setMenuEditor(order.id);
+  };
+
+  const draftNames = menuDraft.map((it) => optKey(it.name));
+  const draftHas = (name: string) => draftNames.includes(optKey(name));
+  /** Add / remove one item from the combined menu being edited. */
+  const toggleDraftItem = (it: DelayMenuItem) => {
+    setMenuDraft((prev) => (prev.some((d) => optKey(d.name) === optKey(it.name))
+      ? prev.filter((d) => optKey(d.name) !== optKey(it.name))
+      : [...prev, it]));
+  };
+  const removeDraftItem = (name: string) =>
+    setMenuDraft((prev) => prev.filter((d) => optKey(d.name) !== optKey(name)));
+  const setDraftQty = (name: string, val: string) =>
+    setMenuDraft((prev) => prev.map((d) => (optKey(d.name) === optKey(name)
+      ? { ...d, requiredQty: Number(val) || 0 } : d)));
+
+  /** Move a dragged meal from one meal-type card onto another. The item leaves
+   *  its source group, appears in the target group and joins the combined menu. */
+  const dropOnGroup = (target: string, from: string, item: DelayMenuItem) => {
+    if (from === target) return;
+    const key = optKey(item.name);
+    setGroupExtras((prev) => {
+      const next = { ...prev };
+      next[from] = (next[from] ?? []).filter((d) => optKey(d.name) !== key);
+      const cur = next[target] ?? [];
+      if (!cur.some((d) => optKey(d.name) === key)) next[target] = [...cur, item];
+      return next;
+    });
+    setGroupRemovals((prev) => {
+      const next = { ...prev };
+      next[target] = (next[target] ?? []).filter((n) => n !== key);
+      if (!(next[from] ?? []).includes(key)) next[from] = [...(next[from] ?? []), key];
+      return next;
+    });
+    if (!draftHas(item.name)) toggleDraftItem(item);
+  };
+
+  /** The Other card's rows — the Configure Items table, as menu items. */
+  const otherBaseRows = (tp: number): DelayMenuItem[] =>
+    otherItems.filter((i) => i.name.trim() !== "").map((i) => ({
+      name: i.name.trim(), requiredQty: i.qty || tp, uom: i.uom ?? "pcs", unitCost: i.unitCost || undefined,
+    }));
+
+  /**
+   * Group the applied draft by meal type exactly as the Change Menu cards show
+   * it — base plan items minus removals plus drag/dropdown additions. An item
+   * shown under two types (e.g. water in Dinner and Heavy Snacks) is attributed
+   * to the first; anything selected but no longer on any card joins the first
+   * group so nothing silently drops from the preview.
+   */
+  const groupedDraft = (order: typeof dispatched[number], tp: number): Array<{ type: string; items: DelayMenuItem[] }> => {
+    const used = new Set<string>();
+    const groups: Array<{ type: string; items: DelayMenuItem[] }> = [];
+    for (const mt of MEAL_TYPES) {
+      const removed = groupRemovals[mt] ?? [];
+      const extras = groupExtras[mt] ?? [];
+      const base = mt === "Other" ? otherBaseRows(tp) : menuItemsFromPlan(mt, order.date, tp, mealPlanCards);
+      const display = [
+        ...base.filter((it) => !removed.includes(optKey(it.name))
+          && !extras.some((x) => optKey(x.name) === optKey(it.name))),
+        ...extras,
+      ];
+      const items = display
+        .filter((it) => draftHas(it.name) && !used.has(optKey(it.name)))
+        .map((it) => menuDraft.find((d) => optKey(d.name) === optKey(it.name)) ?? it);
+      items.forEach((it) => used.add(optKey(it.name)));
+      if (items.length > 0) groups.push({ type: mt, items });
+    }
+    const leftovers = menuDraft.filter((d) => !used.has(optKey(d.name)));
+    if (leftovers.length > 0) {
+      if (groups.length > 0) groups[0].items.push(...leftovers);
+      else groups.push({ type: mealsFor(order.id).join(", ") || "Menu", items: leftovers });
+    }
+    return groups;
+  };
 
   // Bump the numeric suffix of a base id (e.g. DEL-0005 → DEL-0006) so each
   // fanned-out event gets a distinct id.
@@ -1547,6 +2267,10 @@ function DelayCreate({
       const valid = otherItems.filter((i) => i.name.trim() && i.qty > 0);
       if (valid.length === 0) { toast.error("Add at least one item with a name and quantity for the Other meal type."); return; }
     }
+    if (selectedOrders.some((o) => menuOverride[o.id]?.length === 0)) {
+      toast.error("The edited menu is empty — add at least one item, or reset it to the plan.");
+      return;
+    }
     const now = stamp();
     // Fan out: ONE delay event per flight (not per meal). Each event carries ALL
     // selected meal types — a combined label plus the aggregated menu items — so a
@@ -1565,7 +2289,9 @@ function DelayCreate({
       const etd  = (order as any)?.etd as string | undefined;
       const meals = mealsFor(order.id);
       const mealLabel = meals.join(", ");
-      const aggItems = meals.flatMap((meal) => itemsFor(order, meal, tp));
+      // The Change Menu override, when present, IS the flight's menu — the
+      // combined, user-edited list. Otherwise derive from the day-wise plan.
+      const aggItems = menuOverride[order.id] ?? meals.flatMap((meal) => itemsFor(order, meal, tp));
       events.push({
         id: bumpId(nextId, k),
         flightOrderId: order.id,
@@ -1752,7 +2478,8 @@ function DelayCreate({
                       </button>
                     </PopoverTrigger>
                     <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-1">
-                      {MEAL_TYPES.map((mt) => (
+                      {/* "Other" is not offered here — it lives only inside Change Menu. */}
+                      {MEAL_TYPES.filter((mt) => mt !== "Other").map((mt) => (
                         <label key={mt} className="flex items-center gap-2 px-2 py-1.5 text-sm cursor-pointer rounded hover:bg-muted/50">
                           <Checkbox checked={mealsFor(o.id).includes(mt)} onCheckedChange={() => toggleMealFor(o.id, mt)} />
                           <span>{mt}</span>
@@ -1798,25 +2525,56 @@ function DelayCreate({
                         Selected Meals · Day-wise Config ({weekday})
                       </span>
                     </div>
-                    <Button size="sm" variant="outline" className="h-7 text-xs bg-background" onClick={() => navigate("/meal-planning")}>
-                      <ExternalLink className="h-3 w-3 mr-1" /> Change Menu
+                    <Button size="sm" variant="outline" className="h-7 text-xs bg-background" onClick={() => openMenuEditor(o, tp)}>
+                      <Pencil className="h-3 w-3 mr-1" /> Change Menu
                     </Button>
                   </div>
+                  {menuOverride[o.id] ? (
+                    /* Edited menu — segregated by meal type, as arranged in Change Menu. */
+                    <div className="rounded-md border border-border/60 bg-background/70 divide-y divide-border/50">
+                      {menuOverride[o.id].length === 0 ? (
+                        <div className="px-3 py-2 text-[11px] text-destructive">No items — edit the menu again or reset to plan.</div>
+                      ) : (menuOverrideGroups[o.id] ?? [{ type: meals.join(", "), items: menuOverride[o.id] }]).map((g) => (
+                        <div key={g.type} className="px-3 py-2">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-xs font-semibold text-primary">{g.type}</span>
+                            <span className="text-[10px] text-amber-700 font-medium">(menu edited)</span>
+                          </div>
+                          <ul className="space-y-0.5">
+                            {g.items.map((it, i) => (
+                              <li key={i} className="flex items-center justify-between text-xs">
+                                <span className="text-foreground">{it.name}</span>
+                                <span className="tabular-nums text-muted-foreground">{it.requiredQty} {it.uom}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
                   <div className="rounded-md border border-border/60 bg-background/70 divide-y divide-border/50">
                     {meals.map((meal) => {
                       const isOther = meal === "Other";
                       const items = isOther
-                        ? otherItems.filter((i) => i.name.trim() !== "").map((i) => ({ name: i.name.trim(), requiredQty: i.qty, uom: "pcs" }))
+                        ? otherItems.filter((i) => i.name.trim() !== "").map((i) => ({ name: i.name.trim(), requiredQty: i.qty, uom: i.uom ?? "pcs" }))
                         : menuItemsFromPlan(meal, o.date, tp, mealPlanCards);
                       const matched = !isOther && mealPlanCards.some(
                         (c) => c.mealType.toLowerCase() === meal.toLowerCase() && c.day === weekday,
                       );
                       return (
                         <div key={meal} className="px-3 py-2">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="text-xs font-semibold text-primary">{meal}</span>
-                            {!isOther && (
-                              <span className="text-[10px] text-muted-foreground">{matched ? "(matched to plan)" : "(defaults)"}</span>
+                          <div className="flex items-center justify-between gap-2 mb-1">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-semibold text-primary">{meal}</span>
+                              {!isOther && (
+                                <span className="text-[10px] text-muted-foreground">{matched ? "(matched to plan)" : "(defaults)"}</span>
+                              )}
+                            </div>
+                            {isOther && (
+                              <Button size="sm" variant="outline" className="h-6 text-[11px] bg-background"
+                                onClick={() => setOtherConfigOpen(true)}>
+                                <ListChecks className="h-3 w-3 mr-1" /> Configure Items
+                              </Button>
                             )}
                           </div>
                           {items.length === 0 ? (
@@ -1835,6 +2593,7 @@ function DelayCreate({
                       );
                     })}
                   </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1852,68 +2611,6 @@ function DelayCreate({
           </div>
         </div>
 
-        {/* ── "Other" dynamic item entry ──────────────────────────────── */}
-        {anyOther && (
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <Label className="text-xs uppercase tracking-wider text-muted-foreground">
-                Items — Other <span className="text-destructive">*</span>
-              </Label>
-              <Button size="sm" variant="outline" className="h-7 text-xs" onClick={addOtherItem}>
-                <PlusCircle className="h-3.5 w-3.5 mr-1" /> Add Item
-              </Button>
-            </div>
-            <div className="border border-border rounded-md overflow-hidden">
-              <Table>
-                <TableHeader className="bg-muted/40">
-                  <TableRow>
-                    <TableHead className="text-xs uppercase tracking-wider">Item Name</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider w-24">Qty</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider w-28">Unit Cost (৳)</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider text-right w-28">Line Total</TableHead>
-                    <TableHead className="w-10" />
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {otherItems.map((item, idx) => (
-                    <TableRow key={idx}>
-                      <TableCell>
-                        <Input value={item.name}
-                          onChange={(e) => updateOtherItem(idx, "name", e.target.value)}
-                          className="h-8 text-sm" placeholder="Item name" />
-                      </TableCell>
-                      <TableCell>
-                        <Input type="number" min={0} value={item.qty || ""}
-                          onChange={(e) => updateOtherItem(idx, "qty", e.target.value)}
-                          className="h-8 text-sm tabular-nums" />
-                      </TableCell>
-                      <TableCell>
-                        <Input type="number" min={0} value={item.unitCost || ""}
-                          onChange={(e) => updateOtherItem(idx, "unitCost", e.target.value)}
-                          className="h-8 text-sm tabular-nums" />
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums text-sm font-medium">
-                        ৳ {(item.qty * item.unitCost).toLocaleString()}
-                      </TableCell>
-                      <TableCell>
-                        <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                          onClick={() => removeOtherItem(idx)}>
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-            <div className="flex justify-end mt-2">
-              <div className="text-sm font-semibold">
-                Total Cost: <span className="text-primary tabular-nums">৳ {otherTotal.toLocaleString()}</span>
-              </div>
-            </div>
-          </div>
-        )}
-
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border">
@@ -1928,6 +2625,305 @@ function DelayCreate({
           <Send className="h-4 w-4 mr-1.5" /> Create &amp; Go to Fulfillment
         </Button>
       </div>
+
+      {/* ── Configure Items modal — the "Other" meal type ─────────────────── */}
+      <Dialog open={otherConfigOpen} onOpenChange={setOtherConfigOpen}>
+        <DialogContent className="w-full max-w-[95vw] sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ListChecks className="h-4 w-4 text-primary" /> Configure Items — Other
+            </DialogTitle>
+            <DialogDescription>
+              Pick the meals to serve under the Other meal type — quantity and price per item.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex items-center justify-between gap-3">
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">
+              Items — Other <span className="text-destructive">*</span>
+            </Label>
+            {/* Multi-select: tick items to add rows, untick to remove them. */}
+            <div className="w-56">
+              <ItemDropdown
+                options={itemOptions}
+                selected={otherNames}
+                label={`Add Item${otherItems.some((i) => i.name.trim()) ? ` · ${otherItems.filter((i) => i.name.trim()).length} selected` : ""}`}
+                multi
+                onPick={toggleOtherOption}
+                triggerClassName="h-7 text-xs"
+              />
+            </div>
+          </div>
+          <div className="border border-border rounded-md overflow-hidden">
+            <Table>
+              <TableHeader className="bg-muted/40">
+                <TableRow>
+                  <TableHead className="text-xs uppercase tracking-wider">Item Name</TableHead>
+                  <TableHead className="text-xs uppercase tracking-wider w-24">Qty</TableHead>
+                  <TableHead className="text-xs uppercase tracking-wider w-28">Unit Cost (৳)</TableHead>
+                  <TableHead className="text-xs uppercase tracking-wider text-right w-28">Line Total</TableHead>
+                  <TableHead className="w-10" />
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {otherItems.map((item, idx) => (
+                  <TableRow key={idx}>
+                    <TableCell>
+                      {/* Items are picked from the master/menu list, not typed. */}
+                      <ItemDropdown
+                        options={itemOptions}
+                        selected={otherNames}
+                        label={item.name.trim() || "Select item…"}
+                        onPick={(o) => pickOtherItem(idx, o)}
+                        triggerClassName={cn(!item.name.trim() && "text-muted-foreground")}
+                      />
+                      {item.uom && (
+                        <div className="mt-0.5 text-[10px] text-muted-foreground">UoM: {item.uom}</div>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Input type="number" min={0} value={item.qty || ""}
+                        onChange={(e) => updateOtherItem(idx, "qty", e.target.value)}
+                        className="h-8 text-sm tabular-nums" />
+                    </TableCell>
+                    <TableCell>
+                      <Input type="number" min={0} value={item.unitCost || ""}
+                        onChange={(e) => updateOtherItem(idx, "unitCost", e.target.value)}
+                        className="h-8 text-sm tabular-nums" />
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums text-sm font-medium">
+                      ৳ {(item.qty * item.unitCost).toLocaleString()}
+                    </TableCell>
+                    <TableCell>
+                      <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        onClick={() => removeOtherItem(idx)}>
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+          <div className="flex justify-end">
+            <div className="text-sm font-semibold">
+              Total Cost: <span className="text-primary tabular-nums">৳ {otherTotal.toLocaleString()}</span>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button onClick={() => setOtherConfigOpen(false)}>
+              <CheckCircle2 className="h-4 w-4 mr-1.5" /> Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Change Menu modal ─────────────────────────────────────────────── */}
+      <Dialog open={!!menuEditor} onOpenChange={(v) => { if (!v) setMenuEditor(null); }}>
+        <DialogContent className="w-full max-w-[95vw] sm:max-w-3xl max-h-[90vh] overflow-y-auto">
+          {(() => {
+            const order = selectedOrders.find((o) => o.id === menuEditor);
+            if (!order) return null;
+            const tp = (order.pax ?? 0) + (order.crew ?? 0);
+            return (
+              <>
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-2">
+                    <Pencil className="h-4 w-4 text-primary" /> Change Menu — {order.flight}
+                    <span className="font-mono text-xs font-normal text-muted-foreground">{order.sector} · {order.date}</span>
+                  </DialogTitle>
+                  <DialogDescription>
+                    Combine items across every meal type: untick to remove, tick to add —
+                    or drag a meal onto another type&apos;s card to move it across.
+                    The edited list replaces this flight&apos;s day-wise plan.
+                  </DialogDescription>
+                </DialogHeader>
+
+                {/* All meal types with their day-wise plan items — quick add/remove.
+                    Every card is also a drop target for cross-type dragging. */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {MEAL_TYPES.map((mt) => {
+                    const isOtherGroup = mt === "Other";
+                    const removed = groupRemovals[mt] ?? [];
+                    const extras = groupExtras[mt] ?? [];
+                    // Other draws from its Configure Items rows; the rest from the plan.
+                    const base: DelayMenuItem[] = isOtherGroup
+                      ? otherBaseRows(tp)
+                      : menuItemsFromPlan(mt, order.date, tp, mealPlanCards);
+                    const items = [
+                      ...base.filter((it) => !removed.includes(optKey(it.name))
+                        && !extras.some((x) => optKey(x.name) === optKey(it.name))),
+                      ...extras,
+                    ];
+                    /* Picking adds a visible row on THIS card (and selects it);
+                       picking again removes it — so the card always shows where
+                       each item belongs and the preview can segregate by type. */
+                    const pickForGroup = (o: MenuItemOption) => {
+                      const item: DelayMenuItem = { name: o.name, requiredQty: tp, uom: o.uom, unitCost: o.unitCost || undefined };
+                      const key = optKey(o.name);
+                      const inGroup = items.some((it) => optKey(it.name) === key);
+                      setGroupExtras((prev) => ({
+                        ...prev,
+                        [mt]: inGroup
+                          ? (prev[mt] ?? []).filter((d) => optKey(d.name) !== key)
+                          : [...(prev[mt] ?? []), item],
+                      }));
+                      setGroupRemovals((prev) => ({
+                        ...prev,
+                        [mt]: inGroup
+                          ? [...(prev[mt] ?? []).filter((n) => n !== key), key]
+                          : (prev[mt] ?? []).filter((n) => n !== key),
+                      }));
+                      // Keep the combined menu in step: removing an in-group item
+                      // drops it from the draft, adding one selects it.
+                      if (inGroup === draftHas(o.name)) toggleDraftItem(item);
+                    };
+                    return (
+                      <div
+                        key={mt}
+                        onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setDragOverType(mt); }}
+                        onDragLeave={() => setDragOverType((cur) => (cur === mt ? null : cur))}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          setDragOverType(null);
+                          try {
+                            const p = JSON.parse(e.dataTransfer.getData("application/json")) as { from: string; item: DelayMenuItem };
+                            if (p?.item?.name) dropOnGroup(mt, p.from, p.item);
+                          } catch { /* ignore non-item drags */ }
+                        }}
+                        className={cn(
+                          "rounded-md border border-border bg-muted/20 p-2 transition-colors",
+                          dragOverType === mt && "border-primary ring-1 ring-primary/40 bg-primary/5",
+                        )}
+                      >
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{mt}</div>
+                          {/* Scoped to this meal type only — like the meal configuration
+                              pickers. Other offers the full servable pool. */}
+                          <div className="w-32">
+                            <ItemDropdown
+                              options={isOtherGroup ? itemOptions : mealTypeItemOptions(mt, mealPlanCards)}
+                              selected={items.map((it) => optKey(it.name))}
+                              label="Add Items"
+                              multi
+                              onPick={pickForGroup}
+                              triggerClassName="h-6 text-[11px]"
+                            />
+                          </div>
+                        </div>
+                        {items.length === 0 ? (
+                          <div className="text-[11px] text-muted-foreground px-1">
+                            {isOtherGroup
+                              ? "No items yet — add from the dropdown or drag a meal here."
+                              : "No items configured."}
+                          </div>
+                        ) : items.map((it) => (
+                          <label
+                            key={it.name}
+                            draggable
+                            onDragStart={(e) => {
+                              e.dataTransfer.setData("application/json", JSON.stringify({ from: mt, item: it }));
+                              e.dataTransfer.effectAllowed = "move";
+                            }}
+                            className="flex items-center gap-2 rounded px-1 py-1 text-sm cursor-grab active:cursor-grabbing hover:bg-muted/50"
+                          >
+                            <GripVertical className="h-3 w-3 text-muted-foreground/60 shrink-0" />
+                            <Checkbox checked={draftHas(it.name)} onCheckedChange={() => toggleDraftItem(it)} />
+                            <span className="flex-1 truncate">{it.name}</span>
+                            <span className="text-[10px] text-muted-foreground shrink-0">{it.uom}</span>
+                          </label>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* The combined menu being built — editable quantities. */}
+                <div className="border border-border rounded-md overflow-hidden">
+                  <Table>
+                    <TableHeader className="bg-muted/40">
+                      <TableRow>
+                        <TableHead className="text-xs uppercase tracking-wider">Selected Item</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider text-right w-28">Qty</TableHead>
+                        <TableHead className="text-xs uppercase tracking-wider w-20">UoM</TableHead>
+                        <TableHead className="w-10" />
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {menuDraft.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={4} className="text-center text-sm text-muted-foreground py-8">
+                            No items selected — tick items above to build the menu.
+                          </TableCell>
+                        </TableRow>
+                      ) : menuDraft.map((it) => (
+                        <TableRow key={it.name}>
+                          <TableCell className="text-sm font-medium">{it.name}</TableCell>
+                          <TableCell className="text-right">
+                            <Input
+                              type="number"
+                              min={0}
+                              value={it.requiredQty || ""}
+                              onChange={(e) => setDraftQty(it.name, e.target.value)}
+                              className="h-8 text-right tabular-nums"
+                            />
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">{it.uom}</TableCell>
+                          <TableCell>
+                            <Button size="icon" variant="ghost" className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                              onClick={() => removeDraftItem(it.name)}>
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+
+                <DialogFooter className="gap-2">
+                  {menuOverride[order.id] && (
+                    <Button
+                      variant="outline"
+                      className="mr-auto"
+                      onClick={() => {
+                        setMenuOverride((prev) => {
+                          const next = { ...prev };
+                          delete next[order.id];
+                          return next;
+                        });
+                        setMenuOverrideGroups((prev) => {
+                          const next = { ...prev };
+                          delete next[order.id];
+                          return next;
+                        });
+                        setMenuEditor(null);
+                        toast.success(`${order.flight} — menu reset to the day-wise plan.`);
+                      }}
+                    >
+                      Reset to Plan
+                    </Button>
+                  )}
+                  <Button variant="outline" onClick={() => setMenuEditor(null)}>Cancel</Button>
+                  <Button
+                    disabled={menuDraft.length === 0 || menuDraft.some((it) => it.requiredQty <= 0)}
+                    onClick={() => {
+                      setMenuOverride((prev) => ({ ...prev, [order.id]: menuDraft }));
+                      // Snapshot the per-type arrangement (incl. drags) for the preview.
+                      setMenuOverrideGroups((prev) => ({ ...prev, [order.id]: groupedDraft(order, tp) }));
+                      setMenuEditor(null);
+                      toast.success(`${order.flight} — menu updated (${menuDraft.length} item${menuDraft.length === 1 ? "" : "s"}).`);
+                    }}
+                  >
+                    <CheckCircle2 className="h-4 w-4 mr-1.5" /> Apply Menu
+                  </Button>
+                </DialogFooter>
+              </>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -1983,6 +2979,9 @@ function DelayProductionScreen({
   const [drLog, setDrLog]                   = usePersistedState<DrLogEntry[]>("delay-dr-log", []);
 
   const [drOpen, setDrOpen]               = useState(false);
+  /** True when the spot buy was launched from the list's Instant Purchase —
+   *  closing without submitting goes back to the list, not this blank screen. */
+  const [drFromList, setDrFromList]       = useState(false);
   const [drVendor, setDrVendor]           = useState("");
   const [drReceivedBy, setDrReceivedBy]   = useState("");
   const [drOfficeId, setDrOfficeId]       = useState("OFF-001");
@@ -2132,6 +3131,10 @@ function DelayProductionScreen({
     flight: string;
     rows: { name: string; qty: number; uom: string; requiredQty: number }[];
     run: () => void;
+    /** Override the source-derived heading (e.g. "Fulfill from Production"). */
+    title?: string;
+    /** Override the qty column header (Issue / Cook / Buy Qty by default). */
+    qtyHeader?: string;
   } | null>(null);
 
   /**
@@ -2153,6 +3156,10 @@ function DelayProductionScreen({
     commitViewItems(marked.map((r) => r.name), "Production");
   };
 
+
+  /** Raise the marked shortfalls as a Purchase Requisition. Once IT is
+   *  approved, the list's Instant Purchase button opens the Direct Receive
+   *  modal for the actual spot buy. */
   const viewForwardToPurchase = (
     ev: DelayEvent,
     marked: { name: string; shortfall: number; uom: string }[],
@@ -2188,45 +3195,76 @@ function DelayProductionScreen({
     toast.success(`${pr.id} raised — pending approval under Purchase Req.`);
   };
 
-  const viewFulfilFromStock = (
-    ev: DelayEvent,
-    marked: { name: string; onHand: number; requiredQty: number; uom: string }[],
-  ) => {
-    if (marked.length === 0) return;
+  // ── Fulfill from Stock modal — stock items, live stock link, editable qty ──
+  const [stockFulfil, setStockFulfil] = useState<{
+    flight: DelayEvent;
+    rows: { name: string; uom: string; requiredQty: number; onHand: number; reqQty: number }[];
+  } | null>(null);
+
+  const setStockFulfilQty = (name: string, val: string) =>
+    setStockFulfil((prev) => prev
+      ? {
+          ...prev,
+          rows: prev.rows.map((r) => r.name === name
+            ? { ...r, reqQty: Math.max(0, roundQty(Number(val) || 0)) }
+            : r),
+        }
+      : prev);
+
+  /** Jump to the item's row on Stock Overview with the arrival blink — the
+   *  closing-qty item-details table there works exactly as it does today. */
+  const goToStockRow = (name: string) => {
+    const inv = inventoryItems.find(
+      (it) => it.name.trim().toLowerCase() === name.trim().toLowerCase(),
+    );
+    flagArrival({ target: "inv-alerts", ids: [inv?.id ?? name] });
+    navigate("/inventory");
+    toast.success(`Opening ${name} in Stock Overview.`);
+  };
+
+  /** Submit the stock fulfilment for approval. Nothing moves yet — the admin
+   *  approves in Approval Management and the existing flow deducts the stock. */
+  const submitStockFulfil = () => {
+    if (!stockFulfil) return;
+    const { flight, rows } = stockFulfil;
+    const acting = rows.filter((r) => r.reqQty > 0);
+    if (acting.length === 0) { toast.error("Enter a quantity for at least one item."); return; }
+    const over = acting.find((r) => r.reqQty > r.onHand);
+    if (over) { toast.error(`${over.name}: exceeds the ${over.onHand} ${over.uom} on hand.`); return; }
     const now = stamp();
-    const items: DrItem[] = marked.map((r) => ({
+    const items: DrItem[] = acting.map((r) => ({
       name: r.name,
-      qty: Math.min(r.requiredQty, r.onHand),
-      unitCost: (ev.menuItems ?? []).find((m) => m.name === r.name)?.unitCost ?? 0,
+      qty: r.reqQty,
+      unitCost: (flight.menuItems ?? []).find((m) => m.name === r.name)?.unitCost ?? 0,
     }));
     onFulfilFromProduction([{
-      eventId: ev.id,
+      eventId: flight.id,
       plan: {
         id: bumpSeq("DPP-0001", dpfRecords.length),
         createdAt: now,
         createdBy: role,
-        lines: marked.map((r) => ({
+        lines: acting.map((r) => ({
           itemName: r.name,
           uom: r.uom,
           requiredQty: r.requiredQty,
           productionQty: 0,
-          stockQty: Math.min(r.requiredQty, r.onHand),
-          purchaseQty: Math.max(0, r.requiredQty - r.onHand),
+          stockQty: r.reqQty,
+          purchaseQty: Math.max(0, r.requiredQty - r.reqQty),
           batches: [],
         })),
         totalProduction: 0,
         totalStock: items.reduce((s, i) => s + i.qty, 0),
-        totalPurchase: marked.reduce((s, r) => s + Math.max(0, r.requiredQty - r.onHand), 0),
+        totalPurchase: acting.reduce((s, r) => s + Math.max(0, r.requiredQty - r.reqQty), 0),
       },
       approval: {
         id: nextDaId,
-        delayEventId: ev.id,
-        flightNumber: ev.flightNumber,
-        flightDate: ev.flightDate,
-        sector: ev.sector,
-        paxCount: ev.paxCount,
-        crewCount: ev.crewCount,
-        delayDurationHours: ev.delayDurationHours,
+        delayEventId: flight.id,
+        flightNumber: flight.flightNumber,
+        flightDate: flight.flightDate,
+        sector: flight.sector,
+        paxCount: flight.paxCount,
+        crewCount: flight.crewCount,
+        delayDurationHours: flight.delayDurationHours,
         submittedBy: role,
         submittedAt: now,
         status: "Pending",
@@ -2236,7 +3274,8 @@ function DelayProductionScreen({
         notes: "Fulfilled from on-hand kitchen stock.",
       },
     }]);
-    commitViewItems(marked.map((r) => r.name), "Stock");
+    commitViewItems(acting.map((r) => r.name), "Stock");
+    setStockFulfil(null);
   };
 
   /** Coverage summary for one flight — drives the Check Production column. */
@@ -2276,7 +3315,10 @@ function DelayProductionScreen({
           flightNumber: ev.flightNumber,
           itemName: mi.name,
           uom: mi.uom,
+          // Req Qty starts auto-filled at the flight's full requirement; the
+          // production / stock / to-buy split derives from it.
           requiredQty: mi.requiredQty,
+          origRequiredQty: mi.requiredQty,
           produced,
           availableProduction,
           availableStock,
@@ -2383,10 +3425,47 @@ function DelayProductionScreen({
     toast.success(`${pr.id} raised — pending approval under Purchase Req.`);
   };
 
+  // ── Plan "Fulfill from Stock" review modal — like the single-flight one ────
+  const [planStock, setPlanStock] = useState<{
+    rows: { key: string; flight: string; name: string; uom: string; requiredQty: number; onHand: number; reqQty: number }[];
+  } | null>(null);
+
+  const setPlanStockQty = (key: string, val: string) =>
+    setPlanStock((prev) => prev
+      ? {
+          rows: prev.rows.map((r) => r.key === key
+            ? { ...r, reqQty: Math.max(0, roundQty(Number(val) || 0)) }
+            : r),
+        }
+      : prev);
+
+  const submitPlanStock = () => {
+    if (!planStock) return;
+    const acting = planStock.rows.filter((r) => r.reqQty > 0);
+    if (acting.length === 0) { toast.error("Enter a quantity for at least one item."); return; }
+    const over = acting.find((r) => r.reqQty > r.onHand);
+    if (over) { toast.error(`${over.name}: exceeds the ${over.onHand} ${over.uom} on hand.`); return; }
+    const qty = new Map(planStock.rows.map((r) => [r.key, r.reqQty]));
+    // Keep the plan table in step with what was confirmed, then submit with
+    // the confirmed figures (state updates flush after this handler).
+    setPlanLines((prev) => prev.map((l) => (qty.has(l.key) ? { ...l, stockQty: qty.get(l.key)! } : l)));
+    submitPlan("Stock", qty);
+    setPlanStock(null);
+  };
+
+  /** Edit a line's Req Qty (the amount being fulfilled — partial allowed). The
+   *  production draw, stock draw and to-buy balance re-derive from it. */
   const setPlanQty = (key: string, value: string) =>
-    setPlanLines((prev) => prev.map((l) => l.key === key
-      ? { ...l, productionQty: Math.max(0, roundQty(Number(value) || 0)) }
-      : l));
+    setPlanLines((prev) => prev.map((l) => {
+      if (l.key !== key) return l;
+      const req = Math.max(0, roundQty(Number(value) || 0));
+      return {
+        ...l,
+        requiredQty: req,
+        productionQty: Math.min(req, l.availableProduction),
+        stockQty: Math.min(req, l.availableStock),
+      };
+    }));
 
   /**
    * Open a production order from its id — jumps to the Production Order list and
@@ -2426,6 +3505,14 @@ function DelayProductionScreen({
     cook: picked.filter((l) => l.produced).reduce((s, l) => s + shortfallOf(l), 0),
     purchase: picked.reduce((s, l) => s + shortfallOf(l), 0),
   };
+  // Button labels count marked ITEMS per route (like the single-flight view),
+  // not unit totals — 9 order lines reads "(9)", never "(1248)".
+  const planCounts = {
+    production: picked.filter((l) => l.productionQty > 0).length,
+    stock: picked.filter((l) => l.stockQty > 0).length,
+    cook: picked.filter((l) => l.produced && shortfallOf(l) > 0).length,
+    purchase: picked.filter((l) => shortfallOf(l) > 0).length,
+  };
   const planOverdrawn = picked.filter((l) => l.productionQty > l.availableProduction);
   /** Local id bumper — the parent hands us one next-id per series. */
   const bumpSeq = (baseId: string, offset: number) => {
@@ -2444,8 +3531,15 @@ function DelayProductionScreen({
    * second delayed flight cannot be promised the same meals while this one is
    * still waiting for a decision.
    */
-  const submitPlan = (from: "Production" | "Stock" = "Production") => {
-    const qtyOf = (l: PlanLine) => (from === "Stock" ? l.stockQty : l.productionQty);
+  const submitPlan = (
+    from: "Production" | "Stock" = "Production",
+    /** Per-line quantities confirmed in the route's review modal — they win
+     *  over the plan table's figures for the submitting source. */
+    qtyOverride?: Map<string, number>,
+  ) => {
+    const qtyOf = (l: PlanLine) =>
+      qtyOverride?.get(l.key) ?? (from === "Stock" ? l.stockQty : l.productionQty);
+    const stockQtyOf = (l: PlanLine) => (from === "Stock" ? qtyOf(l) : l.stockQty);
     const acting = picked.filter((l) => qtyOf(l) > 0);
     if (acting.length === 0) {
       toast.error(from === "Stock"
@@ -2498,8 +3592,8 @@ function DelayProductionScreen({
             uom: l.uom,
             requiredQty: l.requiredQty,
             productionQty: l.productionQty,
-            stockQty: l.stockQty,
-            purchaseQty: shortfallOf(l),
+            stockQty: stockQtyOf(l),
+            purchaseQty: Math.max(0, l.requiredQty - l.productionQty - stockQtyOf(l)),
             batches: allocateToBatches(l).map((b) => ({
               productionId: b.batch.productionId,
               qty: b.qty,
@@ -2507,8 +3601,8 @@ function DelayProductionScreen({
             })),
           })),
           totalProduction: lines.reduce((s, l) => s + l.productionQty, 0),
-          totalStock: lines.reduce((s, l) => s + l.stockQty, 0),
-          totalPurchase: lines.reduce((s, l) => s + shortfallOf(l), 0),
+          totalStock: lines.reduce((s, l) => s + stockQtyOf(l), 0),
+          totalPurchase: lines.reduce((s, l) => s + Math.max(0, l.requiredQty - l.productionQty - stockQtyOf(l)), 0),
         },
         approval: {
           id: bumpSeq(nextDaId, k),
@@ -2621,6 +3715,9 @@ function DelayProductionScreen({
           }))
       : stockCheck.filter((i) => !i.sufficient);
     openDrModal(short as typeof stockCheck);
+    // Cancelling the modal returns to the list — this screen was only opened
+    // to host the spot buy, so there is nothing else to show on it.
+    setDrFromList(true);
     onAutoOpenPurchaseDone?.();
     // Fires once per arrival — the parent clears the flag straight after.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2732,6 +3829,7 @@ function DelayProductionScreen({
     });
 
     setDrOpen(false);
+    setDrFromList(false);
     toast.success(`${nextDrId} recorded — stock updated. ${nextDaId} submitted for approval.`);
     onNeedsPurchase(event.id, fulfillment, approval);
   };
@@ -2863,7 +3961,9 @@ function DelayProductionScreen({
               const cooked = isProducedItem({ name: mi.name });
               const onHand = stockByName.get(mi.name.trim().toLowerCase()) ?? 0;
               const fromProduction = cooked ? (a?.availableQty ?? 0) : 0;
-              const shortfall = Math.max(0, mi.requiredQty - fromProduction - (cooked ? 0 : onHand));
+              // On-hand stock covers ANY item — a consumable already on the
+              // shelf is never "Short" just because it isn't cooked.
+              const shortfall = Math.max(0, mi.requiredQty - fromProduction - onHand);
               return { ...mi, cooked, onHand, fromProduction, shortfall, batches: a?.batches ?? [] };
             });
             // What still needs sourcing, split by how it can be sourced: meals the
@@ -2973,9 +4073,15 @@ function DelayProductionScreen({
                                   <CheckCircle2 className="h-3 w-3" /> Sent · {viewDone[r.name]}
                                 </span>
                               ) : r.shortfall === 0 ? (
-                                <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
-                                  <CheckCircle2 className="h-3 w-3" /> Available
-                                </span>
+                                r.fromProduction > 0 ? (
+                                  <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                                    <CheckCircle2 className="h-3 w-3" /> Available
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[11px] font-semibold text-sky-700">
+                                    <CheckCircle2 className="h-3 w-3" /> In Stock
+                                  </span>
+                                )
                               ) : (
                                 <span className="inline-flex items-center gap-1 rounded-full border border-red-200 bg-red-50 px-2 py-0.5 text-[11px] font-semibold text-red-700">
                                   <AlertTriangle className="h-3 w-3" /> Short {r.shortfall}
@@ -3020,16 +4126,15 @@ function DelayProductionScreen({
                       title={markedStockable.length === 0
                         ? "Mark at least one item that on-hand stock can cover"
                         : `Issue ${markedStockable.length} marked item(s) from stock`}
-                      onClick={() => setConfirmRoute({
-                        source: "Stock",
-                        flight: `${viewFlight.flightNumber} — ${viewFlight.sector}`,
+                      onClick={() => setStockFulfil({
+                        flight: viewFlight,
                         rows: markedStockable.map((r) => ({
                           name: r.name,
-                          qty: Math.min(r.requiredQty, r.onHand),
                           uom: r.uom,
                           requiredQty: r.requiredQty,
+                          onHand: r.onHand,
+                          reqQty: Math.min(r.requiredQty, r.onHand),
                         })),
-                        run: () => viewFulfilFromStock(viewFlight, markedStockable),
                       })}
                     >
                       <PackageOpen className="h-4 w-4 mr-1.5" />
@@ -3083,8 +4188,180 @@ function DelayProductionScreen({
           })()}
         </DialogContent>
       </Dialog>
+      {/* ─── Plan Fulfill from Stock Modal (multi-flight) ─────────────────── */}
+      <Dialog open={!!planStock} onOpenChange={(v) => { if (!v) setPlanStock(null); }}>
+        <DialogContent className="w-full max-w-[95vw] sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+          {planStock && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <PackageOpen className="h-4 w-4 text-sky-600" /> Fulfill from Stock
+                </DialogTitle>
+                <DialogDescription>
+                  Issue the marked items from on-hand stock. On approval the stock is deducted
+                  and the movement shows in the item&apos;s closing-quantity details, as today.
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="border border-border rounded-md overflow-hidden">
+                <Table>
+                  <TableHeader className="bg-muted/40">
+                    <TableRow>
+                      <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider w-24">Flight</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right w-28">Current Stock</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right w-24">Required</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right w-28">Req Qty</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider w-20">UoM</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {planStock.rows.map((r) => (
+                      <TableRow key={r.key}>
+                        <TableCell className="text-sm font-medium">{r.name}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{r.flight}</TableCell>
+                        <TableCell className="text-right">
+                          {/* Clickable — opens the item's Stock Overview row with
+                              the blinking arrival effect. */}
+                          <button
+                            type="button"
+                            className="tabular-nums text-sm font-semibold text-sky-700 underline decoration-dotted underline-offset-2 hover:opacity-80"
+                            title="View this item in Stock Overview"
+                            onClick={() => goToStockRow(r.name)}
+                          >
+                            {r.onHand}
+                          </button>
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums text-sm">{r.requiredQty}</TableCell>
+                        <TableCell className="text-right">
+                          <Input
+                            type="number"
+                            min={0}
+                            max={r.onHand}
+                            value={r.reqQty}
+                            onChange={(e) => setPlanStockQty(r.key, e.target.value)}
+                            className={cn(
+                              "h-8 text-right tabular-nums",
+                              r.reqQty > r.onHand && "border-destructive focus-visible:ring-destructive",
+                            )}
+                          />
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{r.uom}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+
+              <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                <strong className="text-foreground">
+                  {planStock.rows.reduce((s, r) => s + r.reqQty, 0)}
+                </strong>{" "}
+                unit(s) across {planStock.rows.length} item(s) — goes to Approval Management
+                for admin sign-off before any stock moves.
+              </div>
+
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setPlanStock(null)}>Cancel</Button>
+                <Button className="bg-sky-600 hover:bg-sky-700 text-white" onClick={submitPlanStock}>
+                  <PackageOpen className="h-4 w-4 mr-1.5" /> Submit For Approval
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* ─── Fulfill from Stock Modal ─────────────────────────────────────── */}
+      <Dialog open={!!stockFulfil} onOpenChange={(v) => { if (!v) setStockFulfil(null); }}>
+        <DialogContent className="w-full max-w-[95vw] sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+          {stockFulfil && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <PackageOpen className="h-4 w-4 text-sky-600" /> Fulfill from Stock
+                </DialogTitle>
+                <DialogDescription>
+                  {stockFulfil.flight.flightNumber} — {stockFulfil.flight.sector} — issue the
+                  marked items from on-hand stock. On approval the stock is deducted and the
+                  movement shows in the item&apos;s closing-quantity details, as today.
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="border border-border rounded-md overflow-hidden">
+                <Table>
+                  <TableHeader className="bg-muted/40">
+                    <TableRow>
+                      <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right w-28">Current Stock</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right w-24">Required</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right w-28">Req Qty</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider w-20">UoM</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {stockFulfil.rows.map((r) => (
+                      <TableRow key={r.name}>
+                        <TableCell className="text-sm font-medium">{r.name}</TableCell>
+                        <TableCell className="text-right">
+                          {/* Clickable — opens the item's Stock Overview row with
+                              the blinking arrival effect. */}
+                          <button
+                            type="button"
+                            className="tabular-nums text-sm font-semibold text-sky-700 underline decoration-dotted underline-offset-2 hover:opacity-80"
+                            title="View this item in Stock Overview"
+                            onClick={() => goToStockRow(r.name)}
+                          >
+                            {r.onHand}
+                          </button>
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums text-sm">{r.requiredQty}</TableCell>
+                        <TableCell className="text-right">
+                          <Input
+                            type="number"
+                            min={0}
+                            max={r.onHand}
+                            value={r.reqQty}
+                            onChange={(e) => setStockFulfilQty(r.name, e.target.value)}
+                            className={cn(
+                              "h-8 text-right tabular-nums",
+                              r.reqQty > r.onHand && "border-destructive focus-visible:ring-destructive",
+                            )}
+                          />
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{r.uom}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+
+              <div className="rounded-md border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                <strong className="text-foreground">
+                  {stockFulfil.rows.reduce((s, r) => s + r.reqQty, 0)}
+                </strong>{" "}
+                unit(s) across {stockFulfil.rows.length} item(s) — goes to Approval Management
+                for admin sign-off before any stock moves.
+              </div>
+
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setStockFulfil(null)}>Cancel</Button>
+                <Button className="bg-sky-600 hover:bg-sky-700 text-white" onClick={submitStockFulfil}>
+                  <PackageOpen className="h-4 w-4 mr-1.5" /> Submit For Approval
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
       {/* ─── Direct Receive – Spot Buy Modal ──────────────────────────────── */}
-      <Dialog open={drOpen} onOpenChange={(v) => { if (!v) setDrOpen(false); }}>
+      <Dialog open={drOpen} onOpenChange={(v) => {
+        if (!v) {
+          setDrOpen(false);
+          if (drFromList) { setDrFromList(false); onCancel(); }
+        }
+      }}>
         <DialogContent className="w-full max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -3233,17 +4510,20 @@ function DelayProductionScreen({
                   {confirmRoute.source === "Stock" ? <PackageOpen className="h-4 w-4 text-sky-600" />
                     : confirmRoute.source === "Production" ? <ChefHat className="h-4 w-4 text-indigo-600" />
                     : <ShoppingCart className="h-4 w-4 text-amber-600" />}
-                  {confirmRoute.source === "Stock" ? "Fulfill from Stock"
-                    : confirmRoute.source === "Production" ? "Send to Production"
-                    : "Forward to Instant Purchase"}
+                  {confirmRoute.title
+                    ?? (confirmRoute.source === "Stock" ? "Fulfill from Stock"
+                      : confirmRoute.source === "Production" ? "Send to Production"
+                      : "Forward to Instant Purchase")}
                 </DialogTitle>
                 <DialogDescription>
                   {confirmRoute.flight} — review the quantities below. Confirming sends them to{" "}
                   {confirmRoute.source === "Instant Purchase"
                     ? "Approval Management under Purchase Req"
-                    : confirmRoute.source === "Production"
-                      ? "Approval Management under Production"
-                      : "Approval Management under Delay Refreshment"}.
+                    : confirmRoute.title === "Fulfill from Production"
+                      ? "Approval Management under Delay Refreshment"
+                      : confirmRoute.source === "Production"
+                        ? "Approval Management under Production"
+                        : "Approval Management under Delay Refreshment"}.
                 </DialogDescription>
               </DialogHeader>
 
@@ -3255,8 +4535,9 @@ function DelayProductionScreen({
                         <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
                         <TableHead className="text-xs uppercase tracking-wider text-right w-28">Required</TableHead>
                         <TableHead className="text-xs uppercase tracking-wider text-right w-28">
-                          {confirmRoute.source === "Stock" ? "Issue Qty"
-                            : confirmRoute.source === "Production" ? "Cook Qty" : "Buy Qty"}
+                          {confirmRoute.qtyHeader
+                            ?? (confirmRoute.source === "Stock" ? "Issue Qty"
+                              : confirmRoute.source === "Production" ? "Cook Qty" : "Buy Qty")}
                         </TableHead>
                         <TableHead className="text-xs uppercase tracking-wider w-20">UoM</TableHead>
                       </TableRow>
@@ -3406,14 +4687,18 @@ function DelayProductionScreen({
                                   ? l.batches.reduce((s, b) => s + b.producedQty, 0)
                                   : "—"}
                               </TableCell>
-                              <TableCell className="text-right tabular-nums text-sm">{l.requiredQty}</TableCell>
+                              <TableCell className="text-right tabular-nums text-sm">
+                                {l.origRequiredQty ?? l.requiredQty}
+                              </TableCell>
+                              {/* Auto-filled with the full requirement; edit down
+                                  for a partial fulfilment — the production / stock
+                                  / to-buy split re-derives from it. */}
                               <TableCell className="text-right">
                                 <Input
                                   type="number"
                                   min={0}
-                                  max={l.availableProduction}
-                                  value={l.productionQty}
-                                  disabled={!l.produced || l.availableProduction === 0}
+                                  value={l.requiredQty}
+                                  disabled={isLocked(l.key)}
                                   onChange={(e) => setPlanQty(l.key, e.target.value)}
                                   className={cn(
                                     "h-8 text-right tabular-nums",
@@ -3499,49 +4784,95 @@ function DelayProductionScreen({
             >
               Close
             </Button>
+            {/* Each route opens its own review modal first — quantities are
+                confirmed there and only then go for approval, exactly like the
+                single-flight View functionality. */}
             <Button
               className="bg-emerald-600 hover:bg-emerald-700 text-white"
-              onClick={() => submitPlan("Production")}
+              onClick={() => {
+                const acting = picked.filter((l) => l.productionQty > 0);
+                setConfirmRoute({
+                  source: "Production",
+                  title: "Fulfill from Production",
+                  qtyHeader: "Issue Qty",
+                  flight: Array.from(new Set(acting.map((l) => l.flightNumber))).join(", "),
+                  rows: acting.map((l) => ({
+                    name: l.itemName, qty: l.productionQty, uom: l.uom, requiredQty: l.requiredQty,
+                  })),
+                  run: () => submitPlan("Production"),
+                });
+              }}
               disabled={planTotals.production <= 0 || planOverdrawn.length > 0}
               title={planTotals.production <= 0
                 ? "Mark items that production can cover"
                 : "Send the marked production-sourced quantities for approval"}
             >
               <ArrowLeftRight className="h-4 w-4 mr-1.5" />
-              Fulfill from Production ({planTotals.production})
+              Fulfill from Production ({planCounts.production})
             </Button>
             <Button
               className="bg-sky-600 hover:bg-sky-700 text-white"
-              onClick={() => submitPlan("Stock")}
+              onClick={() => setPlanStock({
+                rows: picked.filter((l) => l.stockQty > 0).map((l) => ({
+                  key: l.key,
+                  flight: l.flightNumber,
+                  name: l.itemName,
+                  uom: l.uom,
+                  requiredQty: l.requiredQty,
+                  onHand: l.availableStock,
+                  reqQty: l.stockQty,
+                })),
+              })}
               disabled={planTotals.stock <= 0}
               title={planTotals.stock <= 0
                 ? "Mark items that on-hand stock can cover"
                 : "Issue the marked quantities from existing stock"}
             >
               <PackageOpen className="h-4 w-4 mr-1.5" />
-              Fulfill from Stock ({planTotals.stock})
+              Fulfill from Stock ({planCounts.stock})
             </Button>
             <Button
               className="bg-indigo-600 hover:bg-indigo-700 text-white"
-              onClick={submitSendToProduction}
+              onClick={() => {
+                const cook = picked.filter((l) => l.produced && shortfallOf(l) > 0);
+                setConfirmRoute({
+                  source: "Production",
+                  qtyHeader: "Cook Qty",
+                  flight: Array.from(new Set(cook.map((l) => l.flightNumber))).join(", "),
+                  rows: cook.map((l) => ({
+                    name: l.itemName, qty: shortfallOf(l), uom: l.uom, requiredQty: l.requiredQty,
+                  })),
+                  run: submitSendToProduction,
+                });
+              }}
               disabled={planTotals.cook <= 0}
               title={planTotals.cook <= 0
                 ? "Mark kitchen items the day's production has not covered"
                 : "Raise Production Orders for the marked items"}
             >
               <ChefHat className="h-4 w-4 mr-1.5" />
-              Send to Production ({planTotals.cook})
+              Send to Production ({planCounts.cook})
             </Button>
             <Button
               className="bg-amber-600 hover:bg-amber-700 text-white"
-              onClick={submitPurchase}
+              onClick={() => {
+                const short = picked.filter((l) => shortfallOf(l) > 0);
+                setConfirmRoute({
+                  source: "Instant Purchase",
+                  flight: Array.from(new Set(short.map((l) => l.flightNumber))).join(", "),
+                  rows: short.map((l) => ({
+                    name: l.itemName, qty: shortfallOf(l), uom: l.uom, requiredQty: l.requiredQty,
+                  })),
+                  run: submitPurchase,
+                });
+              }}
               disabled={planTotals.purchase <= 0}
               title={planTotals.purchase <= 0
                 ? "Mark items with a balance to buy"
                 : "Raise a Purchase Requisition for the marked balance"}
             >
               <ShoppingCart className="h-4 w-4 mr-1.5" />
-              Forward to Instant Purchase ({planTotals.purchase})
+              Forward to Instant Purchase ({planCounts.purchase})
             </Button>
           </DialogFooter>
         </DialogContent>

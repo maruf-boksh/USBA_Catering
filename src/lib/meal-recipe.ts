@@ -178,5 +178,9 @@ export function isProducedItem(meal: { name?: string; code?: string; bom?: strin
   const master = ITEM_MASTER.find(
     (i) => (meal.code && i.code === meal.code) || i.name.trim().toLowerCase() === name,
   );
-  return master ? itemCanProduce(master) : false;
+  if (!master) return false;
+  // Bottled beverages (juice, water, soft drinks) are bought in, never cooked —
+  // they are consumables to issue from stock or spot-buy, not production items.
+  if (master.category === "Beverage") return false;
+  return itemCanProduce(master);
 }

@@ -61,6 +61,7 @@ import {
   type Warehouse,
 } from "@/lib/sample-data";
 import { usePrimaryUoms, useAltUoms, addPrimaryUom, addAltUom } from "@/lib/custom-uoms";
+import { AgeingAddPanels } from "@/routes/stock-ageing";
 import { roundQty } from "@/lib/num";
 
 type ItemRow = ItemMaster;
@@ -217,7 +218,7 @@ function CapabilityChecks({
 export default function ConfigItemPage() {
   const [rows, setRows] = usePersistedState<ItemRow[]>("config-item-rows", MASTER_ITEMS);
   const [view, setView] = useState<"list" | "create">("list");
-  const [tab, setTab] = useState<"items" | "category">("items");
+  const [tab, setTab] = useState<"items" | "category" | "ageing" | "alert">("items");
   const [openingOpen, setOpeningOpen] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
 
@@ -261,7 +262,7 @@ export default function ConfigItemPage() {
         title="Item Configuration"
         subtitle="Master list of raw materials, packaging, consumables and finished goods used across the kitchen"
         actions={
-          tab === "items" ? (
+          tab !== "category" ? (
             <div className="flex items-center gap-2">
               {view === "list" && (
                 <>
@@ -275,7 +276,15 @@ export default function ConfigItemPage() {
               )}
               <Button
                 variant={view === "create" ? "outline" : "default"}
-                onClick={() => setView(view === "create" ? "list" : "create")}
+                onClick={() => {
+                  if (view === "create") {
+                    // Leaving Create Item also closes its Ageing / Alert sub-tabs.
+                    setView("list");
+                    setTab("items");
+                  } else {
+                    setView("create");
+                  }
+                }}
               >
                 {view === "create" ? <><ArrowLeft className="h-4 w-4 mr-1" /> Back</> : <><Plus className="h-4 w-4 mr-1" /> Create Item</>}
               </Button>
@@ -302,7 +311,7 @@ export default function ConfigItemPage() {
         }}
       />
 
-      <Tabs value={tab} onValueChange={(v) => setTab(v as "items" | "category")} className="space-y-5">
+      <Tabs value={tab} onValueChange={(v) => setTab(v as "items" | "category" | "ageing" | "alert")} className="space-y-5">
         <TabsList className="h-auto gap-6 bg-transparent p-0 pt-2 border-b border-border w-full justify-start rounded-none">
           <TabsTrigger
             value="items"
@@ -310,12 +319,33 @@ export default function ConfigItemPage() {
           >
             Item Profile
           </TabsTrigger>
-          <TabsTrigger
-            value="category"
-            className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-1 pb-3"
-          >
-            Category
-          </TabsTrigger>
+          {/* Category is a list-view tab — hidden inside the Create Item flow. */}
+          {view !== "create" && (
+            <TabsTrigger
+              value="category"
+              className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-1 pb-3"
+            >
+              Category
+            </TabsTrigger>
+          )}
+          {/* Only inside the Create Item flow — ageing entry moved here from
+              Stock Ageing & Alerts. */}
+          {view === "create" && (
+            <>
+              <TabsTrigger
+                value="ageing"
+                className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-1 pb-3"
+              >
+                Ageing Record
+              </TabsTrigger>
+              <TabsTrigger
+                value="alert"
+                className="text-xs uppercase tracking-wider rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:shadow-none px-1 pb-3"
+              >
+                Alert Configuration
+              </TabsTrigger>
+            </>
+          )}
         </TabsList>
 
         <TabsContent value="items" className="mt-0">
@@ -335,6 +365,14 @@ export default function ConfigItemPage() {
 
         <TabsContent value="category" className="mt-0">
           <CategoryManager items={rows} />
+        </TabsContent>
+
+        <TabsContent value="ageing" className="mt-0">
+          <AgeingAddPanels panel="record" onClose={() => setTab("items")} />
+        </TabsContent>
+
+        <TabsContent value="alert" className="mt-0">
+          <AgeingAddPanels panel="config" onClose={() => setTab("items")} />
         </TabsContent>
       </Tabs>
     </>
