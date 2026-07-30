@@ -19,6 +19,8 @@ import {
   Plus, ArrowLeft, Save, Undo2, PackageCheck, Recycle, Trash2, X, Clock, Eye, Search, ExternalLink,
 } from "lucide-react";
 import { toast } from "sonner";
+import { ListExportActions } from "@/components/common/ListExportActions";
+import { filterMeta as listExportFilterMeta } from "@/lib/list-export";
 import {
   consumableItems,
   consumableUsage as SEED_USAGE,
@@ -460,6 +462,29 @@ function ReturnList({
             Clear
           </button>
         )}
+        <div className="ml-auto self-end">
+          <ListExportActions
+            table={() => ({
+              title: "Consumable Returns",
+              fileName: `consumable-returns-${dateFrom || "all"}${dateTo && dateTo !== dateFrom ? `_to_${dateTo}` : ""}`,
+              meta: listExportFilterMeta([
+                ["Dates", (dateFrom || dateTo) && `${dateFrom || "…"} → ${dateTo || "…"}`],
+                ["Status", filterStatus !== "all" && filterStatus],
+                ["Item", searchItem.trim() || false],
+              ]),
+              // One row per return LINE (the return-level fields repeat), so the
+              // sheet is flat and Excel-friendly rather than mirroring rowspans.
+              columns: ["Return ID", "Date", "Flight", "Sector", "Item", "Issued Qty", "Return Qty", "Reusable", "Status"],
+              numericCols: [5, 6],
+              rows: filteredReturns.flatMap((r) =>
+                r.lines.map((l) => [
+                  r.id, r.date, r.flight, r.sector, l.itemName, l.issuedQty ?? "", l.qty,
+                  l.reusable ? "Yes" : "No", approvalFor(r)?.status ?? "Pending",
+                ]),
+              ),
+            })}
+          />
+        </div>
       </div>
 
       <div className="border border-border rounded-md overflow-hidden">

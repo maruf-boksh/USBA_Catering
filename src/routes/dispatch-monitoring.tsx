@@ -13,15 +13,17 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
+import { ListExportActions } from "@/components/common/ListExportActions";
+import { filterMeta as listExportFilterMeta } from "@/lib/list-export";
 import {
   Plus, Minus, Truck, Pencil, Trash2, ThermometerSun, ShieldCheck,
   AlertOctagon, AlertTriangle, PlaneTakeoff, PlaneLanding, Warehouse,
   Clock, User, CheckCircle2, Eye, Smartphone, ChevronRight, QrCode, X as CloseIcon, Timer, Play,
-  Search, Package, ScanLine, CupSoda, Sparkles, Boxes,
+  Search, Package, CupSoda, Sparkles, Boxes,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
-  flights as FLIGHT_BOARD, seedFlightOrders, activeOffices, activeWarehousesByOffice,
+  flights as FLIGHT_BOARD, seedFlightOrders, activeOffices, activeWarehouses, activeWarehousesByOffice,
   aircraftFleet as AIRCRAFT_SEED, airlines as AIRLINE_SEED,
   type Aircraft, type Airline,
 } from "@/lib/sample-data";
@@ -33,6 +35,7 @@ import { useDispatchMonitoringSettings } from "@/lib/dispatch-monitoring-setting
 import { KpiCard } from "@/components/common/KpiCard";
 import { loadStandardsForAircraft, computeStandard, isMealMixKey, galleyAircraftTypes } from "@/lib/galley-standards";
 import { usePersistedState } from "@/lib/use-persisted-state";
+import { readVehicleLoadingSessions, loadingWindowFor, completeSessionsFor } from "@/lib/vehicle-loading";
 import { AircraftFields, modelsForAircraftType } from "@/routes/config-aircraft";
 import { getGalleySections, computeAutoTotals, loadGalleyItems } from "@/lib/galley-items";
 
@@ -123,6 +126,11 @@ export type DispatchEntry = {
   loadFlights?: string[];
   /** The Dispatch-page dispatch IDs (DSP-…) this entry was raised from. */
   sourceDispatchIds?: string[];
+  /** Unloading timer — starts automatically when Airport Receive opens; the
+   *  ISO start drives the live elapsed display, the end stamps completion
+   *  (set from the receive sheet or the row's Complete Unloading action). */
+  unloadingStartedAtIso?: string;
+  unloadingEndTime?: string;
 };
 
 // A dispatched meal item (one Production line) scanned on airport receipt.
@@ -146,6 +154,9 @@ type AirportLeg = {
   date: string;
   rows: ScanMealRow[];
   totalQty: number;
+  /** Dispatch ID this leg belongs to — shown per leg card so a 20-30-dispatch
+      vehicle load stays traceable without listing every ref in the header. */
+  dspRef?: string;
 };
 type FormState = {
   flightId: string; packagingDate: string; mealLines: MealLine[];
@@ -275,7 +286,10 @@ export type DispSection = {
   paxLines: DispPaxLine[]; vgml?: number; chml?: number; spml?: number;
   crewMeals?: DispCrewMeal[];
 };
-type DispRecord = { id: string; date: string; flightNos: string[]; sections: DispSection[] };
+type DispRecord = {
+  id: string; date: string; flightNos: string[]; sections: DispSection[];
+  fromWarehouseId?: string; toWarehouseId?: string;
+};
 
 function loadDispatchRecords(): DispRecord[] {
   try {
@@ -443,9 +457,6 @@ const vehOOR     = (v: string) => { const n = parseFloat(v); return v !== "" && 
 const totalQty   = (lines: MealLine[]) => lines.reduce((s, l) => s + (parseInt(l.qty) || 0), 0);
 export const flightLabel = (id: string) => { const f = flights.find((x) => x.id === id); return f ? `${f.flight} — ${f.sector}` : id; };
 const flightNo    = (id: string) => { const f = flights.find((x) => x.id === id); return f ? f.flight : id; };
-// System packaging id derived from a production order (matches the Packaging &
-// Dispatch modules: PRO-2026-1234 → PKG-2026-1234).
-const toPackagingId = (pro: string) => (pro && pro !== "—" ? `PKG-${pro.replace(/^PRO-?/i, "")}` : "—");
 /** Destination airport for an entry's flight. Matches the flight board by id OR
  *  by flight number (an entry raised from a dispatch carries the number), then
  *  falls back to the order book — otherwise a real flight read "— Airport".
@@ -594,8 +605,6 @@ export default function DispatchMonitoring() {
   const [viewEntryId, setViewEntryId] = useState<string | null>(null);
   const [galleyRecords, setGalleyRecords] = useState<GalleyLoadingRecord[]>(() => loadGalleyRecords());
   const [tickCount, setTickCount] = useState(0);
-  const [formLoadStartIso, setFormLoadStartIso] = useState("");
-  const [formTimerTick, setFormTimerTick] = useState(0);
   // Airport Receive — "Time of Unloading" Start/End timer (self-contained; the
   // start time is written into form.unloadingTime, the end time is UI-only).
   const [unloadStartIso, setUnloadStartIso] = useState("");
@@ -617,20 +626,22 @@ export default function DispatchMonitoring() {
   // ── Airport receive panel state ──────────────────────────────────────────────
   const [showAirportPanel, setShowAirportPanel] = useState(false);
   const [isAirportReceiveMode, setIsAirportReceiveMode] = useState(false);
-  // Airport-receipt scanning — sourced from the Dispatch table's packaging rows.
+  // Dispatched batch lines — sourced from the Dispatch table's packaging rows.
   const [dispatchPackagingRows] = usePersistedState<PackagingRow[]>("dispatch-packaging-rows", INITIAL_PACKAGING_ROWS);
-  const [scannedRowIds, setScannedRowIds] = useState<Set<string>>(new Set());
-  const [activeScanRowId, setActiveScanRowId] = useState<string | null>(null);
   const [orderDetailFlight, setOrderDetailFlight] = useState<string | null>(null);
-  // Order Details opens in scan mode (scan icons shown) only from ⋯ → Scan Items;
-  // the Meals-column / View action opens it read-only.
-  const [orderDetailScanMode, setOrderDetailScanMode] = useState(false);
   // Gate temperature locks once entered (recorded value can't be changed).
   const [gateTempLocked, setGateTempLocked] = useState(false);
   // Dispatched-batch table filters.
   const [batchFrom, setBatchFrom] = useState("");
   const [batchTo, setBatchTo] = useState("");
-  const [batchStatus, setBatchStatus] = useState("all");
+  // Other pending dispatches checked for co-receiving in this one entry —
+  // several vehicle loads can arrive together and be received as a single
+  // Airport Point Receiving Entry.
+  const [coReceiveIds, setCoReceiveIds] = useState<Set<string>>(new Set());
+  // Row selection on the monitoring table itself — batch Airport Receive /
+  // Complete Unloading across several dispatches at a time (the per-flight
+  // row actions stay available alongside).
+  const [selectedEntryIds, setSelectedEntryIds] = useState<Set<string>>(new Set());
 
   // ── Mobile App View state ───────────────────────────────────────────────────
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -746,6 +757,7 @@ export default function DispatchMonitoring() {
           date: rows[0]?.date ?? "—",
           rows: rows.map(toRow),
           totalQty: rows.reduce((s, r) => s + r.qty, 0),
+          dspRef: rows.find((r) => r.dspRef)?.dspRef,
         };
       });
       return { dispatchId: dspRef ?? formDispatchNo, orderNo: orderNo ?? "—", legs, sourceRefs: [...dspRefs] };
@@ -770,90 +782,114 @@ export default function DispatchMonitoring() {
   }, [form.flightId, extraFlights, form.mealLines, form.packagingDate, dispatchPackagingRows, formDispatchNo]);
 
   const airportScanRows = airportDispatch.legs.flatMap((l) => l.rows);
-  // Catering-point loading — scan each production batch to drive the loading timer.
-  const [loadScannedIds, setLoadScannedIds] = useState<Set<string>>(new Set());
-  const [loadScanRow, setLoadScanRow] = useState<ScanMealRow | null>(null);
-  const confirmLoadScan = (r: ScanMealRow) => {
-    if (loadScannedIds.has(r.id)) { setLoadScanRow(null); return; }
-    const next = new Set(loadScannedIds).add(r.id);
-    // First scan starts the loading timer.
-    if (loadScannedIds.size === 0 && !form.loadStartTime) {
-      const now = new Date();
-      const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-      sf("loadStartTime", hhmm);
-      setFormLoadStartIso(now.toISOString());
-    }
-    setLoadScannedIds(next);
-    // Last batch scanned stops the timer and saves the loading (end) time.
-    if (airportScanRows.length > 0 && next.size >= airportScanRows.length && !form.loadEndTime) {
-      const now = new Date();
-      const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-      sf("loadEndTime", hhmm);
-      setFormLoadStartIso("");
-      toast.success("All batches scanned — loading completed.");
-    }
-    setLoadScanRow(null);
-  };
-  const allRowsScanned = airportScanRows.length > 0 && airportScanRows.every((r) => scannedRowIds.has(r.id));
-  const legScanned = (leg: AirportLeg) => leg.rows.length > 0 && leg.rows.every((r) => scannedRowIds.has(r.id));
-
-  // Batch table rows after the date-range + status filters.
+  // From/To warehouse of the dispatch being received — these are the real
+  // cold-chain endpoints (configured on the dispatch record), shown on the
+  // kitchen → gate visual instead of hardcoded labels.
+  const dispatchWarehouses = useMemo(() => {
+    const ids = new Set([airportDispatch.dispatchId, ...airportDispatch.sourceRefs]);
+    const rec = loadDispatchRecords().find((r) => ids.has(r.id));
+    if (!rec) return { from: undefined, to: undefined };
+    // Same defaults dispatch.tsx applies when it raises the Transfer Note, so a
+    // record configured before the warehouse pickers still reads consistently.
+    return {
+      from: activeWarehouses.find((w) => w.id === (rec.fromWarehouseId ?? "WH-003"))?.name,
+      to: activeWarehouses.find((w) => w.id === (rec.toWarehouseId ?? "WH-001"))?.name,
+    };
+  }, [airportDispatch]);
+  // Catering-point loading is no longer scanned batch-by-batch inside this
+  // sheet — the Dispatch page's Actions column records Start/Complete Loading
+  // per dispatch run, and the Load Start/End fields below pre-fill from it.
+  // Batch table rows after the date-range filter.
   const visibleLegs = airportDispatch.legs.filter((leg) => {
     if (batchFrom && leg.date < batchFrom) return false;
     if (batchTo && leg.date > batchTo) return false;
-    if (batchStatus !== "all" && (legScanned(leg) ? "Scan Completed" : "Pending Scanning") !== batchStatus) return false;
     return true;
   });
 
-  const openOrderDetails = (flight: string, scan = false) => { setOrderDetailFlight(flight); setOrderDetailScanMode(scan); setActiveScanRowId(null); };
+  // Other dispatches waiting at the airport — several vehicle loads can arrive
+  // together, so the receive sheet lists them with checkboxes and one Save
+  // receives every ticked dispatch alongside the opened one.
+  const coReceivable = entries.filter((e) => e.approvalStage >= 3 && !e.receivedAt && e.id !== editId);
 
-  // Scan one meal item's label. When every item across both legs is scanned the
-  // dispatch reads "Scan Completed".
-  const scanRow = (rowId: string) => {
-    const firstScan = scannedRowIds.size === 0;
-    const next = new Set(scannedRowIds); next.add(rowId);
-    setScannedRowIds(next);
-    setActiveScanRowId(null);
-    // Airport Receive: the first scan auto-starts the unloading timer (mirrors the
-    // catering-point loading timer); the last scan stops it via the allRowsScanned effect.
-    if (isAirportReceiveMode && firstScan && !unloadStartIso && !form.unloadingTime) {
-      const now = new Date();
-      const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-      sf("unloadingTime", hhmm);
-      setUnloadEndTime("");
-      setUnloadStartIso(now.toISOString());
+  // Full batch records for the TICKED co-dispatches: an unticked dispatch stays
+  // a one-line summary, a ticked one expands into its real legs (same detail as
+  // the opened dispatch — per-leg meals, order, production rows).
+  const coReceiveLegs = useMemo(() => {
+    const primary = new Set(airportDispatch.legs.map((l) => l.flight));
+    const orders = getFlightOrders();
+    const map = new Map<string, AirportLeg[]>();
+    for (const e of entries) {
+      if (!coReceiveIds.has(e.id)) continue;
+      const flightsOfE = [...new Set([flightNo(e.flightId), ...(e.loadFlights ?? [])])]
+        .filter((f) => f && !primary.has(f));
+      const legs: AirportLeg[] = [];
+      for (const lf of flightsOfE) {
+        const rows = dispatchPackagingRows.filter((r) => r.flight === lf);
+        if (rows.length === 0) {
+          // No Dispatch-table match — fall back to the entry's own meal lines.
+          legs.push({
+            flight: lf,
+            direction: "Outbound",
+            sector: flights.find((f) => f.flight === lf)?.sector ?? "—",
+            depTime: flights.find((f) => f.flight === lf)?.dep ?? "—",
+            date: e.packagingDate,
+            rows: e.mealLines.filter((l) => l.qty).map((l, i) => ({
+              id: `${e.id}-ml-${i}`, productionOrderId: "—", flight: lf, mealName: l.type,
+              mealType: "Regular", qty: Number(l.qty) || 0, warehouse: "—", label: `LBL-${e.id}-${i + 1}`,
+            })),
+            totalQty: totalQty(e.mealLines),
+            dspRef: e.sourceDispatchIds?.[0] ?? e.dispatchNo,
+          });
+          continue;
+        }
+        const fo = orders.find((o) => o.flight === lf);
+        legs.push({
+          flight: lf,
+          direction: fo?.direction ?? "Outbound",
+          sector: fo?.sector ?? flights.find((f) => f.flight === lf)?.sector ?? "—",
+          depTime: rows[0]?.depTime ?? flights.find((f) => f.flight === lf)?.dep ?? "—",
+          date: rows[0]?.date ?? e.packagingDate,
+          rows: rows.map((r) => ({
+            id: r.id, productionOrderId: r.productionOrderId ?? "—", flight: r.flight,
+            mealName: r.mealName, mealType: r.mealType, qty: r.qty, warehouse: r.section, label: `LBL-${r.id}`,
+          })),
+          totalQty: rows.reduce((s, r) => s + r.qty, 0),
+          dspRef: rows.find((r) => r.dspRef)?.dspRef ?? e.sourceDispatchIds?.[0] ?? e.dispatchNo,
+        });
+      }
+      map.set(e.id, legs);
     }
-    if (airportScanRows.length > 0 && airportScanRows.every((r) => next.has(r.id))) {
-      toast.success("All items scanned — Scan Completed. Ready to Save And Accept.");
-    } else {
-      toast.success("Scan Completed.");
-    }
-  };
+    return map;
+  }, [coReceiveIds, entries, dispatchPackagingRows, airportDispatch]);
+
+  const openOrderDetails = (flight: string) => { setOrderDetailFlight(flight); };
 
   const handleFlightSelect = (flightId: string) => {
     const f = flights.find((x) => x.id === flightId);
+    // Loading recorded for this flight on the Dispatch page pre-fills the
+    // Load Start/End times (unless something already filled them).
+    const win = loadingWindowFor(readVehicleLoadingSessions(), f ? [f.flight] : []);
     setForm((prev) => ({
       ...prev,
       flightId,
       packagingDate: todayStr,
       mealLines: f ? [{ type: "Regular", qty: f.pax.toString() }] : prev.mealLines,
+      loadStartTime: prev.loadStartTime || win.start || prev.loadStartTime,
+      loadEndTime: prev.loadEndTime || win.end || prev.loadEndTime,
     }));
   };
 
   const resetForm = () => {
     setShowForm(false); setEditId(null); setForm({ ...EMPTY_FORM }); setDepTime(""); setErrors({});
     setShowAirportPanel(false); setIsAirportReceiveMode(false);
-    setFormLoadStartIso(""); setFormTimerTick(0);
     setUnloadStartIso(""); setUnloadEndTime(""); setUnloadTimerTick(0);
-    setScannedRowIds(new Set()); setActiveScanRowId(null); setOrderDetailFlight(null);
-    setOrderDetailScanMode(false); setGateTempLocked(false);
-    setLoadScannedIds(new Set()); setLoadScanRow(null);
+    setOrderDetailFlight(null); setGateTempLocked(false);
+    setCoReceiveIds(new Set());
   };
 
   const openNew = () => {
     setForm({ ...EMPTY_FORM }); setDepTime(""); setEditId(null); setErrors({});
     setFsRemarksInput(""); setHocRemarksInput(""); setShowForm(true);
-    setFormLoadStartIso(""); setFormTimerTick(0);
     setExtraFlights([]);
   };
 
@@ -869,6 +905,11 @@ export default function DispatchMonitoring() {
     // A vehicle load selected across several dispatches arrives as ?flights=a,b,c.
     const others = (searchParams.get("flights") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     setExtraFlights(others.filter((x) => x !== flightNo));
+    // Loading recorded on the Dispatch page (Start/Complete Loading) pre-fills
+    // the Load Start/End times — earliest start / latest end across the runs.
+    const win = loadingWindowFor(readVehicleLoadingSessions(), [...new Set([flightNo, ...others])]);
+    if (win.start) sf("loadStartTime", win.start);
+    if (win.end) sf("loadEndTime", win.end);
     if (f) {
       setDepTime(f.dep);
       handleFlightSelect(f.id);
@@ -892,20 +933,16 @@ export default function DispatchMonitoring() {
   // Sync galley records to sessionStorage whenever they change
   useEffect(() => { saveGalleyRecords(galleyRecords); }, [galleyRecords]);
 
-  // Live timer tick — re-renders every second while a loading session is active
+  // Live timer tick — re-renders every second while a galley-loading session or
+  // an airport unloading timer is active.
   useEffect(() => {
-    const hasActive = galleyRecords.some((r) => r.galleyStatus === "loading");
+    const hasActive =
+      galleyRecords.some((r) => r.galleyStatus === "loading") ||
+      entries.some((e) => e.approvalStage >= 3 && !e.receivedAt && e.unloadingStartedAtIso && !e.unloadingEndTime);
     if (!hasActive) return;
     const id = setInterval(() => setTickCount((t) => t + 1), 1000);
     return () => clearInterval(id);
-  }, [galleyRecords]);
-
-  // Form loading timer tick — re-renders every second while loading is active in the dispatch entry form
-  useEffect(() => {
-    if (!formLoadStartIso) return;
-    const id = setInterval(() => setFormTimerTick((t) => t + 1), 1000);
-    return () => clearInterval(id);
-  }, [formLoadStartIso]);
+  }, [galleyRecords, entries]);
 
   // Unloading timer tick — re-renders every second while the Airport Receive
   // unloading timer is running.
@@ -915,18 +952,6 @@ export default function DispatchMonitoring() {
     return () => clearInterval(id);
   }, [unloadStartIso]);
 
-  // Auto-stop the airport-receive (unloading) timer once every dispatched batch
-  // has been scanned/received.
-  useEffect(() => {
-    if (unloadStartIso && !unloadEndTime && allRowsScanned) {
-      const now = new Date();
-      const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-      setUnloadEndTime(hhmm);
-      setUnloadStartIso("");
-      toast.success("All batches scanned — unloading timer stopped.");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allRowsScanned, unloadStartIso, unloadEndTime]);
 
 
   function startLoading(entryId: string) {
@@ -982,12 +1007,76 @@ export default function DispatchMonitoring() {
     openEdit(entry);
     setShowAirportPanel(true);
     setIsAirportReceiveMode(true);
-    setUnloadStartIso(""); setUnloadEndTime(""); setUnloadTimerTick(0);
-    // Fresh scan session — the dispatched items are fetched live from the
-    // Dispatch table via the airportDispatch memo.
-    setScannedRowIds(new Set()); setActiveScanRowId(null); setOrderDetailFlight(null);
-    setOrderDetailScanMode(false); setGateTempLocked(!!entry.gateTempGate08);
-    setBatchFrom(""); setBatchTo(""); setBatchStatus("all");
+    setUnloadTimerTick(0);
+    // Unloading is NOT started by hand: opening the receiving entry IS the
+    // start. Persisted on the entry so the timer survives closing the sheet
+    // and can be completed from the row's Complete Unloading action too.
+    if (entry.unloadingEndTime) {
+      setUnloadStartIso("");
+      setUnloadEndTime(entry.unloadingEndTime);
+    } else if (entry.unloadingTime) {
+      // Already running from an earlier open — resume the elapsed display.
+      setUnloadStartIso(entry.unloadingStartedAtIso ?? "");
+      setUnloadEndTime("");
+    } else {
+      const now = new Date();
+      const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+      sf("unloadingTime", hhmm);
+      setUnloadStartIso(now.toISOString());
+      setUnloadEndTime("");
+      setEntries((prev) => prev.map((e) =>
+        e.id === entry.id ? { ...e, unloadingTime: hhmm, unloadingStartedAtIso: now.toISOString() } : e));
+      toast.info(`Unloading timer started automatically at ${hhmm}.`);
+    }
+    // The dispatched items are fetched live from the Dispatch table via the
+    // airportDispatch memo.
+    setOrderDetailFlight(null);
+    setGateTempLocked(!!entry.gateTempGate08);
+    setBatchFrom(""); setBatchTo("");
+    setCoReceiveIds(new Set());
+  };
+
+  /** Stop the unloading timer for an entry — from the receive sheet's button
+   *  or the monitoring row's Complete Unloading action ("outside"). */
+  const completeUnloading = (entryId: string) => {
+    const now = new Date();
+    const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    setEntries((prev) => prev.map((e) =>
+      e.id === entryId && !e.unloadingEndTime ? { ...e, unloadingEndTime: hhmm } : e));
+    if (editId === entryId) { setUnloadEndTime(hhmm); setUnloadStartIso(""); }
+    toast.success(`Unloading completed at ${hhmm}.`);
+  };
+
+  // ── Batch actions from the monitoring table selection ────────────────────────
+  const isReceivable = (e: DispatchEntry) => e.approvalStage >= 3 && !e.receivedAt;
+
+  /** Open ONE Airport Receive entry for every selected dispatch: the first
+   *  selected opens the sheet, the rest arrive pre-ticked for co-receiving. */
+  const receiveSelected = () => {
+    const sel = entries.filter((e) => selectedEntryIds.has(e.id) && isReceivable(e));
+    if (sel.length === 0) { toast.error("Select at least one dispatch awaiting airport receive."); return; }
+    const [first, ...rest] = sel;
+    openAirportReceive(first);
+    // After openAirportReceive's reset, pre-tick the other selected dispatches.
+    setCoReceiveIds(new Set(rest.map((e) => e.id)));
+    setSelectedEntryIds(new Set());
+    if (rest.length > 0) {
+      toast.info(`${rest.length} more dispatch${rest.length > 1 ? "es" : ""} pre-ticked to receive in this same entry.`);
+    }
+  };
+
+  /** Complete unloading for every selected dispatch with a running timer. */
+  const completeUnloadingSelected = () => {
+    const ids = entries
+      .filter((e) => selectedEntryIds.has(e.id) && isReceivable(e) && e.unloadingTime && !e.unloadingEndTime)
+      .map((e) => e.id);
+    if (ids.length === 0) { toast.error("None of the selected dispatches has a running unloading timer."); return; }
+    const now = new Date();
+    const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    setEntries((prev) => prev.map((e) => (ids.includes(e.id) ? { ...e, unloadingEndTime: hhmm } : e)));
+    if (editId && ids.includes(editId)) { setUnloadEndTime(hhmm); setUnloadStartIso(""); }
+    setSelectedEntryIds(new Set());
+    toast.success(`Unloading completed for ${ids.length} dispatch${ids.length > 1 ? "es" : ""} at ${hhmm}.`);
   };
 
   const validate = () => {
@@ -1023,6 +1112,9 @@ export default function DispatchMonitoring() {
     // stuck short of "Initiate Dispatch" even though they were loaded and checked.
     const clearedFlights = [...new Set([flightNo, ...airportDispatch.legs.map((l) => l.flight)].filter(Boolean))];
     for (const f of clearedFlights) markFlightQcCleared(f, at);
+    // A Load End typed here (instead of Complete Loading on the Dispatch page)
+    // must still stop that page's running timer — close the covered sessions.
+    completeSessionsFor(clearedFlights, form.loadEndTime);
     const existing = editId ? entries.find((e) => e.id === editId) : null;
     const now = new Date();
     const dateStr = now.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
@@ -1152,6 +1244,9 @@ export default function DispatchMonitoring() {
     if (!validateReceipt()) return;
     const label = flightLabel(form.flightId);
     const at = nowTimeStr();
+    // Accepting closes the receipt — any unloading timer still running (on this
+    // entry or a co-received one) stops at the accept time.
+    const acceptHm = at.split(" ")[1] ?? "";
     const existing = editId ? entries.find((e) => e.id === editId) : null;
     const base: Omit<DispatchEntry, "id"> = {
       flightId: form.flightId, packagingDate: form.packagingDate,
@@ -1173,8 +1268,12 @@ export default function DispatchMonitoring() {
       receivedRemarks: form.receiverRemarks,
       forwardedToAirportAt: existing?.forwardedToAirportAt,
       dispatchNo: existing?.dispatchNo ?? nextDispatchNo,
-      containersScanned: airportScanRows.filter((r) => scannedRowIds.has(r.id)).length,
+      // Item-level scanning was removed from Airport Receive — accepting the
+      // receipt covers the whole dispatched load.
+      containersScanned: airportScanRows.length,
       containersTotal: airportScanRows.length,
+      unloadingStartedAtIso: existing?.unloadingStartedAtIso,
+      unloadingEndTime: existing?.unloadingEndTime || unloadEndTime || acceptHm,
     };
     if (editId) {
       setEntries((prev) => prev.map((e) => e.id === editId ? { ...e, ...base } : e));
@@ -1183,7 +1282,26 @@ export default function DispatchMonitoring() {
       setEntries((prev) => [{ id: newId, ...base }, ...prev]);
       setEditId(newId);
     }
-    toast.success(`Receipt accepted — ${label}`);
+    // Co-receive every ticked pending dispatch in this same entry — one arrival,
+    // one receipt, several dispatch records closed.
+    if (coReceiveIds.size > 0) {
+      setEntries((prev) => prev.map((e) =>
+        coReceiveIds.has(e.id) && !e.receivedAt
+          ? {
+              ...e,
+              receivedAt: at,
+              receivedRemarks: form.receiverRemarks,
+              gateTempGate08: e.gateTempGate08 || form.gateTempGate08,
+              unloadingTime: e.unloadingTime || form.unloadingTime,
+              unloadingEndTime: e.unloadingEndTime || acceptHm,
+            }
+          : e));
+    }
+    toast.success(
+      coReceiveIds.size > 0
+        ? `Receipt accepted — ${label} + ${coReceiveIds.size} more dispatch${coReceiveIds.size > 1 ? "es" : ""}.`
+        : `Receipt accepted — ${label}`,
+    );
     resetForm();
   };
 
@@ -1405,16 +1523,65 @@ export default function DispatchMonitoring() {
             </Button>
           )}
         </div>
+        <div className="ml-auto">
+          <ListExportActions
+            table={() => ({
+              title: `${doc.title} — Dispatch Monitoring`,
+              fileName: `dispatch-monitoring-${dmFrom || "all"}${dmTo && dmTo !== dmFrom ? `_to_${dmTo}` : ""}`,
+              meta: listExportFilterMeta([
+                ["Dates", (dmFrom || dmTo) && `${dmFrom || "…"} → ${dmTo || "…"}`],
+                ["Status", dmStatus !== "all" && dmStatus],
+                ["Search", dmSearch.trim() || false],
+              ]),
+              columns: ["Flight", "Destination", "Date", "Vehicle", "Vehicle Clean", "Chilled Temp", "Frozen Temp", "Result", "Status"],
+              rows: visibleEntries.map((e) => [
+                flightNo(e.flightId), flightDest(e.flightId), e.packagingDate,
+                e.vehicleNo ?? "", e.vehicleClean ?? "", e.chilledTemp ?? "", e.frozenTemp ?? "",
+                e.resultSatisfy ?? "", dispatchStatusBadge(e).label,
+              ]),
+            })}
+          />
+        </div>
       </div>
 
       {/* Entries Table */}
-      {entries.length > 0 && (
+      {entries.length > 0 && (() => {
+        const receivableVisible = visibleEntries.filter(isReceivable);
+        const allReceivableSelected = receivableVisible.length > 0 && receivableVisible.every((e) => selectedEntryIds.has(e.id));
+        return (
+        <>
+        {selectedEntryIds.size > 0 && (
+          <div className="flex flex-wrap items-center gap-2 mb-2 rounded-lg border border-indigo-200 bg-indigo-50/60 px-3 py-2">
+            <span className="text-xs font-semibold text-indigo-700">
+              {selectedEntryIds.size} dispatch{selectedEntryIds.size > 1 ? "es" : ""} selected
+            </span>
+            <Button size="sm" className="h-7 px-3 text-xs bg-emerald-600 hover:bg-emerald-700 text-white border-0" onClick={receiveSelected}>
+              <PlaneLanding className="h-3 w-3 mr-1" /> Airport Receive Together
+            </Button>
+            <Button size="sm" className="h-7 px-3 text-xs bg-teal-600 hover:bg-teal-700 text-white border-0" onClick={completeUnloadingSelected}>
+              <CheckCircle2 className="h-3 w-3 mr-1" /> Complete Unloading
+            </Button>
+            <Button size="sm" variant="ghost" className="h-7 text-xs text-muted-foreground" onClick={() => setSelectedEntryIds(new Set())}>
+              Clear
+            </Button>
+          </div>
+        )}
         <div className="rounded-xl border border-border bg-card overflow-x-auto mb-6 shadow-sm">
-          <table className="w-full text-xs border-collapse" style={{ minWidth: 820 }}>
+          <table className="w-full text-xs border-collapse" style={{ minWidth: 850 }}>
             <thead>
               <tr className="bg-slate-100 text-slate-600 border-b border-border">
+                <th className="px-3 py-2.5 w-8 sticky left-0 z-10 bg-slate-100 text-center">
+                  <Checkbox
+                    checked={allReceivableSelected}
+                    onCheckedChange={() => setSelectedEntryIds(() =>
+                      allReceivableSelected ? new Set<string>() : new Set(receivableVisible.map((e) => e.id)))}
+                    className="h-3.5 w-3.5"
+                    title="Select every dispatch awaiting airport receive"
+                    disabled={receivableVisible.length === 0}
+                  />
+                </th>
                 {([
-                  ["Flt No.", true, false],
+                  ["Flt No.", false, false],
                   ["Pkg. Date", false, false],
                   ["Dispatch Date & Time", false, false],
                   ["From", false, false],
@@ -1432,14 +1599,28 @@ export default function DispatchMonitoring() {
             <tbody>
               {visibleEntries.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-3 py-8 text-center text-muted-foreground">
+                  <td colSpan={8} className="px-3 py-8 text-center text-muted-foreground">
                     No dispatches match the current search / date filter.
                   </td>
                 </tr>
               ) : visibleEntries.map((entry, idx) => (
                 <Fragment key={entry.id}>
                   <tr className={`border-b border-border/40 hover:bg-blue-50/40 transition-colors ${idx % 2 === 1 ? "bg-slate-50/60" : "bg-white"}`}>
-                    <td className="px-3 py-2 sticky left-0 z-10 bg-inherit font-semibold whitespace-nowrap text-blue-700">{flightNo(entry.flightId)}</td>
+                    <td className="px-3 py-2 sticky left-0 z-10 bg-inherit text-center">
+                      {isReceivable(entry) && (
+                        <Checkbox
+                          checked={selectedEntryIds.has(entry.id)}
+                          onCheckedChange={() => setSelectedEntryIds((prev) => {
+                            const n = new Set(prev);
+                            if (n.has(entry.id)) n.delete(entry.id); else n.add(entry.id);
+                            return n;
+                          })}
+                          className="h-3.5 w-3.5"
+                          title="Select for combined receive / unloading actions"
+                        />
+                      )}
+                    </td>
+                    <td className="px-3 py-2 font-semibold whitespace-nowrap text-blue-700">{flightNo(entry.flightId)}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{entry.packagingDate}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{entry.packagingDate}{entry.loadStartTime ? ` ${entry.loadStartTime}` : ""}</td>
                     <td className="px-3 py-2 whitespace-nowrap text-slate-600">{doc.originLabel} Point</td>
@@ -1471,6 +1652,26 @@ export default function DispatchMonitoring() {
                           >
                             <PlaneLanding className="h-3 w-3 mr-1" /> Airport Receive
                           </Button>
+                        )}
+                        {/* Unloading runs on the entry, so it can be completed from
+                            here too — not only inside the receive sheet. */}
+                        {entry.approvalStage >= 3 && !entry.receivedAt && entry.unloadingTime && !entry.unloadingEndTime && (
+                          <div className="flex items-center gap-1">
+                            {entry.unloadingStartedAtIso && (
+                              <span className="text-[10px] font-mono text-violet-700 bg-violet-50 border border-violet-200 px-2 py-0.5 rounded tabular-nums">
+                                <Timer className="h-2.5 w-2.5 inline mr-0.5" />
+                                {tickCount >= 0 && formatElapsed(entry.unloadingStartedAtIso)}
+                              </span>
+                            )}
+                            <Button
+                              size="sm"
+                              className="h-6 px-2 text-[10px] bg-teal-600 hover:bg-teal-700 text-white border-0"
+                              onClick={() => completeUnloading(entry.id)}
+                              title="Stop the unloading timer for this dispatch"
+                            >
+                              Complete Unloading
+                            </Button>
+                          </div>
                         )}
                         {entry.receivedAt && (() => {
                           const gr = galleyRecords.find((r) => r.dispatchEntryId === entry.id);
@@ -1530,7 +1731,9 @@ export default function DispatchMonitoring() {
             </tbody>
           </table>
         </div>
-      )}
+        </>
+        );
+      })()}
 
       {/* ── Empty State ──────────────────────────────────────────────────────── */}
       <div className="mb-6">
@@ -1568,13 +1771,21 @@ export default function DispatchMonitoring() {
                       dispatch IDs it covers are what the user selected, and those
                       are what they came here to see. Both, rather than only the
                       sequence number. */}
-                  <div className="flex flex-col items-end gap-1">
+                  <div className="flex flex-col items-end gap-1 min-w-0">
                     {airportDispatch.sourceRefs.length > 0 ? (
                       <>
-                        <span className="text-xs bg-blue-800/60 px-2.5 py-1 rounded-full font-semibold">
-                          {airportDispatch.sourceRefs.length > 1
-                            ? `${airportDispatch.sourceRefs.length} Dispatches: ${airportDispatch.sourceRefs.join(" + ")}`
-                            : `Dispatch ID: ${airportDispatch.sourceRefs[0]}`}
+                        {/* A vehicle load can combine 20-30 dispatches — the pill
+                            summarises the count, the full list lives on hover and
+                            per leg card below (each leg shows its own DSP ref). */}
+                        <span
+                          className="text-xs bg-blue-800/60 px-2.5 py-1 rounded-full font-semibold max-w-[min(360px,60vw)] truncate"
+                          title={airportDispatch.sourceRefs.join(", ")}
+                        >
+                          {airportDispatch.sourceRefs.length === 1
+                            ? `Dispatch ID: ${airportDispatch.sourceRefs[0]}`
+                            : airportDispatch.sourceRefs.length <= 3
+                              ? `${airportDispatch.sourceRefs.length} Dispatches: ${airportDispatch.sourceRefs.join(" + ")}`
+                              : `${airportDispatch.sourceRefs.length} Dispatches: ${airportDispatch.sourceRefs.slice(0, 2).join(" + ")} +${airportDispatch.sourceRefs.length - 2} more`}
                         </span>
                         <span className="text-[11px] text-blue-200">
                           Entry No: {formDispatchNo}
@@ -1598,7 +1809,9 @@ export default function DispatchMonitoring() {
                   {airportDispatch.legs.length > 0 && (
                     <div>
                       <Divider label={airportDispatch.legs.length > 1 ? `Flights In This Dispatch (${airportDispatch.legs.length})` : "Flight"} color="blue" />
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {/* Many-dispatch loads (20-30 legs) scroll inside the card
+                          instead of stretching the sheet open. */}
+                      <div className={`grid grid-cols-1 sm:grid-cols-2 gap-2 ${airportDispatch.legs.length > 6 ? "max-h-64 overflow-y-auto pr-1" : ""}`}>
                         {airportDispatch.legs.map((leg) => (
                           <div key={leg.flight} className="rounded-md border border-border bg-muted/20 px-3 py-2">
                             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -1609,15 +1822,17 @@ export default function DispatchMonitoring() {
                                 {leg.direction}
                               </span>
                               <span className="text-[11px] text-muted-foreground">{leg.sector}</span>
+                              {leg.dspRef && (
+                                <span className="ml-auto font-mono text-[10px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-1.5 py-0.5">
+                                  {leg.dspRef}
+                                </span>
+                              )}
                             </div>
                             <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground tabular-nums">
                               <span>Dep <b className="text-foreground">{leg.depTime}</b></span>
                               <span>{leg.date}</span>
                               <span>{leg.rows.length} batch{leg.rows.length === 1 ? "" : "es"}</span>
                               <span>Qty <b className="text-foreground">{leg.totalQty.toLocaleString()}</b></span>
-                              <span className="text-emerald-700 font-medium">
-                                {leg.rows.filter((r) => loadScannedIds.has(r.id)).length}/{leg.rows.length} scanned
-                              </span>
                             </div>
                           </div>
                         ))}
@@ -1644,54 +1859,6 @@ export default function DispatchMonitoring() {
                       {form.vehicleClean === "No" && <p className="text-xs text-amber-600 mt-1 font-medium">⚠ Report to supervisor immediately</p>}
                     </div>
                   </div>
-                  {/* Load production batches — scan each to record the loading time */}
-                  {!editId && !isAirportReceiveMode && form.vehicleNo && form.vehicleClean && (
-                    <div className="rounded-md border border-border bg-muted/20 p-3 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <Label className="text-xs font-semibold">Load Production Batches</Label>
-                        <span className="text-[11px] text-muted-foreground tabular-nums">{loadScannedIds.size}/{airportScanRows.length} scanned</span>
-                      </div>
-                      <p className="text-[11px] text-muted-foreground">
-                        Scan each Packaging-Done batch — the loading timer starts on the first scan and stops on the last.
-                        {airportDispatch.legs.length > 1 && ` Batches for all ${airportDispatch.legs.length} flights load onto this one vehicle.`}
-                      </p>
-                      {/* Loading time */}
-                      <div className="rounded-md border border-border bg-background px-3 py-2 flex items-center justify-between text-sm">
-                        <span className="inline-flex items-center gap-1.5 text-muted-foreground"><Clock className="h-3.5 w-3.5" /> Loading Time</span>
-                        {form.loadEndTime ? (
-                          <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-700"><CheckCircle2 className="h-4 w-4" /> {form.loadStartTime} → {form.loadEndTime}</span>
-                        ) : formLoadStartIso ? (
-                          <span className="font-mono font-semibold text-indigo-700 tabular-nums">{formTimerTick >= 0 && formatElapsed(formLoadStartIso)}</span>
-                        ) : (
-                          <span className="text-xs text-muted-foreground">Scan the first batch to start</span>
-                        )}
-                      </div>
-                      {/* Batch list */}
-                      <div className="rounded-md border border-border divide-y divide-border overflow-hidden bg-background">
-                        {airportScanRows.length === 0 ? (
-                          <div className="px-3 py-4 text-center text-xs text-muted-foreground">No production batches for this flight.</div>
-                        ) : airportScanRows.map((r) => {
-                          const scanned = loadScannedIds.has(r.id);
-                          return (
-                            <div key={r.id} className={`flex items-center gap-2 px-3 py-2 text-sm ${scanned ? "bg-emerald-50/40" : ""}`}>
-                              <span className="font-mono text-xs font-semibold text-primary shrink-0">{toPackagingId(r.productionOrderId)}</span>
-                              <span className="inline-flex items-center rounded-full border border-sky-300 bg-sky-50 px-2 py-0.5 text-[11px] font-semibold text-sky-700 whitespace-nowrap shrink-0">{r.flight}</span>
-                              <span className="flex-1 truncate text-xs">{r.mealName}</span>
-                              <span className="text-xs tabular-nums text-muted-foreground shrink-0">Qty {r.qty}</span>
-                              {scanned ? (
-                                <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600 shrink-0"><CheckCircle2 className="h-3.5 w-3.5" /> Scanned</span>
-                              ) : (
-                                <Button type="button" size="sm" variant="outline" className="h-7 px-2 text-xs shrink-0" onClick={() => setLoadScanRow(r)}>
-                                  <ScanLine className="h-3.5 w-3.5 mr-1" /> Scan
-                                </Button>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
                   {/* ─ Core Temps ─ */}
                   <Divider label="Product Core Temperature" color="blue" />
                   <div className="grid grid-cols-2 gap-3">
@@ -1719,57 +1886,26 @@ export default function DispatchMonitoring() {
 
                   {/* ─ Loading Times + Vehicle Temps ─ */}
                   <Divider label="Loading Times & Vehicle Temperature" color="blue" />
+                  {!editId && (
+                    <p className="text-[11px] text-muted-foreground -mt-1">
+                      {form.loadStartTime
+                        ? <><span className="font-semibold text-indigo-600">Load Start recorded automatically</span> when Vehicle Load was clicked on the Dispatch page. Enter Load End here, or use Complete Loading on that page.</>
+                        : <>Load Start records automatically on <span className="font-semibold text-indigo-600">Vehicle Load</span> (Dispatch page); Load End comes from Complete Loading there or is entered here.</>}
+                    </p>
+                  )}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    {editId ? (
-                      <>
-                        <div>
-                          <Label className="text-xs">Load Start *</Label>
-                          <Input type="time" value={form.loadStartTime} onChange={(e) => sf("loadStartTime", e.target.value)}
-                            className={`mt-1 h-9 ${errors.loadStartTime ? "border-red-400" : ""}`} />
-                          <FieldErr msg={errors.loadStartTime} />
-                        </div>
-                        <div>
-                          <Label className="text-xs">Load End *</Label>
-                          <Input type="time" value={form.loadEndTime} onChange={(e) => sf("loadEndTime", e.target.value)}
-                            className={`mt-1 h-9 ${errors.loadEndTime ? "border-red-400" : ""}`} />
-                          <FieldErr msg={errors.loadEndTime} />
-                        </div>
-                      </>
-                    ) : (
-                      <div className="col-span-2">
-                        {form.loadStartTime ? (
-                          <div className="flex items-center flex-wrap gap-2 mt-1">
-                            <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2">
-                              <Play className="h-3.5 w-3.5 text-indigo-600 shrink-0" />
-                              <div>
-                                <div className="text-[9px] uppercase tracking-wider text-muted-foreground">Loading started</div>
-                                <div className="text-xs font-semibold tabular-nums text-indigo-700">{form.loadStartTime}</div>
-                              </div>
-                            </div>
-                            {formLoadStartIso && !form.loadEndTime && (
-                              <span className="font-mono text-xs text-violet-700 bg-violet-50 border border-violet-200 rounded px-2 py-1.5 tabular-nums">
-                                <Timer className="h-3 w-3 inline mr-0.5" />
-                                {formTimerTick >= 0 && formatElapsed(formLoadStartIso)}
-                              </span>
-                            )}
-                            {form.loadEndTime && (
-                              <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
-                                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
-                                <div>
-                                  <div className="text-[9px] uppercase tracking-wider text-muted-foreground">Loading completed</div>
-                                  <div className="text-xs font-semibold tabular-nums text-emerald-700">{form.loadEndTime}</div>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <p className="text-[11px] text-muted-foreground italic mt-2">
-                            <span className="font-semibold not-italic text-indigo-600">Scan the production batches</span> above (after filling vehicle details) — loading time records automatically from the first to the last scan
-                          </p>
-                        )}
-                        <FieldErr msg={errors.loadStartTime ?? errors.loadEndTime} />
-                      </div>
-                    )}
+                    <div>
+                      <Label className="text-xs">Load Start *</Label>
+                      <Input type="time" value={form.loadStartTime} onChange={(e) => sf("loadStartTime", e.target.value)}
+                        className={`mt-1 h-9 ${errors.loadStartTime ? "border-red-400" : ""}`} />
+                      <FieldErr msg={errors.loadStartTime} />
+                    </div>
+                    <div>
+                      <Label className="text-xs">Load End *</Label>
+                      <Input type="time" value={form.loadEndTime} onChange={(e) => sf("loadEndTime", e.target.value)}
+                        className={`mt-1 h-9 ${errors.loadEndTime ? "border-red-400" : ""}`} />
+                      <FieldErr msg={errors.loadEndTime} />
+                    </div>
                     <div>
                       <Label className="text-xs">Veh. Temp Begin (°C) *</Label>
                       <Input type="number" step="0.1" placeholder="e.g. 4.5" value={form.vehicleTempBegin}
@@ -1799,24 +1935,6 @@ export default function DispatchMonitoring() {
                     <YesNoToggle value={form.resultSatisfy} onChange={(v) => sf("resultSatisfy", v)} error={errors.resultSatisfy} />
                     {form.resultSatisfy === "No" && <p className="text-xs text-amber-600 mt-1 font-medium">⚠ Record preventive action below</p>}
                   </div>
-                  {!editId && !isAirportReceiveMode && form.loadStartTime && !form.loadEndTime && (
-                    <div className="mt-2">
-                      <Button
-                        type="button"
-                        className="h-9 bg-emerald-600 hover:bg-emerald-700 text-white"
-                        onClick={() => {
-                          const now = new Date();
-                          const hhmm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-                          sf("loadEndTime", hhmm);
-                          setFormLoadStartIso("");
-                          toast.success("Loading completed!");
-                        }}
-                      >
-                        <CheckCircle2 className="h-4 w-4 mr-2" /> Loading Completed
-                      </Button>
-                    </div>
-                  )}
-
                   {/* ─ Dispatch Log & Approval Trail ─ */}
                   <Divider label="Dispatch Log" color="blue" />
 
@@ -1949,7 +2067,7 @@ export default function DispatchMonitoring() {
                       <Label className="text-xs">Time of Unloading</Label>
                       <div className="mt-1 flex flex-wrap items-center gap-2">
                         {!form.unloadingTime ? (
-                          <span className="text-xs text-muted-foreground italic">Scan the first product to start the unloading timer.</span>
+                          <span className="text-xs text-muted-foreground italic">Starts automatically when the receiving entry opens.</span>
                         ) : (
                           <>
                             <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2">
@@ -1974,31 +2092,40 @@ export default function DispatchMonitoring() {
                                 </div>
                               </div>
                             ) : (
-                              <span className="text-[11px] text-muted-foreground italic">Scan the last product to stop.</span>
+                              <Button
+                                type="button"
+                                size="sm"
+                                className="h-8 text-xs bg-emerald-600 hover:bg-emerald-700 text-white border-0"
+                                onClick={() => editId && completeUnloading(editId)}
+                              >
+                                <CheckCircle2 className="h-3.5 w-3.5 mr-1" /> Complete Unloading
+                              </Button>
                             )}
                           </>
                         )}
                       </div>
-                      <TempHint note="Time when unloading begins at gate — records automatically from the first to the last scan" />
+                      <TempHint note="Starts automatically when the receiving entry opens — press Complete Unloading (here or on the dispatch row) when the last product is off the vehicle" />
                     </div>
                   </div>
 
-                  {/* Cold chain visual — catering-point temp (left) → airport gate temp (right) */}
+                  {/* Cold chain visual — dispatch From-warehouse temp (left) → To-warehouse / gate temp (right) */}
                   <div className="rounded-lg bg-slate-50 border border-slate-200 p-4 text-center">
                     <div className="flex items-start justify-center gap-2 text-xs text-slate-600">
                       <div className="flex flex-col items-center gap-1">
-                        <span className="px-2.5 py-1 rounded-md bg-blue-100 text-blue-700 font-semibold">Catering Kitchen</span>
+                        <span className="px-2.5 py-1 rounded-md bg-blue-100 text-blue-700 font-semibold">{dispatchWarehouses.from ?? "Catering Kitchen"}</span>
+                        <span className="text-[9px] uppercase tracking-wider text-muted-foreground">From Warehouse</span>
                         <span className="text-[11px] font-bold tabular-nums text-blue-700">{form.vehicleTempBegin !== "" ? `${form.vehicleTempBegin}°C` : "—"}</span>
                       </div>
                       <span className="flex-1 border-t-2 border-dashed border-slate-300 relative mt-4">
                         <span className="absolute -top-3 left-1/2 -translate-x-1/2 bg-amber-100 text-amber-700 text-[10px] px-1.5 py-0.5 rounded-full font-medium whitespace-nowrap">≤ +8°C</span>
                       </span>
                       <div className="flex flex-col items-center gap-1">
-                        <span className="px-2.5 py-1 rounded-md bg-emerald-100 text-emerald-700 font-semibold">Airport Gate 08</span>
+                        <span className="px-2.5 py-1 rounded-md bg-emerald-100 text-emerald-700 font-semibold">{dispatchWarehouses.to ?? "Airport Gate 08"}</span>
+                        <span className="text-[9px] uppercase tracking-wider text-muted-foreground">To Warehouse</span>
                         <span className={`text-[11px] font-bold tabular-nums ${vehOOR(form.gateTempGate08) ? "text-red-600" : "text-emerald-700"}`}>{form.gateTempGate08 !== "" ? `${form.gateTempGate08}°C` : "—"}</span>
                       </div>
                     </div>
-                    <p className="text-[10px] text-muted-foreground mt-3">Cold chain must be unbroken from kitchen to gate</p>
+                    <p className="text-[10px] text-muted-foreground mt-3">Cold chain must be unbroken from the dispatching warehouse to the receiving point</p>
                   </div>
 
                   {/* ─ Batch filters — date range + status ─ */}
@@ -2011,19 +2138,8 @@ export default function DispatchMonitoring() {
                       <Label className="text-xs">To</Label>
                       <Input type="date" value={batchTo} min={batchFrom || undefined} onChange={(e) => setBatchTo(e.target.value)} className="mt-1 h-8 w-36 text-xs tabular-nums" />
                     </div>
-                    <div>
-                      <Label className="text-xs">Status</Label>
-                      <Select value={batchStatus} onValueChange={setBatchStatus}>
-                        <SelectTrigger className="mt-1 h-8 w-44 text-xs"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="all">All Statuses</SelectItem>
-                          <SelectItem value="Pending Scanning">Pending Scanning</SelectItem>
-                          <SelectItem value="Scan Completed">Scan Completed</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    {(batchFrom || batchTo || batchStatus !== "all") && (
-                      <Button type="button" size="sm" variant="ghost" className="h-8 text-xs text-muted-foreground" onClick={() => { setBatchFrom(""); setBatchTo(""); setBatchStatus("all"); }}>
+                    {(batchFrom || batchTo) && (
+                      <Button type="button" size="sm" variant="ghost" className="h-8 text-xs text-muted-foreground" onClick={() => { setBatchFrom(""); setBatchTo(""); }}>
                         Clear
                       </Button>
                     )}
@@ -2031,10 +2147,16 @@ export default function DispatchMonitoring() {
 
                   {/* ─ Dispatched batch — fetched from the Dispatch table (round trip = one row per leg) ─ */}
                   <Divider label="Dispatched Batch" color="emerald" />
+                  {coReceivable.length > 0 && (
+                    <p className="text-[11px] text-muted-foreground -mt-1">
+                      Several dispatches can be received as a single entry — tick the other pending dispatches below and one Save receives them all.
+                    </p>
+                  )}
                   <div className="rounded-lg border border-slate-200 overflow-x-auto">
-                    <table className="w-full text-[11px] border-collapse" style={{ minWidth: 760 }}>
+                    <table className="w-full text-[11px] border-collapse" style={{ minWidth: 800 }}>
                       <thead>
                         <tr className="bg-slate-100 text-slate-600 uppercase tracking-wider">
+                          <th className="px-2.5 py-2 w-8"><span className="sr-only">Receive in this entry</span></th>
                           <th className="px-2.5 py-2 text-left font-semibold">SL</th>
                           <th className="px-2.5 py-2 text-left font-semibold">Dispatch ID</th>
                           <th className="px-2.5 py-2 text-left font-semibold">Flight</th>
@@ -2048,14 +2170,16 @@ export default function DispatchMonitoring() {
                         </tr>
                       </thead>
                       <tbody>
-                        {visibleLegs.length === 0 ? (
-                          <tr><td colSpan={10} className="px-2.5 py-6 text-center text-muted-foreground">{airportDispatch.legs.length === 0 ? "No dispatched items found." : "No legs match the current filters."}</td></tr>
+                        {visibleLegs.length === 0 && coReceivable.length === 0 ? (
+                          <tr><td colSpan={11} className="px-2.5 py-6 text-center text-muted-foreground">{airportDispatch.legs.length === 0 ? "No dispatched items found." : "No legs match the current filters."}</td></tr>
                         ) : visibleLegs.map((leg, li) => {
-                          const done = legScanned(leg);
                           return (
                             <tr key={leg.flight} className="border-t border-slate-100 bg-white align-top">
                               {li === 0 && (
                                 <>
+                                  <td className="px-2.5 py-2 text-center" rowSpan={visibleLegs.length}>
+                                    <Checkbox checked disabled className="h-3.5 w-3.5" title="This dispatch is being received in this entry" />
+                                  </td>
                                   <td className="px-2.5 py-2 text-slate-500" rowSpan={visibleLegs.length}>1</td>
                                   <td className="px-2.5 py-2 font-semibold text-slate-800 whitespace-nowrap" rowSpan={visibleLegs.length}>
                                     {airportDispatch.dispatchId}
@@ -2071,17 +2195,13 @@ export default function DispatchMonitoring() {
                               {li === 0 && <td className="px-2.5 py-2 whitespace-nowrap text-slate-600" rowSpan={visibleLegs.length}>{leg.date}</td>}
                               {li === 0 && <td className="px-2.5 py-2 whitespace-nowrap text-slate-600" rowSpan={visibleLegs.length}>{leg.depTime}</td>}
                               <td className="px-2.5 py-2 whitespace-nowrap">
-                                <button type="button" className="inline-flex items-center gap-1 text-slate-700 hover:text-indigo-700" onClick={() => openOrderDetails(leg.flight, false)} title="View items">
+                                <button type="button" className="inline-flex items-center gap-1 text-slate-700 hover:text-indigo-700" onClick={() => openOrderDetails(leg.flight)} title="View items">
                                   <Eye className="h-3.5 w-3.5 text-slate-400" />
                                   {leg.rows.length} items · {leg.totalQty}
                                 </button>
                               </td>
                               <td className="px-2.5 py-2 whitespace-nowrap">
-                                {done ? (
-                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700"><CheckCircle2 className="h-3 w-3" /> Scan Completed</span>
-                                ) : (
-                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700">Pending Scanning</span>
-                                )}
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700">Awaiting Receipt</span>
                               </td>
                               <td className="px-2.5 py-2 whitespace-nowrap">
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700"><ShieldCheck className="h-3 w-3" /> QC Done</span>
@@ -2091,8 +2211,110 @@ export default function DispatchMonitoring() {
                                   <Button type="button" size="icon" variant="ghost" className="h-7 w-7 text-slate-500 hover:text-indigo-700" title="View catering dispatch point entry" onClick={() => { if (editId) setViewEntryId(editId); }}>
                                     <Eye className="h-3.5 w-3.5" />
                                   </Button>
-                                  <Button type="button" size="sm" variant="outline" className="h-7 px-2 text-xs whitespace-nowrap" disabled={done} title={done ? "All items scanned" : "Scan items"} onClick={() => openOrderDetails(leg.flight, true)}>
-                                    <ScanLine className="h-3.5 w-3.5 mr-1" /> Scan Items
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        {/* Other dispatches pending at the airport — tick to receive
+                            them together with this entry (one combined receipt).
+                            Unticked = one summary line; ticked = the dispatch's
+                            full batch record, leg by leg. */}
+                        {coReceivable.map((e, i) => {
+                          const fno = flightNo(e.flightId);
+                          const pkgRow = dispatchPackagingRows.find((r) => r.flight === fno);
+                          const dspIds = e.sourceDispatchIds?.length ? e.sourceDispatchIds : [e.dispatchNo ?? e.id];
+                          const checked = coReceiveIds.has(e.id);
+                          const slNo = (visibleLegs.length > 0 ? 2 : 1) + i;
+                          const toggle = () => setCoReceiveIds((prev) => {
+                            const n = new Set(prev);
+                            if (n.has(e.id)) n.delete(e.id); else n.add(e.id);
+                            return n;
+                          });
+                          const legs = checked ? (coReceiveLegs.get(e.id) ?? []) : [];
+                          if (checked && legs.length > 0) {
+                            return (
+                              <Fragment key={e.id}>
+                                {legs.map((leg, li) => (
+                                  <tr key={`${e.id}-${leg.flight}`} className="border-t border-slate-100 bg-emerald-50/40 align-top">
+                                    {li === 0 && (
+                                      <>
+                                        <td className="px-2.5 py-2 text-center" rowSpan={legs.length}>
+                                          <Checkbox checked onCheckedChange={toggle} className="h-3.5 w-3.5" title="Untick to drop this dispatch from the combined receipt" />
+                                        </td>
+                                        <td className="px-2.5 py-2 text-slate-500" rowSpan={legs.length}>{slNo}</td>
+                                        <td className="px-2.5 py-2 font-semibold text-slate-800 whitespace-nowrap" rowSpan={legs.length} title={dspIds.join(", ")}>
+                                          {leg.dspRef ?? dspIds[0]}
+                                          {legs.length > 1 && <div className="text-[9px] font-medium text-amber-600 mt-0.5">Round trip · {legs.length} legs</div>}
+                                        </td>
+                                      </>
+                                    )}
+                                    <td className="px-2.5 py-2 whitespace-nowrap">
+                                      <span className="font-semibold text-blue-700">{leg.flight}</span>
+                                      <span className={`ml-1.5 px-1.5 py-0.5 rounded-full text-[9px] font-semibold ${leg.direction === "Return" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>{leg.direction}</span>
+                                    </td>
+                                    <td className="px-2.5 py-2 font-mono text-slate-700 whitespace-nowrap">{dispatchPackagingRows.find((r) => r.flight === leg.flight)?.orderNo ?? "—"}</td>
+                                    <td className="px-2.5 py-2 whitespace-nowrap text-slate-600">{leg.date}</td>
+                                    <td className="px-2.5 py-2 whitespace-nowrap text-slate-600">{leg.depTime}</td>
+                                    <td className="px-2.5 py-2 whitespace-nowrap">
+                                      <button type="button" className="inline-flex items-center gap-1 text-slate-700 hover:text-indigo-700" onClick={() => openOrderDetails(leg.flight)} title="View items">
+                                        <Eye className="h-3.5 w-3.5 text-slate-400" />
+                                        {leg.rows.length} items · {leg.totalQty}
+                                      </button>
+                                    </td>
+                                    <td className="px-2.5 py-2 whitespace-nowrap">
+                                      <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700">Awaiting Receipt</span>
+                                    </td>
+                                    <td className="px-2.5 py-2 whitespace-nowrap">
+                                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700"><ShieldCheck className="h-3 w-3" /> QC Done</span>
+                                    </td>
+                                    {li === 0 && (
+                                      <td className="px-2.5 py-2" rowSpan={legs.length}>
+                                        <div className="flex items-center justify-end gap-1">
+                                          <Button type="button" size="icon" variant="ghost" className="h-7 w-7 text-slate-500 hover:text-indigo-700" title="View dispatch entry" onClick={() => setViewEntryId(e.id)}>
+                                            <Eye className="h-3.5 w-3.5" />
+                                          </Button>
+                                        </div>
+                                      </td>
+                                    )}
+                                  </tr>
+                                ))}
+                              </Fragment>
+                            );
+                          }
+                          return (
+                            <tr key={e.id} className={`border-t border-slate-100 align-top ${checked ? "bg-emerald-50/40" : "bg-white"}`}>
+                              <td className="px-2.5 py-2 text-center">
+                                <Checkbox
+                                  checked={checked}
+                                  onCheckedChange={toggle}
+                                  className="h-3.5 w-3.5"
+                                  title="Receive this dispatch in the same entry"
+                                />
+                              </td>
+                              <td className="px-2.5 py-2 text-slate-500">{slNo}</td>
+                              <td className="px-2.5 py-2 font-semibold text-slate-800 whitespace-nowrap" title={dspIds.join(", ")}>
+                                {dspIds[0]}{dspIds.length > 1 && <span className="text-[9px] font-medium text-slate-500"> +{dspIds.length - 1}</span>}
+                              </td>
+                              <td className="px-2.5 py-2 whitespace-nowrap">
+                                <span className="font-semibold text-blue-700">{fno}</span>
+                              </td>
+                              <td className="px-2.5 py-2 font-mono text-slate-700 whitespace-nowrap">{pkgRow?.orderNo ?? "—"}</td>
+                              <td className="px-2.5 py-2 whitespace-nowrap text-slate-600">{e.packagingDate}</td>
+                              <td className="px-2.5 py-2 whitespace-nowrap text-slate-600">{pkgRow?.depTime ?? flights.find((f) => f.id === e.flightId)?.dep ?? "—"}</td>
+                              <td className="px-2.5 py-2 whitespace-nowrap text-slate-700">
+                                {e.mealLines.length} items · {totalQty(e.mealLines)}
+                              </td>
+                              <td className="px-2.5 py-2 whitespace-nowrap">
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-100 text-amber-700">Awaiting Receipt</span>
+                              </td>
+                              <td className="px-2.5 py-2 whitespace-nowrap">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700"><ShieldCheck className="h-3 w-3" /> QC Done</span>
+                              </td>
+                              <td className="px-2.5 py-2">
+                                <div className="flex items-center justify-end gap-1">
+                                  <Button type="button" size="icon" variant="ghost" className="h-7 w-7 text-slate-500 hover:text-indigo-700" title="View dispatch entry" onClick={() => setViewEntryId(e.id)}>
+                                    <Eye className="h-3.5 w-3.5" />
                                   </Button>
                                 </div>
                               </td>
@@ -2102,14 +2324,6 @@ export default function DispatchMonitoring() {
                       </tbody>
                     </table>
                   </div>
-                  {airportScanRows.length > 0 && (
-                    <p className={`text-[11px] font-medium ${allRowsScanned ? "text-emerald-600" : "text-amber-600"}`}>
-                      {allRowsScanned
-                        ? "✓ All items scanned (both legs) — Scan Completed. Ready to Save And Accept."
-                        : `${airportScanRows.filter((r) => scannedRowIds.has(r.id)).length}/${airportScanRows.length} items scanned · use the Scan Items button.`}
-                    </p>
-                  )}
-
                   {/* ─ Receipt Log ─ */}
                   <Divider label="Receipt Log" color="emerald" />
                   <div className="rounded-lg bg-emerald-50/70 border border-emerald-200 p-3.5 space-y-3">
@@ -2128,30 +2342,15 @@ export default function DispatchMonitoring() {
                         className="mt-1 min-h-[60px] text-xs resize-none"
                       />
                     </div>
-                    <div className="flex items-center justify-between">
-                      <p className="text-[11px] text-muted-foreground flex items-center gap-1">
-                        <Clock className="h-3 w-3" /> Date &amp; time auto-recorded on accept
-                      </p>
-                      <Button
-                        type="button"
-                        size="sm"
-                        disabled={airportScanRows.length > 0 && !allRowsScanned}
-                        className="h-8 text-xs bg-emerald-600 hover:bg-emerald-700 text-white border-0 px-4 disabled:opacity-50"
-                        onClick={acceptReceipt}
-                        title={airportScanRows.length > 0 && !allRowsScanned ? "Scan all items (both legs) before accepting" : undefined}
-                      >
-                        <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" /> Save And Accept
-                      </Button>
-                    </div>
-                    {airportScanRows.length > 0 && !allRowsScanned && (
-                      <p className="text-[10px] text-amber-600 font-medium text-right">Scan all items for both legs (Meals → Scan) to enable Save And Accept.</p>
-                    )}
+                    <p className="text-[11px] text-muted-foreground flex items-center gap-1">
+                      <Clock className="h-3 w-3" /> Date &amp; time auto-recorded on accept
+                    </p>
                   </div>
                 </div>
               </div>}
             </div>
 
-            {/* Save / Cancel */}
+            {/* Save / Cancel — the primary action sits in the footer, right of Cancel */}
             <div className="mt-5 flex items-center justify-end gap-3 border-t border-border pt-4">
               <Button variant="outline" onClick={resetForm}>Cancel</Button>
               {!isAirportReceiveMode && (
@@ -2160,69 +2359,24 @@ export default function DispatchMonitoring() {
                   {editId ? "Save Changes" : "Submit for Approval"}
                 </Button>
               )}
+              {isAirportReceiveMode && (
+                <Button className="bg-emerald-600 hover:bg-emerald-700 text-white px-8 shadow-md" onClick={acceptReceipt}>
+                  <CheckCircle2 className="h-4 w-4 mr-2" /> Save
+                </Button>
+              )}
             </div>
           </div>
         </DialogContent>
       </Dialog>
 
-      {/* ── Load-scan label popup — scan a production batch into the vehicle ──── */}
-      <Dialog open={!!loadScanRow} onOpenChange={(v) => !v && setLoadScanRow(null)}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-base"><ScanLine className="h-4 w-4" /> Scan Label</DialogTitle>
-          </DialogHeader>
-          {loadScanRow && (() => {
-            const code = loadScanRow.label;
-            return (
-              /* Same label format as the Packaging module (dashed card + barcode). */
-              <div className="rounded-lg border-2 border-dashed border-border bg-card p-3 flex flex-col gap-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">USBA Catering · Meal Label</span>
-                  <span className="text-[10px] font-bold text-amber-600">READY TO PRINT</span>
-                </div>
-                <div className="flex items-baseline justify-between gap-2">
-                  <span className="font-semibold text-sm">{loadScanRow.mealName}</span>
-                  <span className="text-xs tabular-nums text-muted-foreground shrink-0">Qty {loadScanRow.qty > 0 ? loadScanRow.qty : "—"}</span>
-                </div>
-                <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
-                  <span>Batch <b className="text-foreground font-mono">{loadScanRow.productionOrderId}</b></span>
-                  <span>Type <b className="text-foreground">{loadScanRow.mealType}</b></span>
-                  <span>{loadScanRow.warehouse}</span>
-                </div>
-                {/* Decorative barcode (matches the Packaging label format) */}
-                <div className="mt-1">
-                  <div className="flex items-end gap-[1px] h-8 w-full overflow-hidden" aria-hidden>
-                    {code.split("").flatMap((ch, i) =>
-                      [0, 1, 2, 3].map((k) => (
-                        <span
-                          key={`${i}-${k}`}
-                          className="bg-slate-900"
-                          style={{ width: ((ch.charCodeAt(0) >> k) & 1) ? 3 : 1, height: "100%" }}
-                        />
-                      )),
-                    )}
-                  </div>
-                  <div className="text-center font-mono text-[11px] tracking-widest mt-1">{code}</div>
-                </div>
-              </div>
-            );
-          })()}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setLoadScanRow(null)}>Cancel</Button>
-            <Button onClick={() => loadScanRow && confirmLoadScan(loadScanRow)}>
-              <ScanLine className="h-4 w-4 mr-1.5" /> Scan
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* ── Order Details — meal breakdown with per-item label scanning ──────── */}
-      <Dialog open={!!orderDetailFlight} onOpenChange={(v) => { if (!v) { setOrderDetailFlight(null); setActiveScanRowId(null); } }}>
+      {/* ── Order Details — read-only meal breakdown per leg ─────────────────── */}
+      <Dialog open={!!orderDetailFlight} onOpenChange={(v) => { if (!v) setOrderDetailFlight(null); }}>
         <DialogContent className="w-full max-w-full sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           {(() => {
-            const leg = airportDispatch.legs.find((l) => l.flight === orderDetailFlight);
+            // A ticked co-dispatch's legs live outside airportDispatch — search both.
+            const leg = airportDispatch.legs.find((l) => l.flight === orderDetailFlight)
+              ?? [...coReceiveLegs.values()].flat().find((l) => l.flight === orderDetailFlight);
             if (!leg) return null;
-            const scannedCount = leg.rows.filter((r) => scannedRowIds.has(r.id)).length;
             return (
               <>
                 <DialogHeader>
@@ -2240,20 +2394,17 @@ export default function DispatchMonitoring() {
 
                   <div className="pt-2 border-t border-border flex gap-3 flex-wrap items-center">
                     <div><span className="text-muted-foreground">Status:</span>
-                      {legScanned(leg)
-                        ? <span className="ml-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">Scan Completed</span>
-                        : <span className="ml-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700">Pending Scanning</span>}
+                      <span className="ml-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700">Awaiting Receipt</span>
                     </div>
                     <div><span className="text-muted-foreground">QC:</span><span className="ml-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">QC Done</span></div>
                   </div>
 
                   <div>
-                    <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-1 flex items-center justify-between">
-                      <span>Meals ({leg.rows.length})</span>
-                      {orderDetailScanMode && <span className="text-[10px] text-muted-foreground normal-case tracking-normal">{scannedCount}/{leg.rows.length} scanned</span>}
+                    <div className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-1">
+                      Meals ({leg.rows.length})
                     </div>
                     <div className="overflow-x-auto">
-                    <table className="w-full text-xs border border-slate-200 rounded-md overflow-hidden" style={{ minWidth: orderDetailScanMode ? 560 : 440 }}>
+                    <table className="w-full text-xs border border-slate-200 rounded-md overflow-hidden" style={{ minWidth: 440 }}>
                       <thead className="bg-slate-50 border-b border-slate-200">
                         <tr>
                           <th className="p-2 text-left font-semibold">Production</th>
@@ -2261,37 +2412,22 @@ export default function DispatchMonitoring() {
                           <th className="p-2 text-left font-semibold">Type</th>
                           <th className="p-2 text-right font-semibold">Qty</th>
                           <th className="p-2 text-left font-semibold">Warehouse</th>
-                          {orderDetailScanMode && <th className="p-2 text-right font-semibold">Scan</th>}
                         </tr>
                       </thead>
                       <tbody>
-                        {leg.rows.map((r) => {
-                          const done = scannedRowIds.has(r.id);
-                          return (
-                            <tr key={r.id} className="border-t border-slate-100 align-middle">
-                              <td className="p-2 font-mono text-primary">{r.productionOrderId}</td>
-                              <td className="p-2">{r.mealName}</td>
-                              <td className="p-2"><span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${MEAL_TYPE_TONE[r.mealType] ?? "bg-slate-100 text-slate-600"}`}>{r.mealType}</span></td>
-                              <td className="p-2 text-right tabular-nums font-medium">{r.qty}</td>
-                              <td className="p-2 text-muted-foreground">{r.warehouse}</td>
-                              {orderDetailScanMode && (
-                                <td className="p-2 text-right">
-                                  {done ? (
-                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700"><CheckCircle2 className="h-3 w-3" /> Scan Completed</span>
-                                  ) : (
-                                    <Button type="button" size="icon" variant="outline" className="h-7 w-7" title="Show label & scan" onClick={() => setActiveScanRowId(r.id)}>
-                                      <QrCode className="h-3.5 w-3.5" />
-                                    </Button>
-                                  )}
-                                </td>
-                              )}
-                            </tr>
-                          );
-                        })}
+                        {leg.rows.map((r) => (
+                          <tr key={r.id} className="border-t border-slate-100 align-middle">
+                            <td className="p-2 font-mono text-primary">{r.productionOrderId}</td>
+                            <td className="p-2">{r.mealName}</td>
+                            <td className="p-2"><span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${MEAL_TYPE_TONE[r.mealType] ?? "bg-slate-100 text-slate-600"}`}>{r.mealType}</span></td>
+                            <td className="p-2 text-right tabular-nums font-medium">{r.qty}</td>
+                            <td className="p-2 text-muted-foreground">{r.warehouse}</td>
+                          </tr>
+                        ))}
                         <tr className="border-t-2 border-slate-300 bg-slate-50/80">
                           <td className="p-2 font-bold" colSpan={3}>Total</td>
                           <td className="p-2 text-right font-bold tabular-nums">{leg.totalQty}</td>
-                          <td colSpan={orderDetailScanMode ? 2 : 1}></td>
+                          <td></td>
                         </tr>
                       </tbody>
                     </table>
@@ -2299,70 +2435,8 @@ export default function DispatchMonitoring() {
                   </div>
                 </div>
                 <DialogFooter>
-                  <Button variant="outline" onClick={() => { setOrderDetailFlight(null); setActiveScanRowId(null); }}>Close</Button>
+                  <Button variant="outline" onClick={() => setOrderDetailFlight(null)}>Close</Button>
                 </DialogFooter>
-              </>
-            );
-          })()}
-        </DialogContent>
-      </Dialog>
-
-      {/* ── Meal Label — barcode card shown when a scan icon is clicked (Scan only) ── */}
-      <Dialog open={!!activeScanRowId} onOpenChange={(v) => { if (!v) setActiveScanRowId(null); }}>
-        <DialogContent className="max-w-xs border-0 bg-transparent p-0 shadow-none">
-          {(() => {
-            let ctx: { leg: AirportLeg; row: ScanMealRow } | null = null;
-            for (const leg of airportDispatch.legs) {
-              const row = leg.rows.find((r) => r.id === activeScanRowId);
-              if (row) { ctx = { leg, row }; break; }
-            }
-            if (!ctx) return null;
-            const { leg, row } = ctx;
-            const scanned = scannedRowIds.has(row.id);
-            return (
-              <>
-                <DialogHeader className="sr-only"><DialogTitle>Meal Label — {row.mealName}</DialogTitle></DialogHeader>
-                <div className="rounded-lg border-2 border-emerald-300 bg-white p-4 flex flex-col gap-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-700">USBA Catering · Meal Label</span>
-                    {scanned
-                      ? <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-600"><CheckCircle2 className="h-3 w-3" /> SCANNED</span>
-                      : <span className="text-[10px] font-bold text-amber-600">PENDING SCAN</span>}
-                  </div>
-                  <div className="flex items-baseline justify-between gap-2">
-                    <span className="font-semibold text-sm">{row.mealName}</span>
-                    <span className="text-xs tabular-nums text-muted-foreground shrink-0">Qty {row.qty}</span>
-                  </div>
-                  <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
-                    <span>Flight <b className="text-foreground">{leg.flight}</b></span>
-                    <span>{row.mealType}</span>
-                    <span>{row.warehouse}</span>
-                    <span>DSP <b className="text-foreground font-mono">{airportDispatch.dispatchId}</b></span>
-                    <span>Order <b className="text-foreground font-mono">{airportDispatch.orderNo}</b></span>
-                    <span>Dep <b className="text-foreground">{leg.depTime}</b></span>
-                  </div>
-                  {/* Barcode */}
-                  <div className="mt-1">
-                    <div className="flex items-end gap-[1px] h-8 w-full overflow-hidden" aria-hidden>
-                      {row.label.split("").flatMap((ch, i) =>
-                        [0, 1, 2, 3].map((k) => (
-                          <span key={`${i}-${k}`} className="bg-slate-900" style={{ width: ((ch.charCodeAt(0) >> k) & 1) ? 3 : 1, height: "100%" }} />
-                        ))
-                      )}
-                    </div>
-                    <div className="text-center font-mono text-[11px] tracking-widest mt-1">{row.label}</div>
-                  </div>
-                  {/* Scan only (no Print) */}
-                  <div className="mt-1">
-                    {scanned ? (
-                      <div className="inline-flex items-center justify-center gap-1 w-full text-xs font-semibold text-emerald-600 h-9"><CheckCircle2 className="h-3.5 w-3.5" /> Scan Completed</div>
-                    ) : (
-                      <Button size="sm" className="h-9 w-full text-xs bg-emerald-600 hover:bg-emerald-700 text-white" onClick={() => scanRow(row.id)}>
-                        <ScanLine className="h-3.5 w-3.5 mr-1.5" /> Scan
-                      </Button>
-                    )}
-                  </div>
-                </div>
               </>
             );
           })()}

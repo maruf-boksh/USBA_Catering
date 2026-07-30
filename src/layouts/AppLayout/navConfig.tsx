@@ -105,6 +105,7 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/meal-planning',       label: 'Menu Planning',    icon: I(UtensilsCrossed) },
       { key: '/delay-management',    label: 'Delay Management',     icon: I(Clock) },
       { key: '/lmc',                 label: 'Last Minute Change (LMC)', icon: I(Replace) },
+      { key: '/operational-report',  label: 'Operational Report',   icon: I(BarChart3) },
     ],
   },
 
@@ -282,6 +283,7 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/config-approval',   label: 'Approval Setup',   icon: I(GitBranch) },
       { key: '/config-meal-slots', label: 'Meal Config',       icon: I(Clock) },
       { key: '/config-production-basis', label: 'Production Basis', icon: I(Scale) },
+      { key: '/config-packaging', label: 'Packaging Configuration', icon: I(ScanBarcode) },
       { key: '/config-role-setup', label: 'Role Setup', icon: I(UserCog) },
       { key: '/config-role-permission-editor', label: 'Role Permission Editor', icon: I(KeyRound) },
       { key: '/config-form-access-control', label: 'Form Access Control', icon: I(LockKeyhole) },

@@ -185,6 +185,18 @@ export default function Inventory() {
   const [adjDetailItem, setAdjDetailItem] = useState<Item | null>(null);
   const [adjDetailWastageId, setAdjDetailWastageId] = useState("");
 
+  // One-time cleanup: a registry bug used to create a NAMELESS stock row that
+  // then absorbed every posting keyed by an empty string (an unattributable
+  // pile of phantom stock). Registration and posting are now guarded against
+  // blank keys; this drops any such row an older store still carries.
+  useEffect(() => {
+    setItems((prev) => {
+      const cleaned = prev.filter((i) => (i.name ?? "").trim() !== "");
+      return cleaned.length === prev.length ? prev : cleaned;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [closingFlashIds, setClosingFlashIds] = useState<Set<string>>(new Set());
   useEffect(() => {
     try {
@@ -543,7 +555,6 @@ export default function Inventory() {
         const batched = isBatchTrackedForInventory(r.id);
         return (
           <div className="flex items-center gap-1.5">
-            <span>{r.name}</span>
             {batched && (
               <button
                 type="button"
@@ -555,6 +566,7 @@ export default function Inventory() {
                 <Layers className="h-3.5 w-3.5" />
               </button>
             )}
+            <span>{r.name}</span>
           </div>
         );
       },
@@ -1255,9 +1267,6 @@ function StockCell({ item, onClick }: { item: Item; onClick: () => void }) {
         low && "text-destructive",
       )}>
         {total.toLocaleString()}
-      </span>
-      <span className="text-[10px] text-muted-foreground -mt-0.5">
-        {batched ? `${lots} lot${lots === 1 ? "" : "s"}` : "single"}
       </span>
     </button>
   );

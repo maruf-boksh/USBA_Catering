@@ -115,6 +115,9 @@ const INV_KEY = "harvest-data-v1:inventory-items";
  * routes through here and stays consistent.
  */
 export function applyInventoryStock(idOrName: string, delta: number): void {
+  // A blank key must never post — it would silently match (and mutate) any
+  // row whose name is empty instead of the item the caller meant.
+  if (!idOrName || !idOrName.trim()) return;
   try {
     const raw = window.localStorage.getItem(INV_KEY);
     if (!raw) return;
@@ -156,6 +159,7 @@ export type InventoryBatchLotInput = {
  * double-posts. Safe no-op if the item isn't in the persisted stock master.
  */
 export function addInventoryBatchLot(idOrName: string, lot: InventoryBatchLotInput): void {
+  if (!idOrName || !idOrName.trim()) return; // blank key — see applyInventoryStock
   try {
     const raw = window.localStorage.getItem(INV_KEY);
     if (!raw) return;

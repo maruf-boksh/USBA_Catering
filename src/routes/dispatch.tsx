@@ -9,8 +9,9 @@ import {
   Truck, Package, Plus, AlertTriangle, Bell, MoreHorizontal,
   Eye, Croissant, Pill, ShieldCheck, Download,
   CheckCircle2, ThermometerSun, PlaneLanding, User, Clock, MoveRight,
-  Printer, ScanLine, Layers,
+  Printer, ScanLine, Layers, Timer,
 } from "lucide-react";
+import { VEHICLE_LOADING_KEY, writeVehicleLoadingSessions, type VehicleLoadingSession } from "@/lib/vehicle-loading";
 import { flights, meals, activeWarehouses, activeOffices, activeWarehousesByOffice } from "@/lib/sample-data";
 import {
   dayFromDate, parseMealQty, resolveCrewDish, resolveSpecialDish, resolveDessert,
@@ -28,6 +29,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
+import { ListExportActions } from "@/components/common/ListExportActions";
+import { filterMeta as listExportFilterMeta } from "@/lib/list-export";
 import { useArrivalFlash, flagArrival } from "@/lib/arrival-flash";
 import { useWorkflow } from "@/lib/workflow-store";
 
@@ -585,6 +588,37 @@ export default function Dispatch() {
   const [viewDispatchedEntry, setViewDispatchedEntry] = useState<DispatchedFlightEntry | null>(null);
   // ── QC Report dialog state ─────────────────────────────────────────────────
   const [qcReport, setQcReport] = useState<{ flight: string; qcState: QCState; checkedAt?: string } | null>(null);
+
+  // ── Vehicle loading sessions ────────────────────────────────────────────────
+  // Loading is recorded HERE (Actions column: Start Loading → Complete Loading),
+  // one session per dispatch run. The Catering Point Dispatch Entry sheet no
+  // longer scans batches — it just pre-fills its Load Start/End from these.
+  const [loadingSessions, setLoadingSessions] = usePersistedState<Record<string, VehicleLoadingSession>>(VEHICLE_LOADING_KEY, {});
+  const [loadTick, setLoadTick] = useState(0);
+  const anyLoadingActive = useMemo(
+    () => Object.values(loadingSessions).some((s) => !s.endAt),
+    [loadingSessions],
+  );
+  useEffect(() => {
+    if (!anyLoadingActive) return;
+    const id = setInterval(() => setLoadTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [anyLoadingActive]);
+  const loadingElapsed = (startedAtIso: string) => {
+    const sec = Math.max(0, Math.floor((Date.now() - new Date(startedAtIso).getTime()) / 1000));
+    return `${String(Math.floor(sec / 60)).padStart(2, "0")}:${String(sec % 60).padStart(2, "0")}`;
+  };
+  const completeRunLoading = (runKey: string) => {
+    const now = new Date();
+    const hm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    setLoadingSessions((prev) => {
+      const s = prev[runKey];
+      if (!s || s.endAt) return prev;
+      return { ...prev, [runKey]: { ...s, endAt: now.toISOString(), endHm: hm } };
+    });
+    const s = loadingSessions[runKey];
+    toast.success(`Loading completed — ${s?.dspRef ?? runKey}. Times will pre-fill the dispatch entry.`);
+  };
 
   // ── Airport Receive dialog state ───────────────────────────────────────────
   const [airportReceiveTarget, setAirportReceiveTarget] = useState<DispatchedFlightEntry | null>(null);
@@ -1445,6 +1479,32 @@ export default function Dispatch() {
     const loadable = loadableSelection;
     if (loadable.length === 0) { toast.error("Select at least one Packaging-Done dispatch to load into the vehicle."); return; }
     loadable.forEach((f) => handleQCAction(f));
+    // Vehicle Load IS the start of loading — the timer starts here (no separate
+    // Start Loading step). One session per dispatch run; Load End comes either
+    // from the entry sheet's Load End field or from Complete Loading on this
+    // page. Written synchronously because we navigate away in this same event.
+    const now = new Date();
+    const hm = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    const next = { ...loadingSessions };
+    const runFlights = new Map<string, { dspRef?: string; flights: string[] }>();
+    for (const f of loadable) {
+      const dspRef = filteredPRDs.find((r) => r.flight === f)?.dspRef;
+      const key = dspRef ?? f;
+      const g = runFlights.get(key) ?? { dspRef, flights: [] };
+      g.flights.push(f);
+      runFlights.set(key, g);
+    }
+    let started = 0;
+    for (const [key, g] of runFlights) {
+      if (next[key] && !next[key].endAt) continue; // already loading — keep its start
+      next[key] = { key, dspRef: g.dspRef, flights: g.flights, startAt: now.toISOString(), startHm: hm };
+      started++;
+    }
+    if (started > 0) {
+      setLoadingSessions(next);
+      writeVehicleLoadingSessions(next);
+      toast.info(`Loading timer started at ${hm} for ${started} dispatch${started > 1 ? "es" : ""}.`);
+    }
     setSelectedVehicleFlights(new Set());
     // Every selected dispatch travels on the one vehicle, so hand all of them
     // over — passing only loadable[0] silently dropped the rest, and the
@@ -1860,6 +1920,17 @@ export default function Dispatch() {
       setDispatchedFlightEntries((prev) => [...prev, ...newEntries]);
       const dispatchedFlightSet = new Set(dispatchingRecord.flightNos);
       const dispatchedRows = packagingRows.filter((r) => dispatchedFlightSet.has(r.flight));
+
+      // The vehicle-loading session served its purpose (its times are in the
+      // monitoring entry) — drop it so the same flight number on a later day
+      // doesn't surface a stale "Loaded" badge.
+      setLoadingSessions((prev) => {
+        const next = { ...prev };
+        for (const [k, s] of Object.entries(next)) {
+          if (s.flights.some((f) => dispatchedFlightSet.has(f))) delete next[k];
+        }
+        return next;
+      });
 
       // ── Dispatch → Dispatch Monitoring → Galley Planning ────────────────────
       // Monitoring (and Galley Planning, which plans against the same entries)
@@ -2695,6 +2766,25 @@ export default function Dispatch() {
           <option>Ready for Dispatch</option>
           <option>Dispatched</option>
         </select>
+        <div className="ml-auto">
+          <ListExportActions
+            table={() => ({
+              title: "Dispatch — Manifest Lines",
+              fileName: `dispatch-${filterDateFrom || "all"}${filterDateTo && filterDateTo !== filterDateFrom ? `_to_${filterDateTo}` : ""}`,
+              meta: listExportFilterMeta([
+                ["Dates", (filterDateFrom || filterDateTo) && `${filterDateFrom || "…"} → ${filterDateTo || "…"}`],
+                ["Dep Time", filterDepTime || false],
+                ["Status", filterStatus !== "All Statuses" && filterStatus],
+              ]),
+              columns: ["Flight", "Dep Time", "Date", "Meal Type", "Meal", "Qty", "Section", "Order", "Production ID", "Status"],
+              numericCols: [5],
+              rows: filteredPRDs.map((r) => [
+                r.flight, r.depTime, r.date, r.mealType, r.mealName, r.qty, r.section,
+                r.orderNo ?? "", r.productionOrderId ?? "", r.packagingStatus,
+              ]),
+            })}
+          />
+        </div>
       </div>
 
       {/* Single Vehicle Load — loads all checkbox-marked dispatches into one vehicle */}
@@ -2847,6 +2937,16 @@ export default function Dispatch() {
                       // All flight legs of this run — the Dispatch-ID checkbox selects the whole dispatch.
                       const runAllFlights = run.first ? runFgs.map((fg) => fg.flight) : [];
                       const runAllSelected = runAllFlights.length > 0 && runAllFlights.every((f) => selectedVehicleFlights.has(f));
+                      // Vehicle loading session for this run (Start/Complete Loading
+                      // live in the Actions column; the entry sheet reads the times).
+                      const runKey = dspId ?? flightGroup.flight;
+                      const runSession = run.first ? loadingSessions[runKey] : undefined;
+                      // Match the leg's own dispatch ref first — a flight number
+                      // recurs every day, so a bare flight match could surface a
+                      // stale session from an earlier dispatch of the same flight.
+                      const legSession = dspId
+                        ? loadingSessions[dspId]
+                        : Object.values(loadingSessions).find((s) => !s.dspRef && s.flights.includes(flightGroup.flight));
                       return (
                         <tr
                           key={`${flightGroup.flight}-${dspId ?? fgIdx}`}
@@ -3005,6 +3105,16 @@ export default function Dispatch() {
                                 onClick={() => handleQCAction(flightGroup.flight)}>
                                 <ShieldCheck className="h-3 w-3 mr-1" /> QC Passed
                               </Button>
+                            ) : legSession && !legSession.endHm ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-violet-100 text-violet-700 border border-violet-200 whitespace-nowrap font-mono tabular-nums"
+                                title={`Loading started ${legSession.startHm}`}>
+                                <Timer className="h-3 w-3" /> {loadTick >= 0 && loadingElapsed(legSession.startAt)}
+                              </span>
+                            ) : legSession?.endHm ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 whitespace-nowrap tabular-nums"
+                                title="Vehicle loaded — times pre-fill the dispatch entry sheet">
+                                <CheckCircle2 className="h-3 w-3" /> Loaded {legSession.startHm} → {legSession.endHm}
+                              </span>
                             ) : allPackagingDone ? (
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-violet-100 text-violet-700 border border-violet-200 whitespace-nowrap">
                                 <ShieldCheck className="h-3 w-3" /> Ready to Load
@@ -3031,6 +3141,19 @@ export default function Dispatch() {
                               </Button>
                               {/* Packaging (Initiate Packaging / Print Label) now lives in the
                                   dedicated Packaging module — the Dispatch flow starts at Vehicle Load. */}
+                              {/* Vehicle loading — the timer starts when Vehicle Load
+                                  is clicked (no separate Start step). Load End comes
+                                  from here OR from the entry sheet's Load End field. */}
+                              {run.first && runSession && !runSession.endHm && !allLegsQcDone && (
+                                <Button
+                                  size="sm"
+                                  className="h-7 px-3 text-xs shrink-0 bg-emerald-600 hover:bg-emerald-700 text-white border-0"
+                                  onClick={() => completeRunLoading(runKey)}
+                                  title="Stop the loading timer and record the end time"
+                                >
+                                  <CheckCircle2 className="h-3 w-3 mr-1" /> Complete Loading
+                                </Button>
+                              )}
                               {/* One combined Initiate Dispatch per dispatch — only
                                   on the first leg, only once EVERY leg passed QC. */}
                               {run.first && allLegsQcDone && runAnyNotDispatched && (
@@ -4282,10 +4405,25 @@ export default function Dispatch() {
                   </div>
                   <div>
                     <Label className="text-xs text-muted-foreground">Production No</Label>
-                    <div className="min-h-8 max-h-24 overflow-y-auto mt-1 rounded border border-input bg-slate-100 px-3 py-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm font-mono text-slate-700">
-                      {productionNos.length
-                        ? productionNos.map((p) => <span key={p}>{p}</span>)
-                        : <span className="text-slate-400 font-sans">—</span>}
+                    {/* One line, same height as the sibling fields — a multi-run
+                        dispatch lists every ref on hover instead of stacking a
+                        tall scroll box into the middle of the header row. */}
+                    <div
+                      className="h-8 mt-1 rounded border border-input bg-slate-100 px-3 flex items-center gap-1.5 text-sm font-mono text-slate-700 overflow-hidden"
+                      title={productionNos.join(", ")}
+                    >
+                      {productionNos.length ? (
+                        <>
+                          <span className="truncate">{productionNos[0]}</span>
+                          {productionNos.length > 1 && (
+                            <span className="shrink-0 rounded-full bg-slate-200 text-slate-600 text-[10px] font-sans font-semibold px-1.5 py-0.5">
+                              +{productionNos.length - 1} more
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <span className="text-slate-400 font-sans">—</span>
+                      )}
                     </div>
                   </div>
                   <div>
@@ -4324,8 +4462,8 @@ export default function Dispatch() {
                           <thead>
                             <tr className="bg-slate-50 border-b border-slate-200">
                               <th className="p-2 text-left font-semibold border-r border-slate-200">Item's Name</th>
-                              <th className="p-2 text-center font-semibold border-r border-slate-200 w-16">%</th>
-                              <th className="p-2 text-center font-semibold w-16">Qty</th>
+                              <th className="p-2 text-center font-semibold border-r border-slate-200 w-20">%</th>
+                              <th className="p-2 text-center font-semibold w-24">Qty</th>
                             </tr>
                           </thead>
                           <tbody>
@@ -4335,10 +4473,10 @@ export default function Dispatch() {
                                   <Input value={line.itemName} onChange={(e) => updatePaxLine(sIdx, lIdx, "itemName", e.target.value)} className="h-7 text-xs" />
                                 </td>
                                 <td className="p-1.5 border-r border-slate-200">
-                                  <Input type="number" value={line.percent} onChange={(e) => updatePaxLine(sIdx, lIdx, "percent", Number(e.target.value))} className="h-7 text-xs text-center" />
+                                  <Input type="number" value={line.percent} onChange={(e) => updatePaxLine(sIdx, lIdx, "percent", Number(e.target.value))} className="h-7 text-xs text-center px-1 tabular-nums no-spinner" />
                                 </td>
                                 <td className="p-1.5">
-                                  <Input type="number" value={line.qty} onChange={(e) => updatePaxLine(sIdx, lIdx, "qty", Number(e.target.value))} className="h-7 text-xs text-center" />
+                                  <Input type="number" value={line.qty} onChange={(e) => updatePaxLine(sIdx, lIdx, "qty", Number(e.target.value))} className="h-7 text-xs text-center px-1 tabular-nums no-spinner" />
                                 </td>
                               </tr>
                             ))}
@@ -4363,7 +4501,7 @@ export default function Dispatch() {
                                 {specials.map(([label, field]) => (
                                   <div key={label} className="flex items-center gap-1.5">
                                     <span className="text-xs font-semibold text-slate-600">{label}</span>
-                                    <Input type="number" value={sec[field] || ""} placeholder="0" onChange={(e) => updateSection(sIdx, { [field]: Number(e.target.value) })} className="h-7 w-14 text-xs text-center" />
+                                    <Input type="number" value={sec[field] || ""} placeholder="0" onChange={(e) => updateSection(sIdx, { [field]: Number(e.target.value) })} className="h-7 w-16 text-xs text-center px-1 tabular-nums no-spinner" />
                                   </div>
                                 ))}
                               </div>
@@ -4376,13 +4514,13 @@ export default function Dispatch() {
                             {sec.pastry > 0 && (
                               <div className="flex items-center gap-2">
                                 <Label className="text-xs font-semibold text-slate-600 whitespace-nowrap">Pastry for {sec.flightNo}</Label>
-                                <Input type="number" value={sec.pastry} onChange={(e) => updateSection(sIdx, { pastry: Number(e.target.value) })} className="h-7 w-20 text-xs text-center" />
+                                <Input type="number" value={sec.pastry} onChange={(e) => updateSection(sIdx, { pastry: Number(e.target.value) })} className="h-7 w-20 text-xs text-center px-1 tabular-nums no-spinner" />
                               </div>
                             )}
                             {sec.childMealsPastry > 0 && (
                               <div className="flex items-center gap-2">
                                 <Label className="text-xs font-semibold text-slate-600 whitespace-nowrap">Child Meals Pastry</Label>
-                                <Input type="number" value={sec.childMealsPastry} onChange={(e) => updateSection(sIdx, { childMealsPastry: Number(e.target.value) })} className="h-7 w-20 text-xs text-center" />
+                                <Input type="number" value={sec.childMealsPastry} onChange={(e) => updateSection(sIdx, { childMealsPastry: Number(e.target.value) })} className="h-7 w-20 text-xs text-center px-1 tabular-nums no-spinner" />
                               </div>
                             )}
                           </div>
@@ -4670,31 +4808,30 @@ export default function Dispatch() {
                         className="mt-1 min-h-[60px] text-xs resize-none"
                       />
                     </div>
-                    <div className="flex items-center justify-between">
-                      <p className="text-[11px] text-muted-foreground flex items-center gap-1">
-                        <Clock className="h-3 w-3" /> Date &amp; time auto-recorded on accept
-                      </p>
-                      <Button
-                        size="sm"
-                        className="h-8 text-xs bg-emerald-600 hover:bg-emerald-700 text-white border-0 px-4"
-                        onClick={() => {
-                          setDispatchedFlightEntries((prev) =>
-                            prev.map((e) => e.id === airportReceiveTarget.id ? { ...e, airportReceived: true } : e)
-                          );
-                          toast.success(`Airport receipt accepted — ${airportReceiveTarget.flight}`);
-                          setAirportReceiveTarget(null);
-                        }}
-                      >
-                        <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" /> Save And Accept
-                      </Button>
-                    </div>
+                    <p className="text-[11px] text-muted-foreground flex items-center gap-1">
+                      <Clock className="h-3 w-3" /> Date &amp; time auto-recorded on accept
+                    </p>
                   </div>
                 </div>
               </div>
             )}
           </div>
-          <div className="px-6 py-3 border-t shrink-0 flex justify-end bg-slate-50">
+          <div className="px-6 py-3 border-t shrink-0 flex justify-end gap-3 bg-slate-50">
             <Button variant="outline" onClick={() => setAirportReceiveTarget(null)}>Close</Button>
+            {airportReceiveTarget && (
+              <Button
+                className="bg-emerald-600 hover:bg-emerald-700 text-white px-8 shadow-md"
+                onClick={() => {
+                  setDispatchedFlightEntries((prev) =>
+                    prev.map((e) => e.id === airportReceiveTarget.id ? { ...e, airportReceived: true } : e)
+                  );
+                  toast.success(`Airport receipt accepted — ${airportReceiveTarget.flight}`);
+                  setAirportReceiveTarget(null);
+                }}
+              >
+                <CheckCircle2 className="h-4 w-4 mr-2" /> Save
+              </Button>
+            )}
           </div>
         </DialogContent>
       </Dialog>

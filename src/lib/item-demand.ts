@@ -80,7 +80,8 @@ function directDemand(
     }
     if (card.dessert?.name?.trim().toLowerCase() === key) {
       found = true;
-      qty += audience;
+      // Dessert honours the per-meal quantity too (2 pastries per pax = ×2).
+      qty += audience * perMealQty(card.dessert);
     }
   }
   return { qty, found };

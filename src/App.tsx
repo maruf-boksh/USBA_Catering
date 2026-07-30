@@ -67,6 +67,7 @@ import ConfigPricePage from "@/routes/config-price";
 import ConfigApprovalPage from "@/routes/config-approval";
 import ConfigMealSlotsPage from "@/routes/config-meal-slots";
 import ConfigProductionBasisPage from "@/routes/config-production-basis";
+import ConfigPackagingPage from "@/routes/config-packaging";
 import ConfigAccessControlPage from "@/routes/config-access-control";
 import ConfigAccessControlPermissionsPage from "@/routes/config-access-control-permissions";
 import ConfigRoleSetupPage from "@/routes/config-role-setup";
@@ -74,6 +75,7 @@ import ConfigRolePermissionEditorPage from "@/routes/config-role-permission-edit
 import ConfigFormAccessControlPage from "@/routes/config-form-access-control";
 import ReportBuilderPage from "@/routes/report-builder";
 import OperationsOverviewPage from "@/routes/operations-overview";
+import OperationalReportPage from "@/routes/operational-report";
 import ProductionOverviewPage from "@/routes/production-overview";
 import InventoryOverviewPage from "@/routes/inventory-overview";
 import SupplyChainOverviewPage from "@/routes/supply-chain-overview";
@@ -170,6 +172,7 @@ export function App() {
             <Route path="/config-approval" element={<ConfigApprovalPage />} />
             <Route path="/config-meal-slots" element={<ConfigMealSlotsPage />} />
             <Route path="/config-production-basis" element={<ConfigProductionBasisPage />} />
+            <Route path="/config-packaging" element={<ConfigPackagingPage />} />
             <Route path="/config-access-control" element={<ConfigAccessControlPage />} />
             <Route path="/config-access-control/permissions" element={<ConfigAccessControlPermissionsPage />} />
             <Route path="/config-role-setup" element={<ConfigRoleSetupPage />} />
@@ -177,6 +180,7 @@ export function App() {
             <Route path="/config-form-access-control" element={<ConfigFormAccessControlPage />} />
             <Route path="/report-builder" element={<ReportBuilderPage />} />
             <Route path="/operations-overview" element={<OperationsOverviewPage />} />
+            <Route path="/operational-report" element={<OperationalReportPage />} />
             <Route path="/production-overview" element={<ProductionOverviewPage />} />
             <Route path="/inventory-overview" element={<InventoryOverviewPage />} />
             <Route path="/supply-chain-overview" element={<SupplyChainOverviewPage />} />

@@ -18,6 +18,8 @@ import {
   LayoutGrid, CheckCircle2, CornerUpLeft, Eye, X as CloseIcon, Receipt, Plus,
 } from "lucide-react";
 import { toast } from "sonner";
+import { ListExportActions } from "@/components/common/ListExportActions";
+import { filterMeta as listExportFilterMeta } from "@/lib/list-export";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import {
   getAllAmendments, getFlightOrders, useFlightOrders, amendOrder,
@@ -549,6 +551,23 @@ export default function LmcPage() {
             <span className="text-[11px] text-muted-foreground tabular-nums">
               {scoped.length} change{scoped.length === 1 ? "" : "s"}
             </span>
+            <ListExportActions
+              table={() => ({
+                title: "Last Minute Changes",
+                fileName: `lmc-${new Date().toISOString().slice(0, 10)}`,
+                meta: listExportFilterMeta([
+                  ["Scope", scope === "lmc" ? "Last-minute only" : "All amendments"],
+                  ["Severity", severityFilter !== "all" && SEVERITY_META[severityFilter].label],
+                  ["Search", query.trim() || false],
+                ]),
+                columns: ["Flight", "Sector", "Order", "Change", "Severity", "By", "At", "Status", "Approval"],
+                rows: scoped.map((r) => [
+                  r.it.flight, r.it.sector, r.it.orderNo, r.it.typeLabel,
+                  SEVERITY_META[r.it.severity].label, r.it.by, r.it.at.slice(0, 16).replace("T", " "),
+                  r.status, r.approval,
+                ]),
+              })}
+            />
           </div>
 
           <div className="border border-border rounded-md overflow-x-auto">

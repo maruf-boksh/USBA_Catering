@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Table, Input, Button } from "antd";
 import type { TableColumnType } from "antd";
-import { SearchOutlined, DownloadOutlined } from "@ant-design/icons";
+import { SearchOutlined, DownloadOutlined, PrinterOutlined } from "@ant-design/icons";
 import { toast } from "sonner";
+import { printTable } from "@/lib/list-export";
 import { useLocation } from "react-router-dom";
 import { resolveSelectedNavKey } from "@/layouts/AppLayout/navIndex";
 import { useRole } from "@/lib/roles";
@@ -169,6 +170,23 @@ export function DataTable<T extends { id: string }>({
     toast.success("Exported to CSV");
   };
 
+  // Print the SAME slice Export downloads: the filtered rows, raw cell values
+  // (custom-rendered cells fall back to the underlying field, as in exportCsv).
+  const printList = () => {
+    const prettyTitle = (title || "List")
+      .replace(/[-_]/g, " ")
+      .replace(/\b\w/g, (m) => m.toUpperCase());
+    printTable({
+      title: prettyTitle,
+      fileName: title || "list",
+      meta: q.trim() ? `Search: ${q.trim()}` : "All records",
+      columns: visibleColumns.map((c) => c.header),
+      rows: filtered.map((r) =>
+        visibleColumns.map((c) => String((r as Record<string, unknown>)[String(c.key)] ?? "")),
+      ),
+    });
+  };
+
   return (
     <div
       style={{
@@ -222,9 +240,12 @@ export function DataTable<T extends { id: string }>({
             )}
           </>
         )}
-        <div style={{ marginLeft: "auto" }}>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <Button size="small" icon={<DownloadOutlined />} onClick={exportCsv}>
             Export
+          </Button>
+          <Button size="small" icon={<PrinterOutlined />} onClick={printList} title="Print the list (PDF)">
+            Print
           </Button>
         </div>
       </div>

@@ -222,8 +222,28 @@ export default function CookingTemp() {
         qcFailedAt: stamp,
         qcFailedBy: `${CURRENT_USER} (${role})`,
         qcFailReason: failReason.trim(),
+        // The failed batch ENTERS stock too (physical reality: the food exists
+        // and must be accounted for until it leaves). It cannot be packaged —
+        // the packaging pool only reads QC-PASSED logs — so it sits in stock as
+        // blocked goods until Wastage disposal posts the matching OUT, or a
+        // Re-Cook re-initiation withdraws it back into the kitchen.
+        inventoryAdded: true,
       });
-      toast.error(`${qcTarget.id} failed sensory check — sent to Re-Cook.`);
+      applyStockDeltas([{
+        // Keyed by item NAME (not code): the Wastage-disposal OUT posted on
+        // Final Approval is keyed by the report's stock item name, and the two
+        // movements must net against the same ledger row.
+        itemId: qcTarget.outputItemName ?? qcTarget.bom,
+        delta: qcTarget.producedQty,
+        date: qcTarget.date,
+        reference: qcTarget.id,
+        officeId: qcTarget.officeId,
+        warehouseId: qcTarget.warehouseId,
+        label: "Production (QC Failed)",
+      }]);
+      toast.error(
+        `${qcTarget.id} failed sensory check — sent to Re-Cook. ${qcTarget.producedQty.toLocaleString()} units entered into stock as blocked goods (dispose via Wastage or re-initiate).`,
+      );
     }
     setQcOpen(false);
     setRecookConfirmOpen(false);

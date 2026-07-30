@@ -221,6 +221,9 @@ export function isBatchTrackedForMaster(masterId: string): boolean {
 
 /** Whether an inventory row's underlying master is tracked by batch. */
 export function isBatchTrackedForInventory(inventoryId: string): boolean {
+  // Airline consumables (galley store, CNS-###) are pooled single stock —
+  // they carry no lot ladder, so never show them as batch-tracked.
+  if (inventoryId.startsWith("CNS-")) return false;
   const master = resolveMasterForInventory(inventoryId);
   if (!master) return true; // orphan rows default to batch-tracked
   if (batchTrackedOverrides.has(master.id)) return batchTrackedOverrides.get(master.id)!;
@@ -2242,15 +2245,15 @@ function defaultAllocationMethod(item: Omit<ItemMaster, "id">): AllocationMethod
 
 /**
  * Default batch-tracked flag. Perishables and items with meaningful expiry
- * default to batch-tracked. Shelf-stable hardware-like packaging (tape, caps,
- * straws, labels) defaults to single-item (no batch / no FIFO-FEFO).
+ * default to batch-tracked; shelf-stable stock with no expiry story is a
+ * single pooled item (no lots, no FIFO/FEFO):
+ *  - ALL Packaging (boxes, foil, cups, tape… — hardware-like, no expiry)
+ *  - Raw-material sundries in category "Other" (sugar, salt, honey)
+ * An explicit `batchTracked` on the item row still wins over this default.
  */
 function defaultBatchTracked(item: Omit<ItemMaster, "id">): boolean {
-  if (item.itemType === "Packaging") {
-    // Hardware-like packaging that doesn't carry expiry → single item
-    const singleCodes = new Set(["PK-TPE-SCH", "PK-CAP-PET", "PK-LBL-USB", "PK-LBL-MUM", "PK-STR-PLA"]);
-    if (singleCodes.has(item.code)) return false;
-  }
+  if (item.itemType === "Packaging") return false;
+  if (item.itemType === "Raw Material" && item.category === "Other") return false;
   return true;
 }
 

@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/common/StatusBadge";
+import { ListExportActions } from "@/components/common/ListExportActions";
 import { Progress } from "@/components/ui/progress";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
@@ -130,13 +131,15 @@ function ReviewedPill() {
 }
 
 /**
- * Order-level status. Flights advance independently, so an order is a *container*
- * of legs, not a single state machine. We therefore DERIVE the header status:
- *   • all legs at the same stage → that concrete status,
- *   • legs spread across stages   → a neutral "In Progress" pill plus a per-status
- *     count breakdown (e.g. "22 Pending · 5 Production · 3 Dispatched") so the mix
- *     is visible without expanding. The "In Progress" pill is titled with the
- *     least-advanced (blocking) stage — the order isn't done until its slowest leg is.
+ * Order-level header badges. An order has NO status of its own — it is the
+ * intake document (the customer's order sheet); the workflow entity is the
+ * flight-date leg, and legs advance independently. So the header never invents
+ * a status:
+ *   • all legs at the same stage → that concrete status (a fact, not a guess),
+ *   • legs spread across stages  → a PROGRESS readout ("12 of 34 still
+ *     Pending") naming the least-advanced stage — the order is only as done as
+ *     its slowest leg — plus the per-status count breakdown so the mix is
+ *     visible without expanding.
  */
 function OrderStatusBadges({ legs }: { legs: { status: FlightOrderStatus; reviewComment?: string }[] }) {
   if (legs.length === 0) return null;
@@ -155,16 +158,19 @@ function OrderStatusBadges({ legs }: { legs: { status: FlightOrderStatus; review
     return <OmStatusPill status={counts[0]?.status ?? legs[0].status} />;
   }
 
-  // Mixed order → derived "In Progress" pill + breakdown chips.
-  const blocking = counts[0].status; // earliest lifecycle stage present = least advanced
+  // Mixed order → progress readout + breakdown chips. Deliberately NOT a status
+  // pill: the order is a container, and "In Progress" was a status it doesn't
+  // have. Lead with what's holding it up instead.
+  const blocking = counts[0]; // earliest lifecycle stage present = least advanced
+  const total = legs.length;
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5">
       {reviewed && <ReviewedPill />}
       <span
-        title={`Least-advanced flight: ${blocking}`}
-        className="inline-flex items-center gap-1 rounded-full border px-3 py-1 text-[10.5px] font-bold uppercase tracking-[0.04em] text-[#3651d4] bg-[#eef1fe] border-[#cdd6fb]"
+        title={`Flights advance independently — ${blocking.n} of ${total} are still at ${blocking.status}, the least-advanced stage`}
+        className="inline-flex items-center gap-1 rounded-full border px-3 py-1 text-[10.5px] font-bold uppercase tracking-[0.04em] tabular-nums text-[#3651d4] bg-[#eef1fe] border-[#cdd6fb]"
       >
-        <CircleDot className="h-3 w-3" /> In Progress
+        <CircleDot className="h-3 w-3" /> {blocking.n} of {total} still {blocking.status}
       </span>
       {counts.map((c) => (
         <span
@@ -207,6 +213,19 @@ type FlightOrder = {
   reviewedBy?: string;
   reviewedAt?: string;
 };
+
+/**
+ * Highest SYSTEM-minted order number (ORD-####) in the book — the seed the next
+ * ORD-… is minted above. Customer refs from bulk upload (e.g. USB-4471) are
+ * deliberately excluded: they are the customer's numbering, not ours, and
+ * letting their digits into this max would yank the system sequence around.
+ */
+function systemOrderNoSeed(orders: { orderNo: string }[]): number {
+  return Math.max(
+    3410,
+    ...orders.map((o) => (/^ORD-\d+$/i.test(o.orderNo) ? Number(o.orderNo.slice(4)) : 0)),
+  );
+}
 
 const AIRLINES = ["US-Bangla", "Air Astra"];
 const AIRPORTS: { code: string; name: string }[] = [
@@ -349,6 +368,15 @@ type ParsedRow = {
   /** "Trip Ref" column — a user token shared by an outbound + its return so the
    *  two legs are linked into one round trip on dispatch. Blank ⇒ unpaired. */
   tripRef?: string;
+  /**
+   * "Order Ref" column — the CUSTOMER's own order number for these flights.
+   *
+   * This is the document the airline sent us and the number a billing query
+   * arrives quoting, so when the sheet supplies one it becomes the Order # and
+   * defines which legs group together. Blank ⇒ we mint a system Order # per
+   * date, as before.
+   */
+  orderRef?: string;
   /** Crew-meal upload only: number of crew + the meal slot. */
   crew?: number;
   mealSlot?: string;
@@ -452,6 +480,7 @@ function parseFlightCsv(text: string): ParsedRow[] {
       type,
       direction,
       tripRef: pick(rec, "trip ref", "trip", "rotation", "pair"),
+      orderRef: pick(rec, "order ref", "order no", "order number", "order"),
       date: normalizeDate(pick(rec, "date")),
     };
   });
@@ -511,6 +540,7 @@ function parseCrewCsv(text: string): ParsedRow[] {
       direction,
       crew,
       mealSlot,
+      orderRef: pick(rec, "order ref", "order no", "order number", "order"),
       date: normalizeDate(pick(rec, "date")),
     };
   });
@@ -726,7 +756,7 @@ export default function OrderManagementPage() {
       orders.filter((o) => flightOf(o) && o.date === date).map((o) => o.orderNo),
     );
     if (byDate.size === 1) return [...byDate][0];
-    return `ORD-${Math.max(3410, ...orders.map((o) => Number(o.orderNo.split("-").pop()) || 0)) + 1}`;
+    return `ORD-${systemOrderNoSeed(orders) + 1}`;
   };
 
   const dayAfterComputed = useMemo(() => {
@@ -1239,10 +1269,7 @@ export default function OrderManagementPage() {
       {view === "create" && (
         <OrderCreate
           onSave={addOrder}
-          nextOrderNo={`ORD-${(Math.max(
-            3410,
-            ...orders.map((o) => Number(o.orderNo.split("-").pop()) || 0),
-          )) + 1}`}
+          nextOrderNo={`ORD-${systemOrderNoSeed(orders) + 1}`}
           nextRowSeq={orders.length + 1}
         />
       )}
@@ -1256,7 +1283,7 @@ export default function OrderManagementPage() {
       {view === "bulk" && (
         <BulkUpload
           onPersistOrders={addOrdersBulk}
-          orderNoSeed={Math.max(3410, ...orders.map((o) => Number(o.orderNo.split("-").pop()) || 0))}
+          orderNoSeed={systemOrderNoSeed(orders)}
           existingOrders={orders}
           onUpdateCrew={(legId, crew) => updateFlightOrder(legId, { crew })}
           onAttachRoster={(legId, roster) => updateFlightOrder(legId, { specialMealRoster: roster })}
@@ -1375,10 +1402,32 @@ function OrderSummaryView({
               Grouped by Date × Flight Type. Total Meals = Passengers + Crew + Special.
             </div>
           </div>
-          <Badge variant="outline" className="text-[10px] font-normal">
-            <CalendarRange className="h-3 w-3 mr-1" />
-            {dateApplied ? (dateFrom === dateTo ? dateFrom : `${dateFrom || "…"} → ${dateTo || "…"}`) : "No date filter"}
-          </Badge>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline" className="text-[10px] font-normal">
+              <CalendarRange className="h-3 w-3 mr-1" />
+              {dateApplied ? (dateFrom === dateTo ? dateFrom : `${dateFrom || "…"} → ${dateTo || "…"}`) : "No date filter"}
+            </Badge>
+            {/* Export the summary the table shows — hidden until a date filter
+                is applied, same gate as the table itself. */}
+            {dateApplied && (
+              <ListExportActions
+                table={() => ({
+                  title: "Order Summary",
+                  fileName: `order-summary-${dateFrom || "all"}${dateTo && dateTo !== dateFrom ? `_to_${dateTo}` : ""}`,
+                  meta: `Grouped by Date × Flight Type · ${dateFrom === dateTo ? dateFrom : `${dateFrom || "…"} → ${dateTo || "…"}`}`,
+                  columns: ["Date", "Order #", "Flight Type", "Flights", "Passengers", "Crew", "Special (Pax)", "Special (Crew)", "Total Meals"],
+                  numericCols: [3, 4, 5, 6, 7, 8],
+                  rows: [
+                    ...lines.map((r) => [
+                      r.date, r.orderNos.join(", "), r.flightType, r.flights, r.passengers, r.crew,
+                      r.specialPax, r.specialCrew, r.baseTotal + approvedDeltaFor(r.date, r.flightType),
+                    ]),
+                    ["Grand Total", "", "", totals.flights, totals.passengers, totals.crew, totals.specialPax, totals.specialCrew, totals.effective],
+                  ],
+                })}
+              />
+            )}
+          </div>
         </div>
 
         {!dateApplied ? (
@@ -1623,7 +1672,7 @@ function CrewMealsView({ orders, hasFilters }: { orders: FlightOrder[]; hasFilte
               Cabin-crew meal orders grouped by meal slot — derived from each flight's ETD.
             </p>
           </div>
-          <div className="flex items-center gap-5 text-sm">
+          <div className="flex flex-wrap items-center gap-5 text-sm">
             <div className="text-right">
               <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Flights</div>
               <div className="font-semibold tabular-nums">{filtered.length}</div>
@@ -1632,6 +1681,25 @@ function CrewMealsView({ orders, hasFilters }: { orders: FlightOrder[]; hasFilte
               <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Crew Meals</div>
               <div className="font-semibold tabular-nums text-primary">{grandCrew}</div>
             </div>
+            <ListExportActions
+              table={() => ({
+                title: "Crew Meals",
+                fileName: `crew-meals-${new Date().toISOString().slice(0, 10)}`,
+                meta: hasFilters ? "Filtered list" : "All crew meal orders",
+                // The WHOLE filtered list (every page), slot-ordered like the
+                // table — one row per flight leg with its meal slot.
+                columns: ["Meal Slot", "Flight No", "Sector", "Airline", "Date", "ETD", "Order", "No of Crew", "Status"],
+                numericCols: [7],
+                rows: [...filtered]
+                  .map((o) => ({ o, slot: resolveMealSlot(o.etd, slots).name }))
+                  .sort((a, b) =>
+                    slots.findIndex((s) => s.name === a.slot) - slots.findIndex((s) => s.name === b.slot)
+                    || a.o.etd.localeCompare(b.o.etd))
+                  .map(({ o, slot }) => [
+                    slot, o.flight, o.sector, o.airline, o.date, o.etd, o.orderNo, o.crew ?? 0, o.status,
+                  ]),
+              })}
+            />
           </div>
         </div>
 
@@ -2124,6 +2192,20 @@ function OrdersList({
   const expandAllSections = () => setOpenSections(new Set(pageGroups.map(([no]) => no)));
   const collapseAllSections = () => setOpenSections(new Set());
 
+  // Export / Print — every leg of the FILTERED list (all pages, not just the
+  // visible one), flat: one row per flight, its order first.
+  const exportTable = () => ({
+    title: "Flight Orders",
+    fileName: `flight-orders-${new Date().toISOString().slice(0, 10)}`,
+    meta: hasFilters ? "Filtered list" : "All flight orders",
+    columns: ["Order", "Flight", "Direction", "Airline", "Sector", "Date", "ETD", "PAX", "Crew", "Special Meals", "Status"],
+    numericCols: [7, 8, 9],
+    rows: sortedOrders.map((o) => [
+      o.orderNo, o.flight, o.direction, o.airline, o.sector, o.date, o.etd,
+      o.pax, o.crew ?? 0, o.specialMeals, o.status,
+    ]),
+  });
+
   return (
     <Card>
       <CardContent className="pt-6">
@@ -2135,25 +2217,28 @@ function OrdersList({
               <> · Page <strong className="text-foreground tabular-nums">{page}</strong> of <strong className="text-foreground tabular-nums">{totalPages}</strong></>
             )}
           </div>
-          {pageGroups.length > 1 && (
-            <div className="flex items-center gap-2 text-xs">
-              <button
-                type="button"
-                onClick={expandAllSections}
-                className="font-medium text-muted-foreground hover:text-primary"
-              >
-                Expand all
-              </button>
-              <span className="text-border">·</span>
-              <button
-                type="button"
-                onClick={collapseAllSections}
-                className="font-medium text-muted-foreground hover:text-primary"
-              >
-                Collapse all
-              </button>
-            </div>
-          )}
+          <div className="flex flex-wrap items-center gap-3">
+            <ListExportActions table={exportTable} />
+            {pageGroups.length > 1 && (
+              <div className="flex items-center gap-2 text-xs">
+                <button
+                  type="button"
+                  onClick={expandAllSections}
+                  className="font-medium text-muted-foreground hover:text-primary"
+                >
+                  Expand all
+                </button>
+                <span className="text-border">·</span>
+                <button
+                  type="button"
+                  onClick={collapseAllSections}
+                  className="font-medium text-muted-foreground hover:text-primary"
+                >
+                  Collapse all
+                </button>
+              </div>
+            )}
+          </div>
         </div>
 
         {groupedOrders.length === 0 ? (
@@ -4642,28 +4727,34 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
     };
     // Three templates, each mirroring the matching single-order screen:
     //  • Flights (Domestic / International) — flight-level only, with a Special
-    //    Meals COUNT column (no per-passenger detail). Order No is system-
-    //    generated, never on the sheet.
+    //    Meals COUNT column (no per-passenger detail).
     //  • Special Meals — the per-passenger roster (PNR / Name / Seat / Code),
     //    attaching to a flight by Flight No + Date. Same shape the single
     //    screen's roster bulk-paste accepts.
     //  • Crew Meals — crew-meal order fields from the Create Crew Meal screen
     //    (Scope, Flight, Airline, sector, Date, ETD, Meal Slot, No of Crew).
-    // "Trip Ref" links a round trip: put the SAME value on an outbound and its
-    // return so dispatch pairs them (even when sectors are identical). Blank for
-    // one-way flights.
-    const FLIGHT_HEADERS = ["Scope", "Flight No", "Airline", "From", "To", "Date", "ETD", "Direction", "PAX", "No of Crew", "Special Meals", "Trip Ref"];
+    //
+    // Two ref columns, doing two different jobs — they are NOT interchangeable:
+    //  • "Order Ref" is the CUSTOMER's order number: which document these
+    //    flights arrived on, and therefore which legs group under one order.
+    //    Optional — blank rows fall back to one system Order # per date.
+    //  • "Trip Ref" links a round trip: the SAME value on an outbound and its
+    //    return so dispatch pairs them (even when sectors are identical, and
+    //    even when both legs sit under one Order #). Blank for one-way flights.
+    const FLIGHT_HEADERS = ["Order Ref", "Scope", "Flight No", "Airline", "From", "To", "Date", "ETD", "Direction", "PAX", "No of Crew", "Special Meals", "Trip Ref"];
     const TEMPLATES: Record<typeof kind, { fileName: string; label: string; headers: string[]; rows: (string | number)[][] }> = {
       dom: {
         fileName: "domestic-flights-template.csv",
         label: "Domestic flights",
         headers: FLIGHT_HEADERS,
         rows: [
-          // A round trip — same Trip Ref (T1) on the outbound and its return.
-          ["Domestic", "BS-141", "US-Bangla", "DAC", "CXB", "2026-05-24", "08:15", "Outbound", 72, 4, 4, "T1"],
-          ["Domestic", "BS-142", "US-Bangla", "CXB", "DAC", "2026-05-24", "14:00", "Return", 70, 4, 4, "T1"],
-          ["Domestic", "BS-203", "US-Bangla", "DAC", "CGP", "2026-05-24", "10:30", "Outbound", 88, 4, 2, "T2"],
-          ["Domestic", "BS-204", "US-Bangla", "CGP", "DAC", "2026-05-24", "17:30", "Return", 84, 4, 2, "T2"],
+          // All four legs are ONE customer order (USB-4471) containing TWO round
+          // trips — so Order Ref groups them and Trip Ref says which return
+          // belongs to which outbound (T1 / T2). One column cannot do both jobs.
+          ["USB-4471", "Domestic", "BS-141", "US-Bangla", "DAC", "CXB", "2026-05-24", "08:15", "Outbound", 72, 4, 4, "T1"],
+          ["USB-4471", "Domestic", "BS-142", "US-Bangla", "CXB", "DAC", "2026-05-24", "14:00", "Return", 70, 4, 4, "T1"],
+          ["USB-4471", "Domestic", "BS-203", "US-Bangla", "DAC", "CGP", "2026-05-24", "10:30", "Outbound", 88, 4, 2, "T2"],
+          ["USB-4471", "Domestic", "BS-204", "US-Bangla", "CGP", "DAC", "2026-05-24", "17:30", "Return", 84, 4, 2, "T2"],
         ],
       },
       intl: {
@@ -4671,9 +4762,11 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
         label: "International flights",
         headers: FLIGHT_HEADERS,
         rows: [
-          // Cross-midnight round trip — out 23:50, return 02:30 next day, same Trip Ref.
-          ["International", "BS-307", "US-Bangla", "DAC", "KUL", "2026-05-24", "23:50", "Outbound", 282, 16, 18, "R1"],
-          ["International", "BS-308", "US-Bangla", "KUL", "DAC", "2026-05-25", "02:30", "Return", 274, 16, 16, "R1"],
+          // Cross-midnight round trip — out 23:50, return 02:30 next day, same
+          // Trip Ref. Both legs carry one Order Ref, so the order spans two
+          // dates and stays a single order (per-date numbering would split it).
+          ["USB-4472", "International", "BS-307", "US-Bangla", "DAC", "KUL", "2026-05-24", "23:50", "Outbound", 282, 16, 18, "R1"],
+          ["USB-4472", "International", "BS-308", "US-Bangla", "KUL", "DAC", "2026-05-25", "02:30", "Return", 274, 16, 16, "R1"],
         ],
       },
       special: {
@@ -4694,11 +4787,13 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
       crew: {
         fileName: "crew-meals-template.csv",
         label: "Crew meals",
-        headers: ["Scope", "Flight No", "Airline", "From", "To", "Date", "ETD", "Meal Slot", "Direction", "No of Crew"],
+        headers: ["Order Ref", "Scope", "Flight No", "Airline", "From", "To", "Date", "ETD", "Meal Slot", "Direction", "No of Crew"],
         // Meal Slot derived from ETD (business rule) so the sample stays consistent.
+        // Order Ref matches the flight sheet's, so a crew order lands under the
+        // same order as the flight it feeds.
         rows: [
-          ["Domestic", "BS-141", "US-Bangla", "DAC", "CXB", "2026-05-24", "08:15", resolveMealSlot("08:15", slots).name, "Outbound", 4],
-          ["International", "BS-225", "US-Bangla", "DAC", "DXB", "2026-05-24", "12:30", resolveMealSlot("12:30", slots).name, "Outbound", 14],
+          ["USB-4471", "Domestic", "BS-141", "US-Bangla", "DAC", "CXB", "2026-05-24", "08:15", resolveMealSlot("08:15", slots).name, "Outbound", 4],
+          ["USB-4472", "International", "BS-225", "US-Bangla", "DAC", "DXB", "2026-05-24", "12:30", resolveMealSlot("12:30", slots).name, "Outbound", 14],
         ],
       },
     };
@@ -4875,24 +4970,50 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
     const valid = allParsed.filter((r) => r.valid);
     const today = new Date().toISOString().slice(0, 10);
     const stamp = String(Date.now()).slice(-5);
-    // Group flights by date — each date becomes ONE order (with a system Order
-    // No) carrying all that day's flights as legs, mirroring the Order
-    // Management table (e.g. ORD-3514 · 34 flights).
-    const byDate = new Map<string, ParsedRow[]>();
-    for (const r of valid) {
-      const d = r.date || today;
-      (byDate.get(d) ?? byDate.set(d, []).get(d)!).push(r);
-    }
-    const orders: FlightOrder[] = [];
-    // One Order # per date — and that date's crew order reuses the same number,
-    // so a flight and its crew order share one Order #.
-    const dateToOrderNo = new Map<string, string>();
+    // Group flights into orders.
+    //
+    // An order is the DOCUMENT the flights arrived on, not a day's work: the
+    // customer's "Order Ref" defines it when the sheet supplies one, because
+    // that is the number they quote back at us and the number a billing query
+    // arrives on. It may legitimately span dates (a cross-midnight round trip
+    // is one order) and a date may carry several orders from several customers.
+    //
+    // Rows with no Order Ref keep the previous behaviour — one system-minted
+    // Order # per date — so sheets that don't carry the customer's number still
+    // import exactly as before.
+    const orderRefOf = (r: ParsedRow) => r.orderRef?.trim() ?? "";
+    const groups = new Map<string, { orderNo: string; rows: ParsedRow[] }>();
+    // Order #s seen per date, used only for the crew fallback below. A set, not
+    // a single value, because a date can now hold more than one order.
+    const orderNosByDate = new Map<string, Set<string>>();
     let orderIdx = 0;
     let legSeq = 0;
-    for (const [date, rows] of byDate) {
-      const orderNo = `ORD-${orderNoSeed + 1 + orderIdx}`;
-      orderIdx += 1;
-      dateToOrderNo.set(date, orderNo);
+    for (const r of valid) {
+      const d = r.date || today;
+      const ref = orderRefOf(r);
+      // Case-insensitive so "usb-4471" and "USB-4471" are one order; the first
+      // spelling seen is the one displayed.
+      const key = ref ? `ref ${ref.toLowerCase()}` : `date ${d}`;
+      let g = groups.get(key);
+      if (!g) {
+        g = { orderNo: ref || `ORD-${orderNoSeed + 1 + orderIdx++}`, rows: [] };
+        groups.set(key, g);
+      }
+      g.rows.push(r);
+      let seen = orderNosByDate.get(d);
+      if (!seen) { seen = new Set(); orderNosByDate.set(d, seen); }
+      seen.add(g.orderNo);
+    }
+    /** A date's Order # — only when that date resolved to exactly ONE order.
+     *  With several, we cannot tell which one a bare crew row belongs to, so the
+     *  caller mints a separate order rather than guessing. */
+    const soleOrderNoForDate = (d: string): string | undefined => {
+      const seen = orderNosByDate.get(d);
+      return seen && seen.size === 1 ? [...seen][0] : undefined;
+    };
+
+    const orders: FlightOrder[] = [];
+    for (const { orderNo, rows } of groups.values()) {
       for (const r of rows) {
         const manifest = uploadedByFlight.get(flightKey(r.flight, r.date)) ?? [];
         const roster: SpecialMealEntry[] = manifest.map((m, j) => ({
@@ -4958,22 +5079,27 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
       standaloneCrew.push(r);
     }
 
-    // Standalone crew rows (no matching flight) → their own crew orders by date.
-    const standaloneByDate = new Map<string, ParsedRow[]>();
+    // Standalone crew rows (no matching flight) → their own crew orders,
+    // grouped the same way flights are: by the customer's Order Ref when the
+    // sheet gives one, else by date.
+    const standaloneGroups = new Map<string, { orderNo: string; rows: ParsedRow[] }>();
     for (const r of standaloneCrew) {
       const d = r.date || today;
-      (standaloneByDate.get(d) ?? standaloneByDate.set(d, []).get(d)!).push(r);
+      const ref = orderRefOf(r);
+      const key = ref ? `ref ${ref.toLowerCase()}` : `date ${d}`;
+      let g = standaloneGroups.get(key);
+      if (!g) {
+        // Order # preference: the sheet's own Order Ref, else the date's flight
+        // Order # so crew rides with the flights it feeds — but only when that
+        // date resolved to a single order. Otherwise mint one.
+        const orderNo = ref || soleOrderNoForDate(d) || `ORD-${orderNoSeed + 1 + orderIdx++}`;
+        g = { orderNo, rows: [] };
+        standaloneGroups.set(key, g);
+      }
+      g.rows.push(r);
     }
     let crewOrderCount = 0;
-    for (const [date, rows] of standaloneByDate) {
-      // Reuse the flight order's number for the same date so the crew order
-      // shares the Order #. Mint a new one only if that date has no flight order.
-      let orderNo = dateToOrderNo.get(date);
-      if (!orderNo) {
-        orderNo = `ORD-${orderNoSeed + 1 + orderIdx}`;
-        orderIdx += 1;
-        dateToOrderNo.set(date, orderNo);
-      }
+    for (const { orderNo, rows } of standaloneGroups.values()) {
       crewOrderCount += 1;
       for (const r of rows) {
         orders.push({
@@ -5016,11 +5142,14 @@ function BulkUpload({ onPersistOrders, orderNoSeed, existingOrders, onUpdateCrew
 
     setImportedOrders(orders);
     setImportConfirmed(true);
-    // Persist into the Order Management table immediately, with system Order Nos.
+    // Persist into the Order Management table immediately. Order #s come from
+    // the sheet's Order Ref where given, system-minted otherwise.
     onPersistOrders(orders);
     // Apply crew merges onto flight orders that already existed in the store.
     crewUpdatesExisting.forEach((crew, id) => onUpdateCrew(id, crew));
-    const orderCount = orderIdx;
+    // Count orders as distinct Order #s actually imported — orderIdx only
+    // counts the system-minted ones, which undercounts ref-grouped sheets.
+    const orderCount = new Set(orders.map((o) => o.orderNo)).size;
     const crewBits = [
       mergedCount > 0 ? `${mergedCount} crew merged` : "",
       crewOrderCount > 0 ? `${crewOrderCount} crew order${crewOrderCount === 1 ? "" : "s"}` : "",

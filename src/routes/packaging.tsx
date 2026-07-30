@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/command";
 import {
   Package, PackageCheck, Printer, CheckCircle2, Eye, Boxes, Clock, Truck, Search, Plane, Plus,
-  ChevronDown, Check, Layers, ClipboardList, ScanLine,
+  ChevronDown, Check, Layers, ClipboardList, ScanLine, Users, UserCog,
 } from "lucide-react";
 import { toast } from "sonner";
 import { usePersistedState } from "@/lib/use-persisted-state";
@@ -33,7 +33,7 @@ import { useArrivalFlash, peekArrivalRows } from "@/lib/arrival-flash";
 import { logAudit } from "@/lib/audit-log";
 import { getAuthUser } from "@/lib/auth";
 import { servedOrderNosFor, flightPortionFor, menuSpecFor, dayFromDate, flightTypeFromSector } from "@/lib/production-order-link";
-import { loadMealPlanningConfig, perMealQty } from "@/lib/meal-planning-data";
+import { loadMealPlanningConfig, perMealQty, type ForType } from "@/lib/meal-planning-data";
 import { itemDemandForOrder, explainItemDemand, type ItemDemand } from "@/lib/item-demand";
 import { meals, warehouses } from "@/lib/sample-data";
 import {
@@ -47,6 +47,9 @@ import {
   type PackagingAllocation, type PackagingAllocationStatus, type PackagingComponent,
 } from "@/lib/packaging-allocations";
 import { specialMealSetsForLeg, dedupeSetsByCode, type SpecialMealSet } from "@/lib/special-meal-sets";
+import { usePackagingCompletionSettings } from "@/lib/packaging-completion-settings";
+import { ListExportActions } from "@/components/common/ListExportActions";
+import { filterMeta } from "@/lib/list-export";
 
 // Meal-type pill colors (mirrors the Dispatch Order-Details modal).
 const MEAL_TYPE_BADGE: Record<string, string> = {
@@ -55,6 +58,33 @@ const MEAL_TYPE_BADGE: Record<string, string> = {
   Dinner: "bg-indigo-100 text-indigo-700",
   Snack: "bg-sky-100 text-sky-700",
   Special: "bg-fuchsia-100 text-fuchsia-700",
+};
+
+// Who a meal is planned FOR — read off the day's menu cards (forType). The same
+// dish can sit on both a Passengers card and a Crew card, in which case it
+// feeds both audiences and wears both pills.
+const AUDIENCE_PILL: Record<ForType, { label: string; cls: string; Icon: typeof Users }> = {
+  Passengers: { label: "Pax", cls: "border-sky-300 bg-sky-50 text-sky-700", Icon: Users },
+  Crew: { label: "Crew", cls: "border-indigo-300 bg-indigo-50 text-indigo-700", Icon: UserCog },
+};
+const AudiencePills = ({ audience }: { audience?: ForType[] }) => {
+  if (!audience || audience.length === 0) return null;
+  return (
+    <>
+      {audience.map((a) => {
+        const p = AUDIENCE_PILL[a];
+        return (
+          <span
+            key={a}
+            className={cn("inline-flex items-center gap-0.5 rounded-full border px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide", p.cls)}
+            title={a === "Passengers" ? "On the day's Passengers menu card" : "On the day's Crew menu card"}
+          >
+            <p.Icon className="h-2.5 w-2.5" /> {p.label}
+          </span>
+        );
+      })}
+    </>
+  );
 };
 
 // System-generated packaging id — one per production package, derived from the
@@ -617,6 +647,13 @@ export default function PackagingPage() {
   // Flight whose menu-plan status popup is open (what's produced / packaged / left).
   const [menuInfoGroup, setMenuInfoGroup] = useState<PkgFlightGroup | null>(null);
   const [labelOpen, setLabelOpen] = useState(false);
+  // Site-level completion mode (Configuration → Packaging Completion):
+  //   printScan ON  → labels are printed and SCANNED to complete (the flow below);
+  //   printScan OFF → no label session at all — ticked batches are marked
+  //                   Packaging Done directly via markPackaged(list, "direct").
+  // Both paths run the SAME markPackaged, so status transitions, batch flips,
+  // dispatch hand-off and order lifecycle are identical in either mode.
+  const { printScan } = usePackagingCompletionSettings();
   // Which labels in this session have been printed at least once. Printing is
   // repeatable and status-neutral; SCANNING a printed label is what completes
   // packaging (marks it Packaging Done). This tracks print state so a label can
@@ -729,12 +766,43 @@ export default function PackagingPage() {
     // one made the plan read as 30-odd unpackaged dishes when the flight really
     // carries one special meal. The special meals get their own rows below.
     const names = new Set<string>();
+    // Which audience each meal is planned for — the card's forType. Collected
+    // alongside the names so a dish on both a Passengers and a Crew card is
+    // shown as feeding both.
+    const audienceByName = new Map<string, Set<ForType>>();
+    const noteAudience = (name: string, who: ForType) => {
+      const key = name.trim().toLowerCase();
+      let set = audienceByName.get(key);
+      if (!set) audienceByName.set(key, (set = new Set()));
+      set.add(who);
+    };
     for (const card of menuCards) {
       if (card.day !== day || !card.flightType.includes(ftype)) continue;
-      if (services.size > 0 && card.mealType && !services.has(card.mealType)) continue;
-      for (const ch of card.choices) for (const it of ch.items) names.add(it.name);
-      if (card.dessert?.name) names.add(card.dessert.name);
+      // The service filter narrows to the pax service(s) this flight actually
+      // carries — but it is inferred from packaged PAX lines, so it must not
+      // silence the Crew card: crew is fed under its own service (a Wednesday
+      // crew "Heavy Snacks" is served regardless of which pax meal flies).
+      // Crew dishes nobody needs still drop out below on zero crew demand.
+      if (card.forType !== "Crew" && services.size > 0 && card.mealType && !services.has(card.mealType)) continue;
+      for (const ch of card.choices) for (const it of ch.items) { names.add(it.name); noteAudience(it.name, card.forType); }
+      if (card.dessert?.name) { names.add(card.dessert.name); noteAudience(card.dessert.name, card.forType); }
     }
+    // Audience for a meal that reached the list from a packaged allocation
+    // rather than the scoped cards — search the whole day's config for it.
+    const audienceOf = (name: string): ForType[] => {
+      const key = name.trim().toLowerCase();
+      const hit = audienceByName.get(key);
+      if (hit) return [...hit];
+      const out = new Set<ForType>();
+      for (const card of menuCards) {
+        if (card.day !== day) continue;
+        const inCard =
+          card.choices.some((ch) => ch.items.some((it) => it.name.trim().toLowerCase() === key)) ||
+          card.dessert?.name?.trim().toLowerCase() === key;
+        if (inCard) out.add(card.forType);
+      }
+      return [...out];
+    };
     // Keep only meals this order actually needs a portion of on its OWN line —
     // the special-meal share is accounted for by the special rows.
     const leg = { flight: g.flight, date: g.date, orderNo: g.orderNo };
@@ -764,6 +832,8 @@ export default function PackagingPage() {
       name: string;
       produced: boolean;
       packaged: boolean;
+      /** Who the menu configuration plans this meal for — Pax, Crew, or both. */
+      audience?: ForType[];
       /** A special meal is assembled, so it carries the dishes it is made of. */
       code?: string;
       components?: { name: string; produced: boolean }[];
@@ -772,6 +842,7 @@ export default function PackagingPage() {
       name: n,
       produced: isProduced(n),
       packaged: packagedItems.has(n.trim().toLowerCase()),
+      audience: audienceOf(n),
     }));
 
     // ── Special meals — one row per code, not per component dish ──────────────
@@ -785,6 +856,8 @@ export default function PackagingPage() {
         name: `${set.code} · ${set.name}`,
         code: set.code,
         components,
+        // Special meals are passenger SSRs (VGML etc.) — always a pax meal.
+        audience: ["Passengers"],
         produced: components.length > 0 && components.every((c) => c.produced),
         packaged: alloc.length > 0 && alloc.some(isPackaged),
       });
@@ -793,7 +866,12 @@ export default function PackagingPage() {
     const notPackaged = meals.filter((m) => !m.packaged);
     const notProduced = meals.filter((m) => !m.produced);
     const allPackaged = meals.length > 0 && notPackaged.length === 0;
-    return { meals, allPackaged, notPackaged, notProduced };
+    // Why a plan can show no crew rows — answered explicitly, not left implicit:
+    // either the day's config has no Crew card for this flight type, or it has
+    // one but the order books no crew to feed.
+    const hasCrewCard = menuCards.some((c) => c.day === day && c.forType === "Crew" && c.flightType.includes(ftype));
+    const crewCount = findCrewOrder(leg)?.crew ?? order?.crew ?? 0;
+    return { meals, allPackaged, notPackaged, notProduced, hasCrewCard, crewCount };
   };
 
   const batchById = useMemo(() => {
@@ -1217,6 +1295,23 @@ export default function PackagingPage() {
   // Print labels for everything ticked on the list.
   const printSelectedLabels = () => openLabels(rows.filter((a) => selectedIds.has(a.id)));
 
+  // Direct completion (print/scan disabled in Configuration): mark a set of
+  // In-Packaging batches Packaging Done without a label session. Same
+  // markPackaged as the scan path — only the gate differs.
+  const markDoneDirect = (list: PackagingAllocation[]) => {
+    const pending = list.filter((a) => a.status === "In Packaging");
+    if (pending.length === 0) { toast.error("Nothing here is awaiting completion."); return; }
+    markPackaged(pending, "direct");
+    // Completed rows are no longer selectable — drop them from the selection so
+    // the bar doesn't keep counting batches that are already done.
+    setSelectedIds((prev) => {
+      const n = new Set(prev);
+      pending.forEach((a) => n.delete(a.id));
+      return n;
+    });
+  };
+  const markSelectedDone = () => markDoneDirect(rows.filter((a) => selectedIds.has(a.id)));
+
   // ── New Packaging (flight-first) ────────────────────────────────────────────
   /** Selection key. Per LEG, so the outbound and return can be ticked apart. */
   const selKey = (legKey: string, batchId: string) => `${legKey}::${batchId}`;
@@ -1416,8 +1511,11 @@ export default function PackagingPage() {
    * flights therefore reports its most recent flight on the batch; the per-flight
    * truth lives in the allocations, which Dispatch also reads.
    */
-  const markPackaged = (list: PackagingAllocation[]) => {
-    if (list.length === 0) { toast.error("No labels to print."); return; }
+  const markPackaged = (list: PackagingAllocation[], via: "scan" | "direct" = "scan") => {
+    if (list.length === 0) {
+      toast.error(via === "direct" ? "Nothing selected to mark done." : "No labels to print.");
+      return;
+    }
     const now = new Date().toISOString().slice(0, 16).replace("T", " ");
     const ids = new Set(list.map((a) => a.id));
     const nextAllocations = allocations.map((a) => (ids.has(a.id)
@@ -1462,7 +1560,11 @@ export default function PackagingPage() {
         );
       }
     }
-    toast.success(`${ids.size} label${ids.size === 1 ? "" : "s"} scanned — Packaging Done, ready for dispatch.`);
+    toast.success(
+      via === "direct"
+        ? `${ids.size} batch${ids.size === 1 ? "" : "es"} marked Packaging Done — ready for dispatch.`
+        : `${ids.size} label${ids.size === 1 ? "" : "s"} scanned — Packaging Done, ready for dispatch.`,
+    );
   };
 
   // Printing is REPEATABLE and does not change status — reprint as many copies as
@@ -1496,7 +1598,9 @@ export default function PackagingPage() {
     <>
       <PageHeader
         title="Packaging"
-        subtitle="Packaging runs you have created — start one with New Packaging from a flight number, then print & scan its labels here"
+        subtitle={printScan
+          ? "Packaging runs you have created — start one with New Packaging from a flight number, then print & scan its labels here"
+          : "Packaging runs you have created — start one with New Packaging from a flight number, then select batches and mark them Packaging Done"}
         actions={
           <Button onClick={() => openNewPackaging()}>
             <Plus className="h-4 w-4 mr-1.5" /> New Packaging
@@ -1558,6 +1662,24 @@ export default function PackagingPage() {
             Clear
           </button>
         )}
+        <div className="ml-auto self-end">
+          <ListExportActions
+            table={() => ({
+              title: "Packaging Runs",
+              fileName: `packaging-${dateFrom || "all"}${dateTo && dateTo !== dateFrom ? `_to_${dateTo}` : ""}`,
+              meta: filterMeta([
+                ["Dates", (dateFrom || dateTo) && `${dateFrom || "…"} → ${dateTo || "…"}`],
+                ["Status", filterStatus !== "all" && filterStatus],
+                ["Search", searchText.trim() || false],
+              ]),
+              columns: ["Packaging ID", "Production ID", "Item", "Special Meal", "Flight", "Order", "Qty", "Date", "Status"],
+              numericCols: [6],
+              rows: rows.map((a) => [
+                a.packagingId, a.productionId, a.item, a.setCode ?? "", a.flight, a.orderNo ?? "", a.qty, a.date, a.status,
+              ]),
+            })}
+          />
+        </div>
       </div>
 
       {/* Selection bar — what the checkbox column is for, with its actions in
@@ -1571,9 +1693,20 @@ export default function PackagingPage() {
             <Button size="sm" variant="ghost" className="h-8 text-xs text-muted-foreground" onClick={() => setSelectedIds(new Set())}>
               Clear
             </Button>
-            <Button size="sm" className="h-8 text-xs" onClick={printSelectedLabels}>
-              <Printer className="h-3.5 w-3.5 mr-1" /> Print Labels ({selectedIds.size})
-            </Button>
+            {printScan ? (
+              <Button size="sm" className="h-8 text-xs" onClick={printSelectedLabels}>
+                <Printer className="h-3.5 w-3.5 mr-1" /> Print Labels ({selectedIds.size})
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                className="h-8 text-xs"
+                onClick={markSelectedDone}
+                title="Label print & scan is disabled in Configuration — completes the selected batches directly"
+              >
+                <PackageCheck className="h-3.5 w-3.5 mr-1" /> Mark Packaging Done ({selectedIds.size})
+              </Button>
+            )}
           </div>
         </div>
       )}
@@ -1588,8 +1721,10 @@ export default function PackagingPage() {
                   indeterminate={selectedIds.size > 0}
                   disabled={labelableRows.length === 0}
                   onChange={toggleSelectAll}
-                  label="Select all batches awaiting labels"
-                  title={labelableRows.length === 0 ? "No batches awaiting labels" : "Select all batches awaiting labels"}
+                  label={printScan ? "Select all batches awaiting labels" : "Select all batches awaiting completion"}
+                  title={labelableRows.length === 0
+                    ? (printScan ? "No batches awaiting labels" : "No batches awaiting completion")
+                    : (printScan ? "Select all batches awaiting labels" : "Select all batches awaiting completion")}
                 />
               </TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Packaging ID</TableHead>
@@ -1723,7 +1858,7 @@ export default function PackagingPage() {
                               <Truck className="h-3.5 w-3.5 mr-1" /> Dispatch
                             </Button>
                           )}
-                          {inProgressInGroup.length > 0 && (
+                          {inProgressInGroup.length > 0 && (printScan ? (
                             <Button
                               size="sm"
                               variant="outline"
@@ -1733,7 +1868,17 @@ export default function PackagingPage() {
                             >
                               <Printer className="h-3.5 w-3.5 mr-1" /> Print Labels ({inProgressInGroup.length})
                             </Button>
-                          )}
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 px-2.5 text-xs"
+                              onClick={() => markDoneDirect(inProgressInGroup)}
+                              title="Mark this flight's in-packaging batches Packaging Done (label print & scan is disabled in Configuration)"
+                            >
+                              <PackageCheck className="h-3.5 w-3.5 mr-1" /> Mark Done ({inProgressInGroup.length})
+                            </Button>
+                          ))}
                           <Button
                             size="sm"
                             variant="ghost"
@@ -1763,12 +1908,12 @@ export default function PackagingPage() {
                         onChange={() => toggleSelectOne(a.id)}
                         label={`Select ${a.productionId}`}
                         title={isLabelable(a)
-                          ? `Select ${a.productionId} to print its label`
+                          ? (printScan ? `Select ${a.productionId} to print its label` : `Select ${a.productionId} to mark it Packaging Done`)
                           : isAwaitingApproval(a)
-                            ? `${a.productionId} is awaiting packaging approval — approve it in Approval Management before printing labels`
+                            ? `${a.productionId} is awaiting packaging approval — approve it in Approval Management before ${printScan ? "printing labels" : "completing packaging"}`
                             : a.status === "Rejected"
                               ? `${a.productionId} was rejected at packaging approval${a.rejectedReason ? ` — ${a.rejectedReason}` : ""}`
-                              : `${a.productionId} is ${a.status} — its labels are already printed`}
+                              : `${a.productionId} is ${a.status} — packaging is already complete`}
                       />
                     </TableCell>
                     {/* Packaging ID — system-generated per production package */}
@@ -1846,7 +1991,7 @@ export default function PackagingPage() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="inline-flex items-center gap-1.5">
-                        {a.status === "In Packaging" && (
+                        {a.status === "In Packaging" && (printScan ? (
                           <Button
                             size="icon"
                             className="h-7 w-7"
@@ -1856,7 +2001,17 @@ export default function PackagingPage() {
                           >
                             <Printer className="h-3.5 w-3.5" />
                           </Button>
-                        )}
+                        ) : (
+                          <Button
+                            size="icon"
+                            className="h-7 w-7"
+                            title="Mark Packaging Done (label print & scan is disabled in Configuration)"
+                            aria-label={`Mark ${a.productionId} Packaging Done`}
+                            onClick={() => markDoneDirect([a])}
+                          >
+                            <PackageCheck className="h-3.5 w-3.5" />
+                          </Button>
+                        ))}
                         <Button
                           variant="outline"
                           size="icon"
@@ -2224,9 +2379,10 @@ export default function PackagingPage() {
                           <td className="p-2 font-medium">
                             {m.code ? (
                               <>
-                                <span className="inline-flex items-center gap-1.5">
+                                <span className="inline-flex flex-wrap items-center gap-1.5">
                                   <Layers className="h-3.5 w-3.5 shrink-0 text-fuchsia-600" />
                                   {m.name}
+                                  <AudiencePills audience={m.audience} />
                                 </span>
                                 {/* An assembled meal is only as ready as its
                                     dishes — name the ones still to cook. */}
@@ -2239,7 +2395,12 @@ export default function PackagingPage() {
                                   ))}
                                 </span>
                               </>
-                            ) : m.name}
+                            ) : (
+                              <span className="inline-flex flex-wrap items-center gap-1.5">
+                                {m.name}
+                                <AudiencePills audience={m.audience} />
+                              </span>
+                            )}
                           </td>
                           <td className="p-2">
                             {m.produced ? (
@@ -2279,19 +2440,36 @@ export default function PackagingPage() {
                   </table>
                 </div>
 
+                {/* A flight with no crew rows says WHY, so "where is the crew
+                    meal?" is answered on the spot instead of looking like a gap. */}
+                {!rd.meals.some((m) => m.audience?.includes("Crew")) && (
+                  <p className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-600">
+                    {!rd.hasCrewCard
+                      ? "No crew meals — the menu configuration has no Crew card for this day & flight type."
+                      : rd.crewCount <= 0
+                        ? "No crew meals — a Crew menu is configured for this day, but this order books no crew count."
+                        : "No crew meals — the day's Crew menu could not be sized against this order."}
+                  </p>
+                )}
+
                 {/* What is outstanding, as chips rather than one long comma run —
                     a 30-meal plan produced an unreadable paragraph, and the two
                     states (waiting on production vs ready to package) were run
                     together in it. Split, so each list is actionable on its own. */}
                 {rd.notPackaged.length > 0 && (() => {
                   const readyToPackage = rd.notPackaged.filter((m) => m.produced);
-                  const chip = (m: { name: string; code?: string }, tone: string) => (
+                  const chip = (m: { name: string; code?: string; audience?: ForType[] }, tone: string) => (
                     <span
                       key={m.name}
                       className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium whitespace-nowrap", tone)}
                     >
                       {m.code && <Layers className="h-2.5 w-2.5 shrink-0" />}
                       {m.name}
+                      {(m.audience?.length ?? 0) > 0 && (
+                        <span className="font-normal opacity-70">
+                          · {m.audience!.map((a) => (a === "Passengers" ? "Pax" : "Crew")).join(" + ")}
+                        </span>
+                      )}
                     </span>
                   );
                   return (
@@ -2337,7 +2515,7 @@ export default function PackagingPage() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2"><Plane className="h-4 w-4" /> New Packaging</DialogTitle>
             <DialogDescription>
-              Choose a flight from Order Management — its order details and everything produced for it load below. Starting queues the ticked lines onto the packaging list, where the labels are printed &amp; scanned.
+              Choose a flight from Order Management — its order details and everything produced for it load below. Starting queues the ticked lines onto the packaging list, where {printScan ? "the labels are printed & scanned" : "they are marked Packaging Done"}.
             </DialogDescription>
           </DialogHeader>
 
@@ -2986,8 +3164,8 @@ export default function PackagingPage() {
                       const meals = j.sets.reduce((s, l) => s + l.qty, 0);
                       return `${j.leg.flight} ${j.lines.reduce((s, l) => s + l.qty, 0).toLocaleString()} portions (${j.lines.length} run${j.lines.length === 1 ? "" : "s"})${meals > 0 ? ` + ${meals} special meal${meals === 1 ? "" : "s"}` : ""}`;
                     })
-                    .join(" and ")} — print & scan the labels from the list.`
-                : "Starting adds the ticked lines to the packaging list — each special-meal set becomes ONE package. Print & scan the labels from there."}
+                    .join(" and ")} — ${printScan ? "print & scan the labels" : "mark them Packaging Done"} from the list.`
+                : `Starting adds the ticked lines to the packaging list — each special-meal set becomes ONE package. ${printScan ? "Print & scan the labels" : "Mark them Packaging Done"} from there.`}
             </p>
             <Button variant="outline" onClick={() => setNewOpen(false)}>Cancel</Button>
             <Button onClick={startNewPackaging} disabled={!newOption || newEligibleCount === 0}>

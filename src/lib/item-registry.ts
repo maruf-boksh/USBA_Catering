@@ -86,7 +86,17 @@ export function ensureProductionItemRegistered(input: RegisterItemInput): ItemMa
   const existing = resolveItemMaster(input.name, input.code);
   if (existing) return existing;
 
-  const name = input.name.trim();
+  // A blank name must never be registered — it creates a nameless Stock
+  // Overview row that then absorbs every stock posting keyed by "".
+  // Fall back to the code as the display name; with neither, register nothing.
+  const name = (input.name ?? "").trim() || (input.code ?? "").trim();
+  if (!name) {
+    return {
+      id: "ITM-UNNAMED", code: "FG-UNNAMED", name: "(unnamed item)",
+      itemType: "Finished Good", category: "Meal", subCategory: "Fresh",
+      uom: input.uom || "Piece", status: "Inactive",
+    } as ItemMaster;
+  }
   const slug = name.toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 16) || "ITEM";
   const code = (input.code && input.code.trim()) || `FG-${slug}`;
   const uom = input.uom || "Piece";
