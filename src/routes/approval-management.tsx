@@ -56,7 +56,7 @@ import { applyReceiptToPR } from "@/lib/purchase-requisitions";
 import { getRfqs, setRfqStatus } from "@/lib/rfqs";
 import { getPurchaseRequisitions, setPurchaseRequisitionStatus } from "@/lib/purchase-requisitions";
 import { getQuotations, setQuotationStatus } from "@/lib/quotations";
-import { getStockAdjustments, setStockAdjustmentStatus, addAdjustment, reduceInventoryStock, applyInventoryStock } from "@/lib/stock-adjustments";
+import { getStockAdjustments, setStockAdjustmentStatus, addAdjustment, reduceInventoryStock, applyInventoryStock, disposeStock } from "@/lib/stock-adjustments";
 import { logAudit } from "@/lib/audit-log";
 import { resolveProductionItem } from "@/lib/meal-recipe";
 import { useRole } from "@/lib/roles";
@@ -2116,7 +2116,12 @@ export default function ApprovalManagementPage() {
               label: "Wastage Disposal",
             }]);
           }
-          reduceInventoryStock(entry.stockItemName, entry.disposalQty);
+          // Write-off, not a plain decrement: a disposal is what a QC hold exists
+          // to lead to, so it consumes HELD stock first and releases that hold as
+          // it goes. Decrementing on-hand alone would leave the item short — 70
+          // on hand with 10 held, dispose the bad 10, and a naive decrement gives
+          // 60 on hand still carrying a 10 hold, so only 50 usable.
+          disposeStock(entry.stockItemName, entry.disposalQty);
           const allAdj = getStockAdjustments();
           let adjSeq = allAdj.length + 1;
           addAdjustment({

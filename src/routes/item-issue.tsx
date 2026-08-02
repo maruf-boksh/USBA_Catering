@@ -21,7 +21,7 @@ import {
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { toast } from "sonner";
 import { inventory, allocateFefo, type FefoAllocation } from "@/lib/sample-data";
-import { getItemStockByWarehouse, getItemStock } from "@/lib/inventory-stock";
+import { getItemAvailableByWarehouse, getItemStock, getItemBlocked } from "@/lib/inventory-stock";
 import { roundQty } from "@/lib/num";
 import { applyInventoryStock } from "@/lib/stock-adjustments";
 import { logAudit } from "@/lib/audit-log";
@@ -791,10 +791,18 @@ function CreateIssueDialog({
   const requestedFor = (itemId: string): number =>
     selectedDemand?.items.find((i) => i.id === itemId)?.qty ?? 0;
 
-  // Stock available for an item in the currently-selected source warehouse.
-  // Issuing draws from this warehouse, so the table reflects its on-hand only.
+  // Stock issuable for an item in the currently-selected source warehouse.
+  // Issuing draws from this warehouse, so the table reflects its holding only —
+  // and AVAILABLE rather than on-hand, so quantity held for QC (produced but not
+  // signed off, or QC-failed and awaiting disposal) cannot be issued out.
   const availableIn = (itemName: string): number =>
-    getItemStockByWarehouse(itemName).find((w) => w.warehouseId === warehouseId)?.stock ?? 0;
+    getItemAvailableByWarehouse(itemName).find((w) => w.warehouseId === warehouseId)?.stock ?? 0;
+
+  /** Quantity held for QC at the selected warehouse — shown so a short issue is explained. */
+  const heldIn = (itemName: string): number => {
+    if (warehouseId !== "WH-001") return 0; // holds sit on the primary row
+    return getItemBlocked(itemName);
+  };
 
   const setIssued = (id: string, value: string) => {
     setIssuedMap((prev) => ({ ...prev, [id]: value }));
@@ -860,13 +868,14 @@ function CreateIssueDialog({
   // Computed across ALL rows so the UI can flag them together (not one-by-one).
   const stockErrors = useMemo(() => {
     const ids = selectedDemand ? selectedDemand.items.map((i) => i.id) : manualIds;
-    const errs: { id: string; name: string; avail: number; uom: string; issued: number }[] = [];
+    const errs: { id: string; name: string; avail: number; held: number; uom: string; issued: number }[] = [];
     for (const id of ids) {
       const iss = Number(issuedMap[id] ?? 0);
       if (iss <= 0) continue;
       const invItem = inventory.find((i) => i.id === id);
       const avail = invItem ? availableIn(invItem.name) : 0;
-      if (iss > avail) errs.push({ id, name: invItem?.name ?? id, avail, uom: invItem?.uom ?? "", issued: iss });
+      const held = invItem ? heldIn(invItem.name) : 0;
+      if (iss > avail) errs.push({ id, name: invItem?.name ?? id, avail, held, uom: invItem?.uom ?? "", issued: iss });
     }
     return errs;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -886,7 +895,8 @@ function CreateIssueDialog({
       const first = stockErrors[0];
       toast.error(
         stockErrors.length === 1
-          ? `${first.name}: only ${first.avail} ${first.uom} in stock at the selected warehouse — cannot issue ${first.issued}.`
+          ? `${first.name}: only ${first.avail} ${first.uom} issuable at the selected warehouse — cannot issue ${first.issued}.`
+            + (first.held > 0 ? ` A further ${first.held} ${first.uom} is on hand but held for QC.` : "")
           : `${stockErrors.length} items exceed available stock at the selected warehouse — reduce the highlighted quantities.`,
       );
       return;
@@ -1089,6 +1099,7 @@ function CreateIssueDialog({
                   const remaining = roundQty(Math.max(0, reqN - issN));
                   const over = issN > reqN && reqN > 0;
                   const avail = availableIn(inv.name);
+                  const held = heldIn(inv.name);
                   const lowStock = issN > 0 && issN > avail;
                   const inDemand = reqN > 0;
                   // Only allocate when the selected warehouse actually holds stock.
@@ -1105,6 +1116,14 @@ function CreateIssueDialog({
                         <span className={lowStock ? "text-destructive font-semibold" : ""}>
                           {avail}
                         </span>
+                        {held > 0 && (
+                          <div
+                            className="text-[10px] text-warning font-medium"
+                            title="On hand but held for QC — not issuable until it passes or is disposed"
+                          >
+                            +{held} held
+                          </div>
+                        )}
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums">
                         <span className={inDemand ? "font-semibold text-foreground" : "text-muted-foreground"}>
@@ -1123,7 +1142,7 @@ function CreateIssueDialog({
                         />
                         {lowStock && (
                           <div className="text-[10px] text-destructive mt-0.5">
-                            Only {avail} {inv.uom} in stock
+                            Only {avail} {inv.uom} issuable{held > 0 ? ` · ${held} held for QC` : ""}
                           </div>
                         )}
                       </td>

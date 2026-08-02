@@ -1,4 +1,5 @@
 ﻿import { GALLEY_STOCK_DEFS } from "@/lib/galley-catalog";
+import { findInventoryRow, lotIsBlocked, type LotStatus } from "@/lib/inventory-store";
 
 export const flights = [
   { id: "BS-101", flight: "BS-101", sector: "DAC-CGP", aircraft: "ATR 72-600", dep: "08:30", arr: "09:30", pax: 68, adult: 60, child: 6, infant: 2, crew: 4, type: "Domestic", window: "Breakfast", duration: "1h 0m", status: "Scheduled" },
@@ -27,6 +28,15 @@ export type BatchLot = {
   receivedOn: string;
   /** Bin / rack / shelf location inside the warehouse. */
   binLocation?: string;
+  /**
+   * Held-for-QC state. Absent means Unrestricted, so every lot that predates
+   * this field stays consumable. A Blocked lot still counts as on-hand stock
+   * and still carries value — it is simply not allocatable. See
+   * lib/inventory-store.ts.
+   */
+  status?: LotStatus;
+  blockedReason?: string;
+  blockedAt?: string;
 };
 
 /** Allocation method: FEFO uses expiry, FIFO uses receipt date. */
@@ -37,6 +47,7 @@ export type InventoryItem = {
   name: string;
   category: string;
   uom: string;
+  /** ON HAND — includes anything held for QC. Availability is stock − blocked. */
   stock: number;
   reorder: number;
   batch: string;
@@ -44,6 +55,13 @@ export type InventoryItem = {
   storage: string;
   status: "OK" | "Low" | "Critical";
   batches: BatchLot[];
+  /**
+   * Held quantity for SINGLE (non-batch) items, which have no lot to flag. It
+   * holds a quantity, not an identity — nothing records which units are bad, so
+   * the store has to segregate them physically.
+   */
+  blockedQty?: number;
+  blockedReason?: string;
 };
 
 /** Build an inventory row from a list of batches; derives stock + earliest-expiry fields. */
@@ -270,12 +288,29 @@ export function toPrimaryQtyByName(itemName: string, qty: number, uom: string): 
   return toPrimaryQty(master.id, qty, uom);
 }
 
-/** Batches sorted by the item's allocation method (FEFO = expiry asc, FIFO = receivedOn asc). */
+/**
+ * Every lot on an item, live: the persisted stock master if it has been written,
+ * else the seed. Lots produced or received at runtime only exist in the former.
+ */
+export function getAllBatches(itemId: string): BatchLot[] {
+  const persisted = findInventoryRow(itemId);
+  if (persisted) return (persisted.batches ?? []) as BatchLot[];
+  return inventory.find((i) => i.id === itemId)?.batches ?? [];
+}
+
+/**
+ * Batches sorted by the item's allocation method (FEFO = expiry asc, FIFO =
+ * receivedOn asc), holding back anything blocked for QC.
+ *
+ * Filtering here is what makes the hold real for costing and issuing — both draw
+ * through `allocate()`, so a blocked lot that stayed in this list would be
+ * picked first whenever it was the oldest.
+ */
 export function getOrderedBatches(itemId: string, method?: AllocationMethod): BatchLot[] {
-  const item = inventory.find((i) => i.id === itemId);
-  if (!item) return [];
+  const all = getAllBatches(itemId);
+  if (all.length === 0) return [];
   const m = method ?? getAllocationMethod(itemId);
-  const sorted = item.batches.filter((b) => b.qty > 0).slice();
+  const sorted = all.filter((b) => b.qty > 0 && !lotIsBlocked(b)).slice();
   if (m === "FIFO") {
     sorted.sort((a, b) => a.receivedOn.localeCompare(b.receivedOn));
   } else {

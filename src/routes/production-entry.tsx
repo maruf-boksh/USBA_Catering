@@ -33,6 +33,7 @@ import {
   type FlightOrderRow, type MealSlot, type ItemMaster, type InventoryItem,
 } from "@/lib/sample-data";
 import { getItemStock } from "@/lib/inventory-stock";
+import { disposeStock, clearPostedProductionStock } from "@/lib/stock-adjustments";
 import { roundQty } from "@/lib/num";
 import { logAudit } from "@/lib/audit-log";
 import { useOrderSummaryAdjustments, approvedDeltaFor, type FlightTypeScope } from "@/lib/order-summary-adjustments";
@@ -446,8 +447,9 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
                     // the failed batch AND the re-cooked one. Wastage disposal is
                     // the other exit; it posts its own OUT on Final Approval.
                     if (entry.inventoryAdded && entry.producedQty > 0) {
+                      const item = entry.outputItemName ?? entry.bom;
                       applyStockDeltas([{
-                        itemId: entry.outputItemName ?? entry.bom,
+                        itemId: item,
                         delta: -entry.producedQty,
                         date: new Date().toISOString().slice(0, 10),
                         reference: entry.id,
@@ -455,6 +457,11 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
                         warehouseId: entry.warehouseId,
                         label: "Re-Cook Withdrawal",
                       }]);
+                      // The stock master needs the same withdrawal, releasing the
+                      // QC hold with it — the ledger delta alone left the failed
+                      // batch sitting in Stock Overview until it was disposed.
+                      disposeStock(item, entry.producedQty, entry.batchNo?.trim() || entry.id);
+                      clearPostedProductionStock(entry.id);
                     }
                     updateProductionEntryStatus(entry.id, "Pending", {
                       producedQty: 0,

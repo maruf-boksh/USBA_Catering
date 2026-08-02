@@ -10,7 +10,7 @@ import { updateFlightOrdersWhere, getFlightOrders } from "@/lib/flight-orders-st
 import { servedOrderNosFor } from "@/lib/production-order-link";
 import { resolveItemMaster, isItemBatchTracked } from "@/lib/item-registry";
 import {
-  addInventoryBatchLot, applyInventoryStock,
+  addInventoryBatchLot, applyInventoryStock, blockStock, releaseStock,
   hasPostedProductionStock, markPostedProductionStock,
 } from "@/lib/stock-adjustments";
 
@@ -612,19 +612,7 @@ const WorkflowContext = createContext<WorkflowCtx>({
   maintenanceApprovals: [], addMaintenanceApproval: () => {}, updateMaintenanceApproval: () => {},
 });
 
-/**
- * Post a produced item's quantity to Stock Overview, once per production run.
- *
- *   • Batch-tracked output → append a lot (batch no + expiry) to the item's batch
- *     ladder and bump its stock. The batch no / expiry come from the Production
- *     Entry (auto-generated or typed); they fall back to the run id + shelf-life
- *     projection when not supplied.
- *   • Non-batch output → bump the pooled stock only (no lot).
- *
- * Idempotent by production-order id so firing at both Ready for QC and Completed
- * (and any re-fire) posts exactly once. No-op for unknown masters or zero qty.
- */
-function postProducedBatchLot(entry: {
+type ProducedEntry = {
   id: string;
   bom: string;
   outputItemName?: string;
@@ -634,17 +622,43 @@ function postProducedBatchLot(entry: {
   date?: string;
   batchNo?: string;
   batchExpiry?: string;
-}): void {
+};
+
+/** The lot number a run posts under — typed batch no, else the run id. */
+const producedBatchNo = (entry: ProducedEntry) => entry.batchNo?.trim() || entry.id;
+
+/**
+ * Post a produced item's quantity to Stock Overview, once per production run.
+ *
+ *   • Batch-tracked output → append a lot (batch no + expiry) to the item's batch
+ *     ladder and bump its stock. The batch no / expiry come from the Production
+ *     Entry (auto-generated or typed); they fall back to the run id + shelf-life
+ *     projection when not supplied.
+ *   • Non-batch output → bump the pooled stock only (no lot).
+ *
+ * The quantity is posted HELD, because this fires at Ready for QC — before the
+ * sensory check has said anything. The food exists and must be on the books
+ * (yield, cost, recall), but nothing may consume it until QC signs off, which
+ * is what `releaseProducedStock` below does. Posting it as plain available
+ * stock is what previously let a batch be issued while its QC was still open,
+ * and let a FAILED batch stay issuable afterwards.
+ *
+ * Idempotent by production-order id so firing at both Ready for QC and Completed
+ * (and any re-fire) posts exactly once. No-op for unknown masters or zero qty.
+ */
+function postProducedBatchLot(entry: ProducedEntry): void {
   const name = (entry.outputItemName ?? entry.bom) || "";
-  const code = entry.outputItemCode;
-  const master = resolveItemMaster(name, code);
+  const master = resolveItemMaster(name, entry.outputItemCode);
   const qty = entry.producedQty;
   if (!master || qty <= 0) return;
   if (hasPostedProductionStock(entry.id)) return;
 
+  const reason = `Awaiting QC — ${entry.id}`;
+
   if (!isItemBatchTracked(master)) {
-    // Single-bucket item — no lot, just add to the pooled on-hand stock.
+    // Single-bucket item — no lot to flag, so the hold is a quantity only.
     applyInventoryStock(master.name, qty);
+    blockStock(master.name, qty, { reason });
     markPostedProductionStock(entry.id);
     return;
   }
@@ -656,13 +670,42 @@ function postProducedBatchLot(entry: {
     : master.subCategory === "Fresh" ? 3 : master.subCategory === "Frozen" ? 90 : 30;
   const iso = (d: Date) => d.toISOString().slice(0, 10);
   addInventoryBatchLot(master.name, {
-    batchNo: entry.batchNo?.trim() || entry.id,
+    batchNo: producedBatchNo(entry),
     qty,
     expiry: entry.batchExpiry || iso(new Date(base.getTime() + shelf * 86400000)),
     costPrice: master.costPrice ?? 0,
     receivedOn: baseDate || iso(base),
+    status: "Blocked",
+    blockedReason: reason,
   });
   markPostedProductionStock(entry.id);
+}
+
+/**
+ * QC signed the run off — release its hold so the goods become issuable. This is
+ * the moment stock genuinely becomes available; everything before it is on the
+ * books but unusable.
+ */
+function releaseProducedStock(entry: ProducedEntry): void {
+  const master = resolveItemMaster((entry.outputItemName ?? entry.bom) || "", entry.outputItemCode);
+  if (!master || entry.producedQty <= 0) return;
+  releaseStock(master.name, entry.producedQty, {
+    batchNo: isItemBatchTracked(master) ? producedBatchNo(entry) : undefined,
+  });
+}
+
+/**
+ * QC failed the run. The stock stays held — it was already posted that way at
+ * Ready for QC — but the reason is restated so Stock Overview shows why, and so
+ * a hold awaiting inspection is never confused with one that has been rejected.
+ */
+function markProducedStockFailed(entry: ProducedEntry): void {
+  const master = resolveItemMaster((entry.outputItemName ?? entry.bom) || "", entry.outputItemCode);
+  if (!master || entry.producedQty <= 0) return;
+  blockStock(master.name, entry.producedQty, {
+    batchNo: isItemBatchTracked(master) ? producedBatchNo(entry) : undefined,
+    reason: `QC Failed — ${entry.id}`,
+  });
 }
 
 // ── Provider ───────────────────────────────────────────────────────────────────
@@ -1091,8 +1134,14 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         // (Completed), record its produced quantity as a batch lot on the Stock
         // Overview so its batch records are maintained there. Idempotent by
         // production-order id, so firing at both points never double-posts.
-        if ((status === "Ready for QC" || status === "Completed") && entry) {
-          postProducedBatchLot({
+        //
+        // The QC gate is applied on top of that posting: the quantity goes on the
+        // books HELD and only a pass releases it. So the three outcomes are
+        //   Ready for QC → on the books, not issuable
+        //   Completed    → released, issuable
+        //   Re-Cook      → still held, now labelled as failed
+        if ((status === "Ready for QC" || status === "Completed" || status === "Re-Cook") && entry) {
+          const produced = {
             ...entry,
             outputItemName: extra?.outputItemName ?? entry.outputItemName,
             outputItemCode: extra?.outputItemCode ?? entry.outputItemCode,
@@ -1100,7 +1149,12 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
             completedAt: extra?.completedAt ?? entry.completedAt,
             batchNo: extra?.batchNo ?? entry.batchNo,
             batchExpiry: extra?.batchExpiry ?? entry.batchExpiry,
-          });
+          };
+          // Re-Cook can only follow a posting, so it never needs to post itself —
+          // posting there would re-add stock that QC has just rejected.
+          if (status !== "Re-Cook") postProducedBatchLot(produced);
+          if (status === "Completed") releaseProducedStock(produced);
+          if (status === "Re-Cook") markProducedStockFailed(produced);
         }
       },
 

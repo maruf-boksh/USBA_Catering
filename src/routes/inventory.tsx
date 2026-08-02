@@ -7,7 +7,7 @@ import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Boxes, AlertTriangle, Eye, FileText, CalendarDays, Layers } from "lucide-react";
+import { Boxes, AlertTriangle, Eye, FileText, CalendarDays, Layers, Lock } from "lucide-react";
 import { Select as AntSelect, Button as AntButton } from "antd";
 import { AppstoreOutlined, TagsOutlined, CloseOutlined, ProfileOutlined } from "@ant-design/icons";
 import { toast } from "sonner";
@@ -32,7 +32,8 @@ import {
 } from "@/components/ui/dialog";
 import { useArrivalFlash, peekArrivalRows } from "@/lib/arrival-flash";
 import { useWorkflow, type StockDelta } from "@/lib/workflow-store";
-import { getStockAdjustments } from "@/lib/stock-adjustments";
+import { getStockAdjustments, blockedOf, lotIsBlocked } from "@/lib/stock-adjustments";
+import { roundQty } from "@/lib/num";
 import { getItemProfiles } from "@/lib/item-profiles";
 import { buildItemLedger, itemMovementTotals, itemLedgerSummary, type LedgerSources, type LedgerRange, type RawMovement } from "@/lib/stock-ledger";
 import { weightedAvg, poUnitPrice, blendedOutCost, movingAverage } from "@/lib/item-cost";
@@ -406,6 +407,18 @@ export default function Inventory() {
   const criticalCount = statusPool.filter((i) => i.status === "Critical").length;
   const okCount = statusPool.filter((i) => i.status === "OK").length;
 
+  // Stock on the books that nothing may consume — produced but not yet QC-signed
+  // off, or QC-failed and awaiting disposal or re-cook.
+  const heldSummary = useMemo(() => {
+    let itemsHeld = 0;
+    let qty = 0;
+    for (const i of items) {
+      const held = blockedOf(i);
+      if (held > 0) { itemsHeld += 1; qty = roundQty(qty + held); }
+    }
+    return { items: itemsHeld, qty };
+  }, [items]);
+
   // Unified stock-movement ledger. Every flow that touches an item feeds the
   // In/Out columns and the per-item "Item Details" drill-down:
   //   • Purchases   → accepted GRN lines        (workflow-store grns)
@@ -582,6 +595,10 @@ export default function Inventory() {
       render: (r) => <StockCell item={r} onClick={() => openBatches(r)} />,
     },
     {
+      key: "blockedQty" as keyof Item, header: "Held (QC)",
+      render: (r) => <BlockedCell item={r} onClick={() => openBatches(r)} />,
+    },
+    {
       key: "id" as keyof Item, header: "Opening Qty",
       render: (r) => {
         const { opening } = ledgerSummaryFor(r);
@@ -676,10 +693,17 @@ export default function Inventory() {
         subtitle="Unified store — kitchen stock plus airline consumables (filter Item Type: Airline Consumable), with reorder levels, valuation and status"
       />
 
-      <div className="grid grid-cols-1 sm:grid-cols-5 gap-4 mb-6">
+      <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
         <KpiCard label="Total Items" value={1248} icon={Boxes} tone="navy" />
         <KpiCard label="Low Stock" value={lowStockCount} icon={AlertTriangle} tone="warning" />
         <KpiCard label="Critical" value={criticalCount} icon={AlertTriangle} tone="red" />
+        <KpiCard
+          label="Held for QC"
+          value={heldSummary.items}
+          sub={heldSummary.items > 0 ? `${heldSummary.qty.toLocaleString()} units not issuable` : "nothing held"}
+          icon={Lock}
+          tone={heldSummary.items > 0 ? "warning" : "navy"}
+        />
         <KpiCard
           label="Near Expiry (30d)"
           value={nearExpiryCount(items, 30)}
@@ -1151,6 +1175,17 @@ export default function Inventory() {
                   <div className="text-sm mt-0.5 tabular-nums">{selected.reorder.toLocaleString()} {selected.uom}</div>
                 </div>
                 <div>
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Held for QC</div>
+                  <div className={cn(
+                    "text-sm mt-0.5 tabular-nums",
+                    blockedOf(selected) > 0 ? "font-semibold text-amber-600" : "text-muted-foreground",
+                  )}>
+                    {blockedOf(selected) > 0
+                      ? `${blockedOf(selected).toLocaleString()} ${selected.uom}`
+                      : "—"}
+                  </div>
+                </div>
+                <div>
                   <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Status</div>
                   <div className="mt-0.5"><StatusBadge status={selected.status} /></div>
                 </div>
@@ -1163,14 +1198,27 @@ export default function Inventory() {
                   method={getAllocationMethod(selected.id)}
                 />
               ) : (
-                <div className="rounded-md border border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground">
-                  <div className="font-semibold text-foreground mb-0.5">Single Item Stock</div>
-                  This item is not batch-tracked. Stock is held as one pooled bucket of{" "}
-                  <span className="font-semibold text-foreground tabular-nums">
-                    {selected.stock.toLocaleString()} {selected.uom}
-                  </span>{" "}
-                  — no batch numbers, no expiry, no FIFO/FEFO ordering.
+                <div className="rounded-md border border-border bg-muted/30 px-3 py-3 text-xs text-muted-foreground space-y-2">
+                  <div>
+                    <div className="font-semibold text-foreground mb-0.5">Single Item Stock</div>
+                    This item is not batch-tracked. Stock is held as one pooled bucket of{" "}
+                    <span className="font-semibold text-foreground tabular-nums">
+                      {selected.stock.toLocaleString()} {selected.uom}
+                    </span>{" "}
+                    — no batch numbers, no expiry, no FIFO/FEFO ordering.
+                  </div>
+                  <QuantityHoldNote item={selected} />
                 </div>
+              )}
+
+              {/* A hold with no lot behind it can also occur on a batch-tracked
+                  item — legacy stock carrying no lots, or a producer that posted
+                  a quantity without one. The ladder has nothing to flag in that
+                  case, so the hold would otherwise go unexplained. */}
+              {isBatchTrackedForInventory(selected.id)
+                && blockedOf(selected) > 0
+                && !(selected.batches ?? []).some(lotIsBlocked) && (
+                <QuantityHoldNote item={selected} />
               )}
             </div>
           )}
@@ -1251,7 +1299,12 @@ function StockCell({ item, onClick }: { item: Item; onClick: () => void }) {
   // holdings come from the aggregation helper.
   const others = getItemStockByWarehouse(item.name).slice(1); // beyond primary
   const total = item.stock + others.reduce((s, w) => s + w.stock, 0);
-  const low = total < item.reorder;
+  // On-hand includes anything held for QC, so the reorder comparison has to run
+  // on what is usable — otherwise an item whose stock is entirely blocked reads
+  // as healthy and never triggers a reorder.
+  const held = blockedOf(item);
+  const usable = roundQty(Math.max(0, total - held));
+  const low = usable < item.reorder;
 
   return (
     <button
@@ -1267,6 +1320,68 @@ function StockCell({ item, onClick }: { item: Item; onClick: () => void }) {
         low && "text-destructive",
       )}>
         {total.toLocaleString()}
+      </span>
+      {held > 0 && (
+        <span className="text-[10px] font-medium text-amber-600 tabular-nums">
+          {usable.toLocaleString()} usable
+        </span>
+      )}
+    </button>
+  );
+}
+
+/**
+ * The note shown when stock is held as a QUANTITY with no lot behind it — the
+ * only shape a hold can take on a single item, and the fallback shape on a
+ * batch-tracked one that has no lots to flag.
+ *
+ * It says plainly what the system cannot do, because the gap is operational, not
+ * cosmetic: nothing records which units are affected, so unless the store
+ * segregates them physically the hold is only a number on a screen.
+ */
+function QuantityHoldNote({ item }: { item: Item }) {
+  const held = blockedOf(item);
+  if (held <= 0) return null;
+  return (
+    <div className="rounded border border-amber-300 bg-amber-50 px-2.5 py-2 text-amber-900">
+      <span className="font-semibold tabular-nums">{held.toLocaleString()} {item.uom}</span>{" "}
+      of this stock is held for QC
+      {item.blockedReason ? ` (${item.blockedReason})` : ""} and cannot be issued or transferred.
+      With no lot to attach it to, the system holds a <strong>quantity, not an identity</strong> —
+      it cannot say which units are affected, so the store must segregate them physically.
+    </div>
+  );
+}
+
+/**
+ * Held-for-QC cell — the quantity on hand that nothing may consume.
+ *
+ * Batch-tracked items name the lots, because the hold sits on specific lots you
+ * can dispose or release individually. Single items can only show a number:
+ * there is no lot to point at, so the store has to segregate the goods
+ * physically. That difference is the whole practical case for batch tracking,
+ * so the cell states it rather than hiding it behind an identical figure.
+ */
+function BlockedCell({ item, onClick }: { item: Item; onClick: () => void }) {
+  const held = blockedOf(item);
+  if (held <= 0) return <span className="text-muted-foreground tabular-nums">—</span>;
+
+  const lots = (item.batches ?? []).filter(lotIsBlocked);
+  const reason = lots[0]?.blockedReason ?? item.blockedReason;
+  const detail = lots.length > 0
+    ? `${lots.length} lot${lots.length === 1 ? "" : "s"} held: ${lots.map((b) => b.batchNo).join(", ")}`
+    : "Quantity held — single item, no lot to identify. Segregate physically.";
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex flex-col items-start text-left rounded-sm px-1 py-0.5 -mx-1 hover:bg-amber-500/10 transition-colors"
+      title={`${detail}${reason ? ` — ${reason}` : ""}`}
+    >
+      <span className="tabular-nums font-semibold text-amber-600">{held.toLocaleString()}</span>
+      <span className="text-[10px] text-muted-foreground">
+        {lots.length > 0 ? `${lots.length} lot${lots.length === 1 ? "" : "s"}` : "no lot"}
       </span>
     </button>
   );
@@ -1316,6 +1431,9 @@ function FefoBatchLadder({
   const cutoff30 = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
   const totalQty = sorted.reduce((s, b) => s + b.qty, 0);
   const totalValue = sorted.reduce((s, b) => s + b.qty * b.costPrice, 0);
+  // Held lots stay in the total — they are on hand and still an asset — but are
+  // called out separately because allocation skips them.
+  const heldQty = sorted.reduce((s, b) => (lotIsBlocked(b) ? s + b.qty : s), 0);
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
@@ -1347,11 +1465,14 @@ function FefoBatchLadder({
             {sorted.map((b, i) => {
               const expired = b.expiry < today;
               const near = !expired && b.expiry <= cutoff30;
+              const held = lotIsBlocked(b);
               return (
                 <tr
                   key={b.batchNo}
                   className={
-                    expired
+                    held
+                      ? "bg-amber-50"
+                      : expired
                       ? "bg-destructive/5"
                       : near
                       ? "bg-warning/5"
@@ -1359,7 +1480,17 @@ function FefoBatchLadder({
                   }
                 >
                   <td className="px-2 py-1.5 tabular-nums text-muted-foreground">{i + 1}</td>
-                  <td className="px-2 py-1.5 font-mono text-[11px]">{b.batchNo}</td>
+                  <td className="px-2 py-1.5 font-mono text-[11px]">
+                    {b.batchNo}
+                    {held && (
+                      <span
+                        className="ml-1.5 px-1 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide bg-amber-500 text-white align-middle"
+                        title={b.blockedReason ?? "Held for QC — not allocatable"}
+                      >
+                        Held
+                      </span>
+                    )}
+                  </td>
                   <td className="px-2 py-1.5 tabular-nums text-muted-foreground">{b.receivedOn}</td>
                   <td className="px-2 py-1.5 tabular-nums">
                     {b.expiry}
@@ -1384,13 +1515,28 @@ function FefoBatchLadder({
             })}
             <tr className="bg-muted/30 font-semibold">
               <td colSpan={4} className="px-2 py-1.5 text-right uppercase text-[10px] tracking-wider">Total</td>
-              <td className="px-2 py-1.5 text-right tabular-nums">{totalQty.toLocaleString()} {uom}</td>
+              <td className="px-2 py-1.5 text-right tabular-nums">
+                {totalQty.toLocaleString()} {uom}
+                {heldQty > 0 && (
+                  <div className="text-[10px] font-medium text-amber-600">
+                    {roundQty(totalQty - heldQty).toLocaleString()} allocatable
+                  </div>
+                )}
+              </td>
               <td />
               <td className="px-2 py-1.5 text-right tabular-nums">৳ {totalValue.toLocaleString()}</td>
             </tr>
           </tbody>
         </table>
       </div>
+      {heldQty > 0 && (
+        <p className="mt-2 text-[11px] text-amber-700">
+          {roundQty(heldQty).toLocaleString()} {uom} across{" "}
+          {sorted.filter(lotIsBlocked).length} lot
+          {sorted.filter(lotIsBlocked).length === 1 ? " is" : "s are"} held for QC — still on hand and
+          still valued, but skipped by FIFO/FEFO allocation and not issuable until released or disposed.
+        </p>
+      )}
     </div>
   );
 }
