@@ -45,6 +45,7 @@ import {
   type ItemAvailability, type PlanLine, type ProductionBatchOption,
 } from "@/lib/delay-production-fulfillment";
 import { isProducedItem } from "@/lib/meal-recipe";
+import { getItemProfiles } from "@/lib/item-profiles";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -219,6 +220,8 @@ type PackagingRowLike = {
   packagingStatus: "Ready for Packaging" | "Packaging In Progress" | "Packaging Done" | "Ready for Dispatch" | "Dispatched";
   dspRef?: string;
   orderNo?: string;
+  /** Kitchen run behind the row — how Packaging progress reaches Dispatch. */
+  productionOrderId?: string;
 };
 
 type InventoryItemMinimal = { id?: string; name: string; stock: number; uom?: string };
@@ -285,6 +288,17 @@ function to12h(hhmm: string): string {
   const period = h >= 12 ? "PM" : "AM";
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return `${h12}:${String(m).padStart(2, "0")} ${period}`;
+}
+
+/**
+ * "HH:MM" 24h, stamped with the operating timezone. Schedules are kept in Dhaka
+ * local time (GMT+6), so the label states it rather than leaving the reader to
+ * assume it — a delayed departure that wraps past midnight is ambiguous in 12h.
+ */
+function to24hGmt6(hhmm: string): string {
+  const m = hhmm.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return hhmm;
+  return `${m[1].padStart(2, "0")}:${m[2]} GMT+6`;
 }
 
 /** Add `hours` to an "HH:MM" ETD string; returns new "HH:MM" (wraps past midnight). */
@@ -684,7 +698,7 @@ export default function DelayManagementPage() {
   const [delayApprovals, setDelayApprovals] = usePersistedState<DelayApprovalRecord[]>("delay-approval-records", SEED_APPROVALS);
   const [dispatchRecords, setDispatchRecords] = usePersistedState<DispatchRecordLike[]>("dispatch-records", []);
   const [packagingRows, setPackagingRows]   = usePersistedState<PackagingRowLike[]>("dispatch-packaging-rows", []);
-  const { applyStockDeltas, addProductionEntry } = useWorkflow();
+  const { applyStockDeltas, addProductionEntry, productionEntries } = useWorkflow();
 
   // Ensure the demo dispatch record is present in dispatch-records on first load
   const demoPresent = dispatchRecords.some((d) => d.id === "DSP-DEL-DEMO");
@@ -831,8 +845,10 @@ export default function DelayManagementPage() {
 
   /**
    * Instant purchase from the production screen: raise the approval and come
-   * straight back to the LIST — no detour through the detail view. The event
-   * carries an Instant Purchase ref so the Purchase Status column tracks it:
+   * straight back to the LIST — no detour through the detail view. A spot buy is
+   * a PURCHASE, so it queues under Purchase Req in Approval Management (not
+   * Delay Refreshment): the requisition carries the received lines and the event
+   * keeps a purchase-requisition ref, so the Purchase Status column tracks it as
    * Purchase Req Pending → (approval) → Purchase Req Approved.
    */
   const submitInstantPurchase = (
@@ -841,10 +857,32 @@ export default function DelayManagementPage() {
     approvalRecord: DelayApprovalRecord,
   ) => {
     const at = stamp();
+    const dr = fulfillment.directReceive;
+    const pr = addPurchaseRequisition({
+      date: at.slice(0, 10),
+      officeId: "OFF-001",
+      warehouseId: "WH-001",
+      requestedBy: approvalRecord.submittedBy,
+      requiredBy: approvalRecord.flightDate,
+      priority: "Urgent",
+      justification:
+        `Instant purchase${dr ? ` (${dr.id}${dr.vendorName ? ` — ${dr.vendorName}` : ""})` : ""} — ` +
+        `delay refreshment ${approvalRecord.flightNumber} (${approvalRecord.flightDate}), ${eventId}.` +
+        (approvalRecord.notes ? ` ${approvalRecord.notes}` : ""),
+      lines: approvalRecord.items.map((it, i) => ({
+        id: `L${i + 1}`,
+        itemName: it.name,
+        description: `Delay refreshment — ${approvalRecord.flightNumber}`,
+        qty: it.qty,
+        uom: "pcs",
+        rate: it.unitCost ?? 0,
+      })),
+      status: "Pending Approval",
+    });
     const ref: NonNullable<DelayEvent["fulfilmentRefs"]>[number] = {
       source: "Instant Purchase",
-      ref: approvalRecord.id,
-      refKind: "delay-approval",
+      ref: pr.id,
+      refKind: "purchase-requisition",
       items: approvalRecord.items.map((i) => ({ name: i.name, qty: i.qty, uom: "pcs" })),
       at,
     };
@@ -854,18 +892,25 @@ export default function DelayManagementPage() {
           ? {
               ...e,
               fulfillment,
-              approvalId: approvalRecord.id,
               fulfilmentRefs: [...(e.fulfilmentRefs ?? []), ref],
-              status: "Approval Pending",
+              // A spot buy raised after the meals already moved must not drag
+              // the flight back out of its dispatch state.
+              status: e.status === "Sent To Dispatch" || e.status === "Dispatched"
+                ? e.status
+                : "Approval Pending",
               updatedAt: at,
             }
           : e,
       ),
     );
-    setDelayApprovals((prev) => [approvalRecord, ...prev]);
     setView("list");
     setActiveEventId(null);
-    toast.success(`${approvalRecord.id} submitted — pending approval.`);
+    // Verify the write actually landed before claiming success.
+    if (!getPurchaseRequisitions().some((p) => p.id === pr.id)) {
+      toast.error("Could not save the requisition — browser storage unavailable.");
+      return;
+    }
+    toast.success(`${pr.id} raised — pending approval under Purchase Req.`);
   };
 
   /**
@@ -1135,17 +1180,42 @@ export default function DelayManagementPage() {
     // remounts — a read on mount is enough to pick the decision up.
   }, [setDelayEvents]);
 
+  /**
+   * Every kitchen run raised for the flight is finished AND has passed QC. A run
+   * still preparing (or cooked but not QC-cleared) may not move on: packaging and
+   * dispatch open only after production and QC are complete. Flights with no
+   * kitchen run of their own — stock issues, spot buys, meals drawn from finished
+   * production — are already past this point and pass trivially.
+   */
+  const productionReady = (event: DelayEvent): boolean =>
+    (event.productionOrderIds ?? []).every((id) => {
+      const o = productionEntries.find((x) => x.id === id);
+      return o?.status === "Completed" && !!o.qcPassedAt;
+    });
+
   const sendToDispatch = (
     event: DelayEvent,
     /** Offset for the DSP id when several flights dispatch in one tick — the
      *  event list is read from a closure, so back-to-back calls would other-
      *  wise mint the same id. */
     seqOffset = 0,
+    /** Where to land afterwards. Meals that still need packing go to Packaging;
+     *  meals already packed go straight to Dispatch. Same records either way. */
+    opts?: { goTo?: "dispatch" | "packaging" },
   ) => {
     // "Approval Pending" is allowed through: the list only offers Dispatch once
     // every routed approval has actually cleared — the raw label can lag when
     // several fulfilments were raised on the same event.
     if (!["Approved", "Sent To Production", "Approval Pending"].includes(event.status)) return;
+    // Hard gate, not just a hidden button: nothing preparing in the kitchen may
+    // raise a packaging run or a dispatch, whichever path called in.
+    if (!productionReady(event)) {
+      toast.error(
+        `${event.flightNumber} — production is still in progress. ` +
+        `Packaging and dispatch open once production and QC are complete.`,
+      );
+      return;
+    }
     const now = stamp();
     const today = now.slice(0, 10);
     // Compute delayed dep time in airline 12h standard (original ETD + delay hours)
@@ -1176,19 +1246,59 @@ export default function DelayManagementPage() {
       return "Snack";
     })();
 
-    const newPkgRows: PackagingRowLike[] = sourceItems.map((item, idx) => ({
-      id:       `PKG-${newDspId}-${idx + 1}`,
-      date:     today,
-      depTime,
-      flight:   event.flightNumber,
-      mealType: pkgMealType,
-      mealName: item.name,
-      qty:      item.qty,
-      section:  "Delay Refreshment",
-      packagingStatus: "Ready for Packaging",
-      dspRef:   newDspId,
-      orderNo:  event.orderNo,
-    }));
+    // Items issued from stock came off the shelf, not out of the kitchen, so the
+    // system checks the packaging queue for this flight before sending them on:
+    // one already packed for the flight skips the packaging stage, anything else
+    // still packages first. Production / purchased items always package.
+    const stockIssued = new Set(
+      (event.fulfilmentRefs ?? [])
+        .filter((r) => r.source === "Stock")
+        .flatMap((r) => r.items.map((i) => i.name.trim().toLowerCase())),
+    );
+    const PACKED: PackagingRowLike["packagingStatus"][] =
+      ["Packaging Done", "Ready for Dispatch", "Dispatched"];
+    const alreadyPackaged = (name: string) =>
+      packagingRows.some((r) =>
+        r.flight === event.flightNumber
+        && r.mealName.trim().toLowerCase() === name.trim().toLowerCase()
+        && (!event.orderNo || !r.orderNo || r.orderNo === event.orderNo)
+        && PACKED.includes(r.packagingStatus),
+      );
+
+    // The kitchen run behind each item, when there is one — this is the link the
+    // Dispatch board uses to flip a row to "Packaging Done" once the Packaging
+    // module finishes that production batch, so the delay run rides the existing
+    // packaging → dispatch pipeline instead of a parallel one.
+    const runFor = (name: string) =>
+      productionEntries.find((o) =>
+        (event.productionOrderIds ?? []).includes(o.id)
+        && (o.outputItemName ?? o.bom ?? "").trim().toLowerCase() === name.trim().toLowerCase(),
+      )?.id;
+
+    let packedAhead = 0;
+    const newPkgRows: PackagingRowLike[] = sourceItems.map((item, idx) => {
+      const packed = stockIssued.has(item.name.trim().toLowerCase())
+        && alreadyPackaged(item.name);
+      if (packed) packedAhead++;
+      return {
+        // NOT a `PKG-…` id: the Dispatch board clears rows with that prefix as
+        // legacy placeholders, which would delete this run's packaging.
+        id:       `PRD-DEL-${newDspId}-${idx + 1}`,
+        productionOrderId: runFor(item.name),
+        date:     today,
+        depTime,
+        flight:   event.flightNumber,
+        mealType: pkgMealType,
+        mealName: item.name,
+        qty:      item.qty,
+        section:  "Delay Refreshment",
+        // Packed already → straight into the dispatch stage; from there QC →
+        // Ready for Dispatch → Dispatched runs exactly as it does today.
+        packagingStatus: packed ? "Packaging Done" : "Ready for Packaging",
+        dspRef:   newDspId,
+        orderNo:  event.orderNo,
+      };
+    });
 
     const newRecord: DispatchRecordLike = {
       id:          newDspId,
@@ -1238,10 +1348,79 @@ export default function DelayManagementPage() {
     }));
     applyStockDeltas(deltas);
 
-    toast.success(`${newDspId} created — proceeding to Dispatch for QC & dispatch.`);
+    const goTo = opts?.goTo ?? "dispatch";
+    toast.success(
+      goTo === "packaging"
+        ? `${newDspId} created — ${newPkgRows.length - packedAhead} item(s) sent to Packaging.`
+        : packedAhead > 0
+          ? `${newDspId} created — ${packedAhead} item(s) already packaged, going straight to Dispatch.`
+          : `${newDspId} created — proceeding to Dispatch for QC & dispatch.`,
+    );
     // Defer navigation so usePersistedState flushes the new rows/record to
-    // localStorage before the dispatch page mounts and reads from it.
-    setTimeout(() => navigate("/dispatch"), 0);
+    // localStorage before the destination page mounts and reads from it.
+    setTimeout(() => navigate(goTo === "packaging" ? "/packaging" : "/dispatch"), 0);
+  };
+
+  /**
+   * "Send To Packaging" — the entry point from the list once every fulfilment
+   * route has cleared. The system checks the packaging queue first:
+   *   • every item already packaged → show them (with their packaging ids) and
+   *     offer Send To Dispatch, which skips the packaging stage entirely;
+   *   • anything still unpacked → raise the packaging run and go to Packaging.
+   * From there the packaging → QC → dispatch process is the existing one.
+   */
+  const [pkgCheck, setPkgCheck] = useState<{
+    event: DelayEvent;
+    rows: Array<{ id: string; name: string; qty: number; status: string }>;
+  } | null>(null);
+
+  /** The items a delay dispatch actually moves — the received spot buy when
+   *  there is one, otherwise the flight's menu. Mirrors `sendToDispatch`. */
+  const dispatchItemsOf = (ev: DelayEvent): Array<{ name: string; qty: number }> =>
+    ev.fulfillment?.directReceive?.items?.map((i) => ({ name: i.name, qty: i.qty }))
+    ?? (ev.menuItems ?? []).map((mi) => ({ name: mi.name, qty: mi.requiredQty }));
+
+  /** A packaging row for this flight that has already been packed, if any. */
+  const packedRowFor = (ev: DelayEvent, name: string) =>
+    packagingRows.find((r) =>
+      r.flight === ev.flightNumber
+      && r.mealName.trim().toLowerCase() === name.trim().toLowerCase()
+      && (!ev.orderNo || !r.orderNo || r.orderNo === ev.orderNo)
+      && ["Packaging Done", "Ready for Dispatch", "Dispatched"].includes(r.packagingStatus),
+    );
+
+  const sendToPackaging = (event: DelayEvent) => {
+    // Blocked before the check even runs — a flight whose meals are still being
+    // cooked or awaiting QC has nothing to package yet.
+    if (!productionReady(event)) {
+      toast.error(
+        `${event.flightNumber} — production is still in progress. ` +
+        `Packaging opens once production and QC are complete.`,
+      );
+      return;
+    }
+    const items = dispatchItemsOf(event);
+    const matched = items.map((it) => ({ it, row: packedRowFor(event, it.name) }));
+    if (items.length > 0 && matched.every((m) => m.row)) {
+      setPkgCheck({
+        event,
+        rows: matched.map((m) => ({
+          id: m.row!.id,
+          name: m.it.name,
+          qty: m.it.qty,
+          status: m.row!.packagingStatus,
+        })),
+      });
+      return;
+    }
+    sendToDispatch(event, 0, { goTo: "packaging" });
+  };
+
+  /** Open a packaged item where it lives — the dispatch board's packaging row,
+   *  flashed on arrival. */
+  const goToPackagingRow = (rowId: string) => {
+    flagArrival({ target: "packaging-rows", ids: [rowId] });
+    navigate("/dispatch");
   };
 
   /** Combined dispatch: every marked flight goes out in one click, each with
@@ -1251,8 +1430,20 @@ export default function DelayManagementPage() {
       .map((id) => delayEvents.find((e) => e.id === id))
       .filter((e): e is DelayEvent =>
         !!e && ["Approved", "Sent To Production", "Approval Pending"].includes(e.status));
-    if (ready.length === 0) return;
-    ready.forEach((ev, i) => sendToDispatch(ev, i));
+    // Anything still cooking or awaiting QC drops out of the batch — reported
+    // once rather than one refusal toast per flight.
+    const blocked = ready.filter((e) => !productionReady(e));
+    const clear = ready.filter(productionReady);
+    if (blocked.length > 0) {
+      toast.error(
+        `${blocked.map((e) => e.flightNumber).join(", ")} — production is still in progress. ` +
+        `Packaging opens once production and QC are complete.`,
+      );
+    }
+    if (clear.length === 0) return;
+    // Same packaging run as the single-flight action — each flight's already
+    // packed items skip ahead on their own, the rest go through packaging.
+    clear.forEach((ev, i) => sendToDispatch(ev, i, { goTo: "packaging" }));
   };
 
   const closeEvent = (eventId: string) => {
@@ -1262,10 +1453,6 @@ export default function DelayManagementPage() {
     toast.success("Delay event closed.");
     setView("list");
   };
-
-  const activeDispatchRecord = activeEvent?.dispatchId
-    ? dispatchRecords.find((d) => d.id === activeEvent.dispatchId)
-    : undefined;
 
   // The View modal covers the WHOLE submission: every flight logged under the
   // same delay id renders its own detail block.
@@ -1301,6 +1488,7 @@ export default function DelayManagementPage() {
           onOpenModal={setViewModalEventId}
           onNavigate={navigate}
           onDispatchMarked={dispatchMarked}
+          onSendToPackaging={sendToPackaging}
         />
       )}
 
@@ -1337,9 +1525,7 @@ export default function DelayManagementPage() {
         <DelayDetailScreen
           event={activeEvent}
           approval={delayApprovals.find((a) => a.id === activeEvent.approvalId)}
-          dispatchRecord={activeDispatchRecord}
           onOpenFulfillment={() => openFulfillment(activeEvent.id)}
-          onSendToDispatch={() => sendToDispatch(activeEvent)}
           onClose={() => closeEvent(activeEvent.id)}
           onNavigate={navigate}
         />
@@ -1395,16 +1581,9 @@ export default function DelayManagementPage() {
                 <DelayDetailScreen
                   event={ev}
                   approval={delayApprovals.find((a) => a.id === ev.approvalId)}
-                  dispatchRecord={ev.dispatchId
-                    ? dispatchRecords.find((d) => d.id === ev.dispatchId)
-                    : undefined}
                   onOpenFulfillment={() => {
                     setViewModalEventId(null);
                     openFulfillment(ev.id);
-                  }}
-                  onSendToDispatch={() => {
-                    setViewModalEventId(null);
-                    sendToDispatch(ev);
                   }}
                   onClose={() => {
                     setViewModalEventId(null);
@@ -1417,7 +1596,85 @@ export default function DelayManagementPage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* ─── Packaging check — every item is already packed ─────────────────── */}
+      <Dialog open={!!pkgCheck} onOpenChange={(v) => { if (!v) setPkgCheck(null); }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <PackageOpen className="h-4 w-4 text-emerald-600" /> Already Packaged
+              {pkgCheck && (
+                <span className="font-mono text-xs text-muted-foreground">
+                  {pkgCheck.event.id} · {pkgCheck.event.flightNumber}
+                </span>
+              )}
+            </DialogTitle>
+          </DialogHeader>
+          {pkgCheck && (
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                Every item on this flight is already packed, so packaging is skipped.
+                Open a packaging id to see it on the board, or send the run straight
+                to Dispatch — QC and dispatch then follow the usual process.
+              </p>
+              <div className="border border-border rounded-md overflow-hidden">
+                <Table>
+                  <TableHeader className="bg-muted/40">
+                    <TableRow>
+                      <TableHead className="text-xs uppercase tracking-wider">Packaging ID</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider text-right w-20">Qty</TableHead>
+                      <TableHead className="text-xs uppercase tracking-wider w-40">Packaging Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {pkgCheck.rows.map((r) => (
+                      <TableRow key={`${r.id}-${r.name}`}>
+                        <TableCell>
+                          <button
+                            type="button"
+                            className="font-mono text-xs font-semibold text-primary underline decoration-dotted underline-offset-2 hover:opacity-80"
+                            title="Open this packaging row"
+                            onClick={() => { setPkgCheck(null); goToPackagingRow(r.id); }}
+                          >
+                            {r.id}
+                          </button>
+                        </TableCell>
+                        <TableCell className="text-sm font-medium">{r.name}</TableCell>
+                        <TableCell className="text-right tabular-nums text-sm">{r.qty}</TableCell>
+                        <TableCell>{chipStatic(r.status)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setPkgCheck(null)}>Cancel</Button>
+                <Button
+                  className="bg-teal-600 text-white hover:bg-teal-700"
+                  onClick={() => {
+                    const ev = pkgCheck.event;
+                    setPkgCheck(null);
+                    sendToDispatch(ev, 0, { goTo: "dispatch" });
+                  }}
+                >
+                  <Truck className="h-4 w-4 mr-1.5" /> Send To Dispatch
+                </Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </>
+  );
+}
+
+/** Small read-only status pill — used where a chip is shown outside the list. */
+function chipStatic(label: string) {
+  return (
+    <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 whitespace-nowrap">
+      {label}
+    </span>
   );
 }
 
@@ -1425,6 +1682,7 @@ export default function DelayManagementPage() {
 
 function DelayList({
   events, approvals, onOpenFulfillment, onInstantPurchase, onOpenModal, onNavigate, onDispatchMarked,
+  onSendToPackaging,
 }: {
   events: DelayEvent[];
   approvals: DelayApprovalRecord[];
@@ -1432,8 +1690,10 @@ function DelayList({
   onInstantPurchase: (ev: DelayEvent) => void;
   onOpenModal: (id: string) => void;
   onNavigate: ReturnType<typeof useNavigate>;
-  /** Dispatch every marked (ready) flight in one go — same records as a single dispatch. */
+  /** Send every marked (ready) flight to packaging in one go. */
   onDispatchMarked: (ids: string[]) => void;
+  /** Run the packaging check for one flight and route it accordingly. */
+  onSendToPackaging: (ev: DelayEvent) => void;
 }) {
   const [search, setSearch]       = useState("");
   const [filterStatus, setFilterStatus] = useState("all");
@@ -1452,6 +1712,9 @@ function DelayList({
   }, [events, search, filterStatus, filterFrom, filterTo]);
 
   const { productionEntries: allProductionOrders } = useWorkflow();
+  // Read-only: the dispatch record raised for a packaging run drives the Status
+  // column's packaging → dispatch chain.
+  const [dispatchRecords] = usePersistedState<DispatchRecordLike[]>("dispatch-records", []);
 
   // One row per delay submission: flights logged together share a batchId, so
   // they show under ONE delay id with a single Fulfil action for the whole set.
@@ -1555,17 +1818,42 @@ function DelayList({
     return out;
   };
 
+  /**
+   * Column 4 — the packaging → dispatch leg. Once the run is raised it carries a
+   * dispatch record, and that record's own status IS the stage, so the column
+   * follows the real pipeline rather than a copy of it:
+   *   Preparing → Sent To Packaging · Prepared / Ready For QC → Packaging Done
+   *   · Ready For Dispatch → Ready for Dispatch · Dispatched → Sent To Dispatch
+   */
+  const dispatchLabelOf = (ev: DelayEvent): string => {
+    if (ev.status === "Dispatched") return "Sent To Dispatch";
+    const s = (dispatchRecords.find((d) => d.id === ev.dispatchId)?.status ?? "Preparing").toLowerCase();
+    if (s === "dispatched")          return "Sent To Dispatch";
+    if (s === "ready for dispatch")  return "Ready for Dispatch";
+    if (s === "prepared" || s === "ready for qc") return "Packaging Done";
+    return "Sent To Packaging";
+  };
+
+  /**
+   * Purchase references whose backing record still EXISTS. Ghost refs (their
+   * requisition / approval cleared from storage) are ignored — otherwise a lost
+   * requisition would read "Pending" forever with nothing in the queue, and the
+   * flow could never re-raise one.
+   */
+  const livePurchaseRefs = (ev: DelayEvent) => {
+    const refs = ev.fulfilmentRefs ?? [];
+    return {
+      prRefs: refs.filter((r) => r.refKind === "purchase-requisition"
+        && prs.some((p) => p.id === r.ref)),
+      ipRefs: refs.filter((r) => r.refKind === "delay-approval" && r.source === "Instant Purchase"
+        && approvals.some((a) => a.id === r.ref)),
+    };
+  };
+
   /** Column 3 — the purchase route: requisition OR instant-purchase approval,
    *  pending → approved. */
   const purchaseLabelsOf = (ev: DelayEvent): string[] => {
-    // Ghost refs (their record cleared from storage) are ignored — otherwise a
-    // lost requisition would read "Pending" forever with nothing in the queue.
-    const prRefs = (ev.fulfilmentRefs ?? []).filter((r) => r.refKind === "purchase-requisition"
-      && prs.some((p) => p.id === r.ref));
-    const ipRefs = (ev.fulfilmentRefs ?? []).filter(
-      (r) => r.refKind === "delay-approval" && r.source === "Instant Purchase"
-        && approvals.some((a) => a.id === r.ref),
-    );
+    const { prRefs, ipRefs } = livePurchaseRefs(ev);
     if (prRefs.length === 0 && ipRefs.length === 0) return [];
     const pending =
       prRefs.some((r) => {
@@ -1573,7 +1861,11 @@ function DelayList({
         return !pr || /pending|draft/i.test(pr.status);
       })
       || approvalPending(ipRefs);
-    return [pending ? "Purchase Req Pending" : "Purchase Req Completed"];
+    if (pending) return ["Purchase Req Pending"];
+    // Approved. The spot buy itself follows: Instant Purchase → Direct Receive →
+    // one more approval. Only once the goods are actually received (a Direct
+    // Receive is on the event) is the purchase leg complete.
+    return [ev.fulfillment?.directReceive ? "Purchase Completed" : "Purchase Req Approved"];
   };
 
   /** One renderer for every status label — chips for the routed states, the
@@ -1587,7 +1879,11 @@ function DelayList({
     "In Production": CHIP_WORKING,
     "Production Completed": CHIP_DONE,
     "Purchase Req Pending": CHIP_PENDING,
-    "Purchase Req Completed": CHIP_DONE,
+    "Purchase Req Approved": CHIP_DONE,
+    "Purchase Completed": CHIP_DONE,
+    "Sent To Packaging": CHIP_WORKING,
+    "Packaging Done": CHIP_DONE,
+    "Ready for Dispatch": CHIP_DONE,
     "Pending": CHIP_PENDING,
   };
   const renderStatus = (label: string) =>
@@ -1755,7 +2051,7 @@ function DelayList({
             className="h-8 text-xs bg-teal-600 text-white hover:bg-teal-700"
             onClick={() => { onDispatchMarked(markedDispatch); setMarkedDispatch([]); }}
           >
-            <Truck className="h-3.5 w-3.5 mr-1.5" /> Dispatch ({markedDispatch.length})
+            <PackageOpen className="h-3.5 w-3.5 mr-1.5" /> Send To Packaging ({markedDispatch.length})
           </Button>
         </div>
       )}
@@ -1775,7 +2071,7 @@ function DelayList({
               <TableHead className="text-xs uppercase tracking-wider">Stock Status</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Production Status</TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Purchase Status</TableHead>
-              <TableHead className="text-xs uppercase tracking-wider">Dispatch Status</TableHead>
+              <TableHead className="text-xs uppercase tracking-wider">Status</TableHead>
               <TableHead className="text-xs uppercase tracking-wider text-right">Action</TableHead>
             </TableRow>
           </TableHeader>
@@ -1793,9 +2089,16 @@ function DelayList({
                 // ONE Fulfil for the whole submission — it opens the production
                 // check worklist covering every flight in the batch.
                 const pendingFulfil = g.events.find((e) => e.status === "Fulfillment Pending");
-                const canPurchase = (e: DelayEvent) =>
-                  (e.status === "Approved" || e.status === "Sent To Dispatch")
-                  && ((e.productionPlan?.totalPurchase ?? 0) > 0);
+                // Instant Purchase is the action while the purchase leg is open:
+                // it raises the requisition, and once that is APPROVED it opens
+                // the Direct Receive spot buy. It goes away while a requisition
+                // is still pending, and for good once the goods are received.
+                const canPurchase = (e: DelayEvent) => {
+                  if (e.status !== "Approved" && e.status !== "Sent To Dispatch") return false;
+                  if ((e.productionPlan?.totalPurchase ?? 0) <= 0) return false;
+                  if (e.fulfillment?.directReceive) return false;
+                  return !purchaseLabelsOf(e).includes("Purchase Req Pending");
+                };
                 // The delay id's marking box covers every dispatch-ready flight
                 // under it — tick the id, the whole submission joins the
                 // combined dispatch.
@@ -1889,18 +2192,12 @@ function DelayList({
                   </TableCell>
                   <TableCell className="align-top">
                     {(() => {
-                      // The balance production couldn't cover is bought separately,
-                      // so this stays available after the meals are dispatched.
+                      // The balance production couldn't cover is bought
+                      // separately — the button raises that requisition, and
+                      // disappears the moment one exists. From then on the cell
+                      // is the requisition's status: Pending → Approved.
                       const buyable = g.events.filter(canPurchase);
-                      // The Instant Purchase button REPLACES the completed chip —
-                      // the action is the status once the requisition clears. A
-                      // still-pending requisition keeps its chip visible.
-                      const labels = Array.from(new Set(
-                        g.events.flatMap((e) => {
-                          const ls = purchaseLabelsOf(e);
-                          return canPurchase(e) ? ls.filter((l) => l === "Purchase Req Pending") : ls;
-                        }),
-                      ));
+                      const labels = Array.from(new Set(g.events.flatMap(purchaseLabelsOf)));
                       if (labels.length === 0 && buyable.length === 0) {
                         return <span className="text-xs text-muted-foreground">—</span>;
                       }
@@ -1924,21 +2221,26 @@ function DelayList({
                       );
                     })()}
                   </TableCell>
-                  {/* Dispatch Status — dispatch-stage chips plus the per-flight
-                      Dispatch buttons. Marking the row for the combined dispatch
-                      disables the individual buttons. */}
+                  {/* Status — the packaging → dispatch leg, in order:
+                      Send To Packaging → Sent To Packaging → Packaging Done →
+                      Ready for Dispatch → Send To Dispatch → Sent To Dispatch.
+                      The chips are read off the run's own dispatch record, so
+                      the column follows the real packaging pipeline. */}
                   <TableCell className="align-top">
                     {(() => {
-                      const chips = Array.from(new Set(g.events
-                        .filter((e) => e.status === "Sent To Dispatch" || e.status === "Dispatched")
-                        .map((e) => e.status)));
-                      const ready = g.events.filter(readyToDispatch);
-                      // Pending until every routed status has completed — only
-                      // then does the chip give way to the Dispatch button.
+                      // Not in the pipeline yet: either still waiting on a
+                      // fulfilment route, or ready for the packaging run.
+                      const ready = g.events.filter((e) => !e.dispatchId && readyToDispatch(e));
                       const stillPending = g.events.some((e) =>
-                        !["Sent To Dispatch", "Dispatched", "Rejected", "Closed"].includes(e.status)
+                        !e.dispatchId
+                        && !["Dispatched", "Rejected", "Closed"].includes(e.status)
                         && !readyToDispatch(e));
-                      if (chips.length === 0 && ready.length === 0 && !stillPending) {
+                      const inPipeline = g.events.filter((e) => !!e.dispatchId || e.status === "Dispatched");
+                      const labels = Array.from(new Set(inPipeline.map(dispatchLabelOf)));
+                      // "Ready for Dispatch" is where the run leaves this page —
+                      // the dispatch itself happens on the Dispatch board.
+                      const dispatchable = inPipeline.filter((e) => dispatchLabelOf(e) === "Ready for Dispatch");
+                      if (labels.length === 0 && ready.length === 0 && !stillPending) {
                         return <span className="text-xs text-muted-foreground">—</span>;
                       }
                       return (
@@ -1946,20 +2248,31 @@ function DelayList({
                           {stillPending && (
                             <div className="mb-1 last:mb-0">{renderStatus("Pending")}</div>
                           )}
-                          {chips.map((l) => (
-                            <div key={l} className="mb-1 last:mb-0">{delayBadge(l as DelayStatus)}</div>
+                          {labels.map((l) => (
+                            <div key={l} className="mb-1 last:mb-0">{renderStatus(l)}</div>
                           ))}
-                          {/* Dispatchable ONLY once every approval has cleared and
-                              production (incl. QC) is complete. */}
+                          {/* Packaging opens ONLY once every approval has cleared
+                              and production (incl. QC) is complete. */}
                           {ready.map((ev) => (
                             <div key={ev.id} className="mt-1.5 first:mt-0" onClick={(e) => e.stopPropagation()}>
                               <Button size="sm" className="h-7 text-xs bg-teal-600 text-white hover:bg-teal-700"
                                 disabled={markedDispatch.includes(ev.id)}
-                                onClick={() => onOpenModal(ev.id)}
+                                onClick={() => onSendToPackaging(ev)}
                                 title={markedDispatch.includes(ev.id)
-                                  ? "Included in the combined dispatch"
-                                  : `Dispatch ${ev.flightNumber}`}>
-                                Dispatch{multi ? ` · ${ev.flightNumber}` : ""} <Truck className="h-3 w-3 ml-1" />
+                                  ? "Included in the combined packaging run"
+                                  : `Check packaging for ${ev.flightNumber}`}>
+                                Send To Packaging{multi ? ` · ${ev.flightNumber}` : ""}
+                                <PackageOpen className="h-3 w-3 ml-1" />
+                              </Button>
+                            </div>
+                          ))}
+                          {dispatchable.map((ev) => (
+                            <div key={`d-${ev.id}`} className="mt-1.5" onClick={(e) => e.stopPropagation()}>
+                              <Button size="sm" className="h-7 text-xs bg-teal-600 text-white hover:bg-teal-700"
+                                onClick={() => onNavigate("/dispatch")}
+                                title={`Dispatch ${ev.flightNumber} on the Dispatch board`}>
+                                Send To Dispatch{multi ? ` · ${ev.flightNumber}` : ""}
+                                <Truck className="h-3 w-3 ml-1" />
                               </Button>
                             </div>
                           ))}
@@ -2099,7 +2412,25 @@ function DelayCreate({
   // combination, so every downstream screen keeps working on single-value events.
   const selectedOrders = dispatched.filter((o) => selectedOrderIds.includes(o.id));
   const hoursFor = (id: string) => Number(durationByFlight[id]) || 0;
-  const setDurationFor = (id: string, v: string) => setDurationByFlight((prev) => ({ ...prev, [id]: v }));
+  /** One delay for the whole submission — typing on any flight fills them all. */
+  const [sameDelay, setSameDelay] = useState(false);
+  const setDurationFor = (id: string, v: string) =>
+    setDurationByFlight((prev) => sameDelay
+      ? { ...prev, ...Object.fromEntries(selectedOrderIds.map((k) => [k, v])) }
+      : { ...prev, [id]: v });
+  /** Ticking it copies the first flight's delay onto every other flight and
+   *  keeps them in step; unticking leaves the values as they are to edit. */
+  const toggleSameDelay = (on: boolean) => {
+    setSameDelay(on);
+    if (!on) return;
+    const seed = durationByFlight[selectedOrders[0]?.id ?? ""]
+      ?? selectedOrderIds.map((k) => durationByFlight[k]).find(Boolean)
+      ?? "";
+    setDurationByFlight((prev) => ({
+      ...prev,
+      ...Object.fromEntries(selectedOrderIds.map((k) => [k, seed])),
+    }));
+  };
   const mealsFor = (id: string) => mealsByFlight[id] ?? [];
   const toggleMealFor = (id: string, mt: string) => {
     setMealsByFlight((prev) => {
@@ -2387,7 +2718,7 @@ function DelayCreate({
           const dsp = dispatchFor(o.flight);
           const dispatchedMeals = dsp?.detail?.flightKitchen?.totalMeals;
           const hrs = hoursFor(o.id);
-          const revised = o.etd && hrs > 0 ? to12h(addHoursToEtd(o.etd, hrs)) : null;
+          const revised = o.etd && hrs > 0 ? to24hGmt6(addHoursToEtd(o.etd, hrs)) : null;
           const tone = CARD_TONES[idx % CARD_TONES.length];
           const weekday = new Date(o.date + "T00:00:00").toLocaleDateString("en-US", { weekday: "long" });
           const tp = (o.pax ?? 0) + (o.crew ?? 0);
@@ -2396,8 +2727,9 @@ function DelayCreate({
             <div key={o.id} className={cn("rounded-md border p-4 space-y-3", tone)}>
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <span className="text-sm font-semibold">{o.flight} · {o.sector}</span>
+                {/* Same clock as the revised time below, so the two compare. */}
                 <span className="text-[11px] text-muted-foreground tabular-nums">
-                  {o.date} · ETD {o.etd ? to12h(o.etd) : "—"}
+                  {o.date} · ETD {o.etd ? to24hGmt6(o.etd) : "—"}
                 </span>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -2442,9 +2774,24 @@ function DelayCreate({
               {/* Per-flight delay duration → this flight's revised departure time */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 items-end pt-1 border-t border-border/50">
                 <div>
-                  <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                    Delay Duration (hours) <span className="text-destructive">*</span>
-                  </Label>
+                  <div className="flex items-center justify-between gap-2">
+                    <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                      Delay Duration (hours) <span className="text-destructive">*</span>
+                    </Label>
+                    {/* One delay for the whole submission — offered on the first
+                        flight only; the rest follow it. */}
+                    {idx === 0 && selectedOrders.length > 1 && (
+                      <label className="flex items-center gap-1 text-[10px] font-medium text-muted-foreground cursor-pointer whitespace-nowrap">
+                        <Checkbox
+                          checked={sameDelay}
+                          onCheckedChange={(v) => toggleSameDelay(!!v)}
+                          className="h-3.5 w-3.5"
+                          aria-label="Apply this delay to every selected flight"
+                        />
+                        Same Delay?
+                      </label>
+                    )}
+                  </div>
                   <Input
                     type="number"
                     min={0.5}
@@ -2452,6 +2799,7 @@ function DelayCreate({
                     value={durationByFlight[o.id] ?? ""}
                     onChange={(e) => setDurationFor(o.id, e.target.value)}
                     className="mt-1 h-9 tabular-nums"
+                    title={sameDelay ? "Same Delay is on — every flight follows this value" : undefined}
                   />
                 </div>
                 <DetailCell
@@ -3485,7 +3833,35 @@ function DelayProductionScreen({
       ...prev,
     ]);
     flagArrival({ target: "production-list", ids: [batch.productionId] });
-    navigate("/production-entry");
+    // `?pro=` is the list's own deep-link param — it pages the table to the row
+    // so the flash has something to land on when the order isn't on page 1.
+    navigate(`/production-entry?pro=${encodeURIComponent(batch.productionId)}`);
+  };
+
+  /**
+   * Open every batch a line draws on in one go — a meal cooked across several
+   * runs lands on the Production Order list with all of its rows flashing,
+   * instead of making the planner chase one id at a time.
+   */
+  const goToProductionBatches = (l: PlanLine) => {
+    if (l.batches.length === 0) return;
+    if (l.batches.length === 1) { goToProductionOrder(l.batches[0]); return; }
+    const ids = l.batches.map((b) => b.productionId);
+    setDpfLog((prev) => [
+      {
+        at: stamp(),
+        by: role,
+        action: "Production Batch Viewed",
+        detail: `${ids.join(", ")} (${l.itemName}) opened from ${l.eventId} — ${l.flightNumber}`,
+        productionId: ids[0],
+        eventId: l.eventId,
+      },
+      ...prev,
+    ]);
+    flagArrival({ target: "production-list", ids });
+    // Page the list to the first batch; every listed id on that page flashes.
+    navigate(`/production-entry?pro=${encodeURIComponent(ids[0])}`);
+    toast.success(`Opening ${ids.length} production batches for ${l.itemName}.`);
   };
 
   /**
@@ -3830,7 +4206,8 @@ function DelayProductionScreen({
 
     setDrOpen(false);
     setDrFromList(false);
-    toast.success(`${nextDrId} recorded — stock updated. ${nextDaId} submitted for approval.`);
+    // The purchase approval itself is raised by the parent as a Purchase Req.
+    toast.success(`${nextDrId} recorded — stock updated.`);
     onNeedsPurchase(event.id, fulfillment, approval);
   };
 
@@ -4598,6 +4975,9 @@ function DelayProductionScreen({
             <strong className="text-foreground"> Req Qty</strong> to take less than the
             full requirement — produced quantities are a snapshot and cannot be edited.
             Anything production and stock cannot cover is left for instant purchase.
+            The <strong className="text-foreground">Stock</strong> quantity is a link —
+            a produced meal opens its batches on the Production Order list, a
+            consumable opens the item on Stock Overview.
           </p>
 
           <div className="overflow-x-auto">
@@ -4615,11 +4995,13 @@ function DelayProductionScreen({
                       />
                     </TableHead>
                     <TableHead className="text-xs uppercase tracking-wider">Meal Item</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider">Production Batch</TableHead>
+                    {/* How much is already held — a cooked meal in its QC-passed
+                        batches, a bought-in consumable on the shelf. The quantity
+                        links to wherever it sits. */}
+                    <TableHead className="text-xs uppercase tracking-wider text-right w-24">Stock</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider text-right w-28">Produced Qty</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider text-right w-24">Required</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider text-right w-28">Req Qty</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider text-right w-24">Stock</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider text-right w-24">To Buy</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider w-32">Source</TableHead>
                   </TableRow>
@@ -4627,7 +5009,7 @@ function DelayProductionScreen({
                 <TableBody>
                   {planLines.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={9} className="text-center text-sm text-muted-foreground py-10">
+                      <TableCell colSpan={8} className="text-center text-sm text-muted-foreground py-10">
                         Nothing to plan — no meal items on the selected flights.
                       </TableCell>
                     </TableRow>
@@ -4637,7 +5019,7 @@ function DelayProductionScreen({
                       const rows = planLines.filter((l) => l.eventId === ev.id);
                       return [
                         <TableRow key={`hdr-${ev.id}`} className="bg-sky-50/70">
-                          <TableCell colSpan={9} className="py-1.5">
+                          <TableCell colSpan={8} className="py-1.5">
                             <span className="text-xs font-semibold text-sky-900">
                               {ev.flightNumber} — {ev.sector}
                             </span>
@@ -4665,20 +5047,37 @@ function DelayProductionScreen({
                                   <div className="text-[10px] text-muted-foreground">bought-in consumable</div>
                                 )}
                               </TableCell>
-                              <TableCell>
-                                {l.batches.length === 0 ? (
-                                  <span className="text-[11px] text-muted-foreground">—</span>
-                                ) : l.batches.map((b) => (
+                              {/* Stock — the quantity already held for this line,
+                                  and a link to where it is held: a produced meal
+                                  opens its batches on the Production Order list
+                                  (every batch row flashes, however many there
+                                  are), a consumable opens Stock Overview. */}
+                              <TableCell className="text-right tabular-nums text-sm text-sky-700">
+                                {l.produced ? (
+                                  l.batches.length > 0 && l.availableProduction > 0 ? (
+                                    <button
+                                      type="button"
+                                      className="font-semibold text-primary underline decoration-dotted underline-offset-2 hover:opacity-80"
+                                      title={`Open in Production Order — ${l.batches.length} batch${l.batches.length === 1 ? "" : "es"}`}
+                                      onClick={() => goToProductionBatches(l)}
+                                    >
+                                      {l.availableProduction}
+                                    </button>
+                                  ) : (
+                                    <span className="text-muted-foreground">—</span>
+                                  )
+                                ) : l.stockQty > 0 ? (
                                   <button
-                                    key={b.productionId}
                                     type="button"
-                                    className="block font-mono text-[11px] font-semibold text-primary underline decoration-dotted underline-offset-2 hover:opacity-80"
-                                    title="Open this production order"
-                                    onClick={() => goToProductionOrder(b)}
+                                    className="font-semibold text-sky-700 underline decoration-dotted underline-offset-2 hover:opacity-80"
+                                    title={`Open ${l.itemName} in Stock Overview`}
+                                    onClick={() => goToStockRow(l.itemName)}
                                   >
-                                    {b.productionId}
+                                    {l.stockQty}
                                   </button>
-                                ))}
+                                ) : (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
                               </TableCell>
                               {/* Produced Qty is the order's own output, as it reads
                                   on the Production Order list. */}
@@ -4705,9 +5104,6 @@ function DelayProductionScreen({
                                     over && "border-destructive focus-visible:ring-destructive",
                                   )}
                                 />
-                              </TableCell>
-                              <TableCell className="text-right tabular-nums text-sm text-sky-700">
-                                {l.stockQty > 0 ? l.stockQty : "—"}
                               </TableCell>
                               <TableCell className={cn(
                                 "text-right tabular-nums text-sm",
@@ -5276,20 +5672,17 @@ function DelayFulfillmentScreen({
 // ─── Delay Detail Screen ──────────────────────────────────────────────────────
 
 function DelayDetailScreen({
-  event, approval, dispatchRecord, onOpenFulfillment, onSendToDispatch, onClose, onNavigate,
+  event, approval, onOpenFulfillment, onClose, onNavigate,
 }: {
   event: DelayEvent;
   approval: DelayApprovalRecord | undefined;
-  dispatchRecord: DispatchRecordLike | undefined;
   onOpenFulfillment: () => void;
-  onSendToDispatch: () => void;
   onClose: () => void;
   onNavigate: (path: string) => void;
 }) {
   const [drLog] = usePersistedState<DrLogEntry[]>("delay-dr-log", []);
   const [detailStockLog, setDetailStockLog] = useState<{ item: DrItem; log: DrLogEntry[] } | null>(null);
   const { productionEntries } = useWorkflow();
-  const [allDispatchRecords] = usePersistedState<DispatchRecordLike[]>("dispatch-records", []);
   // Production-fulfilment records — read-only here, for the summary card below.
   const [dpfRecords] = usePersistedState<DelayProductionFulfillment[]>(DPF_KEY, []);
   const dpf = dpfRecords.find((r) => r.id === event.productionFulfillment?.id);
@@ -5297,19 +5690,141 @@ function DelayDetailScreen({
   const f  = event.fulfillment;
   const dr = f?.directReceive;
 
-  // The flight's earlier dispatches (everything for this flight other than this
-  // delay dispatch) — shown as "Previous Dispatch History" before the delay one.
-  const previousDispatches = allDispatchRecords
-    .filter((d) => d.flightNos.includes(event.flightNumber) && d.id !== event.dispatchId)
-    .sort((a, b) => (a.dispatch_sequence ?? 0) - (b.dispatch_sequence ?? 0));
+  // ── Per-item references for the fulfilment breakdown ──────────────────────
+  // Stock Overview's Code column is a derived display code (see routes/
+  // inventory.tsx): a per-item-type counter over the item list sorted by id.
+  // Mirrored here so a consumable's reference reads exactly as it does there,
+  // while the row id stays the join key used to flash the row on arrival.
+  const [stockRows] = usePersistedState<Array<{ id?: string; name: string; itemType?: string }>>(
+    "inventory-items", [],
+  );
+  const stockRefByName = useMemo(() => {
+    const CODE_PREFIX: Record<string, string> = {
+      "Finished Good": "FG", "Semi-Finished Good": "SFG",
+      "Raw Material": "RM", "Packaging": "PKG", "Consumable": "CON",
+    };
+    const typeByName = new Map(getItemProfiles().map((p) => [p.name.toLowerCase(), p.itemType]));
+    const counters: Record<string, number> = {};
+    const map = new Map<string, { code: string; rowId: string }>();
+    for (const it of [...stockRows].sort((a, b) => (a.id ?? "").localeCompare(b.id ?? ""))) {
+      const prefix = CODE_PREFIX[typeByName.get(it.name.toLowerCase()) ?? it.itemType ?? ""] ?? "RM";
+      counters[prefix] = (counters[prefix] ?? 0) + 1;
+      map.set(it.name.trim().toLowerCase(), {
+        code: `${prefix}-${String(counters[prefix]).padStart(3, "0")}`,
+        rowId: it.id ?? it.name,
+      });
+    }
+    return map;
+  }, [stockRows]);
 
-  // Food items + qty for the Delay Dispatch Details card: use the dispatch
-  // record's amenities when it resolves, otherwise fall back to the event's own
-  // menu items so the card always shows the dispatched food, never a bare stub.
-  const delayDispatchItems: { label: string; qty: number }[] =
-    (dispatchRecord?.detail.amenities.length ?? 0) > 0
-      ? dispatchRecord!.detail.amenities.map((a) => ({ label: a.label, qty: a.qty }))
-      : (event.menuItems ?? []).map((mi) => ({ label: mi.name, qty: mi.requiredQty }));
+  // ── Approval log ──────────────────────────────────────────────────────────
+  // One line per sign-off this event needed, whichever queue it went to:
+  // stock / production fulfilment (Delay Refreshment), production orders, and
+  // purchase requisitions. Read-only over each queue's own store.
+  const [allDelayApprovals] = usePersistedState<DelayApprovalRecord[]>("delay-approval-records", []);
+  const approvalLog = useMemo(() => {
+    const prs = getPurchaseRequisitions();
+    type Row = {
+      leg: string; ref: string; requestedBy?: string; requestedAt?: string;
+      approvedBy?: string; approvedAt?: string; status: string;
+      done: boolean; rejected: boolean;
+    };
+    const rows: Row[] = [];
+    for (const r of event.fulfilmentRefs ?? []) {
+      if (r.refKind === "delay-approval") {
+        const a = allDelayApprovals.find((x) => x.id === r.ref);
+        const status = a?.status ?? "Pending";
+        rows.push({
+          leg: r.source === "Stock" ? "Stock Fulfillment"
+            : r.source === "Production" ? "Production Fulfillment"
+            : "Instant Purchase",
+          ref: r.ref,
+          requestedBy: a?.submittedBy ?? event.reportedBy,
+          requestedAt: a?.submittedAt ?? r.at,
+          approvedBy: a?.processedBy,
+          approvedAt: a?.processedAt,
+          status,
+          done: status === "Approved",
+          rejected: status === "Declined",
+        });
+      } else if (r.refKind === "purchase-requisition") {
+        const pr = prs.find((p) => p.id === r.ref);
+        const status = pr?.status ?? "Pending Approval";
+        const pending = /pending|draft/i.test(status);
+        rows.push({
+          leg: "Purchase Req",
+          ref: r.ref,
+          requestedBy: pr?.requestedBy ?? event.reportedBy,
+          requestedAt: r.at,
+          // The requisition store keeps the decision, not its timestamp.
+          approvedBy: undefined,
+          approvedAt: undefined,
+          status,
+          done: !pending && !/reject|cancel/i.test(status),
+          rejected: /reject|cancel/i.test(status),
+        });
+      } else {
+        for (const id of r.ref.split(",").map((s) => s.trim()).filter(Boolean)) {
+          const o = productionEntries.find((x) => x.id === id);
+          const status = o?.status ?? "Pending";
+          rows.push({
+            leg: "Production Order",
+            ref: id,
+            requestedBy: event.reportedBy,
+            requestedAt: r.at,
+            approvedBy: o?.qcCheckedBy,
+            // A run is signed off by QC — that is its approval moment.
+            approvedAt: o?.qcPassedAt,
+            status,
+            done: status === "Completed" && !!o?.qcPassedAt,
+            rejected: status === "Re-Cook",
+          });
+        }
+      }
+    }
+    return rows;
+  }, [event.fulfilmentRefs, event.reportedBy, allDelayApprovals, productionEntries]);
+
+  /**
+   * Where a single item actually came from. A cooked meal points at the kitchen
+   * run that made it — the order raised for this flight, or the finished batch it
+   * was drawn from. Anything bought in points at its Stock Overview row. Both
+   * open the row they name, flashed on arrival.
+   */
+  const itemRef = (name: string, source: string): { label: string; open: () => void } | null => {
+    const key = name.trim().toLowerCase();
+    if (source === "Production") {
+      const run = productionEntries.find((o) =>
+        (event.productionOrderIds ?? []).includes(o.id)
+        && (o.outputItemName ?? o.bom ?? "").trim().toLowerCase() === key);
+      // Meals pulled from production already finished carry their batch on a
+      // fulfilment record instead of a fresh order — any record raised for this
+      // event counts, not only the one the event points at.
+      const batch = dpfRecords
+        .filter((d) => d.eventId === event.id)
+        .flatMap((d) => d.lines)
+        .find((l) => l.itemName.trim().toLowerCase() === key);
+      const proId = run?.id ?? batch?.productionId;
+      if (proId) {
+        return {
+          label: proId,
+          open: () => {
+            flagArrival({ target: "production-list", ids: [proId] });
+            onNavigate(`/production-entry?pro=${encodeURIComponent(proId)}`);
+          },
+        };
+      }
+    }
+    const inv = stockRefByName.get(key);
+    if (!inv) return null;
+    return {
+      label: inv.code,
+      open: () => {
+        flagArrival({ target: "inv-alerts", ids: [inv.rowId] });
+        onNavigate("/inventory");
+      },
+    };
+  };
 
   // ── Production route (delay food items cooked fresh) ──────────────────────
   const isProductionRoute = (event.productionOrderIds?.length ?? 0) > 0;
@@ -5348,19 +5863,12 @@ function DelayDetailScreen({
             <PackageOpen className="h-3.5 w-3.5 mr-1.5" /> Go to Fulfillment
           </Button>
         )}
-        {event.status === "Approved" && (
-          <Button size="sm" className="bg-teal-600 text-white hover:bg-teal-700" onClick={onSendToDispatch}>
-            <Truck className="h-3.5 w-3.5 mr-1.5" /> Send to Dispatch
-          </Button>
-        )}
-        {event.status === "Sent To Production" && allProdCompleted && (
-          <Button size="sm" className="bg-teal-600 text-white hover:bg-teal-700" onClick={onSendToDispatch}>
-            <Truck className="h-3.5 w-3.5 mr-1.5" /> Send to Dispatch
-          </Button>
-        )}
+        {/* Packaging and dispatch are driven from the list's Status column —
+            Send To Packaging → … → Send To Dispatch — so this view stays a
+            read-only record of what happened. */}
         {event.dispatchId && (
-          <Button size="sm" variant="outline" onClick={() => onNavigate("/dispatch")}>
-            <ExternalLink className="h-3.5 w-3.5 mr-1.5" /> View in Dispatch
+          <Button size="sm" variant="outline" onClick={() => onNavigate("/packaging")}>
+            <ExternalLink className="h-3.5 w-3.5 mr-1.5" /> View In Packaging
           </Button>
         )}
       </div>
@@ -5402,6 +5910,12 @@ function DelayDetailScreen({
               ["Crew Count",  String(event.crewCount)],
               ["Delay",       `${event.delayDurationHours}h`],
               ["Meal Type",   event.mealType ?? "—"],
+              // The schedule the delay is measured against, both on the same
+              // 24h clock so the shift reads at a glance.
+              ["Scheduled Dep. Time", event.originalEtd ? to24hGmt6(event.originalEtd) : "—"],
+              ["Delayed Dep. Time",   event.originalEtd
+                ? to24hGmt6(addHoursToEtd(event.originalEtd, event.delayDurationHours))
+                : "—"],
               ["Reported By", event.reportedBy],
               ["Created",     event.createdAt],
               ["Updated",     event.updatedAt],
@@ -5461,18 +5975,16 @@ function DelayDetailScreen({
           "Production": "border-indigo-200 bg-indigo-50 text-indigo-800",
           "Instant Purchase": "border-amber-200 bg-amber-50 text-amber-800",
         };
-        /** Open the document a route raised, flashing its row on arrival. */
-        const openRef = (kind: string, id: string) => {
-          const first = id.split(",")[0].trim();
-          if (kind === "production-order") {
-            flagArrival({ target: "production-list", ids: id.split(",").map((s) => s.trim()) });
-            onNavigate("/production-entry");
-          } else if (kind === "purchase-requisition") {
-            flagArrival({ target: "pr-list", ids: [first] });
-            onNavigate("/purchase-requisition");
-          } else {
-            onNavigate("/approval-management");
-          }
+        /** Each route's own screen — where the whole leg is worked. */
+        const ROUTE: Record<string, { label: string; path: string }> = {
+          "Stock": { label: "Open Stock Overview", path: "/inventory" },
+          "Production": { label: "Open Production Order", path: "/production-entry" },
+          "Instant Purchase": { label: "Open Purchase Req", path: "/purchase-requisition" },
+        };
+        const TITLE: Record<string, string> = {
+          "Stock": "Fulfill from Stock",
+          "Production": "Fulfill from Production",
+          "Instant Purchase": "Fulfill from Instant Purchase",
         };
         return (
           <Card>
@@ -5485,34 +5997,66 @@ function DelayDetailScreen({
                 return (
                   <div key={s} className={cn("rounded-md border p-3", tone[s])}>
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-xs font-semibold">
-                        {s === "Stock" ? "Fulfilled From Stock"
-                          : s === "Production" ? "Sent To Production"
-                          : "Forwarded To Instant Purchase"}
-                      </span>
+                      <span className="text-xs font-semibold">{TITLE[s]}</span>
                       <span className="text-[11px] opacity-80">
                         {group.reduce((n, r) => n + r.items.length, 0)} item(s)
                       </span>
+                      <button
+                        type="button"
+                        className="ml-auto inline-flex items-center gap-1 text-[10px] font-semibold underline decoration-dotted underline-offset-2 hover:opacity-70"
+                        onClick={() => onNavigate(ROUTE[s].path)}
+                      >
+                        <ExternalLink className="h-3 w-3" /> {ROUTE[s].label}
+                      </button>
                     </div>
                     {group.map((r, gi) => (
                       <div key={`${r.ref}-${gi}`} className="mt-2 border-t border-current/15 pt-2 first:mt-1 first:border-0 first:pt-0">
                         <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                          <span className="text-[10px] uppercase tracking-wider opacity-70">Reference</span>
-                          {r.ref.split(",").map((id) => (
-                            <button
-                              key={id.trim()}
-                              type="button"
-                              onClick={() => openRef(r.refKind, id.trim())}
-                              className="font-mono text-xs font-semibold underline decoration-dotted underline-offset-2 hover:opacity-70"
-                              title="Open this document"
-                            >
-                              {id.trim()}
-                            </button>
-                          ))}
-                          <span className="ml-auto text-[10px] tabular-nums opacity-70">{r.at}</span>
+                          <span className="text-[10px] uppercase tracking-wider opacity-70">Routed</span>
+                          <span className="text-[10px] tabular-nums opacity-70">{r.at}</span>
                         </div>
-                        <div className="mt-1 text-[11px]">
-                          {r.items.map((i) => `${i.name} — ${i.qty} ${i.uom}`).join(" · ")}
+                        {/* Line detail — each item against the record it came
+                            from: its kitchen run, or its Stock Overview code.
+                            The reference sits on the row, not above the table. */}
+                        <div className="mt-1.5 overflow-hidden rounded border border-current/15">
+                          <table className="w-full text-[11px]">
+                            <thead>
+                              <tr className="bg-current/5 text-left">
+                                <th className="px-2 py-1 font-semibold">Item</th>
+                                <th className="px-2 py-1 font-semibold text-right w-20">Qty</th>
+                                <th className="px-2 py-1 font-semibold w-16">UoM</th>
+                                <th className="px-2 py-1 font-semibold w-40">Reference</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {r.items.map((i, ii) => {
+                                const ref = itemRef(i.name, s);
+                                return (
+                                  <tr key={`${i.name}-${ii}`} className="border-t border-current/10">
+                                    <td className="px-2 py-1 font-medium">{i.name}</td>
+                                    <td className="px-2 py-1 text-right tabular-nums">{i.qty}</td>
+                                    <td className="px-2 py-1 opacity-80">{i.uom}</td>
+                                    <td className="px-2 py-1">
+                                      {ref ? (
+                                        <button
+                                          type="button"
+                                          onClick={ref.open}
+                                          className="font-mono font-semibold underline decoration-dotted underline-offset-2 hover:opacity-70"
+                                          title={s === "Production"
+                                            ? "Open this production run"
+                                            : "Open this item in Stock Overview"}
+                                        >
+                                          {ref.label}
+                                        </button>
+                                      ) : (
+                                        <span className="opacity-60">—</span>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
                         </div>
                       </div>
                     ))}
@@ -5592,7 +6136,13 @@ function DelayDetailScreen({
               {[
                 ["Item Type",    f.itemType],
                 ["Final Qty",    String(f.finalQty)],
-                ["Method",       f.fulfillmentType],
+                // The routes the items actually came through, not just the last
+                // action taken — a delay can draw on all three at once.
+                ["Fulfillment Method", (() => {
+                  const used = Array.from(new Set((event.fulfilmentRefs ?? []).map((r) =>
+                    r.source === "Instant Purchase" ? "Purchase" : r.source)));
+                  return used.length > 0 ? used.join(", ") : f.fulfillmentType;
+                })()],
                 ["Requested By", f.requestedBy],
                 ["Notes",        f.notes || "—"],
               ].map(([label, val]) => (
@@ -5651,54 +6201,44 @@ function DelayDetailScreen({
         </Card>
       )}
 
-      {/* Production Orders (delay food items cooked fresh) */}
-      {isProductionRoute && (
+      {/* Approval log — one line per sign-off the event needed, each with who
+          asked, when, and when it cleared. */}
+      {approvalLog.length > 0 && (
         <Card>
-          <CardContent className="pt-4 space-y-4">
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Production Orders
-              </div>
-              <Button size="sm" variant="outline" onClick={() => onNavigate("/production-entry")}>
-                <ExternalLink className="h-3.5 w-3.5 mr-1.5" /> View in Production
-              </Button>
+          <CardContent className="pt-4 space-y-3">
+            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Approval Log
             </div>
-
-            <div className="border border-border rounded-md overflow-x-auto -mx-1 px-1">
-              <Table className="min-w-[520px]">
+            <div className="border border-border rounded-md overflow-x-auto">
+              <Table className="min-w-[640px]">
                 <TableHeader className="bg-muted/40">
                   <TableRow>
-                    <TableHead className="text-xs uppercase tracking-wider">Order No</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider text-right">Order Qty</TableHead>
-                    <TableHead className="text-xs uppercase tracking-wider text-right">Produced</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Approval</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Reference</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Requested By</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Requested At</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Approved By</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Approved At</TableHead>
                     <TableHead className="text-xs uppercase tracking-wider">Status</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {prodOrders.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={5} className="text-center text-sm text-muted-foreground py-4">
-                        {event.productionOrderIds?.length ?? 0} order(s) raised — open the Production module to track them.
-                      </TableCell>
-                    </TableRow>
-                  ) : prodOrders.map((o) => (
-                    <TableRow key={o.id}>
-                      <TableCell className="font-mono text-xs font-semibold text-primary">{o.id}</TableCell>
-                      <TableCell className="text-sm font-medium">{o.outputItemName ?? o.bom}</TableCell>
-                      <TableCell className="text-right tabular-nums text-sm">{(o.orderQty ?? 0).toLocaleString()}</TableCell>
-                      <TableCell className="text-right tabular-nums text-sm">{o.producedQty.toLocaleString()}</TableCell>
+                  {approvalLog.map((a, i) => (
+                    <TableRow key={`${a.ref}-${i}`}>
+                      <TableCell className="text-sm font-medium">{a.leg}</TableCell>
+                      <TableCell className="font-mono text-xs">{a.ref}</TableCell>
+                      <TableCell className="text-xs">{a.requestedBy || "—"}</TableCell>
+                      <TableCell className="text-xs tabular-nums">{a.requestedAt || "—"}</TableCell>
+                      <TableCell className="text-xs">{a.approvedBy || "—"}</TableCell>
+                      <TableCell className="text-xs tabular-nums">{a.approvedAt || "—"}</TableCell>
                       <TableCell>
                         <span className={cn(
-                          "inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold",
-                          o.status === "Completed" ? "bg-emerald-100 text-emerald-700" :
-                          o.status === "Ready for QC" ? "bg-teal-100 text-teal-700" :
-                          o.status === "In Preparation" ? "bg-amber-100 text-amber-700" :
-                          o.status === "Approved" ? "bg-blue-100 text-blue-700" :
-                          o.status === "Re-Cook" ? "bg-red-100 text-red-700" :
-                          "bg-slate-100 text-slate-600",
+                          "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap",
+                          a.done ? "bg-emerald-100 text-emerald-700"
+                            : a.rejected ? "bg-red-100 text-red-700"
+                            : "bg-amber-100 text-amber-700",
                         )}>
-                          {o.status}
+                          {a.status}
                         </span>
                       </TableCell>
                     </TableRow>
@@ -5706,149 +6246,10 @@ function DelayDetailScreen({
                 </TableBody>
               </Table>
             </div>
-
-            {allProdCompleted ? (
-              <p className="text-xs font-medium text-emerald-700">
-                All production orders completed — ready to send to dispatch.
-              </p>
-            ) : (
-              <p className="text-xs text-muted-foreground">
-                Orders flow through Approval Management → Production Entry → QC. This event can be dispatched once every order is Completed.
-              </p>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Approval record */}
-      {approval && (
-        <Card>
-          <CardContent className="pt-4">
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
-              Approval — {approval.id}
-            </div>
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+            {approval?.declineReason && (
               <div>
-                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Status</div>
-                <div className={cn("mt-0.5 font-semibold",
-                  approval.status === "Approved" ? "text-emerald-700" :
-                  approval.status === "Declined" ? "text-red-600" : "text-amber-700")}>
-                  {approval.status}
-                </div>
-              </div>
-              {[["Submitted By", approval.submittedBy], ["Submitted At", approval.submittedAt],
-                ...(approval.processedBy ? [["Processed By", approval.processedBy]] : []),
-                ...(approval.processedAt ? [["Processed At", approval.processedAt]] : []),
-              ].map(([l, v]) => (
-                <div key={l}>
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{l}</div>
-                  <div className="mt-0.5 font-medium text-sm tabular-nums">{v}</div>
-                </div>
-              ))}
-              {approval.declineReason && (
-                <div className="md:col-span-3">
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Decline Reason</div>
-                  <div className="mt-0.5 font-medium text-red-600">{approval.declineReason}</div>
-                </div>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Previous dispatch history — the flight's earlier dispatches */}
-      {event.dispatchId && (
-        <Card>
-          <CardContent className="pt-4 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Previous Dispatch History
-              </div>
-              <Button size="sm" variant="outline" onClick={() => onNavigate("/dispatch")}>
-                <ExternalLink className="h-3.5 w-3.5 mr-1.5" /> View in Dispatch
-              </Button>
-            </div>
-
-            {previousDispatches.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                No previous dispatches recorded for {event.flightNumber}.
-              </p>
-            ) : (
-              <div className="space-y-3">
-                {previousDispatches.map((d) => (
-                  <div key={d.id} className="rounded-md border border-border p-3">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <button
-                        type="button"
-                        title="View in Dispatch"
-                        className="font-mono text-xs font-semibold text-primary underline decoration-dotted underline-offset-2 hover:opacity-80"
-                        onClick={() => onNavigate("/dispatch")}
-                      >
-                        {d.id}
-                      </button>
-                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${d.status === "Dispatched" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
-                        {d.status}
-                      </span>
-                      <span className="text-xs text-muted-foreground">
-                        {d.detail.amenities.map((a) => a.label).join(", ") || "—"}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Delay dispatch details — ID, food items & qty, status Dispatched */}
-      {event.dispatchId && (
-        <Card>
-          <CardContent className="pt-4 space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                Delay Dispatch Details
-              </div>
-              <Button size="sm" variant="outline" onClick={() => onNavigate("/dispatch")}>
-                <ExternalLink className="h-3.5 w-3.5 mr-1.5" /> View in Dispatch
-              </Button>
-            </div>
-
-            <div className="flex items-center gap-2 flex-wrap">
-              <button
-                type="button"
-                title="View in Dispatch"
-                className="font-mono text-xs font-semibold text-primary underline decoration-dotted underline-offset-2 hover:opacity-80"
-                onClick={() => onNavigate("/dispatch")}
-              >
-                {event.dispatchId}
-              </button>
-              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-100 text-emerald-700">
-                Dispatched
-              </span>
-            </div>
-
-            {delayDispatchItems.length > 0 && (
-              <div>
-                <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Food Items</div>
-                <div className="border border-border rounded-md overflow-hidden">
-                  <Table>
-                    <TableHeader className="bg-muted/40">
-                      <TableRow>
-                        <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
-                        <TableHead className="text-xs uppercase tracking-wider text-right">Qty</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {delayDispatchItems.map((it, i) => (
-                        <TableRow key={i}>
-                          <TableCell className="text-sm font-medium">{it.label}</TableCell>
-                          <TableCell className="text-right tabular-nums text-sm">{it.qty}</TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
+                <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Decline Reason</div>
+                <div className="mt-0.5 font-medium text-sm text-red-600">{approval.declineReason}</div>
               </div>
             )}
           </CardContent>
