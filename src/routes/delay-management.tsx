@@ -31,6 +31,8 @@ import { roundQty } from "@/lib/num";
 import { toast } from "sonner";
 import { flagArrival } from "@/lib/arrival-flash";
 import { addPurchaseRequisition, getPurchaseRequisitions, type PRLineItem } from "@/lib/purchase-requisitions";
+import { ListExportActions } from "@/components/common/ListExportActions";
+import { filterMeta as listExportFilterMeta } from "@/lib/list-export";
 import { useFlightOrders } from "@/lib/flight-orders-store";
 import { activeItems, vendors, warehouses as ALL_WAREHOUSES } from "@/lib/sample-data";
 import { LocationPicker } from "@/components/common/LocationPicker";
@@ -2041,6 +2043,25 @@ function DelayList({
             Clear dates
           </Button>
         )}
+        <div className="ml-auto">
+          <ListExportActions
+            table={() => ({
+              title: "Delay Events",
+              fileName: `delay-events-${filterFrom || "all"}${filterTo && filterTo !== filterFrom ? `_to_${filterTo}` : ""}`,
+              meta: listExportFilterMeta([
+                ["Dates", (filterFrom || filterTo) && `${filterFrom || "…"} → ${filterTo || "…"}`],
+                ["Status", filterStatus !== "all" && filterStatus],
+                ["Search", search.trim() || false],
+              ]),
+              columns: ["Event", "Flight", "Sector", "Order", "Flight Date", "Delay (h)", "PAX", "Reason", "Status"],
+              numericCols: [5, 6],
+              rows: filtered.map((e) => [
+                e.id, e.flightNumber, e.sector, e.orderNo, e.flightDate,
+                e.delayDurationHours, e.paxCount, e.reason, e.status,
+              ]),
+            })}
+          />
+        </div>
       </div>
 
       {/* Combined dispatch for the marked ready flights — one click, every

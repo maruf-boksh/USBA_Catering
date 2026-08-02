@@ -237,7 +237,7 @@ const SRC: Record<string, Group> = {
   "/dispatch-monitoring": {
     columns: [["col:flight", "Flight"], ["col:pkg-date", "Pkg. Date"], ["col:qty", "Qty"], ["col:vehicle", "Vehicle"], ["col:clean", "Clean"], ["col:chilled", "Chilled (1–4°C)"], ["col:frozen", "Frozen (-10±2°C)"], ["col:load-start", "Load Start"], ["col:load-end", "Load End"], ["col:veh-begin", "Veh. Begin"], ["col:veh-end", "Veh. End"], ["col:result", "Result"], ["col:gate-08-temp", "Gate 08 Temp"], ["col:unloading", "Unloading"], ["col:apt-exec", "APT Exec."], ["col:remarks", "Remarks"], ["col:actions", "Actions"]],
     kpis: [["kpi-total-dispatches", "Total Dispatches"], ["kpi-result-satisfied", "Result Satisfied"], ["kpi-not-satisfied", "Not Satisfied"], ["kpi-vehicle-issues", "Vehicle Issues"]],
-    actions: [["action-mobile-app-view", "Mobile App View"], ["action-add-dispatch-entry", "Add Dispatch Entry"], ["action-save-dispatch-entry", "Save Dispatch Entry"], ["action-save-and-accept", "Save And Accept"]],
+    actions: [["action-mobile-app-view", "Mobile App View"], ["action-add-dispatch-entry", "Add Dispatch Entry"], ["action-save-dispatch-entry", "Save Dispatch Entry"], ["action-save-and-accept", "Save (Airport Receive)"]],
     fields: [["field-departure-time", "Departure Time"], ["field-flight-number", "Flight Number"], ["field-date-of-packaging", "Date of Packaging"], ["field-meal-types-quantities", "Meal Types & Quantities"], ["field-vehicle-no", "Vehicle No."], ["field-vehicle-clean", "Vehicle Clean"], ["field-chilled-temp-c", "Chilled Temp (°C)"], ["field-frozen-temp-c", "Frozen Temp (°C)"], ["field-load-start", "Load Start"], ["field-load-end", "Load End"], ["field-veh-temp-begin-c", "Veh. Temp Begin (°C)"], ["field-veh-temp-end-c", "Veh. Temp End (°C)"], ["field-result-satisfy", "Result Satisfy"], ["field-gate-08-temp-c", "Gate 08 Temp (°C)"], ["field-time-of-unloading", "Time of Unloading"]],
     sections: [["section-catering-point-dispatch-entry", "Catering Point Dispatch Entry"], ["section-flight-packaging", "Flight & Packaging"], ["section-vehicle-details", "Vehicle Details"], ["section-product-core-temperature", "Product Core Temperature"], ["section-loading-times-vehicle-temperature", "Loading Times & Vehicle Temperature"], ["section-result-check", "Result Check"], ["section-dispatch-log", "Dispatch Log"], ["section-airport-point-receiving-entry", "Airport Point Receiving Entry"], ["section-airport-gate-details-gate-no-08", "Airport Gate Details — Gate No. 08"], ["section-receipt-log", "Receipt Log"]],
   },
@@ -402,6 +402,15 @@ const SRC: Record<string, Group> = {
     columns: [["col:item", "Item"], ["col:basis", "Basis"], ["col:actions", "Actions"]],
     actions: [["action-reset", "Reset"], ["action-add-override", "Add Override"]],
     fields: [["field-default-basis", "Default basis"], ["field-item", "Item"], ["field-produce-by", "Produce by"]],
+  },
+  "/config-packaging": {
+    fields: [["field-print-scan", "Label print & scan"]],
+  },
+  "/operational-report": {
+    kpis: [["kpi:flights", "Flights"], ["kpi:in-pipeline", "In Pipeline"], ["kpi:dispatched", "Dispatched"], ["kpi:departed", "Departed / Completed"]],
+    columns: [["col:flight", "Flight"], ["col:sector", "Sector"], ["col:date-etd", "Date · ETD"], ["col:load", "Load"], ["col:lifecycle", "Lifecycle"], ["col:status", "Status"], ["col:view", "View"]],
+    fields: [["field-search", "Search"], ["field-date-from", "From"], ["field-date-to", "To"], ["field-flight-type", "Flight Type"], ["field-airline", "Airline"], ["field-status", "Status"]],
+    actions: [["action-view-lifecycle", "View Lifecycle"]],
   },
 };
 

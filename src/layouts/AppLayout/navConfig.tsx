@@ -105,6 +105,7 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/meal-planning',       label: 'Menu Planning',    icon: I(UtensilsCrossed) },
       { key: '/delay-management',    label: 'Delay Management',     icon: I(Clock) },
       { key: '/lmc',                 label: 'Last Minute Change (LMC)', icon: I(Replace) },
+      { key: '/operational-report',  label: 'Operational Report',   icon: I(BarChart3) },
     ],
   },
 
@@ -221,7 +222,7 @@ export const NAV_MODULES: NavModule[] = [
     label: 'Asset Management',
     icon: I(Package),
     children: [
-      { key: '/fleet-overview',        label: 'Asset Overview',     icon: I(LayoutDashboard) },
+      { key: '/fleet-overview',        label: 'Asset Dashboard',    icon: I(LayoutDashboard) },
       { key: '/airline-equipments',    label: 'Asset Registration', icon: I(Boxes) },
       { key: '/asset-assignment',      label: 'Asset Assign',       icon: I(Send) },
       { key: '/asset-disposal',        label: 'Asset Disposal',     icon: I(Trash2) },
@@ -283,6 +284,7 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/config-approval',   label: 'Approval Setup',   icon: I(GitBranch) },
       { key: '/config-meal-slots', label: 'Meal Config',       icon: I(Clock) },
       { key: '/config-production-basis', label: 'Production Basis', icon: I(Scale) },
+      { key: '/config-packaging', label: 'Packaging Configuration', icon: I(ScanBarcode) },
       { key: '/config-role-setup', label: 'Role Setup', icon: I(UserCog) },
       { key: '/config-role-permission-editor', label: 'Role Permission Editor', icon: I(KeyRound) },
       { key: '/config-form-access-control', label: 'Form Access Control', icon: I(LockKeyhole) },

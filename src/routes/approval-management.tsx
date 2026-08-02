@@ -40,6 +40,7 @@ import {
 } from "@/lib/workflow-store";
 import { mergePassedBatches, type PackagingBatch } from "@/lib/packaging-batches";
 import { type PackagingAllocation } from "@/lib/packaging-allocations";
+import { isCrewSetCode, isPaxSetCode } from "@/lib/menu-meal-sets";
 import { inventory, warehouses, consumableItems, type ConsumableItem, activeOffices, activeWarehousesByOffice } from "@/lib/sample-data";
 import {
   TR_STORAGE_KEY, TR_SEED, officeNameOf as trOfficeNameOf,
@@ -55,7 +56,7 @@ import { applyReceiptToPR } from "@/lib/purchase-requisitions";
 import { getRfqs, setRfqStatus } from "@/lib/rfqs";
 import { getPurchaseRequisitions, setPurchaseRequisitionStatus } from "@/lib/purchase-requisitions";
 import { getQuotations, setQuotationStatus } from "@/lib/quotations";
-import { getStockAdjustments, setStockAdjustmentStatus, addAdjustment, reduceInventoryStock, applyInventoryStock } from "@/lib/stock-adjustments";
+import { getStockAdjustments, setStockAdjustmentStatus, addAdjustment, reduceInventoryStock, applyInventoryStock, disposeStock } from "@/lib/stock-adjustments";
 import { logAudit } from "@/lib/audit-log";
 import { resolveProductionItem } from "@/lib/meal-recipe";
 import { useRole } from "@/lib/roles";
@@ -858,6 +859,16 @@ export default function ApprovalManagementPage() {
     );
     setGalleyLoadingRecords(updated);
     sessionStorage.setItem("galley_loading", JSON.stringify(updated));
+    // Galley loading signed off = the catering cycle for this flight is closed
+    // out → advance its dispatched flight order to Completed. (It later becomes
+    // Departed once its ETD passes — see Order Management's reconciliation.)
+    const flightNo = record.flightLabel.split(" — ")[0].trim();
+    if (flightNo) {
+      updateFlightOrdersWhere(
+        (o) => o.flight === flightNo && o.status === "Dispatched",
+        { status: "Completed" },
+      );
+    }
     setGalleyDetailOpen(false);
     toast.success("Galley signed off & approved — Ready To Fly!");
   }
@@ -1241,24 +1252,38 @@ export default function ApprovalManagementPage() {
         id: `PKR-AP-${a.id}`,
         category: "Packaging" as Category,
         refId: a.id,
-        title: `${a.flight} — packaging run (${a.item})`,
+        title: `${a.flight} — packaging run (${a.setCode ? `${a.setCode} · ${a.item}` : a.item})`,
         requestedBy: a.createdBy ?? "Packaging",
         requestedAt: a.createdAt,
-        summary: `${a.qty.toLocaleString()} portions of ${a.item} for ${a.flight}${a.depTime ? " dep " + a.depTime : ""} on ${a.date} · run ${a.productionId}`,
-        itemsCount: 1,
+        // A special-meal package is an assembled MEAL — several production runs
+        // combined into one meal. Signing it off approves all of them, so the
+        // approver is shown meals and the runs behind them, not one run's share.
+        summary: a.setCode
+          ? `${a.qty.toLocaleString()} ${a.setCode} meal${a.qty === 1 ? "" : "s"} (${a.item}) for ${a.flight}${a.depTime ? " dep " + a.depTime : ""} on ${a.date} · assembled from ${a.components?.length ?? 1} runs`
+          : `${a.qty.toLocaleString()} portions of ${a.item} for ${a.flight}${a.depTime ? " dep " + a.depTime : ""} on ${a.date} · run ${a.productionId}`,
+        itemsCount: a.setCode ? (a.components?.length ?? 1) : 1,
         status,
         processedBy: a.approvedBy,
         processedAt: a.approvedAt,
-        lines: [{ name: a.item, qty: a.qty, uom: "portions", note: `${a.flight} · ${a.productionId}` }],
+        lines: a.components?.length
+          ? a.components.map((c) => ({ name: c.item, qty: c.qty, uom: "portions", note: `${a.flight} · ${c.productionId}` }))
+          : [{ name: a.item, qty: a.qty, uom: "portions", note: `${a.flight} · ${a.productionId}` }],
         fields: [
           { label: "Packaging ID", value: a.packagingId },
-          { label: "Production ID", value: a.productionId },
+          ...(a.setCode ? [{
+            label: isCrewSetCode(a.setCode) ? "Crew Meal Set" : isPaxSetCode(a.setCode) ? "Pax Meal Set" : "Special Meal Set",
+            value: `${a.setCode} · ${a.components?.length ?? 0} items per meal`,
+          }] : []),
+          {
+            label: a.components?.length ? "Production IDs" : "Production ID",
+            value: a.components?.length ? a.components.map((c) => c.productionId).join(", ") : a.productionId,
+          },
           { label: "Item", value: a.item },
           { label: "Flight", value: a.flight },
           { label: "Order", value: a.orderNo ?? "—" },
           { label: "Flight Date", value: a.date },
           { label: "Dep Time", value: a.depTime ?? "—" },
-          { label: "Qty For Flight", value: `${a.qty.toLocaleString()} portions` },
+          { label: "Qty For Flight", value: `${a.qty.toLocaleString()} ${a.setCode ? `meal${a.qty === 1 ? "" : "s"}` : "portions"}` },
           { label: "Raised By", value: a.createdBy ?? "—" },
           { label: "Raised At", value: a.createdAt },
           { label: "Run Status", value: a.status },
@@ -2091,7 +2116,12 @@ export default function ApprovalManagementPage() {
               label: "Wastage Disposal",
             }]);
           }
-          reduceInventoryStock(entry.stockItemName, entry.disposalQty);
+          // Write-off, not a plain decrement: a disposal is what a QC hold exists
+          // to lead to, so it consumes HELD stock first and releases that hold as
+          // it goes. Decrementing on-hand alone would leave the item short — 70
+          // on hand with 10 held, dispose the bad 10, and a naive decrement gives
+          // 60 on hand still carrying a 10 hold, so only 50 usable.
+          disposeStock(entry.stockItemName, entry.disposalQty);
           const allAdj = getStockAdjustments();
           let adjSeq = allAdj.length + 1;
           addAdjustment({

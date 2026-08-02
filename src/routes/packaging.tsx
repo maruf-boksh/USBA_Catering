@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { KpiCard } from "@/components/common/KpiCard";
@@ -17,14 +17,14 @@ import {
 } from "@/components/ui/command";
 import {
   Package, PackageCheck, Printer, CheckCircle2, Eye, Boxes, Clock, Truck, Search, Plane, Plus,
-  ChevronDown, Check,
+  ChevronDown, Check, Layers, ClipboardList, ScanLine, Users, UserCog,
 } from "lucide-react";
 import { toast } from "sonner";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { useWorkflow, type WfProductionEntry } from "@/lib/workflow-store";
 import { cn } from "@/lib/utils";
 import { INITIAL_PACKAGING_ROWS, type PackagingRow } from "@/routes/dispatch";
-import { useFlightOrders, type FlightOrder } from "@/lib/flight-orders-store";
+import { useFlightOrders, updateFlightOrdersWhere, type FlightOrder } from "@/lib/flight-orders-store";
 import {
   UNASSIGNED_FLIGHT, resolveManifestRow, manifestLinesFor, resolveFlightOrder, resolveCrewOrder,
   resolveBatchChain, resolveReturnLeg,
@@ -32,8 +32,9 @@ import {
 import { useArrivalFlash, peekArrivalRows } from "@/lib/arrival-flash";
 import { logAudit } from "@/lib/audit-log";
 import { getAuthUser } from "@/lib/auth";
-import { servedOrderNosFor, flightPortionFor, menuSpecFor, dayFromDate } from "@/lib/production-order-link";
-import { loadMealPlanningConfig } from "@/lib/meal-planning-data";
+import { servedOrderNosFor, flightPortionFor, menuSpecFor, dayFromDate, flightTypeFromSector } from "@/lib/production-order-link";
+import { loadMealPlanningConfig, perMealQty, type ForType } from "@/lib/meal-planning-data";
+import { itemDemandForOrder, explainItemDemand, type ItemDemand } from "@/lib/item-demand";
 import { meals, warehouses } from "@/lib/sample-data";
 import {
   mergePassedBatches,
@@ -41,9 +42,18 @@ import {
   type PackagingBatchStatus,
 } from "@/lib/packaging-batches";
 import {
-  allocatedQtyOfRun, flightsOfRun, existingAllocation, newAllocationId, isPackaged, isAwaitingApproval,
-  type PackagingAllocation, type PackagingAllocationStatus,
+  allocatedQtyOfRun, flightsOfRun, existingRunAllocation, existingSetAllocation, allocationRuns,
+  allocationItems, newAllocationId, isPackaged, isAwaitingApproval,
+  type PackagingAllocation, type PackagingAllocationStatus, type PackagingComponent,
 } from "@/lib/packaging-allocations";
+import { specialMealSetsForLeg, dedupeSetsByCode, type SpecialMealSet } from "@/lib/special-meal-sets";
+import {
+  crewMealSetsForLeg, paxMealSetsForLeg, serviceForLeg, servicesCarrying,
+  isCrewSet, isPaxSet, isMenuSet, isCrewSetCode, isPaxSetCode, isMenuSetCode,
+} from "@/lib/menu-meal-sets";
+import { usePackagingCompletionSettings } from "@/lib/packaging-completion-settings";
+import { ListExportActions } from "@/components/common/ListExportActions";
+import { filterMeta } from "@/lib/list-export";
 
 // Meal-type pill colors (mirrors the Dispatch Order-Details modal).
 const MEAL_TYPE_BADGE: Record<string, string> = {
@@ -52,11 +62,90 @@ const MEAL_TYPE_BADGE: Record<string, string> = {
   Dinner: "bg-indigo-100 text-indigo-700",
   Snack: "bg-sky-100 text-sky-700",
   Special: "bg-fuchsia-100 text-fuchsia-700",
+  Crew: "bg-indigo-100 text-indigo-700",
+  Pax: "bg-sky-100 text-sky-700",
 };
+
+// Set-code pill on a packaged meal — pax and crew packages wear their audience
+// colour so a PAX-LUNCH set never reads as a passenger SSR.
+const setCodePill = (code: string) =>
+  cn(
+    "mr-1 inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-bold",
+    isCrewSetCode(code) ? "bg-indigo-100 text-indigo-700"
+      : isPaxSetCode(code) ? "bg-sky-100 text-sky-700"
+      : "bg-fuchsia-100 text-fuchsia-700",
+  );
+/** Short badge text for a set code — the audience for a menu-card meal (whose
+ *  full code is synthetic), the SSR code itself for a special meal. */
+const setCodeLabel = (code: string) =>
+  isCrewSetCode(code) ? "CREW" : isPaxSetCode(code) ? "PAX" : code;
+
+// Who a meal is planned FOR — read off the day's menu cards (forType). The same
+// dish can sit on both a Passengers card and a Crew card, in which case it
+// feeds both audiences and wears both pills.
+const AUDIENCE_PILL: Record<ForType, { label: string; cls: string; Icon: typeof Users }> = {
+  Passengers: { label: "Pax", cls: "border-sky-300 bg-sky-50 text-sky-700", Icon: Users },
+  Crew: { label: "Crew", cls: "border-indigo-300 bg-indigo-50 text-indigo-700", Icon: UserCog },
+};
+const AudiencePills = ({ audience, titleFor }: { audience?: ForType[]; titleFor?: (a: ForType) => string }) => {
+  if (!audience || audience.length === 0) return null;
+  return (
+    <>
+      {audience.map((a) => {
+        const p = AUDIENCE_PILL[a];
+        return (
+          <span
+            key={a}
+            className={cn("inline-flex items-center gap-0.5 rounded-full border px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide", p.cls)}
+            title={titleFor
+              ? titleFor(a)
+              : a === "Passengers" ? "On the day's Passengers menu card" : "On the day's Crew menu card"}
+          >
+            <p.Icon className="h-2.5 w-2.5" /> {p.label}
+          </span>
+        );
+      })}
+    </>
+  );
+};
+
+/**
+ * Who a SPECIAL meal is for.
+ *
+ * A special meal is an SSR, not a menu card, so its audience is not the card's
+ * forType — it comes from the order's roster, which tags each requested meal
+ * Passenger or Crew. Crew genuinely do order specials (a vegetarian purser is
+ * a VGML with no PNR), so treating every SSR as a passenger meal mislabels them.
+ *
+ * Without a roster there is no split to read: the order's flat special-meal
+ * count is a passenger figure, so it reads Pax — and the caller says that is an
+ * assumption rather than a confirmed split.
+ */
+function specialSetAudience(s: SpecialMealSet): ForType[] {
+  if (s.source !== "roster") return ["Passengers"];
+  const out: ForType[] = [];
+  if ((s.paxQty ?? 0) > 0) out.push("Passengers");
+  if ((s.crewQty ?? 0) > 0) out.push("Crew");
+  return out.length > 0 ? out : ["Passengers"];
+}
+
+/** The audience pills' tooltip for a special meal — states where the split came
+ *  from, so "Pax" off a roster is never confused with "Pax" by default. */
+function specialAudienceTitle(s: SpecialMealSet, a: ForType): string {
+  const who = a === "Crew" ? "crew" : "passengers";
+  const n = a === "Crew" ? s.crewQty : s.paxQty;
+  return s.source === "roster"
+    ? `${n ?? 0} of the ${s.qty} ${s.code} on this order are for ${who}, counted off the order's special-meal roster.`
+    : `This order has no special-meal roster, so its ${s.qty} special meals are treated as passenger SSRs. Attach a roster in Order Management to split them by passenger and crew.`;
+}
 
 // System-generated packaging id — one per production package, derived from the
 // production order so it is stable across reloads (PRO-2026-1234 → PKG-2026-1234).
 const packagingId = (b: PackagingBatch) => `PKG-${b.batch.replace(/^PRO-?/i, "")}`;
+// An assembled meal has no single production order to derive an id from, so it
+// takes the primary component's, suffixed with the meal code — still stable, and
+// it reads as what it is (PKG-2026-194237-VGML).
+const setPackagingId = (primary: PackagingBatch, code: string) => `${packagingId(primary)}-${code}`;
 
 const STATUS_TONE: Record<PackagingBatchStatus, string> = {
   "Pending Approval": "border-amber-300 bg-amber-50 text-amber-700",
@@ -87,8 +176,9 @@ type FlightOption = {
   // and pax/crew. The pool counts above are not a per-flight figure: bulk upload
   // gives one Order # to a whole date, so every leg of that order is offered the
   // same runs and every row read an identical "4/4 ready".
-  planLines: number;      // runs contributing >0 portions to this leg
+  planLines: number;      // lines contributing to this leg (runs + assembled meals)
   planQty: number;        // portions this leg would take
+  planMeals?: number;     // special meals it could assemble — a different unit
   fromOrderBook: boolean; // listed in Order Management (vs. batch-only)
 };
 
@@ -123,13 +213,78 @@ const LEGACY_BATCH_STATUS: Partial<Record<PackagingBatchStatus, PackagingAllocat
 type PlanLine = {
   /** Portions of this run to package for the flight. 0 means it can't contribute. */
   qty: number;
-  /** Why it can't: another run covers the item / the run is spent / no menu rule. */
-  reason?: "covered" | "exhausted" | "unsized";
+  /**
+   * Why it can't: another run covers the item, the run is spent, the whole pool
+   * is reserved by special-meal assemblies, the dish belongs to a crew service
+   * this flight doesn't serve, or the dish has no menu rule.
+   */
+  reason?: "covered" | "exhausted" | "reserved" | "unsized" | "offservice";
+  /** For "offservice": the crew service(s) that DO carry the dish. */
+  offService?: string[];
   /** The run that supplied the requirement instead, when reason is "covered". */
   coveredBy?: string;
-  /** The flight's total requirement for this item, for context. */
+  /** The flight's requirement for this dish's OWN line, for context. */
   required?: number;
+  /** The full pool demand behind it — own line + special-meal claims. */
+  demand?: ItemDemand;
 };
+
+/** One leg's sizing: the loose lines, the assemblies, and the reservation ledger. */
+type LegPlan = {
+  plan: Map<string, PlanLine>;
+  sets: SetLine[];
+  /** batch id → portions this leg has spoken for (kits + lines). */
+  claimed: Map<string, number>;
+};
+
+/**
+ * A special meal sized against one flight: the set from the menu plan, and
+ * the QC-passed run standing behind each of its dishes. A meal can only be
+ * packaged when EVERY dish has one — half a VGML is not a VGML.
+ */
+type SetPart = {
+  item: string;
+  /** Portions of this dish in ONE assembled meal (the kit recipe's quantity). */
+  perMeal: number;
+  /** Every run that can supply this dish, with the portions each still has free
+   *  for this flight. A dish cooked in two runs fills one meal count between
+   *  them — the requirement belongs to the dish, not to any single run. */
+  picks: { batch: PackagingBatch; qty: number }[];
+  /** Uncommitted portions of this dish across all of its runs. */
+  available: number;
+  /** Meals this dish alone could cover — floor(available / perMeal). */
+  buildable: number;
+  /** QC-passed runs of this dish that can reach the flight at all, free or not.
+   *  Separates "nobody cooked it" from "cooked, but every portion is spoken
+   *  for" — the two look identical on the row and need different fixes. */
+  runsFound: number;
+};
+
+type SetLine = {
+  set: SpecialMealSet;
+  parts: SetPart[];
+  /** Meals this flight can assemble — min over components, 0 if any is missing. */
+  qty: number;
+  /** Dishes with no QC-passed run behind them. */
+  missing: string[];
+  /** Dishes whose pools cannot cover the full meal count. */
+  short: string[];
+};
+
+/** Draw `need` portions of a dish off its runs, in order — the pick list an
+ *  assembled package records as its components. */
+function takeFromPicks(part: SetPart, meals: number): { batch: PackagingBatch; qty: number }[] {
+  const out: { batch: PackagingBatch; qty: number }[] = [];
+  let left = meals * part.perMeal;
+  for (const p of part.picks) {
+    if (left <= 0) break;
+    const take = Math.min(left, p.qty);
+    if (take <= 0) continue;
+    out.push({ batch: p.batch, qty: take });
+    left -= take;
+  }
+  return out;
+}
 
 const ALLOC_TONE: Record<PackagingAllocationStatus, string> = {
   "Pending Approval": "border-amber-300 bg-amber-50 text-amber-700",
@@ -161,7 +316,7 @@ function AllocationBadge({ status }: { status: PackagingAllocationStatus }) {
 export default function PackagingPage() {
   const navigate = useNavigate();
   useArrivalFlash();
-  const { productionEntries } = useWorkflow();
+  const { productionEntries, productionEntryRecords } = useWorkflow();
   const [batches, setBatches] = usePersistedState<PackagingBatch[]>("packaging-batches", []);
   // Run × flight × quantity — what is actually being packaged, and the list's rows.
   const [allocations, setAllocations] = usePersistedState<PackagingAllocation[]>("packaging-allocations", []);
@@ -207,6 +362,35 @@ export default function PackagingPage() {
     for (const e of productionEntries) m.set(e.id, e);
     return m;
   }, [productionEntries]);
+  // Batch lots logged per production order. A single order can be produced in
+  // several Production Entries, each stamped with its own batch / lot number — so
+  // the packaging modal can show which lot(s) an item is packaged from.
+  const lotsByOrder = useMemo(() => {
+    const m = new Map<string, { batchNo: string; qty: number; expiry?: string }[]>();
+    for (const r of productionEntryRecords) {
+      if (!r.batchNo) continue;
+      const arr = m.get(r.productionOrderId) ?? [];
+      arr.push({ batchNo: r.batchNo, qty: r.producedQty, expiry: r.batchExpiry });
+      m.set(r.productionOrderId, arr);
+    }
+    return m;
+  }, [productionEntryRecords]);
+  /**
+   * The lot(s) a run was produced under.
+   *
+   * The floor entries above are the detailed source — one per shift, each with
+   * its own lot — but they live in memory only, so after a reload every lot
+   * chip read "—" even though the run itself still carried its batch number.
+   * The production ORDER's own `batchNo` is the durable record, so it is the
+   * fallback: an empty column now genuinely means "this run has no lot", not
+   * "the floor entries have been forgotten".
+   */
+  const lotsFor = (productionId: string): { batchNo: string; qty: number; expiry?: string }[] => {
+    const logged = lotsByOrder.get(productionId);
+    if (logged && logged.length > 0) return logged;
+    const e = peById.get(productionId);
+    return e?.batchNo ? [{ batchNo: e.batchNo, qty: e.producedQty, expiry: e.batchExpiry }] : [];
+  };
   // Live Order Management order book — the source of flight numbers, sectors and
   // ETDs for the picker, and of the order a production run is tagged to.
   const flightOrders = useFlightOrders();
@@ -267,15 +451,113 @@ export default function PackagingPage() {
   // once per (item × leg) — thousands of times while the picker sizes the order
   // book. The answer only moves when the order book or the cards do.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const requirementCache = useMemo(() => new Map<string, number | null>(), [flightOrders, menuCards]);
-  const requirementFor = (item: string, leg: { flight: string; date: string; orderNo?: string }): number | null => {
+  const requirementCache = useMemo(() => new Map<string, ItemDemand | null>(), [flightOrders, menuCards]);
+  /**
+   * Everything this flight needs of a dish, split by consumer: `direct` is the
+   * dish's own menu lines, `special` is what the special-meal assemblies reserve
+   * out of the same pool. A dish is one POOL with several consumers — sizing it
+   * as either/or is what lost a share whenever a dish was both a choice line and
+   * a special-meal component.
+   */
+  const demandFor = (item: string, leg: { flight: string; date: string; orderNo?: string }): ItemDemand | null => {
     const k = `${item}|${leg.flight}|${leg.date}|${leg.orderNo ?? ""}`;
     const hit = requirementCache.get(k);
     if (hit !== undefined) return hit;
     const fo = findFlightOrder(leg);
     const crew = fo ? findCrewOrder(leg) : undefined;
-    const v = fo ? flightPortionFor(item, { ...fo, crew: crew?.crew ?? fo.crew }, menuCards) : null;
+    const d = fo
+      ? itemDemandForOrder(item, { ...fo, crew: crew?.crew ?? fo.crew }, menuCards, mealSetsFor(leg))
+      : null;
+    const v = d && d.onMenu ? d : null;
     requirementCache.set(k, v);
+    return v;
+  };
+  /** The dish's own line requirement — what is left for PAX after the kits. */
+  const requirementFor = (item: string, leg: { flight: string; date: string; orderNo?: string }): number | null =>
+    demandFor(item, leg)?.direct ?? null;
+
+  // ── Special meals as assembled meals ────────────────────────────────────────
+  // The menu plan's special meal is a 2-3 dish meal; production cooks each dish
+  // as its own run. These resolve the meal back out of the plan so packaging can
+  // combine the runs into one finished good instead of shipping loose dishes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const specialSetsCache = useMemo(() => new Map<string, SpecialMealSet[]>(), [flightOrders, menuCards]);
+  const specialSetsFor = (leg: { flight: string; date: string; orderNo?: string }): SpecialMealSet[] => {
+    const k = `${leg.flight}|${leg.date}|${leg.orderNo ?? ""}`;
+    let v = specialSetsCache.get(k);
+    if (!v) {
+      v = specialMealSetsForLeg(findFlightOrder(leg), menuCards);
+      specialSetsCache.set(k, v);
+    }
+    return v;
+  };
+  // ── Crew meals as assembled meals ───────────────────────────────────────────
+  // Same idea: the Crew card plans a service (Lunch / Heavy Snacks / Dinner) as
+  // a 2-3 dish meal, production cooks each dish as its own run, and packaging
+  // assembles them back into one package per crew meal. Sized from the crew
+  // booking — the crew-meal order's count when crew is booked separately.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const crewSetsCache = useMemo(() => new Map<string, SpecialMealSet[]>(), [flightOrders, menuCards]);
+  /**
+   * The leg as the crew resolver needs it: date, sector and — the deciding
+   * field — the DEPARTURE TIME, which is what picks the one crew service the
+   * flight serves. The crew-meal order's ETD is the fallback, for the legs
+   * whose passenger order carries no time.
+   */
+  const crewLegOrder = (leg: { flight: string; date: string; orderNo?: string }) => {
+    const fo = findFlightOrder(leg);
+    const co = findCrewOrder(leg);
+    const base = fo ?? co;
+    if (!base) return undefined;
+    return { ...base, etd: fo?.etd || co?.etd || "" };
+  };
+  const crewSetsFor = (leg: { flight: string; date: string; orderNo?: string }): SpecialMealSet[] => {
+    const k = `${leg.flight}|${leg.date}|${leg.orderNo ?? ""}`;
+    let v = crewSetsCache.get(k);
+    if (!v) {
+      v = crewMealSetsForLeg(crewLegOrder(leg), findCrewOrder(leg)?.crew ?? findFlightOrder(leg)?.crew ?? 0, menuCards);
+      crewSetsCache.set(k, v);
+    }
+    return v;
+  };
+  // ── Passenger meals as assembled meals ──────────────────────────────────────
+  // Identical model: the pax card's choice is 2-3 dishes, one package per meal,
+  // sized round(pax × choice %) — the same arithmetic that sized the runs. The
+  // dessert is NOT part of the kit; it keeps its own line.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const paxSetsCache = useMemo(() => new Map<string, SpecialMealSet[]>(), [flightOrders, menuCards]);
+  const paxSetsFor = (leg: { flight: string; date: string; orderNo?: string }): SpecialMealSet[] => {
+    const k = `${leg.flight}|${leg.date}|${leg.orderNo ?? ""}`;
+    let v = paxSetsCache.get(k);
+    if (!v) {
+      v = paxMealSetsForLeg(crewLegOrder(leg), findFlightOrder(leg)?.pax ?? 0, menuCards);
+      paxSetsCache.set(k, v);
+    }
+    return v;
+  };
+  /**
+   * Everything this leg assembles — special, pax and crew meals in ONE list.
+   *
+   * Order is a priority decision, not cosmetic: planForLeg reserves components
+   * in this order, so when a dish pool is short the SSRs are filled first. A
+   * VGML passenger has a dietary requirement that only that meal satisfies,
+   * whereas a passenger on Choice 1 can be moved to Choice 2 — so the special
+   * meals must not be the ones left unassemblable.
+   */
+  const mealSetsFor = (leg: { flight: string; date: string; orderNo?: string }): SpecialMealSet[] =>
+    [...specialSetsFor(leg), ...paxSetsFor(leg), ...crewSetsFor(leg)];
+  /** The services carrying a dish, audience-labelled ("Crew Breakfast") —
+   *  memoised, because planForLeg asks it once per unsized run per leg while
+   *  the picker sizes the whole order book. */
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const crewCarryCache = useMemo(() => new Map<string, string[]>(), [flightOrders, menuCards]);
+  const servicesFor = (item: string, leg: { flight: string; date: string; orderNo?: string }): string[] => {
+    const k = `${item}|${leg.flight}|${leg.date}|${leg.orderNo ?? ""}`;
+    let v = crewCarryCache.get(k);
+    if (!v) {
+      v = servicesCarrying(item, crewLegOrder(leg), menuCards);
+      crewCarryCache.set(k, v);
+    }
     return v;
   };
 
@@ -297,29 +579,116 @@ export default function PackagingPage() {
     pool: PackagingBatch[],
     leg: { flight: string; date: string; orderNo?: string },
     reserved?: Map<string, number>,
-  ): Map<string, PlanLine> => {
-    const need = new Map<string, number>();
-    const filledBy = new Map<string, string>();   // item → the run that supplied it
+  ): LegPlan => {
     const plan = new Map<string, PlanLine>();
+    // Portions of each run already spoken for INSIDE this leg — the reservation
+    // ledger. Special-meal assemblies write to it first; the loose lines then
+    // see only what is left, which is what stops one portion of Plain Polao
+    // being loaded as a PAX meal and eaten by a VGML at the same time.
+    const claimed = new Map<string, number>();
     // Deterministic order so the same run always takes the same share.
     const ordered = [...pool].sort((a, b) => a.batch.localeCompare(b.batch));
+    const freeOf = (b: PackagingBatch) =>
+      Math.max(0, remainingOf(b) - (reserved?.get(b.batch) ?? 0) - (claimed.get(b.id) ?? 0));
+    const runsOf = (item: string) => {
+      const key = item.trim().toLowerCase();
+      return ordered.filter((b) => b.item.trim().toLowerCase() === key);
+    };
+
+    // ── 1. Assembled meals reserve out of their component pools ────────────
+    // Special meals AND crew meals — both are kits over the dish pools.
+    // Readiness is min over components of floor(available / qtyPerMeal): a meal
+    // is only assemblable when EVERY component can cover it, so a kit is never
+    // part-built and never blocks on the first component alone.
+    // Candidates first, WITHOUT reserving: two services can plan the same code
+    // (a Breakfast VGML and a Lunch VGML) but the order asks for N VGML in
+    // total. Reserving for both would carve the dish out of the pools twice for
+    // meals that are only made once, and starve the PAX lines below.
+    const candidates = mealSetsFor(leg).map((set) => {
+      const parts: SetPart[] = set.components.map((c) => {
+        const perMeal = perMealQty(c);
+        const all = runsOf(c.name);
+        const picks = all
+          .map((b) => ({ batch: b, qty: freeOf(b) }))
+          .filter((p) => p.qty > 0);
+        const available = picks.reduce((s, p) => s + p.qty, 0);
+        return {
+          item: c.name, perMeal, picks, available,
+          buildable: Math.floor(available / perMeal),
+          runsFound: all.length,
+        };
+      });
+      const missing = parts.filter((p) => p.picks.length === 0).map((p) => p.item);
+      const qty = parts.length === 0 || missing.length > 0
+        ? 0
+        : Math.min(set.qty, ...parts.map((p) => p.buildable));
+      const short = parts.filter((p) => p.picks.length > 0 && p.buildable < set.qty).map((p) => p.item);
+      return { set, parts, qty, missing, short } as SetLine;
+    });
+    // One line per code — whichever service production actually covers. A code
+    // no service can cover still keeps a line, blocked, so the gap is visible.
+    const chosen = new Map<string, SetLine>();
+    for (const l of candidates) {
+      const cur = chosen.get(l.set.code);
+      if (!cur || l.qty > cur.qty || (l.qty === cur.qty && l.missing.length < cur.missing.length)) {
+        chosen.set(l.set.code, l);
+      }
+    }
+    const setLines = [...chosen.values()];
+    // Now reserve what each will actually assemble, so the loose lines below
+    // (and the next leg) size against the true remainder.
+    for (const l of setLines) {
+      if (l.qty <= 0) continue;
+      for (const p of l.parts) {
+        let left = l.qty * p.perMeal;
+        for (const pick of p.picks) {
+          if (left <= 0) break;
+          const take = Math.min(left, pick.qty);
+          claimed.set(pick.batch.id, (claimed.get(pick.batch.id) ?? 0) + take);
+          left -= take;
+        }
+      }
+    }
+
+    // ── 2. The dishes' own lines take what the kits left ───────────────────
+    const need = new Map<string, number>();
+    const filledBy = new Map<string, string>();   // item → the run that supplied it
     for (const b of ordered) {
-      const req = requirementFor(b.item, leg);
-      if (req == null) { plan.set(b.id, { qty: 0, reason: "unsized" }); continue; }
-      if (!need.has(b.item)) need.set(b.item, req);
-      const left = need.get(b.item) ?? 0;
-      const available = remainingOf(b) - (reserved?.get(b.batch) ?? 0);
-      const take = Math.max(0, Math.min(left, available));
-      need.set(b.item, left - take);
-      if (take > 0 && !filledBy.has(b.item)) filledBy.set(b.item, b.batch);
+      const demand = demandFor(b.item, leg);
+      if (demand == null) {
+        // Nothing sizes it. Two very different causes: the dish is on a menu
+        // card for a service this leg doesn't serve (cooked for the day's
+        // breakfast, on a leg that departs at dinner), or it is on no menu card
+        // at all. Same zero, opposite fixes.
+        const offService = servicesFor(b.item, leg);
+        plan.set(b.id, offService.length > 0
+          ? { qty: 0, reason: "offservice", offService }
+          : { qty: 0, reason: "unsized" });
+        continue;
+      }
+      const key = b.item.trim().toLowerCase();
+      if (!need.has(key)) need.set(key, demand.direct);
+      const left = need.get(key) ?? 0;
+      const take = Math.max(0, Math.min(left, freeOf(b)));
+      need.set(key, left - take);
+      if (take > 0) {
+        claimed.set(b.id, (claimed.get(b.id) ?? 0) + take);
+        if (!filledBy.has(key)) filledBy.set(key, b.batch);
+      }
       plan.set(b.id, {
         qty: take,
-        reason: take > 0 ? undefined : (left <= 0 ? "covered" : "exhausted"),
-        coveredBy: take > 0 ? undefined : filledBy.get(b.item),
-        required: req,
+        // A dish whose whole pool goes into special meals has no line of its own
+        // — that is "reserved", not "covered by another run".
+        reason: take > 0 ? undefined
+          : demand.direct <= 0 && demand.special > 0 ? "reserved"
+          : left <= 0 ? "covered"
+          : "exhausted",
+        coveredBy: take > 0 ? undefined : filledBy.get(key),
+        required: demand.direct,
+        demand,
       });
     }
-    return plan;
+    return { plan, sets: setLines, claimed };
   };
 
 
@@ -410,9 +779,21 @@ export default function PackagingPage() {
   // VQ-903 package opened BG-651's 502-portion manifest because both cook
   // Grilled Chicken. The allocation already knows its flight, order and qty.
   const [orderDetailAlloc, setOrderDetailAlloc] = useState<PackagingAllocation | null>(null);
+  // Flight whose menu-plan status popup is open (what's produced / packaged / left).
+  const [menuInfoGroup, setMenuInfoGroup] = useState<PkgFlightGroup | null>(null);
   const [labelOpen, setLabelOpen] = useState(false);
-  // Printing labels completes packaging (no scan step is required here).
-  const [printedAll, setPrintedAll] = useState(false);
+  // Site-level completion mode (Configuration → Packaging Completion):
+  //   printScan ON  → labels are printed and SCANNED to complete (the flow below);
+  //   printScan OFF → no label session at all — ticked batches are marked
+  //                   Packaging Done directly via markPackaged(list, "direct").
+  // Both paths run the SAME markPackaged, so status transitions, batch flips,
+  // dispatch hand-off and order lifecycle are identical in either mode.
+  const { printScan } = usePackagingCompletionSettings();
+  // Which labels in this session have been printed at least once. Printing is
+  // repeatable and status-neutral; SCANNING a printed label is what completes
+  // packaging (marks it Packaging Done). This tracks print state so a label can
+  // be reprinted freely and its Scan action unlocks once it has been printed.
+  const [printedIds, setPrintedIds] = useState<Set<string>>(new Set());
   // Batches initiated in the CURRENT packaging session — the label modal only
   // shows these (so a single-batch run never shows unrelated in-progress labels).
   const [sessionIds, setSessionIds] = useState<Set<string>>(new Set());
@@ -496,6 +877,160 @@ export default function PackagingPage() {
   };
 
   const flightGroups = groupByFlight(rows);
+
+  // ── Flight-wise dispatch readiness ──────────────────────────────────────────
+  // A flight is Ready for Dispatch only when EVERY meal on its menu plan is
+  // produced AND packaged — not per line. We enumerate the flight's menu meals
+  // (inferring the meal service from what's already being packaged), then mark
+  // each produced / packaged and roll them up to one flight-level status.
+  const flightReadiness = (g: PkgFlightGroup) => {
+    const day = dayFromDate(g.date);
+    const order = findFlightOrder({ flight: g.flight, date: g.date, orderNo: g.orderNo });
+    const sector = g.sector ?? order?.sector ?? "";
+    const ftype = flightTypeFromSector(sector);
+    // Meal service(s) this flight actually carries — inferred from its packaged
+    // lines so we don't pull in every service on the day's menu.
+    const services = new Set(
+      g.allocations
+        .map((a) => menuSpecFor(a.item, day, menuCards)?.mealType)
+        .filter((s): s is string => !!s),
+    );
+    // Candidate menu meals for this flight type + day (+ inferred service).
+    // Special-meal components are NOT listed here: a dish that exists only to be
+    // assembled into a VGML is not a meal this flight serves, and listing it as
+    // one made the plan read as 30-odd unpackaged dishes when the flight really
+    // carries one special meal. The special meals get their own rows below.
+    const names = new Set<string>();
+    // Which audience each meal is planned for — the card's forType. Collected
+    // alongside the names so a dish on both a Passengers and a Crew card is
+    // shown as feeding both.
+    const audienceByName = new Map<string, Set<ForType>>();
+    const noteAudience = (name: string, who: ForType) => {
+      const key = name.trim().toLowerCase();
+      let set = audienceByName.get(key);
+      if (!set) audienceByName.set(key, (set = new Set()));
+      set.add(who);
+    };
+    for (const card of menuCards) {
+      if (card.day !== day || !card.flightType.includes(ftype)) continue;
+      // The service filter narrows to the pax service(s) this flight actually
+      // carries — but it is inferred from packaged PAX lines, so it must not
+      // silence the Crew card: crew is fed under its own service (a Wednesday
+      // crew "Heavy Snacks" is served regardless of which pax meal flies).
+      // Crew dishes nobody needs still drop out below on zero crew demand.
+      if (card.forType !== "Crew" && services.size > 0 && card.mealType && !services.has(card.mealType)) continue;
+      for (const ch of card.choices) for (const it of ch.items) { names.add(it.name); noteAudience(it.name, card.forType); }
+      if (card.dessert?.name) { names.add(card.dessert.name); noteAudience(card.dessert.name, card.forType); }
+    }
+    // Audience for a meal that reached the list from a packaged allocation
+    // rather than the scoped cards — search the whole day's config for it.
+    const audienceOf = (name: string): ForType[] => {
+      const key = name.trim().toLowerCase();
+      const hit = audienceByName.get(key);
+      if (hit) return [...hit];
+      const out = new Set<ForType>();
+      for (const card of menuCards) {
+        if (card.day !== day) continue;
+        const inCard =
+          card.choices.some((ch) => ch.items.some((it) => it.name.trim().toLowerCase() === key)) ||
+          card.dessert?.name?.trim().toLowerCase() === key;
+        if (inCard) out.add(card.forType);
+      }
+      return [...out];
+    };
+    // Keep only meals this order actually needs a portion of on its OWN line —
+    // the special-meal share is accounted for by the special rows.
+    const leg = { flight: g.flight, date: g.date, orderNo: g.orderNo };
+    let required = order
+      ? [...names].filter((n) => (demandFor(n, leg)?.direct ?? 0) > 0)
+      : [...names];
+    // Anything already packaged for the flight stays listed, so nothing in the
+    // run disappears from the plan. A set package is represented by its own row.
+    for (const a of g.allocations) {
+      if (a.setCode) continue;
+      if (!required.some((r) => r.toLowerCase() === a.item.toLowerCase())) required.push(a.item);
+    }
+    if (required.length === 0 && g.allocations.every((a) => a.setCode)) required = [];
+    else if (required.length === 0) required = [...new Set(g.allocations.filter((a) => !a.setCode).map((a) => a.item))];
+
+    // A packaged meal covers every dish inside it — allocationItems() expands a
+    // set package to its components so its dishes don't read as "not packaged".
+    const lower = (a: PackagingAllocation) => allocationItems(a).map((n) => n.toLowerCase());
+    const packagedItems = new Set(g.allocations.filter(isPackaged).flatMap(lower));
+    const allocItems = new Set(g.allocations.flatMap(lower));
+    const isProduced = (name: string) => {
+      const key = name.trim().toLowerCase();
+      return allocItems.has(key)
+        || productionEntries.some((e) => (e.outputItemName ?? e.bom).trim().toLowerCase() === key && e.producedQty > 0);
+    };
+    type ReadinessRow = {
+      name: string;
+      produced: boolean;
+      packaged: boolean;
+      /** Who the menu configuration plans this meal for — Pax, Crew, or both. */
+      audience?: ForType[];
+      /** A special meal is assembled, so it carries the dishes it is made of. */
+      code?: string;
+      components?: { name: string; produced: boolean }[];
+    };
+    const meals: ReadinessRow[] = required.map((n) => ({
+      name: n,
+      produced: isProduced(n),
+      packaged: packagedItems.has(n.trim().toLowerCase()),
+      audience: audienceOf(n),
+    }));
+
+    // ── Special meals — one row per code, not per component dish ──────────────
+    // Produced means EVERY component is cooked (a meal short one dish cannot be
+    // assembled); packaged means an assembled package exists for this flight.
+    for (const set of dedupeSetsByCode(specialMealSetsForLeg(order, menuCards))) {
+      if (set.qty <= 0) continue;
+      const components = set.components.map((c) => ({ name: c.name, produced: isProduced(c.name) }));
+      const alloc = g.allocations.filter((a) => a.setCode === set.code);
+      meals.push({
+        name: `${set.code} · ${set.name}`,
+        code: set.code,
+        components,
+        // NOT always a pax meal: the roster tags each SSR Passenger or Crew, and
+        // a vegetarian purser's VGML is a crew meal.
+        audience: specialSetAudience(set),
+        produced: components.length > 0 && components.every((c) => c.produced),
+        packaged: alloc.length > 0 && alloc.some(isPackaged),
+      });
+    }
+
+    // ── Pax & crew meals — assembled the same way, one row per choice ────────
+    // Their component dishes carry no direct line of their own any more (the
+    // whole share is the kit's claim), so without these rows the flight's main
+    // meal load would vanish from the plan entirely.
+    for (const set of [...paxSetsFor(leg), ...crewSetsFor(leg)]) {
+      if (set.qty <= 0) continue;
+      const components = set.components.map((c) => ({ name: c.name, produced: isProduced(c.name) }));
+      const alloc = g.allocations.filter((a) => a.setCode === set.code);
+      meals.push({
+        name: set.name,
+        code: set.code,
+        components,
+        audience: [isCrewSet(set) ? "Crew" : "Passengers"],
+        produced: components.length > 0 && components.every((c) => c.produced),
+        packaged: alloc.length > 0 && alloc.some(isPackaged),
+      });
+    }
+
+    const notPackaged = meals.filter((m) => !m.packaged);
+    const notProduced = meals.filter((m) => !m.produced);
+    const allPackaged = meals.length > 0 && notPackaged.length === 0;
+    // Why a plan can show no crew rows — answered explicitly, not left implicit:
+    // the day's config has no Crew card for this flight type, the order books no
+    // crew to feed, or the departure time couldn't be matched to a crew service.
+    const hasCrewCard = menuCards.some((c) => c.day === day && c.forType === "Crew" && c.flightType.includes(ftype));
+    const crewCount = findCrewOrder(leg)?.crew ?? order?.crew ?? 0;
+    const legOrder = crewLegOrder(leg);
+    const crewService = serviceForLeg(legOrder, "Crew", menuCards);
+    const paxService = serviceForLeg(legOrder, "Passengers", menuCards);
+    return { meals, allPackaged, notPackaged, notProduced, hasCrewCard, crewCount, crewService, paxService };
+  };
+
   const batchById = useMemo(() => {
     const m = new Map<string, PackagingBatch>();
     for (const b of batches) m.set(b.id, b);
@@ -507,7 +1042,12 @@ export default function PackagingPage() {
   // while the picker sizes the order book — one pass up front instead.
   const allocatedByRun = useMemo(() => {
     const m = new Map<string, number>();
-    for (const a of allocations) m.set(a.productionId, (m.get(a.productionId) ?? 0) + a.qty);
+    // Walk components, not just `productionId`: an assembled meal consumes one
+    // portion of EACH of its runs, and counting only the primary one left the
+    // others looking untouched and re-offerable to the same flight.
+    for (const a of allocations) {
+      for (const r of allocationRuns(a)) m.set(r.productionId, (m.get(r.productionId) ?? 0) + r.qty);
+    }
     return m;
   }, [allocations]);
   // How much of a run is still unallocated — a run drops out of the New
@@ -643,7 +1183,7 @@ export default function PackagingPage() {
       map.set(key, {
         key, flight: o.flight, date: o.date, orderNo: o.orderNo, sector: o.sector,
         etd: o.etd, airline: o.airline,
-        batchCount: 0, approvedCount: 0, planLines: 0, planQty: 0, fromOrderBook: true,
+        batchCount: 0, approvedCount: 0, planLines: 0, planQty: 0, planMeals: 0, fromOrderBook: true,
       });
     }
     return map;
@@ -672,7 +1212,7 @@ export default function PackagingPage() {
       map.set(g.key, {
         key: g.key, flight: g.flight, date: g.date, orderNo: g.orderNo ?? fo?.orderNo,
         sector: fo?.sector ?? g.sector, etd: fo?.etd ?? g.depTime, airline: fo?.airline,
-        batchCount: 0, approvedCount: 0, planLines: 0, planQty: 0, fromOrderBook: !!fo,
+        batchCount: 0, approvedCount: 0, planLines: 0, planQty: 0, planMeals: 0, fromOrderBook: !!fo,
       });
     }
     const out = [...map.values()].map((o) => {
@@ -680,19 +1220,24 @@ export default function PackagingPage() {
       const hasAny = poolIndex.byFlight.has(`${o.flight}|${o.date}`)
         || (!!o.orderNo && poolIndex.byOrderNo.has(o.orderNo))
         || poolIndex.untaggedByDate.has(o.date);
-      if (!hasAny) return { ...o, batchCount: 0, approvedCount: 0, planLines: 0, planQty: 0 };
+      if (!hasAny) return { ...o, batchCount: 0, approvedCount: 0, planLines: 0, planQty: 0, planMeals: 0 };
       const pool = poolForLeg(o);
-      const plan = planForLeg(pool, o);
+      const { plan, sets } = planForLeg(pool, o);
       let planLines = 0, planQty = 0;
       for (const b of pool) {
         const qty = plan.get(b.id)?.qty ?? 0;
         if (qty > 0) { planLines++; planQty += qty; }
       }
+      // Assembled special meals are lines too, but their unit is meals — counted
+      // apart from portions so the two are never added together.
+      const buildable = sets.filter((s) => s.qty > 0);
       return {
         ...o,
         batchCount: pool.length,
         approvedCount: pool.filter((b) => b.status === "Approved").length,
-        planLines, planQty,
+        planLines: planLines + buildable.length,
+        planQty,
+        planMeals: buildable.reduce((s, l) => s + l.qty, 0),
       };
     });
     // Flights with something to package lead; the rest of the order book follows
@@ -773,15 +1318,76 @@ export default function PackagingPage() {
     jobs: {
       leg: { flight: string; orderNo?: string; date: string; depTime?: string };
       lines: { batch: PackagingBatch; qty: number }[];
+      /** Special meals: several runs combined into ONE package each. */
+      sets?: SetLine[];
     }[],
   ) => {
     const now = new Date().toISOString().slice(0, 16).replace("T", " ");
     const by = getAuthUser()?.name;
     setAllocations((prev) => {
       const next = [...prev];
-      for (const { leg, lines } of jobs) {
+      for (const { leg, lines, sets } of jobs) {
+        // ── Assembled meals ───────────────────────────────────────────────────
+        // One package per special-meal code, consuming one portion of each
+        // component run per meal. The meal is the finished good: it gets the
+        // packaging id, the label and the lifecycle; the runs behind it are
+        // recorded on `components` so every dish stays traceable to its batch.
+        for (const l of sets ?? []) {
+          if (l.qty <= 0 || l.parts.length === 0) continue;
+          // One meal takes one portion of each dish, drawn off that dish's runs
+          // in turn — a dish cooked in two runs contributes two components.
+          const components: PackagingComponent[] = l.parts.flatMap((p) =>
+            takeFromPicks(p, l.qty).map((t) => ({
+              productionId: t.batch.batch,
+              batchId: t.batch.id,
+              item: t.batch.item,
+              qty: t.qty,
+            })),
+          );
+          if (components.length === 0) continue;
+          const primary = l.parts[0].picks[0]?.batch;
+          if (!primary) continue;
+          const already = existingSetAllocation(next, l.set.code, leg.flight, leg.date);
+          if (already) {
+            const i = next.indexOf(already);
+            const merged = new Map(allocationRuns(already).map((r) => [r.productionId, { ...r }]));
+            for (const c of components) {
+              const hit = merged.get(c.productionId);
+              if (hit) hit.qty += c.qty; else merged.set(c.productionId, c);
+            }
+            next[i] = {
+              ...already,
+              qty: already.qty + l.qty,
+              components: [...merged.values()],
+              status: "Pending Approval",
+              approvedBy: undefined, approvedAt: undefined, rejectedReason: undefined,
+              createdAt: now,
+            };
+            continue;
+          }
+          next.unshift({
+            id: newAllocationId(),
+            packagingId: setPackagingId(primary, l.set.code),
+            batchId: primary.id,
+            productionId: primary.batch,
+            item: l.set.name,
+            setCode: l.set.code,
+            components,
+            flight: leg.flight,
+            orderNo: leg.orderNo,
+            date: leg.date,
+            depTime: leg.depTime,
+            qty: l.qty,
+            status: "Pending Approval",
+            createdAt: now,
+            createdBy: by,
+          });
+        }
         for (const { batch, qty } of lines) {
-          const already = existingAllocation(next, batch.batch, leg.flight, leg.date);
+          const already = existingRunAllocation(next, batch.batch, leg.flight, leg.date);
+          // A run already committed through a MEAL is spoken for — topping it up
+          // as a loose package would double-count the same portions.
+          if (already?.setCode) continue;
           if (already) {
             const i = next.indexOf(already);
             // Topping up an already-approved run re-opens the approval: the
@@ -820,22 +1426,16 @@ export default function PackagingPage() {
       return next;
     });
     setSelectedIds(new Set());
-    const lineCount = jobs.reduce((s, j) => s + j.lines.length, 0);
-    const total = jobs.reduce((s, j) => s + j.lines.reduce((t, l) => t + l.qty, 0), 0);
     const where = jobs.map((j) => j.leg.flight).join(" + ");
-    toast.success(
-      `${where} — ${total.toLocaleString()} portions from ${lineCount} production run${lineCount === 1 ? "" : "s"} queued as Pending Approval. Labels unlock once packaging is approved.`,
-      {
-        action: { label: "Open Approval Management", onClick: () => navigate("/approval-management") },
-        duration: 8000,
-      },
-    );
     logAudit({
       action: "Packaging run raised for approval",
       module: "Packaging",
       entity: where,
       detail: jobs
-        .map((j) => `${j.leg.flight}: ${j.lines.map((l) => `${l.batch.batch} × ${l.qty}`).join(", ")}`)
+        .map((j) => `${j.leg.flight}: ${[
+          ...(j.sets ?? []).map((s) => `${s.set.code} × ${s.qty} sets (${s.parts.flatMap((p) => p.picks.map((k) => k.batch.batch)).join(" + ")})`),
+          ...j.lines.map((l) => `${l.batch.batch} × ${l.qty}`),
+        ].join(", ")}`)
         .join(" | "),
     });
   };
@@ -845,12 +1445,29 @@ export default function PackagingPage() {
     const pending = list.filter((a) => a.status === "In Packaging");
     if (pending.length === 0) { toast.error("Nothing is awaiting labels here."); return; }
     setSessionIds(new Set(pending.map((a) => a.id)));
-    setPrintedAll(false);
+    setPrintedIds(new Set());
     setLabelOpen(true);
   };
 
   // Print labels for everything ticked on the list.
   const printSelectedLabels = () => openLabels(rows.filter((a) => selectedIds.has(a.id)));
+
+  // Direct completion (print/scan disabled in Configuration): mark a set of
+  // In-Packaging batches Packaging Done without a label session. Same
+  // markPackaged as the scan path — only the gate differs.
+  const markDoneDirect = (list: PackagingAllocation[]) => {
+    const pending = list.filter((a) => a.status === "In Packaging");
+    if (pending.length === 0) { toast.error("Nothing here is awaiting completion."); return; }
+    markPackaged(pending, "direct");
+    // Completed rows are no longer selectable — drop them from the selection so
+    // the bar doesn't keep counting batches that are already done.
+    setSelectedIds((prev) => {
+      const n = new Set(prev);
+      pending.forEach((a) => n.delete(a.id));
+      return n;
+    });
+  };
+  const markSelectedDone = () => markDoneDirect(rows.filter((a) => selectedIds.has(a.id)));
 
   // ── New Packaging (flight-first) ────────────────────────────────────────────
   /** Selection key. Per LEG, so the outbound and return can be ticked apart. */
@@ -889,7 +1506,7 @@ export default function PackagingPage() {
     return {
       key, flight: o.flight, date: o.date, orderNo: o.orderNo, sector: o.sector,
       etd: o.etd, airline: o.airline,
-      batchCount: 0, approvedCount: 0, planLines: 0, planQty: 0, fromOrderBook: true,
+      batchCount: 0, approvedCount: 0, planLines: 0, planQty: 0, planMeals: 0, fromOrderBook: true,
     };
   })();
   // Both halves of the trip are always SIZED, even when the return is unticked —
@@ -908,20 +1525,44 @@ export default function PackagingPage() {
   // is genuinely left of each run rather than against the same full remainder.
   const newLegPlans = (() => {
     const reserved = new Map<string, number>();
-    const out = new Map<string, { pool: PackagingBatch[]; plan: Map<string, PlanLine> }>();
+    const out = new Map<string, { pool: PackagingBatch[]; legPlan: LegPlan }>();
     for (const leg of newPlanLegs) {
       const pool = poolForLeg(leg);
-      const plan = planForLeg(pool, leg, reserved);
+      const legPlan = planForLeg(pool, leg, reserved);
+      // Carry EVERYTHING this leg claimed — its assemblies as well as its loose
+      // lines — so the return leg sizes against what is genuinely left.
       for (const b of pool) {
-        const take = plan.get(b.id)?.qty ?? 0;
+        const take = legPlan.claimed.get(b.id) ?? 0;
         if (take > 0) reserved.set(b.batch, (reserved.get(b.batch) ?? 0) + take);
       }
-      out.set(leg.key, { pool, plan });
+      out.set(leg.key, { pool, legPlan });
     }
     return out;
   })();
   const legPool = (leg: FlightOption) => newLegPlans.get(leg.key)?.pool ?? [];
-  const legPlan = (leg: FlightOption) => newLegPlans.get(leg.key)?.plan ?? new Map<string, PlanLine>();
+  const legPlan = (leg: FlightOption) => newLegPlans.get(leg.key)?.legPlan.plan ?? new Map<string, PlanLine>();
+  /**
+   * The special meals this leg can assemble — computed by planForLeg, which
+   * reserves their components out of the pools before the loose lines are sized.
+   *
+   * A code planned by a service the kitchen didn't cook (a Breakfast VGML on a
+   * dinner flight) drops out once ANOTHER service of the same code has
+   * production; a code with no production anywhere stays, blocked, because "the
+   * order asked for 8 VGML and the kitchen cooked none" is the answer the
+   * planner needs.
+   */
+  const legSetLines = (leg: FlightOption): SetLine[] => {
+    const lines = newLegPlans.get(leg.key)?.legPlan.sets ?? [];
+    const produced = new Set(
+      lines.filter((l) => l.parts.some((p) => p.picks.length > 0)).map((l) => l.set.code),
+    );
+    // planForLeg already keeps one line per code; this only drops a code whose
+    // planned service the kitchen never cooked for, when another service did.
+    return lines.filter((l) => l.parts.some((p) => p.picks.length > 0) || !produced.has(l.set.code));
+  };
+  /** Selection key for a meal — namespaced so it can't collide with a batch id. */
+  const setSelId = (l: SetLine) => `set:${l.set.key}`;
+
   /** What a leg's plan comes to: contributing runs and the portions they give. */
   const legLoad = (leg: FlightOption | undefined) => {
     if (!leg) return { lines: 0, qty: 0 };
@@ -944,10 +1585,18 @@ export default function PackagingPage() {
     const next = new Set<string>();
     for (const leg of newLegs) {
       const plan = legPlan(leg);
+      // Meals first — their dishes are ticked as one line, not individually.
+      // A component dish still gets its OWN line below when the menu serves it
+      // loose as well: the kit reserved its share, the line takes the rest.
+      for (const l of legSetLines(leg)) {
+        const existing = existingSetAllocation(allocations, l.set.code, leg.flight, leg.date);
+        if (existing && existing.status !== "Rejected") continue;
+        if (l.qty > 0) next.add(selKey(leg.key, setSelId(l)));
+      }
       for (const b of legPool(leg)) {
         // Skip runs already created for this leg — Add to Run leaves them locked
         // and only preselects the runs not yet packaged for the flight.
-        const existing = existingAllocation(allocations, b.batch, leg.flight, leg.date);
+        const existing = existingRunAllocation(allocations, b.batch, leg.flight, leg.date);
         if (existing && existing.status !== "Rejected") continue;
         if (b.status !== "Rejected" && (plan.get(b.id)?.qty ?? 0) > 0) {
           next.add(selKey(leg.key, b.id));
@@ -962,17 +1611,29 @@ export default function PackagingPage() {
   // covers, or that has no menu rule, must not be counted on the Start button —
   // it would promise 18 lines and package 12. Runs already created for the leg are
   // excluded too, so Add to Run only ever queues the runs not yet packaged.
-  const newJobs = newLegs.map((leg) => ({
-    leg,
-    lines: legPool(leg)
-      .filter((b) => {
-        if (!newSelected.has(selKey(leg.key, b.id)) || (legPlan(leg).get(b.id)?.qty ?? 0) <= 0) return false;
-        const existing = existingAllocation(allocations, b.batch, leg.flight, leg.date);
-        return !(existing && existing.status !== "Rejected");
-      })
-      .map((b) => ({ batch: b, qty: legPlan(leg).get(b.id)?.qty ?? 0 })),
-  }));
-  const newEligibleCount = newJobs.reduce((s, j) => s + j.lines.length, 0);
+  const newJobs = newLegs.map((leg) => {
+    // Loose lines are already sized net of the assemblies: planForLeg reserves
+    // each kit's components out of the pools first, so a line's quantity is what
+    // the dish's own menu line needs from what remains. Nothing is packaged
+    // twice, and a dish is not hidden just because a special meal also uses it.
+    const sets = legSetLines(leg).filter((l) => {
+      if (l.qty <= 0 || !newSelected.has(selKey(leg.key, setSelId(l)))) return false;
+      const existing = existingSetAllocation(allocations, l.set.code, leg.flight, leg.date);
+      return !(existing && existing.status !== "Rejected");
+    });
+    return {
+      leg,
+      sets,
+      lines: legPool(leg)
+        .filter((b) => {
+          if (!newSelected.has(selKey(leg.key, b.id)) || (legPlan(leg).get(b.id)?.qty ?? 0) <= 0) return false;
+          const existing = existingRunAllocation(allocations, b.batch, leg.flight, leg.date);
+          return !(existing && existing.status !== "Rejected");
+        })
+        .map((b) => ({ batch: b, qty: legPlan(leg).get(b.id)?.qty ?? 0 })),
+    };
+  });
+  const newEligibleCount = newJobs.reduce((s, j) => s + j.lines.length + j.sets.length, 0);
   // Start packaging → queue every ticked line as a run. Approval is NOT required
   // first: the run is created here as "Pending Approval" and signed off afterward
   // in Approval Management (which unlocks its labels). Both legs of a round trip
@@ -983,13 +1644,14 @@ export default function PackagingPage() {
       toast.error("Select at least one production line for this flight.");
       return;
     }
-    const jobs = newJobs.filter((j) => j.lines.length > 0);
+    const jobs = newJobs.filter((j) => j.lines.length > 0 || j.sets.length > 0);
     if (jobs.length === 0) {
       toast.error("Nothing to package: this flight's requirement is already covered, or these items aren't on its menu plan.");
       return;
     }
     allocateToFlights(jobs.map((j) => ({
       lines: j.lines,
+      sets: j.sets,
       leg: { flight: j.leg.flight, orderNo: j.leg.orderNo, date: j.leg.date, depTime: j.leg.etd },
     })));
     setNewOpen(false);
@@ -1006,41 +1668,86 @@ export default function PackagingPage() {
    * flights therefore reports its most recent flight on the batch; the per-flight
    * truth lives in the allocations, which Dispatch also reads.
    */
-  const markPackaged = (list: PackagingAllocation[]) => {
-    if (list.length === 0) { toast.error("No labels to print."); return; }
+  const markPackaged = (list: PackagingAllocation[], via: "scan" | "direct" = "scan") => {
+    if (list.length === 0) {
+      toast.error(via === "direct" ? "Nothing selected to mark done." : "No labels to print.");
+      return;
+    }
     const now = new Date().toISOString().slice(0, 16).replace("T", " ");
     const ids = new Set(list.map((a) => a.id));
-    setAllocations((prev) =>
-      prev.map((a) => (ids.has(a.id)
-        ? { ...a, status: "Packaged" as PackagingAllocationStatus, packagedAt: now, dispatchId: a.dispatchId ?? `DSP-${a.flight}` }
-        : a)),
-    );
-    const byBatchId = new Map(list.map((a) => [a.batchId, a]));
+    const nextAllocations = allocations.map((a) => (ids.has(a.id)
+      ? { ...a, status: "Packaged" as PackagingAllocationStatus, packagedAt: now, dispatchId: a.dispatchId ?? `DSP-${a.flight}` }
+      : a));
+    setAllocations(nextAllocations);
+    // Every batch the package drew on flips, not just the one it is filed under:
+    // a meal consumes all of its component runs, and leaving the others "Approved"
+    // would offer already-plated food back to the next flight.
+    const byBatchId = new Map<string, { alloc: PackagingAllocation; qty: number }>();
+    for (const a of list) for (const r of allocationRuns(a)) byBatchId.set(r.batchId, { alloc: a, qty: r.qty });
     setBatches((prev) =>
       prev.map((b) => {
-        const a = byBatchId.get(b.id);
-        if (!a) return b;
+        const hit = byBatchId.get(b.id);
+        if (!hit) return b;
         return {
           ...b,
           status: "Packaging Done" as PackagingBatchStatus,
           packagedAt: now,
-          packagedForFlight: a.flight,
-          packagedForOrderNo: a.orderNo,
-          packagedQty: a.qty,
+          packagedForFlight: hit.alloc.flight,
+          packagedForOrderNo: hit.alloc.orderNo,
+          packagedQty: hit.qty,
           dispatchId: b.dispatchId ?? `DSP-${b.batch}`,
         };
       }),
     );
-    toast.success(`${ids.size} label${ids.size === 1 ? "" : "s"} printed — packaged, ready for dispatch.`);
+    // Advance the flight-order lifecycle: once every non-rejected allocation of a
+    // flight (matched by Order # + flight) is packaged, its order moves
+    // Approved/Production → Packaged. Uses the just-computed allocation set so the
+    // check reflects this action, not the pre-update state.
+    const affected = new Map<string, { orderNo: string; flight: string }>();
+    for (const a of list) if (a.orderNo) affected.set(`${a.orderNo}__${a.flight}`, { orderNo: a.orderNo, flight: a.flight });
+    for (const { orderNo, flight } of affected.values()) {
+      const flightAllocs = nextAllocations.filter(
+        (a) => a.orderNo === orderNo && a.flight === flight && a.status !== "Rejected",
+      );
+      if (flightAllocs.length > 0 && flightAllocs.every(isPackaged)) {
+        updateFlightOrdersWhere(
+          (o) => o.orderNo === orderNo && o.flight === flight
+            && (o.status === "Approved" || o.status === "Production"),
+          { status: "Packaged" },
+        );
+      }
+    }
+    toast.success(
+      via === "direct"
+        ? `${ids.size} batch${ids.size === 1 ? "" : "es"} marked Packaging Done — ready for dispatch.`
+        : `${ids.size} label${ids.size === 1 ? "" : "s"} scanned — Packaging Done, ready for dispatch.`,
+    );
   };
 
-  const printAll = () => { markPackaged(packagingLabels); setPrintedAll(true); };
-  const printOne = (a: PackagingAllocation) => markPackaged([a]);
+  // Printing is REPEATABLE and does not change status — reprint as many copies as
+  // needed. It only records that the label has been printed (which unlocks Scan).
+  const doPrint = (list: PackagingAllocation[]) => {
+    if (list.length === 0) { toast.error("No labels to print."); return; }
+    setPrintedIds((prev) => {
+      const next = new Set(prev);
+      for (const a of list) next.add(a.id);
+      return next;
+    });
+    toast.success(`${list.length} label${list.length === 1 ? "" : "s"} sent to printer — scan to mark Packaging Done.`);
+  };
+  const printAll = () => doPrint(packagingLabels);
+  const printOne = (a: PackagingAllocation) => doPrint([a]);
 
-  // Close the label modal. Un-printed allocations stay "In Packaging" — the run
+  // Scanning a printed label is what COMPLETES packaging — the first scan flips it
+  // to Packaging Done. Only labels already printed can be scanned.
+  const scanAll = () => markPackaged(packagingLabels.filter((a) => printedIds.has(a.id)));
+  const scanOne = (a: PackagingAllocation) => markPackaged([a]);
+
+  // Close the label modal. Un-scanned allocations stay "In Packaging" — the run
   // lives on the list page now, so closing this is pausing, not cancelling.
   const closeLabelModal = () => {
     setSessionIds(new Set());
+    setPrintedIds(new Set());
     setLabelOpen(false);
   };
 
@@ -1048,7 +1755,9 @@ export default function PackagingPage() {
     <>
       <PageHeader
         title="Packaging"
-        subtitle="Packaging runs you have created — start one with New Packaging from a flight number, then print & scan its labels here"
+        subtitle={printScan
+          ? "Packaging runs you have created — start one with New Packaging from a flight number, then print & scan its labels here"
+          : "Packaging runs you have created — start one with New Packaging from a flight number, then select batches and mark them Packaging Done"}
         actions={
           <Button onClick={() => openNewPackaging()}>
             <Plus className="h-4 w-4 mr-1.5" /> New Packaging
@@ -1110,6 +1819,24 @@ export default function PackagingPage() {
             Clear
           </button>
         )}
+        <div className="ml-auto self-end">
+          <ListExportActions
+            table={() => ({
+              title: "Packaging Runs",
+              fileName: `packaging-${dateFrom || "all"}${dateTo && dateTo !== dateFrom ? `_to_${dateTo}` : ""}`,
+              meta: filterMeta([
+                ["Dates", (dateFrom || dateTo) && `${dateFrom || "…"} → ${dateTo || "…"}`],
+                ["Status", filterStatus !== "all" && filterStatus],
+                ["Search", searchText.trim() || false],
+              ]),
+              columns: ["Packaging ID", "Production ID", "Item", "Meal Set", "Flight", "Order", "Qty", "Date", "Status"],
+              numericCols: [6],
+              rows: rows.map((a) => [
+                a.packagingId, a.productionId, a.item, a.setCode ?? "", a.flight, a.orderNo ?? "", a.qty, a.date, a.status,
+              ]),
+            })}
+          />
+        </div>
       </div>
 
       {/* Selection bar — what the checkbox column is for, with its actions in
@@ -1123,9 +1850,20 @@ export default function PackagingPage() {
             <Button size="sm" variant="ghost" className="h-8 text-xs text-muted-foreground" onClick={() => setSelectedIds(new Set())}>
               Clear
             </Button>
-            <Button size="sm" className="h-8 text-xs" onClick={printSelectedLabels}>
-              <Printer className="h-3.5 w-3.5 mr-1" /> Print Labels ({selectedIds.size})
-            </Button>
+            {printScan ? (
+              <Button size="sm" className="h-8 text-xs" onClick={printSelectedLabels}>
+                <Printer className="h-3.5 w-3.5 mr-1" /> Print Labels ({selectedIds.size})
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                className="h-8 text-xs"
+                onClick={markSelectedDone}
+                title="Label print & scan is disabled in Configuration — completes the selected batches directly"
+              >
+                <PackageCheck className="h-3.5 w-3.5 mr-1" /> Mark Packaging Done ({selectedIds.size})
+              </Button>
+            )}
           </div>
         </div>
       )}
@@ -1140,8 +1878,10 @@ export default function PackagingPage() {
                   indeterminate={selectedIds.size > 0}
                   disabled={labelableRows.length === 0}
                   onChange={toggleSelectAll}
-                  label="Select all batches awaiting labels"
-                  title={labelableRows.length === 0 ? "No batches awaiting labels" : "Select all batches awaiting labels"}
+                  label={printScan ? "Select all batches awaiting labels" : "Select all batches awaiting completion"}
+                  title={labelableRows.length === 0
+                    ? (printScan ? "No batches awaiting labels" : "No batches awaiting completion")
+                    : (printScan ? "Select all batches awaiting labels" : "Select all batches awaiting completion")}
                 />
               </TableHead>
               <TableHead className="text-xs uppercase tracking-wider">Packaging ID</TableHead>
@@ -1177,6 +1917,8 @@ export default function PackagingPage() {
                 // The flight's load = the sum of its allocations, by definition.
                 const groupQty = g.allocations.reduce((s, a) => s + a.qty, 0);
                 const isUnassigned = g.flight === UNASSIGNED_FLIGHT;
+                // Flight-level dispatch readiness across the whole menu plan.
+                const rd = isUnassigned ? null : flightReadiness(g);
                 return [
                   /* ── Flight header — the list is arranged flight by flight ── */
                   <TableRow key={`${g.key}-head`} className="border-t-2 border-sky-100 bg-sky-50/50 hover:bg-sky-50/70">
@@ -1219,6 +1961,27 @@ export default function PackagingPage() {
                         <span className="text-[11px] font-medium text-slate-600 tabular-nums whitespace-nowrap">
                           {g.allocations.length} line{g.allocations.length === 1 ? "" : "s"} · {groupQty.toLocaleString()} portions
                         </span>
+                        {rd && rd.meals.length > 0 && (
+                          rd.allPackaged ? (
+                            <span
+                              className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 whitespace-nowrap"
+                              title={`All ${rd.meals.length} menu meal${rd.meals.length === 1 ? "" : "s"} produced & packaged`}
+                            >
+                              <CheckCircle2 className="h-3 w-3" /> Ready for Dispatch
+                            </span>
+                          ) : (
+                            <span
+                              className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 whitespace-nowrap"
+                              title={
+                                `${rd.meals.length - rd.notPackaged.length}/${rd.meals.length} meals packaged. Pending: ` +
+                                rd.notPackaged.map((m) => `${m.name}${m.produced ? " (produced, not packaged)" : " (not produced)"}`).join(", ")
+                              }
+                            >
+                              <Clock className="h-3 w-3" />
+                              Packaging {rd.meals.length - rd.notPackaged.length}/{rd.meals.length} — not ready
+                            </span>
+                          )
+                        )}
                         {pendingInGroup.length > 0 && (
                           <button
                             type="button"
@@ -1231,7 +1994,36 @@ export default function PackagingPage() {
                           </button>
                         )}
                         <span className="ml-auto flex items-center gap-2">
-                          {inProgressInGroup.length > 0 && (
+                          {/* Read-only: opens the flight's menu-plan status. It
+                              must NOT wear the brand CTA that Mark Done and
+                              Dispatch wear — those change state, this only
+                              looks. `no-brand` opts out of the .hc-cta fill that
+                              the Button applies to outline variants, which is
+                              what made all three read as the same action.
+                              "Menu Plan" over "Menu": it names the dialog it
+                              opens, and the left nav already says MENU. */}
+                          {!isUnassigned && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="no-brand h-7 px-2.5 text-xs border-primary/40 bg-primary/5 text-primary hover:bg-primary/10 hover:text-primary"
+                              onClick={() => setMenuInfoGroup(g)}
+                              title={`See ${g.flight}'s full menu plan — what's produced, packaged and still pending`}
+                            >
+                              <ClipboardList className="h-3.5 w-3.5 mr-1" /> Menu Plan
+                            </Button>
+                          )}
+                          {rd?.allPackaged && (
+                            <Button
+                              size="sm"
+                              className="h-7 px-2.5 text-xs"
+                              onClick={() => navigate(`/dispatch?config=${encodeURIComponent(g.flight)}&date=${encodeURIComponent(g.date)}`)}
+                              title={`All meals packaged — configure ${g.flight}'s dispatch`}
+                            >
+                              <Truck className="h-3.5 w-3.5 mr-1" /> Dispatch
+                            </Button>
+                          )}
+                          {inProgressInGroup.length > 0 && (printScan ? (
                             <Button
                               size="sm"
                               variant="outline"
@@ -1241,7 +2033,17 @@ export default function PackagingPage() {
                             >
                               <Printer className="h-3.5 w-3.5 mr-1" /> Print Labels ({inProgressInGroup.length})
                             </Button>
-                          )}
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 px-2.5 text-xs"
+                              onClick={() => markDoneDirect(inProgressInGroup)}
+                              title="Mark this flight's in-packaging batches Packaging Done (label print & scan is disabled in Configuration)"
+                            >
+                              <PackageCheck className="h-3.5 w-3.5 mr-1" /> Mark Done ({inProgressInGroup.length})
+                            </Button>
+                          ))}
                           <Button
                             size="sm"
                             variant="ghost"
@@ -1271,12 +2073,12 @@ export default function PackagingPage() {
                         onChange={() => toggleSelectOne(a.id)}
                         label={`Select ${a.productionId}`}
                         title={isLabelable(a)
-                          ? `Select ${a.productionId} to print its label`
+                          ? (printScan ? `Select ${a.productionId} to print its label` : `Select ${a.productionId} to mark it Packaging Done`)
                           : isAwaitingApproval(a)
-                            ? `${a.productionId} is awaiting packaging approval — approve it in Approval Management before printing labels`
+                            ? `${a.productionId} is awaiting packaging approval — approve it in Approval Management before ${printScan ? "printing labels" : "completing packaging"}`
                             : a.status === "Rejected"
                               ? `${a.productionId} was rejected at packaging approval${a.rejectedReason ? ` — ${a.rejectedReason}` : ""}`
-                              : `${a.productionId} is ${a.status} — its labels are already printed`}
+                              : `${a.productionId} is ${a.status} — packaging is already complete`}
                       />
                     </TableCell>
                     {/* Packaging ID — system-generated per production package */}
@@ -1285,18 +2087,42 @@ export default function PackagingPage() {
                         {a.packagingId}
                       </span>
                     </TableCell>
-                    {/* Production ID — clickable → Production Order table, blinks that row */}
+                    {/* Production ID — clickable → Production Order table, blinks that row.
+                        An assembled meal has several: the primary is linked, the
+                        rest are counted next to it rather than hidden. */}
                     <TableCell>
-                      <button
-                        type="button"
-                        onClick={() => { navigate(`/production-entry?pro=${encodeURIComponent(a.productionId)}`); }}
-                        className="inline-flex items-center rounded-full border border-primary/30 bg-primary/5 px-2 py-0.5 font-mono text-[11px] font-semibold text-primary hover:bg-primary/10 focus:outline-none focus:ring-1 focus:ring-primary/40 transition-colors"
-                        title="Open in Production Order"
-                      >
-                        {a.productionId}
-                      </button>
+                      <span className="inline-flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => { navigate(`/production-entry?pro=${encodeURIComponent(a.productionId)}`); }}
+                          className="inline-flex items-center rounded-full border border-primary/30 bg-primary/5 px-2 py-0.5 font-mono text-[11px] font-semibold text-primary hover:bg-primary/10 focus:outline-none focus:ring-1 focus:ring-primary/40 transition-colors"
+                          title="Open in Production Order"
+                        >
+                          {a.productionId}
+                        </button>
+                        {(a.components?.length ?? 0) > 1 && (
+                          <span
+                            className="inline-flex items-center rounded-full border border-fuchsia-300 bg-fuchsia-50 px-1.5 py-0.5 text-[10px] font-semibold text-fuchsia-700 whitespace-nowrap"
+                            title={`Assembled from ${a.components!.length} runs:\n${a.components!.map((c) => `${c.productionId} — ${c.item} × ${c.qty}`).join("\n")}`}
+                          >
+                            +{a.components!.length - 1}
+                          </span>
+                        )}
+                      </span>
                     </TableCell>
-                    <TableCell className="text-xs font-medium">{a.item}</TableCell>
+                    <TableCell className="text-xs font-medium">
+                      {a.setCode && (
+                        <span className={setCodePill(a.setCode)}>
+                          {setCodeLabel(a.setCode)}
+                        </span>
+                      )}
+                      {a.item}
+                      {a.setCode && (
+                        <span className="block text-[10px] font-normal text-muted-foreground">
+                          {a.qty.toLocaleString()} meal{a.qty === 1 ? "" : "s"} · {a.components?.length ?? 0} items each
+                        </span>
+                      )}
+                    </TableCell>
                     {/* Qty — THIS flight's share, with the run's day total behind it */}
                     <TableCell>
                       <button
@@ -1308,7 +2134,9 @@ export default function PackagingPage() {
                         <Eye className="h-3.5 w-3.5" />
                         <span className="tabular-nums font-medium">{a.qty.toLocaleString()}</span>
                       </button>
-                      {runProduced != null && runProduced > a.qty && (
+                      {/* An assembled meal counts meals, not a share of one run — the
+                          "of N produced" note would compare two different units. */}
+                      {!a.setCode && runProduced != null && runProduced > a.qty && (
                         <span
                           className="ml-1 text-[10px] text-muted-foreground tabular-nums"
                           title={otherFlights.length
@@ -1324,16 +2152,11 @@ export default function PackagingPage() {
                     <TableCell>
                       <div className="inline-flex items-center gap-1.5 flex-wrap">
                         <AllocationBadge status={a.status} />
-                        {a.status === "Packaged" && (
-                          <span className="inline-flex items-center rounded-full border border-teal-300 bg-teal-50 px-2 py-0.5 text-[10px] font-semibold text-teal-700 whitespace-nowrap">
-                            Ready For Dispatch
-                          </span>
-                        )}
                       </div>
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="inline-flex items-center gap-1.5">
-                        {a.status === "In Packaging" && (
+                        {a.status === "In Packaging" && (printScan ? (
                           <Button
                             size="icon"
                             className="h-7 w-7"
@@ -1343,7 +2166,17 @@ export default function PackagingPage() {
                           >
                             <Printer className="h-3.5 w-3.5" />
                           </Button>
-                        )}
+                        ) : (
+                          <Button
+                            size="icon"
+                            className="h-7 w-7"
+                            title="Mark Packaging Done (label print & scan is disabled in Configuration)"
+                            aria-label={`Mark ${a.productionId} Packaging Done`}
+                            onClick={() => markDoneDirect([a])}
+                          >
+                            <PackageCheck className="h-3.5 w-3.5" />
+                          </Button>
+                        ))}
                         <Button
                           variant="outline"
                           size="icon"
@@ -1566,12 +2399,48 @@ export default function PackagingPage() {
                   <div className="text-[10px] font-bold uppercase tracking-widest text-primary mb-1">This Package</div>
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
                     <span className="font-mono font-semibold">{a.packagingId}</span>
-                    <span className="font-mono text-muted-foreground">{a.productionId}</span>
-                    <span className="font-medium">{a.item}</span>
-                    <span className="tabular-nums font-semibold">{a.qty.toLocaleString()} portions</span>
+                    {!a.setCode && <span className="font-mono text-muted-foreground">{a.productionId}</span>}
+                    <span className="font-medium">
+                      {a.setCode && <span className={setCodePill(a.setCode)}>{setCodeLabel(a.setCode)}</span>}
+                      {a.item}
+                    </span>
+                    <span className="tabular-nums font-semibold">
+                      {a.qty.toLocaleString()} {a.setCode ? `meal${a.qty === 1 ? "" : "s"}` : "portions"}
+                    </span>
                     <AllocationBadge status={a.status} />
-                    {batch && <span className="text-muted-foreground">QC {batch.measuredTemp}°C · {batch.date}</span>}
+                    {!a.setCode && batch && <span className="text-muted-foreground">QC {batch.measuredTemp}°C · {batch.date}</span>}
                   </div>
+                  {/* What an assembled meal is made of — the runs it consumed,
+                      which is where its traceability lives now that the package
+                      is one meal rather than one run. */}
+                  {a.components && a.components.length > 0 && (
+                    <table className="mt-2 w-full text-[11px]">
+                      <thead className="text-muted-foreground">
+                        <tr>
+                          <th className="py-1 text-left font-semibold">Component</th>
+                          <th className="py-1 text-left font-semibold">Production</th>
+                          <th className="py-1 text-left font-semibold">Lot</th>
+                          <th className="py-1 text-right font-semibold">Portions</th>
+                          <th className="py-1 text-right font-semibold">Temp</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {a.components.map((c) => {
+                          const cb = batchById.get(c.batchId);
+                          const lots = lotsFor(c.productionId);
+                          return (
+                            <tr key={c.productionId} className="border-t border-primary/10">
+                              <td className="py-1">{c.item}</td>
+                              <td className="py-1 font-mono text-primary">{c.productionId}</td>
+                              <td className="py-1 font-mono text-muted-foreground">{lots.map((l) => l.batchNo).join(", ") || "—"}</td>
+                              <td className="py-1 text-right tabular-nums">{c.qty.toLocaleString()}</td>
+                              <td className="py-1 text-right tabular-nums">{cb ? `${cb.measuredTemp}°C` : "—"}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
                 </div>
 
                 <div>
@@ -1594,7 +2463,12 @@ export default function PackagingPage() {
                       <tbody>
                         {legAllocs.map((x) => {
                           const xb = batchById.get(x.batchId);
-                          const type = typeForItem(x.item, x.date);
+                          // A meal's item is the meal name, not a cooked dish, so
+                          // there is no menu card to read its service off — the
+                          // set code says which kind of assembled meal it is.
+                          const type = x.setCode
+                            ? (isCrewSetCode(x.setCode) ? "Crew" : isPaxSetCode(x.setCode) ? "Pax" : "Special")
+                            : typeForItem(x.item, x.date);
                           return (
                             <tr key={x.id} className={cn("border-t border-slate-100", x.id === a.id && "bg-primary/5 font-medium")}>
                               <td className="p-2 font-mono">{x.packagingId}</td>
@@ -1634,15 +2508,210 @@ export default function PackagingPage() {
         );
       })()}
 
+      {/* Menu Plan status — the flight's full menu, each meal's produce/package
+          state, so the user sees what still needs producing or packaging. */}
+      <Dialog open={!!menuInfoGroup} onOpenChange={(o) => { if (!o) setMenuInfoGroup(null); }}>
+        <DialogContent className="w-full max-w-full sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+          {menuInfoGroup && (() => {
+            const rd = flightReadiness(menuInfoGroup);
+            const packagedCount = rd.meals.length - rd.notPackaged.length;
+            return (
+              <>
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-2">
+                    <ClipboardList className="h-4 w-4" /> Menu Plan — {menuInfoGroup.flight}
+                  </DialogTitle>
+                  <DialogDescription>
+                    {[menuInfoGroup.sector, menuInfoGroup.orderNo, menuInfoGroup.date].filter(Boolean).join(" · ")}
+                    {" — "}
+                    <span className={cn("font-semibold", rd.allPackaged ? "text-emerald-700" : "text-amber-700")}>
+                      {packagedCount}/{rd.meals.length} meals packaged
+                    </span>
+                    {rd.allPackaged ? " — ready for dispatch." : " — not ready."}
+                  </DialogDescription>
+                </DialogHeader>
+
+                <div className="rounded-md border border-border overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="bg-muted/50">
+                      <tr>
+                        <th className="p-2 text-left text-[11px] uppercase tracking-wider font-semibold">Meal</th>
+                        <th className="p-2 text-left text-[11px] uppercase tracking-wider font-semibold w-40">Production</th>
+                        <th className="p-2 text-left text-[11px] uppercase tracking-wider font-semibold w-40">Packaging</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rd.meals.map((m) => (
+                        <tr key={m.name} className={cn("border-t border-border", m.code && "bg-fuchsia-50/40")}>
+                          <td className="p-2 font-medium">
+                            {m.code ? (
+                              <>
+                                <span className="inline-flex flex-wrap items-center gap-1.5">
+                                  <Layers className="h-3.5 w-3.5 shrink-0 text-fuchsia-600" />
+                                  {m.name}
+                                  <AudiencePills audience={m.audience} />
+                                </span>
+                                {/* An assembled meal is only as ready as its
+                                    dishes — name the ones still to cook. */}
+                                <span className="mt-0.5 block text-[10px] font-normal text-muted-foreground">
+                                  {m.components?.map((c, i) => (
+                                    <span key={c.name}>
+                                      {i > 0 && " + "}
+                                      <span className={cn(!c.produced && "text-rose-600 font-medium")}>{c.name}</span>
+                                    </span>
+                                  ))}
+                                </span>
+                              </>
+                            ) : (
+                              <span className="inline-flex flex-wrap items-center gap-1.5">
+                                {m.name}
+                                <AudiencePills audience={m.audience} />
+                              </span>
+                            )}
+                          </td>
+                          <td className="p-2">
+                            {m.produced ? (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                                <CheckCircle2 className="h-3 w-3" /> Produced
+                              </span>
+                            ) : (
+                              <span
+                                className="inline-flex items-center gap-1 rounded-full border border-rose-300 bg-rose-50 px-2 py-0.5 text-[10px] font-semibold text-rose-700"
+                                title={m.components && m.components.some((c) => !c.produced)
+                                  ? `Waiting on ${m.components.filter((c) => !c.produced).map((c) => c.name).join(", ")}`
+                                  : undefined}
+                              >
+                                <Clock className="h-3 w-3" />
+                                {m.components && m.components.some((c) => c.produced)
+                                  ? `${m.components.filter((c) => c.produced).length}/${m.components.length} items`
+                                  : "Not produced"}
+                              </span>
+                            )}
+                          </td>
+                          <td className="p-2">
+                            {m.packaged ? (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                                <CheckCircle2 className="h-3 w-3" /> Packaged
+                              </span>
+                            ) : m.produced ? (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                                <Clock className="h-3 w-3" /> Awaiting packaging
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-muted-foreground">— produce first</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* A flight with no crew rows says WHY, so "where is the crew
+                    meal?" is answered on the spot instead of looking like a gap. */}
+                {!rd.meals.some((m) => m.audience?.includes("Crew")) ? (
+                  <p className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-600">
+                    {!rd.hasCrewCard
+                      ? "No crew meals — the menu configuration has no Crew card for this day & flight type."
+                      : rd.crewCount <= 0
+                        ? "No crew meals — a Crew menu is configured for this day, but this order books no crew count."
+                        : !rd.crewService
+                          ? "No crew meals — this day plans several crew services and the order has no departure time, so there is nothing to decide which one this flight serves. Set the ETD in Order Management."
+                          : "No crew meals — the day's Crew menu could not be sized against this order."}
+                  </p>
+                ) : null}
+
+                {/* A flight serves ONE meal service per audience, chosen by its
+                    departure time — state which and on what basis, so a missing
+                    Breakfast row reads as correct rather than as a hole. */}
+                {(rd.paxService || rd.crewService) && (
+                  <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-700 space-y-0.5">
+                    {([["Passengers", rd.paxService], ["Crew", rd.crewService]] as const).map(([who, svc]) => svc && (
+                      <p key={who}>
+                        <span className={cn(
+                          "mr-1 inline-flex items-center rounded-full border px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide",
+                          AUDIENCE_PILL[who].cls,
+                        )}>
+                          {AUDIENCE_PILL[who].label}
+                        </span>
+                        served <b>{svc.card.mealType}</b>
+                        {svc.window ? ` (${svc.window})` : ""} —{" "}
+                        {svc.match === "window"
+                          ? "this flight departs inside that serving window, so the day's other services don't fly here."
+                          : svc.match === "only"
+                            ? "it is the only menu configured for this day & flight type."
+                            : svc.match === "slot"
+                              ? "no menu for this day states a serving time, so the Meal Slots master named the service for its departure hour."
+                              : "its departure falls between services, so the closest one was used — adjust the serving window in Menu Planning to make this exact."}
+                      </p>
+                    ))}
+                  </div>
+                )}
+
+                {/* What is outstanding, as chips rather than one long comma run —
+                    a 30-meal plan produced an unreadable paragraph, and the two
+                    states (waiting on production vs ready to package) were run
+                    together in it. Split, so each list is actionable on its own. */}
+                {rd.notPackaged.length > 0 && (() => {
+                  const readyToPackage = rd.notPackaged.filter((m) => m.produced);
+                  const chip = (m: { name: string; code?: string; audience?: ForType[] }, tone: string) => (
+                    <span
+                      key={m.name}
+                      className={cn("inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium whitespace-nowrap", tone)}
+                    >
+                      {m.code && <Layers className="h-2.5 w-2.5 shrink-0" />}
+                      {m.name}
+                      {(m.audience?.length ?? 0) > 0 && (
+                        <span className="font-normal opacity-70">
+                          · {m.audience!.map((a) => (a === "Passengers" ? "Pax" : "Crew")).join(" + ")}
+                        </span>
+                      )}
+                    </span>
+                  );
+                  return (
+                    <div className="space-y-2">
+                      {readyToPackage.length > 0 && (
+                        <div>
+                          <div className="mb-1 text-[11px] font-semibold text-amber-700">
+                            Ready to package ({readyToPackage.length})
+                          </div>
+                          <div className="flex flex-wrap gap-1">
+                            {readyToPackage.map((m) => chip(m, "border-amber-300 bg-amber-50 text-amber-800"))}
+                          </div>
+                        </div>
+                      )}
+                      {rd.notProduced.length > 0 && (
+                        <div>
+                          <div className="mb-1 text-[11px] font-semibold text-rose-700">
+                            Produce first ({rd.notProduced.length})
+                          </div>
+                          <div className="flex flex-wrap gap-1">
+                            {rd.notProduced.map((m) => chip(m, "border-rose-200 bg-rose-50 text-rose-700"))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setMenuInfoGroup(null)}>Close</Button>
+                </DialogFooter>
+              </>
+            );
+          })()}
+        </DialogContent>
+      </Dialog>
+
       {/* New Packaging — flight first. Pick a flight number and everything
           production sent for it (batches + the order's meal manifest) loads
           below; starting hands the ticked batches to the usual scan/print flow. */}
       <Dialog open={newOpen} onOpenChange={(o) => { if (!o) setNewOpen(false); }}>
-        <DialogContent className="w-full max-w-full sm:max-w-3xl max-h-[92vh] overflow-y-auto">
+        <DialogContent className="w-full max-w-full sm:max-w-5xl lg:max-w-6xl max-h-[92vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2"><Plane className="h-4 w-4" /> New Packaging</DialogTitle>
             <DialogDescription>
-              Choose a flight from Order Management — its order details and everything produced for it load below. Starting queues the ticked lines onto the packaging list, where the labels are printed &amp; scanned.
+              Choose a flight from Order Management — its order details and everything produced for it load below. Starting queues the ticked lines onto the packaging list, where {printScan ? "the labels are printed & scanned" : "they are marked Packaging Done"}.
             </DialogDescription>
           </DialogHeader>
 
@@ -1733,16 +2802,40 @@ export default function PackagingPage() {
                 r.section.toLowerCase().includes("crew") || r.mealName.toLowerCase().includes("crew");
               const isSpecialLine = (r: PackagingRow) =>
                 r.mealType === "Special" || r.section.toLowerCase().includes("special");
-              const crewOnManifest = legMeals.filter(isCrewLine).reduce((s, r) => s + r.qty, 0);
-              const specialOnManifest = legMeals.filter(isSpecialLine).reduce((s, r) => s + r.qty, 0);
               const crewOrdered = crewOrder?.crew ?? fo?.crew ?? 0;
               const specialOrdered = fo?.specialMeals ?? 0;
+              const plan = legPlan(opt);
+              // ── Assembled meals ───────────────────────────────────────────
+              // The menu plan's meals, put back together from the component
+              // runs — the passenger SSR sets (VGML…) and the crew meals alike.
+              // The manifest may or may not carry a "Special"/"Crew" line, but
+              // the assembly is what says whether the meals can actually be built.
+              const setLines = legSetLines(opt);
+              const specialSetLines = setLines.filter((l) => !isMenuSet(l.set));
+              const paxSetLines = setLines.filter((l) => isPaxSet(l.set));
+              const crewSetLines = setLines.filter((l) => isCrewSet(l.set));
+              const setsReady = setLines.filter((l) => l.qty > 0);
+              const setMealQty = setsReady.reduce((s, l) => s + l.qty, 0);
+              // Meals coverable from production, plus any manifest line that
+              // isn't part of a meal — what each ordered count is met by.
+              const specialOnManifest = specialSetLines.length > 0
+                ? specialSetLines.reduce((s, l) => s + l.qty, 0)
+                : legMeals.filter(isSpecialLine).reduce((s, r) => s + r.qty, 0);
+              const crewOnManifest = crewSetLines.length > 0
+                ? crewSetLines.reduce((s, l) => s + l.qty, 0)
+                : legMeals.filter(isCrewLine).reduce((s, r) => s + r.qty, 0);
+              const paxOrdered = fo?.pax ?? 0;
+              const paxOnManifest = paxSetLines.reduce((s, l) => s + l.qty, 0);
               const gaps = [
+                paxSetLines.length > 0 && paxOrdered > paxOnManifest ? `${paxOrdered - paxOnManifest} pax` : null,
                 crewOrdered > crewOnManifest ? `${crewOrdered - crewOnManifest} crew` : null,
                 specialOrdered > specialOnManifest ? `${specialOrdered - specialOnManifest} special` : null,
               ].filter(Boolean) as string[];
               // ONE production list: every meal line of the flight order joined to
               // the QC batch that covers it, plus any batch with no manifest line.
+              // A dish that a special meal also uses STAYS here — it is one pool
+              // with two consumers, and its quantity below is already net of what
+              // the assemblies reserved.
               const covered = new Set(
                 legMeals.map((r) => batchCovering(r, pool)?.id).filter(Boolean) as string[],
               );
@@ -1750,7 +2843,6 @@ export default function PackagingPage() {
                 ...legMeals.map((r) => ({ key: `m-${r.id}`, meal: r, batch: batchCovering(r, pool) })),
                 ...pool.filter((b) => !covered.has(b.id)).map((b) => ({ key: `b-${b.id}`, batch: b })),
               ];
-              const plan = legPlan(opt);
               // Total is this FLIGHT's load, not the sum of the runs' day totals.
               const lineQty = runLines.reduce(
                 (s, l) => s + (l.batch ? (plan.get(l.batch.id)?.qty ?? 0) : (l.meal?.qty ?? 0)),
@@ -1762,8 +2854,10 @@ export default function PackagingPage() {
                 !l.batch || (plan.get(l.batch.id)?.qty ?? 0) > 0;
               const excluded = runLines.filter((l) => !contributes(l));
               const shownLines = showExcluded ? runLines : runLines.filter(contributes);
-              const excludedCovered = excluded.filter((l) => l.batch && plan.get(l.batch.id)?.reason !== "unsized").length;
-              const excludedUnsized = excluded.length - excludedCovered;
+              const excludedReserved = excluded.filter((l) => l.batch && plan.get(l.batch.id)?.reason === "reserved").length;
+              const excludedUnsized = excluded.filter((l) => l.batch && plan.get(l.batch.id)?.reason === "unsized").length;
+              const excludedOffService = excluded.filter((l) => l.batch && plan.get(l.batch.id)?.reason === "offservice").length;
+              const excludedCovered = excluded.length - excludedReserved - excludedUnsized - excludedOffService;
               const sharedRuns = shownLines.filter((l) => l.batch && servedFlightCount(l.batch) > 1).length;
               return (
                 <div key={opt.key} className="space-y-4">
@@ -1799,12 +2893,14 @@ export default function PackagingPage() {
                       <Field label="Special Meals" value={fo ? String(specialOrdered) : "—"} />
                       <Field label="On Manifest" value={mealQty > 0 ? `${mealQty.toLocaleString()} meals` : "—"} />
                     </div>
-                    {fo && (crewOrdered > 0 || specialOrdered > 0) && (
+                    {fo && (paxSetLines.length > 0 || crewOrdered > 0 || specialOrdered > 0) && (
                       <p className={cn(
                         "mt-2 rounded-md border px-2.5 py-1.5 text-[11px]",
                         gaps.length ? "border-amber-200 bg-amber-50 text-amber-800" : "border-emerald-200 bg-emerald-50 text-emerald-800",
                       )}>
-                        Crew {crewOnManifest}/{crewOrdered} · Special {specialOnManifest}/{specialOrdered} raised as production.
+                        {paxSetLines.length > 0 && `Pax ${paxOnManifest}/${paxOrdered} · `}
+                        Crew {crewOnManifest}/{crewOrdered} · Special {specialOnManifest}/{specialOrdered} covered by the lines below
+                        {setLines.length > 0 && ` (${setsReady.length} of ${setLines.length} meal set${setLines.length === 1 ? "" : "s"} assemblable)`}.
                         {gaps.length
                           ? ` No production line covers ${gaps.join(" and ")} meal${gaps.length === 1 && !gaps[0].startsWith("1 ") ? "s" : ""} — nothing to package for them here.`
                           : " Fully covered by the lines below."}
@@ -1817,9 +2913,14 @@ export default function PackagingPage() {
                     {/* Header names what the rows ARE — production runs — and
                         their total, so the picker's summary reconciles here. */}
                     <SectionTitle>
-                      Production Details — {shownLines.length} run{shownLines.length === 1 ? "" : "s"} · {lineQty.toLocaleString()} portions for {opt.flight}
+                      Production Details — {shownLines.length} run{shownLines.length === 1 ? "" : "s"}
+                      {paxSetLines.length > 0 && ` + ${paxSetLines.length} pax-meal set${paxSetLines.length === 1 ? "" : "s"}`}
+                      {crewSetLines.length > 0 && ` + ${crewSetLines.length} crew-meal set${crewSetLines.length === 1 ? "" : "s"}`}
+                      {specialSetLines.length > 0 && ` + ${specialSetLines.length} special-meal set${specialSetLines.length === 1 ? "" : "s"}`}
+                      {" · "}{lineQty.toLocaleString()} portions
+                      {setMealQty > 0 && ` + ${setMealQty.toLocaleString()} assembled meal${setMealQty === 1 ? "" : "s"}`} for {opt.flight}
                     </SectionTitle>
-                    {shownLines.length === 0 && excluded.length === 0 ? (
+                    {shownLines.length === 0 && setLines.length === 0 && excluded.length === 0 ? (
                       <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
                         Nothing has been produced for this flight yet — no meal manifest and no QC-passed batch.
                       </div>
@@ -1831,18 +2932,25 @@ export default function PackagingPage() {
                               <th className="w-10 p-2 text-center">
                                 {(() => {
                                   // Select-all is per LEG — it must not clear the
-                                  // other half of a round trip.
-                                  const approved = pool.filter((b) => b.status === "Approved");
-                                  const ticked = approved.filter((b) => newSelected.has(selKey(opt.key, b.id)));
+                                  // other half of a round trip. A meal counts as
+                                  // ONE selectable line; its dishes are never
+                                  // selectable on their own.
+                                  const keys = [
+                                    ...setsReady.map((l) => selKey(opt.key, setSelId(l))),
+                                    ...pool
+                                      .filter((b) => b.status === "Approved" && (plan.get(b.id)?.qty ?? 0) > 0)
+                                      .map((b) => selKey(opt.key, b.id)),
+                                  ];
+                                  const ticked = keys.filter((k) => newSelected.has(k));
+                                  const allOn = keys.length > 0 && ticked.length === keys.length;
                                   return (
                                     <RowCheckbox
-                                      checked={approved.length > 0 && ticked.length === approved.length}
-                                      indeterminate={ticked.length > 0 && ticked.length < approved.length}
-                                      disabled={approved.length === 0}
+                                      checked={allOn}
+                                      indeterminate={ticked.length > 0 && ticked.length < keys.length}
+                                      disabled={keys.length === 0}
                                       onChange={() => setNewSelected((prev) => {
                                         const n = new Set(prev);
-                                        const allOn = approved.length > 0 && ticked.length === approved.length;
-                                        approved.forEach((b) => (allOn ? n.delete(selKey(opt.key, b.id)) : n.add(selKey(opt.key, b.id))));
+                                        keys.forEach((k) => (allOn ? n.delete(k) : n.add(k)));
                                         return n;
                                       })}
                                       label={`Select every approved line for ${opt.flight}`}
@@ -1852,6 +2960,7 @@ export default function PackagingPage() {
                               </th>
                               <th className="p-2 text-left font-semibold">Production ID</th>
                               <th className="p-2 text-left font-semibold">Meal / Item</th>
+                              <th className="p-2 text-left font-semibold">Batch / Lot</th>
                               <th className="p-2 text-left font-semibold">Type</th>
                               <th className="p-2 text-right font-semibold">For This Flight</th>
                               <th className="p-2 text-right font-semibold">Run Produced</th>
@@ -1861,6 +2970,251 @@ export default function PackagingPage() {
                             </tr>
                           </thead>
                           <tbody>
+                            {/* ── Assembled meals — pax, crew and special ──────
+                                One selectable line per meal, with the run
+                                behind each dish nested under it. Ticking the
+                                meal takes all of its dishes; they cannot be
+                                picked apart, because half a meal is not a meal. */}
+                            {setLines.map((l) => {
+                              const key = setSelId(l);
+                              const crewSet = isCrewSet(l.set);
+                              const menuSet = isMenuSet(l.set);   // pax or crew — not an SSR
+                              // What the reader knows the meal AS: the SSR code
+                              // for a special meal, the service name for a pax
+                              // or crew meal (its code is synthetic plumbing).
+                              const setLabel = menuSet ? l.set.name : l.set.code;
+                              // Pax sky, crew indigo, special fuchsia — the same
+                              // audience colours the rest of the page uses.
+                              const tone = isPaxSet(l.set)
+                                ? { row: "bg-sky-50/40", text: "text-sky-700", icon: "text-sky-600", pill: "bg-sky-100 text-sky-700", label: "Pax" }
+                                : crewSet
+                                  ? { row: "bg-indigo-50/40", text: "text-indigo-700", icon: "text-indigo-600", pill: "bg-indigo-100 text-indigo-700", label: "Crew" }
+                                  : { row: "bg-fuchsia-50/40", text: "text-fuchsia-700", icon: "text-fuchsia-600", pill: MEAL_TYPE_BADGE.Special, label: "Special" };
+                              const existingSet = existingSetAllocation(allocations, l.set.code, opt.flight, opt.date);
+                              const alreadyCreated = !!existingSet && existingSet.status !== "Rejected";
+                              const selectable = l.qty > 0 && !alreadyCreated;
+                              const ticked = selectable && newSelected.has(selKey(opt.key, key));
+                              const runCount = l.parts.reduce((s, p) => s + p.picks.length, 0);
+                              // Two very different reasons a dish is unavailable,
+                              // with two different fixes: nobody cooked it, or it
+                              // was cooked and every portion is already committed
+                              // to other flights. Never merge them into "missing".
+                              const uncooked = l.parts.filter((p) => p.picks.length === 0 && p.runsFound === 0).map((p) => p.item);
+                              const takenElsewhere = l.parts.filter((p) => p.picks.length === 0 && p.runsFound > 0).map((p) => p.item);
+                              const blocked = uncooked.length > 0
+                                ? `Not cooked yet: ${uncooked.join(", ")}. The meal can't be assembled until every dish has a QC-passed run.`
+                                : takenElsewhere.length > 0
+                                  ? `${takenElsewhere.join(", ")} ${takenElsewhere.length === 1 ? "is" : "are"} cooked, but every portion is already allocated to other flights — nothing left for ${opt.flight}.`
+                                  : l.set.components.length === 0
+                                    ? `${l.set.code} is on the order's roster but not on any meal card for this day — add it to the menu plan to define what goes in the meal.`
+                                    : l.short.length > 0
+                                      ? `${l.short.join(", ")} can't cover ${l.set.qty} meals — only ${l.qty} assemblable.`
+                                      : undefined;
+                              return (
+                                <Fragment key={key}>
+                                  <tr className={cn("border-t border-slate-100", tone.row, ticked && "bg-primary/5")}>
+                                    <td className="w-10 p-2 text-center align-middle">
+                                      <RowCheckbox
+                                        checked={ticked}
+                                        disabled={!selectable}
+                                        onChange={() => setNewSelected((prev) => {
+                                          const n = new Set(prev);
+                                          const k = selKey(opt.key, key);
+                                          if (n.has(k)) n.delete(k); else n.add(k);
+                                          return n;
+                                        })}
+                                        label={`Select ${setLabel} set for ${opt.flight}`}
+                                        title={
+                                          alreadyCreated ? `${setLabel} is already in a run for ${opt.flight} (${existingSet!.status}) — nothing to add.`
+                                            : blocked ?? `Package ${l.qty} ${setLabel} meal${l.qty === 1 ? "" : "s"} for ${opt.flight} — one package per meal, assembled from ${l.parts.length} runs.`
+                                        }
+                                      />
+                                    </td>
+                                    <td className="p-2 whitespace-nowrap">
+                                      <span className="inline-flex items-center gap-1.5">
+                                        <Layers className={cn("h-3.5 w-3.5 shrink-0", tone.icon)} />
+                                        <span
+                                          className={cn("font-semibold", alreadyCreated ? "text-muted-foreground line-through" : tone.text)}
+                                          title={l.parts.map((p) => `${p.item} — ${p.picks.map((k) => k.batch.batch).join(", ") || "no QC run"}`).join("\n")}
+                                        >
+                                          {runCount} run{runCount === 1 ? "" : "s"} combined
+                                        </span>
+                                        {alreadyCreated && (
+                                          <span className="rounded-full border border-slate-300 bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">Already in run</span>
+                                        )}
+                                      </span>
+                                    </td>
+                                    <td className="p-2">
+                                      {menuSet ? (
+                                        <span className="font-semibold">{l.set.name}</span>
+                                      ) : (
+                                        // A special meal names no audience of its
+                                        // own, so the pills say whether it feeds
+                                        // passengers, crew, or both.
+                                        <span className="inline-flex flex-wrap items-center gap-1.5">
+                                          <span className="font-semibold">{l.set.code}</span>
+                                          <span className="text-muted-foreground">· {l.set.name}</span>
+                                          <AudiencePills
+                                            audience={specialSetAudience(l.set)}
+                                            titleFor={(a) => specialAudienceTitle(l.set, a)}
+                                          />
+                                        </span>
+                                      )}
+                                      <span className="block text-[10px] text-muted-foreground">
+                                        {l.set.mealType ? `${l.set.mealType} · ` : ""}
+                                        {l.set.components.length} item{l.set.components.length === 1 ? "" : "s"} assembled into 1 {menuSet ? tone.label.toLowerCase() + " " : ""}meal
+                                        {!menuSet && (l.set.source === "roster"
+                                          ? ` · for ${[
+                                              (l.set.paxQty ?? 0) > 0 ? `${l.set.paxQty} pax` : null,
+                                              (l.set.crewQty ?? 0) > 0 ? `${l.set.crewQty} crew` : null,
+                                            ].filter(Boolean).join(" + ")}`
+                                          : " · for passengers (assumed — no roster)")}
+                                      </span>
+                                      {/* WHY this service and not another — the
+                                          serving window against the ETD is the
+                                          whole basis for the choice. */}
+                                      {menuSet && l.set.servingWindow && (
+                                        <span
+                                          className={cn("block text-[10px]", tone.text)}
+                                          title={`${opt.flight} departs ${fo?.etd ?? opt.etd ?? "—"}, which falls in the ${tone.label} ${l.set.mealType} serving window (${l.set.servingWindow}) — so that is the ${tone.label.toLowerCase()} service this flight carries.`}
+                                        >
+                                          served {l.set.servingWindow} · ETD {fo?.etd ?? opt.etd ?? "—"}
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="p-2 text-muted-foreground">—</td>
+                                    <td className="p-2">
+                                      <span className={cn("px-2 py-0.5 rounded-full text-[11px] font-semibold", tone.pill)}>{tone.label}</span>
+                                    </td>
+                                    <td className="p-2 text-right tabular-nums font-semibold">
+                                      {l.qty > 0
+                                        ? <>{l.qty.toLocaleString()}<span className="block text-[10px] font-normal text-muted-foreground">meals</span></>
+                                        : <span className="text-muted-foreground font-normal">—</span>}
+                                      {blocked && (
+                                        <span className="block text-[10px] font-normal text-amber-700" title={blocked}>
+                                          {uncooked.length > 0 ? `not cooked: ${uncooked.join(", ")}`
+                                            : takenElsewhere.length > 0 ? `no portions left: ${takenElsewhere.join(", ")}`
+                                            : l.set.components.length === 0 ? "not on this day's menu plan"
+                                            : `short — ${l.set.qty} ordered`}
+                                        </span>
+                                      )}
+                                    </td>
+                                    {/* This column is a run's day total, and an
+                                        assembled meal has no single run — so it
+                                        carries what the ORDER asks for instead,
+                                        labelled as such. */}
+                                    <td className="p-2 text-right tabular-nums text-muted-foreground">
+                                      {l.set.qty.toLocaleString()}
+                                      <span
+                                        className="block text-[10px]"
+                                        title={menuSet
+                                          ? `${l.set.qty} ${l.set.name}${l.set.choicePct != null && l.set.choicePct < 100 ? ` = ${l.set.choicePct}% of` : " sized from"} the ${crewSet ? `${crewOrdered} crew` : `${paxOrdered} pax`} booked on this order — one assembled meal each.`
+                                          : l.set.source === "roster"
+                                            ? `${l.set.qty} ${l.set.code} counted off the order's per-passenger special-meal roster`
+                                            : `This order has no per-passenger special-meal roster, so all ${l.set.qty} of its special meals are treated as ${l.set.code}. Attach a roster in Order Management to split them by code.`}
+                                      >
+                                        {menuSet
+                                          ? `${crewSet ? "crew" : "pax"} booked${l.set.choicePct != null && l.set.choicePct < 100 ? ` · ${l.set.choicePct}%` : ""}`
+                                          : `ordered${l.set.source === "roster" ? "" : " · no roster"}`}
+                                      </span>
+                                    </td>
+                                    <td className="p-2 text-muted-foreground">—</td>
+                                    <td className="p-2 text-right text-muted-foreground">—</td>
+                                    <td className="p-2 text-muted-foreground">—</td>
+                                  </tr>
+                                  {l.parts.flatMap((p) => {
+                                    // One row per RUN behind the dish — a dish
+                                    // cooked twice shows both, and the portions
+                                    // each contributes to this meal count.
+                                    const taken = l.qty > 0 ? takeFromPicks(p, l.qty) : [];
+                                    const rows = p.picks.length > 0
+                                      ? p.picks.map((k) => ({
+                                          batch: k.batch,
+                                          gives: taken.find((t) => t.batch.id === k.batch.id)?.qty ?? 0,
+                                          avail: k.qty,
+                                        }))
+                                      : [{ batch: undefined, gives: 0, avail: 0 }];
+                                    return rows.map((r, i) => {
+                                      const lots = r.batch ? lotsFor(r.batch.batch) : [];
+                                      const pe = r.batch ? peById.get(r.batch.batch) : undefined;
+                                      return (
+                                        <tr key={`${key}-${p.item}-${r.batch?.id ?? i}`} className={cn("border-t border-slate-50 text-[11px]", ticked && "bg-primary/5")}>
+                                          <td className="w-10 p-2 text-center align-middle">
+                                            <RowCheckbox
+                                              checked={ticked}
+                                              disabled
+                                              onChange={() => {}}
+                                              label={`${p.item} is part of the ${setLabel} set`}
+                                              title={`${p.item} is a component of the ${setLabel} meal — it is packaged as part of that meal, not on its own.`}
+                                            />
+                                          </td>
+                                          <td className="p-2 whitespace-nowrap pl-6">
+                                            <span className="text-muted-foreground">└ </span>
+                                            {r.batch
+                                              ? <span className="font-mono text-primary">{r.batch.batch}</span>
+                                              : p.runsFound > 0
+                                                // Cooked, but this flight can't have any of it — a
+                                                // different problem from "nobody cooked it", and the
+                                                // old blanket "no QC batch" hid that.
+                                                ? <span className="text-amber-700" title={`${p.runsFound} QC-passed run${p.runsFound === 1 ? "" : "s"} of ${p.item} reach this flight, but every portion is already allocated elsewhere.`}>
+                                                    no portions left
+                                                  </span>
+                                                : <span className="text-rose-700" title={`No QC-passed production of ${p.item} can serve this flight.`}>not cooked</span>}
+                                          </td>
+                                          <td className="p-2 text-muted-foreground">
+                                            {p.item}
+                                            <span className={cn("ml-1 text-[10px]", tone.text)} title={`${p.perMeal} portion${p.perMeal === 1 ? "" : "s"} of ${p.item} per ${setLabel}`}>
+                                              ×{p.perMeal}/meal
+                                            </span>
+                                            {p.picks.length > 1 && i === 0 && (
+                                              <span className="ml-1 text-[10px] text-muted-foreground">· {p.picks.length} runs</span>
+                                            )}
+                                          </td>
+                                          <td className="p-2">
+                                            {lots.length === 0 ? <span className="text-muted-foreground">—</span> : (
+                                              <div className="flex flex-wrap gap-1">
+                                                {lots.map((lot) => (
+                                                  <span
+                                                    key={lot.batchNo}
+                                                    title={`Lot ${lot.batchNo} · ${lot.qty.toLocaleString()} produced${lot.expiry ? ` · exp ${lot.expiry}` : ""}`}
+                                                    className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-primary/30 bg-primary/5 px-1.5 py-0.5 text-[10px] font-mono text-primary"
+                                                  >
+                                                    <Layers className="h-3 w-3 shrink-0" />
+                                                    {lot.batchNo}
+                                                  </span>
+                                                ))}
+                                              </div>
+                                            )}
+                                          </td>
+                                          {/* Not a meal of its own — say which meal
+                                              it goes into, rather than a bare
+                                              "component" the reader has to decode. */}
+                                          <td className="p-2">
+                                            <span
+                                              className="text-[10px] text-muted-foreground whitespace-nowrap"
+                                              title={`${p.perMeal} portion${p.perMeal === 1 ? "" : "s"} of ${p.item} goes into each ${setLabel} — it is packaged inside that meal, not on its own.`}
+                                            >
+                                              goes into {setLabel}
+                                            </span>
+                                          </td>
+                                          <td className="p-2 text-right tabular-nums text-muted-foreground">
+                                            {(r.gives || r.avail).toLocaleString()}
+                                          </td>
+                                          <td className="p-2 text-right tabular-nums text-muted-foreground">
+                                            {pe?.producedQty?.toLocaleString() ?? (r.batch && r.batch.qty > 0 ? r.batch.qty.toLocaleString() : "—")}
+                                          </td>
+                                          <td className="p-2 text-muted-foreground">{(r.batch ? warehouseForBatch(r.batch) : undefined) ?? "—"}</td>
+                                          <td className="p-2 text-right tabular-nums whitespace-nowrap">
+                                            {r.batch ? <span className="font-medium text-emerald-600">{r.batch.measuredTemp}°C</span> : <span className="text-muted-foreground">—</span>}
+                                          </td>
+                                          <td className="p-2 tabular-nums text-muted-foreground whitespace-nowrap">{r.batch?.date ?? "—"}</td>
+                                        </tr>
+                                      );
+                                    });
+                                  })}
+                                </Fragment>
+                              );
+                            })}
                             {shownLines.map(({ key, meal, batch }) => {
                               const pe = batch ? peById.get(batch.batch) : undefined;
                               // This flight's share, from the shared plan.
@@ -1870,7 +3224,7 @@ export default function PackagingPage() {
                               // A run already packaged for THIS flight can't be added
                               // again — Add to Run only offers the runs not yet created
                               // for it, so an existing allocation locks the row.
-                              const existingAlloc = batch ? existingAllocation(allocations, batch.batch, opt.flight, opt.date) : undefined;
+                              const existingAlloc = batch ? existingRunAllocation(allocations, batch.batch, opt.flight, opt.date) : undefined;
                               const alreadyCreated = !!existingAlloc && existingAlloc.status !== "Rejected";
                               // A line with no quantity to contribute can't join
                               // the run — its requirement is already covered by
@@ -1901,7 +3255,9 @@ export default function PackagingPage() {
                                         selectable ? `Package ${batch!.batch} for ${opt.flight}`
                                           : alreadyCreated ? `${batch!.batch} is already in a run for ${opt.flight} (${existingAlloc!.status}) — nothing to add.`
                                           : !batch ? "No QC-passed batch for this meal yet"
+                                          : planned?.reason === "reserved" ? `${batch.item} isn't served on its own to ${opt.flight} — its whole share goes into ${planned.demand?.claims.map((c) => `${c.qty} for ${c.code}`).join(", ")}. Package it as part of that meal.`
                                           : planned?.reason === "covered" ? `${opt.flight} needs ${planned.required?.toLocaleString()} ${batch.item}, and ${planned.coveredBy ?? "another run"} already supplies all of it. This run stays available for other flights.`
+                                          : planned?.reason === "offservice" ? `${batch.item} is on the day's ${planned.offService!.join(" / ")} menu, but ${opt.flight} departs ${fo?.etd ?? opt.etd ?? "at another time"} and serves ${[...paxSetLines, ...crewSetLines].map((s) => s.set.name).join(" + ") || "no menu-card service"} — it belongs on a different flight.`
                                           : planned?.reason === "unsized" ? `${batch.item} isn't on any meal card for this day, so there is no rule to size it against ${opt.flight}. Add it to the menu plan and it will size automatically.`
                                           : `${batch.batch} is fully allocated to other flights`
                                       }
@@ -1923,17 +3279,55 @@ export default function PackagingPage() {
                                   </td>
                                   <td className="p-2">{meal?.mealName ?? batch?.item}</td>
                                   <td className="p-2">
+                                    {(() => {
+                                      const lots = batch ? lotsFor(batch.batch) : [];
+                                      if (lots.length === 0) {
+                                        return <span className="text-muted-foreground" title="No batch/lot recorded for this run">—</span>;
+                                      }
+                                      return (
+                                        <div className="flex flex-wrap gap-1">
+                                          {lots.map((l) => (
+                                            <span
+                                              key={l.batchNo}
+                                              title={`Lot ${l.batchNo} · ${l.qty.toLocaleString()} produced${l.expiry ? ` · exp ${l.expiry}` : ""}`}
+                                              className="inline-flex items-center gap-1 whitespace-nowrap rounded border border-primary/30 bg-primary/5 px-1.5 py-0.5 text-[10px] font-mono text-primary"
+                                            >
+                                              <Layers className="h-3 w-3 shrink-0" />
+                                              {l.batchNo}
+                                              {lots.length > 1 && <span className="text-muted-foreground">×{l.qty.toLocaleString()}</span>}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      );
+                                    })()}
+                                  </td>
+                                  <td className="p-2">
                                     {type
                                       ? <span className={cn("px-2 py-0.5 rounded-full text-[11px] font-semibold", MEAL_TYPE_BADGE[type] ?? "bg-muted text-foreground")}>{type}</span>
                                       : <span className="text-muted-foreground">—</span>}
                                   </td>
                                   <td className="p-2 text-right tabular-nums font-semibold">
                                     {reqQty ? reqQty.toLocaleString() : <span className="text-muted-foreground font-normal">—</span>}
+                                    {/* A dish shared with a special meal: say how much
+                                        of its pool the assemblies took, so the smaller
+                                        line quantity is explained rather than puzzling. */}
+                                    {!planned?.reason && (planned?.demand?.special ?? 0) > 0 && (
+                                      <span
+                                        className="block text-[10px] font-normal text-fuchsia-700"
+                                        title={`${batch?.item} is one pool with several consumers — ${explainItemDemand(planned!.demand!)}`}
+                                      >
+                                        + {planned!.demand!.special.toLocaleString()} reserved for{" "}
+                                        {planned!.demand!.claims.map((c) => c.code).join(", ")}
+                                      </span>
+                                    )}
                                     {planned?.reason && (
                                       <span className="block text-[10px] font-normal text-amber-700">
                                         {planned.reason === "covered"
                                           ? <>all {planned.required?.toLocaleString()} covered by{planned.coveredBy ? <> <span className="font-mono">{planned.coveredBy}</span></> : " another run"}</>
+                                          : planned.reason === "reserved"
+                                            ? <>all {planned.demand?.special.toLocaleString()} goes into {planned.demand?.claims.map((c) => c.code).join(", ")}</>
                                           : planned.reason === "exhausted" ? "run fully allocated to other flights"
+                                          : planned.reason === "offservice" ? `${planned.offService!.join(" / ").toLowerCase()} dish — not this flight's service`
                                           : "not on this day's menu plan"}
                                       </span>
                                     )}
@@ -1962,9 +3356,28 @@ export default function PackagingPage() {
                                 </tr>
                               );
                             })}
+                            {/* ONE total: everything this flight loads. A special
+                                meal is one package on the trolley, and the
+                                portions it was assembled from are already
+                                reserved out of the loose lines above — so adding
+                                them is a count of packages, not a double-count. */}
                             <tr className="border-t-2 border-slate-300 bg-slate-50/80">
-                              <td className="p-2 font-bold" colSpan={4}>Total</td>
-                              <td className="p-2 text-right font-bold tabular-nums">{lineQty}</td>
+                              <td className="p-2 font-bold" colSpan={5}>
+                                Total to package
+                                {setMealQty > 0 && (
+                                  <span className="ml-1 font-normal text-[10px] text-muted-foreground">
+                                    {lineQty.toLocaleString()} portion{lineQty === 1 ? "" : "s"} + {setMealQty.toLocaleString()} assembled meal{setMealQty === 1 ? "" : "s"}
+                                  </span>
+                                )}
+                              </td>
+                              <td
+                                className="p-2 text-right font-bold tabular-nums"
+                                title={setMealQty > 0
+                                  ? `${lineQty.toLocaleString()} single-dish portions + ${setMealQty.toLocaleString()} assembled meal${setMealQty === 1 ? "" : "s"} = ${(lineQty + setMealQty).toLocaleString()} packages for ${opt.flight}`
+                                  : undefined}
+                              >
+                                {(lineQty + setMealQty).toLocaleString()}
+                              </td>
                               <td colSpan={4}></td>
                             </tr>
                           </tbody>
@@ -1974,9 +3387,12 @@ export default function PackagingPage() {
                     {excluded.length > 0 && (
                       <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 text-[11px] text-muted-foreground">
                         {excluded.length} run{excluded.length === 1 ? "" : "s"} not shown
-                        {excludedCovered > 0 && ` — ${excludedCovered} already covered by another run of the same item`}
-                        {excludedCovered > 0 && excludedUnsized > 0 && ","}
-                        {excludedUnsized > 0 && ` ${excludedUnsized} not on this day's menu plan`}.
+                        {[
+                          excludedReserved > 0 ? `${excludedReserved} fully reserved by this flight's assembled meals` : null,
+                          excludedCovered > 0 ? `${excludedCovered} already covered by another run of the same item` : null,
+                          excludedOffService > 0 ? `${excludedOffService} cooked for a meal service this flight doesn't serve` : null,
+                          excludedUnsized > 0 ? `${excludedUnsized} not on this day's menu plan` : null,
+                        ].filter(Boolean).join(", ").replace(/^/, " — ")}.
                         <button
                           type="button"
                           className="font-semibold underline underline-offset-2 hover:text-foreground"
@@ -2001,9 +3417,12 @@ export default function PackagingPage() {
             <p className="mr-auto text-[11px] text-muted-foreground">
               {newLegs.length > 1
                 ? `Starting queues ${newJobs
-                    .map((j) => `${j.leg.flight} ${j.lines.reduce((s, l) => s + l.qty, 0).toLocaleString()} portions (${j.lines.length} run${j.lines.length === 1 ? "" : "s"})`)
-                    .join(" and ")} — print & scan the labels from the list.`
-                : "Starting adds the ticked lines to the packaging list — print & scan the labels from there."}
+                    .map((j) => {
+                      const meals = j.sets.reduce((s, l) => s + l.qty, 0);
+                      return `${j.leg.flight} ${j.lines.reduce((s, l) => s + l.qty, 0).toLocaleString()} portions (${j.lines.length} run${j.lines.length === 1 ? "" : "s"})${meals > 0 ? ` + ${meals} assembled meal${meals === 1 ? "" : "s"}` : ""}`;
+                    })
+                    .join(" and ")} — ${printScan ? "print & scan the labels" : "mark them Packaging Done"} from the list.`
+                : `Starting adds the ticked lines to the packaging list — each meal set (special or crew) becomes ONE package. ${printScan ? "Print & scan the labels" : "Mark them Packaging Done"} from there.`}
             </p>
             <Button variant="outline" onClick={() => setNewOpen(false)}>Cancel</Button>
             <Button onClick={startNewPackaging} disabled={!newOption || newEligibleCount === 0}>
@@ -2013,24 +3432,34 @@ export default function PackagingPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Per-batch Scan — the label for one batch; scanning marks it Packaging Done */}
-      {/* Print Labels — one card per batch; printing completes packaging (no scan) */}
+      {/* Print & Scan Labels — one card per batch. Printing is repeatable and
+          status-neutral; SCANNING a printed label marks it Packaging Done. */}
       <Dialog open={labelOpen} onOpenChange={(v) => !v && closeLabelModal()}>
         <DialogContent className="w-full max-w-full sm:max-w-3xl max-h-[100vh] sm:max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden">
           <div className="px-6 pt-5 pb-4 border-b shrink-0">
             <DialogTitle className="text-base font-semibold flex items-center gap-2">
-              <Printer className="h-4 w-4" /> Print Labels — Packaging
+              <Printer className="h-4 w-4" /> Print &amp; Scan Labels — Packaging
             </DialogTitle>
           </div>
 
-          {/* Print all — completes packaging */}
+          {/* Print (repeatable) + Scan (completes packaging) */}
           <div className="px-6 py-3 border-b bg-muted/30 shrink-0 flex items-center justify-between gap-3 flex-wrap">
             <span className="text-xs text-muted-foreground">
-              {packagingLabels.length} label{packagingLabels.length === 1 ? "" : "s"} · printing marks them <b>Packaging Done</b> (ready for dispatch).
+              {packagingLabels.length} label{packagingLabels.length === 1 ? "" : "s"} · reprint freely · <b>scanning</b> a label marks it <b>Packaging Done</b> (ready for dispatch).
             </span>
-            <Button size="sm" onClick={printAll} disabled={printedAll || packagingLabels.length <= 1}>
-              <Printer className="h-3.5 w-3.5 mr-1" /> {printedAll ? "Printed" : "Print All Labels"}
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={printAll} disabled={packagingLabels.length === 0}>
+                <Printer className="h-3.5 w-3.5 mr-1" /> {packagingLabels.every((a) => printedIds.has(a.id)) && packagingLabels.length > 0 ? "Print All Again" : "Print All Labels"}
+              </Button>
+              <Button
+                size="sm"
+                onClick={scanAll}
+                disabled={!packagingLabels.some((a) => printedIds.has(a.id))}
+                title={packagingLabels.some((a) => printedIds.has(a.id)) ? "Scan all printed labels — marks them Packaging Done" : "Print the labels first, then scan"}
+              >
+                <ScanLine className="h-3.5 w-3.5 mr-1" /> Scan All
+              </Button>
+            </div>
           </div>
 
           {/* Label cards */}
@@ -2043,27 +3472,61 @@ export default function PackagingPage() {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {packagingLabels.map((a) => {
                   const b = batchById.get(a.batchId);
-                  const code = `LBL-${a.productionId}-${a.flight}`;
+                  // A meal has no single production order to key on — its
+                  // packaging id is what identifies the assembled meal.
+                  const code = a.setCode ? `LBL-${a.packagingId}-${a.flight}` : `LBL-${a.productionId}-${a.flight}`;
                   return (
                     <div key={a.id} className="rounded-lg border-2 border-dashed border-border bg-card p-3 flex flex-col gap-2">
                       <div className="flex items-center justify-between">
                         <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
                           USBA Catering · Meal Label
                         </span>
-                        <span className="text-[10px] font-bold text-amber-600">READY TO PRINT</span>
+                        {printedIds.has(a.id) ? (
+                          <span className="text-[10px] font-bold text-sky-600">PRINTED · SCAN TO COMPLETE</span>
+                        ) : (
+                          <span className="text-[10px] font-bold text-amber-600">READY TO PRINT</span>
+                        )}
                       </div>
                       <div className="flex items-baseline justify-between gap-2">
-                        <span className="font-semibold text-sm">{a.item}</span>
+                        <span className="font-semibold text-sm">
+                          {a.setCode && <span className={setCodePill(a.setCode)}>{setCodeLabel(a.setCode)}</span>}
+                          {a.item}
+                        </span>
                         {/* The label carries THIS flight's quantity, not the run's. */}
-                        <span className="text-xs tabular-nums text-muted-foreground shrink-0">Qty {a.qty.toLocaleString()}</span>
+                        <span className="text-xs tabular-nums text-muted-foreground shrink-0">
+                          Qty {a.qty.toLocaleString()}{a.setCode ? ` meal${a.qty === 1 ? "" : "s"}` : ""}
+                        </span>
                       </div>
                       <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
                         <span>Flight <b className="text-foreground">{a.flight}</b></span>
                         {a.orderNo && <span>Order <b className="text-foreground font-mono">{a.orderNo}</b></span>}
-                        <span>Batch <b className="text-foreground font-mono">{a.productionId}</b></span>
-                        {b && <span>Meas <b className="text-foreground">{b.measuredTemp}°C</b></span>}
+                        {!a.setCode && <span>Batch <b className="text-foreground font-mono">{a.productionId}</b></span>}
+                        {!a.setCode && b && <span>Meas <b className="text-foreground">{b.measuredTemp}°C</b></span>}
                         <span>{a.date}</span>
                       </div>
+                      {/* An assembled meal prints what is IN it — every dish with
+                          the run and lot it came from, so one label carries the
+                          whole traceability chain of the meal. */}
+                      {a.components && a.components.length > 0 && (
+                        <div className="rounded border border-dashed border-fuchsia-200 bg-fuchsia-50/50 px-2 py-1.5">
+                          <div className="text-[9px] font-bold uppercase tracking-widest text-fuchsia-700 mb-0.5">
+                            Contents — {a.components.length} items per meal
+                          </div>
+                          {a.components.map((c) => {
+                            const cb = batchById.get(c.batchId);
+                            const lots = lotsFor(c.productionId);
+                            return (
+                              <div key={c.productionId} className="flex flex-wrap items-baseline gap-x-2 text-[10px] text-muted-foreground">
+                                <span className="text-foreground font-medium">{c.item}</span>
+                                <span className="font-mono">{c.productionId}</span>
+                                {lots.length > 0 && <span className="font-mono">lot {lots.map((l) => l.batchNo).join(", ")}</span>}
+                                {cb && <span>{cb.measuredTemp}°C</span>}
+                                <span className="tabular-nums">×{c.qty.toLocaleString()}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                       {/* Decorative barcode (matches Dispatch label format) */}
                       <div className="mt-1">
                         <div className="flex items-end gap-[1px] h-8 w-full overflow-hidden" aria-hidden>
@@ -2079,18 +3542,24 @@ export default function PackagingPage() {
                         </div>
                         <div className="text-center font-mono text-[11px] tracking-widest mt-1">{code}</div>
                       </div>
-                      {/* Per-card Print only for a single-batch run — multi-batch
-                          runs use one "Print All Labels" click (no batch-by-batch). */}
-                      {packagingLabels.length === 1 && (
-                        <div className="flex gap-2 mt-1">
-                          <Button
-                            variant="outline" size="sm" className="h-7 px-2 text-xs flex-1"
-                            onClick={() => printOne(a)}
-                          >
-                            <Printer className="h-3 w-3 mr-1" /> Print
-                          </Button>
-                        </div>
-                      )}
+                      {/* Print (repeatable) + Scan (completes this label). Scan
+                          unlocks once the label has been printed at least once. */}
+                      <div className="flex gap-2 mt-1">
+                        <Button
+                          variant="outline" size="sm" className="h-7 px-2 text-xs flex-1"
+                          onClick={() => printOne(a)}
+                        >
+                          <Printer className="h-3 w-3 mr-1" /> {printedIds.has(a.id) ? "Reprint" : "Print"}
+                        </Button>
+                        <Button
+                          size="sm" className="h-7 px-2 text-xs flex-1"
+                          onClick={() => scanOne(a)}
+                          disabled={!printedIds.has(a.id)}
+                          title={printedIds.has(a.id) ? "Scan to mark Packaging Done" : "Print the label first, then scan it"}
+                        >
+                          <ScanLine className="h-3 w-3 mr-1" /> Scan
+                        </Button>
+                      </div>
                     </div>
                   );
                 })}
@@ -2102,7 +3571,7 @@ export default function PackagingPage() {
             <p className="text-xs text-muted-foreground inline-flex items-center gap-1">
               <Truck className="h-3.5 w-3.5" />
               {packagingLabels.length > 0
-                ? "Print the labels to complete packaging — batches become Ready for Dispatch."
+                ? "Reprint labels as needed — scanning each one completes packaging (Ready for Dispatch)."
                 : "All batches packaged — forwarded to Dispatch."}
             </p>
             <Button variant="outline" onClick={closeLabelModal}>Close</Button>
@@ -2194,8 +3663,12 @@ function FlightSearchSelect({
         >
           <span className="truncate text-left">
             {selected
-              ? `${label(selected)} — ${selected.planQty > 0
-                  ? `${selected.planQty.toLocaleString()} portions from ${selected.planLines} production run${selected.planLines === 1 ? "" : "s"}`
+              ? `${label(selected)} — ${selected.planQty > 0 || (selected.planMeals ?? 0) > 0
+                  ? `${(selected.planQty + (selected.planMeals ?? 0)).toLocaleString()} to package${
+                      (selected.planMeals ?? 0) > 0
+                        ? ` (${selected.planQty.toLocaleString()} portions + ${selected.planMeals} assembled meal${selected.planMeals === 1 ? "" : "s"})`
+                        : ""
+                    } from ${selected.planLines} line${selected.planLines === 1 ? "" : "s"}`
                   : "nothing to package"}`
               : "Search or select a flight…"}
           </span>
@@ -2222,24 +3695,23 @@ function FlightSearchSelect({
                     {o.sector && <span className="text-muted-foreground"> · {o.sector}</span>}
                     {o.orderNo && <span className="font-mono text-[11px] text-muted-foreground"> · {o.orderNo}</span>}
                   </span>
-                  {/* This leg's own load. `planQty` differs per flight; the pool
-                      counts do not — see the flightOptions comment. */}
-                  {o.planQty > 0 ? (
-                    <span
-                      className="ml-2 shrink-0 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-emerald-700"
-                      title={`${o.planLines} of the ${o.batchCount} run${o.batchCount === 1 ? "" : "s"} that can serve this date contribute to ${o.flight} — ${o.planQty.toLocaleString()} portions`}
-                    >
-                      {o.planQty.toLocaleString()}
-                    </span>
-                  ) : o.batchCount > 0 ? (
-                    <span
-                      className="ml-2 shrink-0 text-[10px] text-muted-foreground"
-                      title={`${o.batchCount} QC-passed run${o.batchCount === 1 ? " serves" : "s serve"} this date, but none of them size against ${o.flight} — already covered by another run, or not on its menu plan.`}
-                    >
-                      nothing to package
-                    </span>
-                  ) : (
-                    <span className="ml-2 shrink-0 text-[10px] text-muted-foreground">no production</span>
+                  {/* A packable leg says nothing — the quantity is on the row
+                      you land on, and repeating it here just made the list
+                      noisy. Only legs you CANNOT package are flagged, so this
+                      reads as a plain flight list with the exceptions called
+                      out. The figures are still computed: flightOptions sorts
+                      by planQty so packable flights lead. */}
+                  {o.planQty <= 0 && (o.planMeals ?? 0) <= 0 && (
+                    o.batchCount > 0 ? (
+                      <span
+                        className="ml-2 shrink-0 text-[10px] text-muted-foreground"
+                        title={`${o.batchCount} QC-passed run${o.batchCount === 1 ? " serves" : "s serve"} this date, but none of them size against ${o.flight} — already covered by another run, or not on its menu plan.`}
+                      >
+                        nothing to package
+                      </span>
+                    ) : (
+                      <span className="ml-2 shrink-0 text-[10px] text-muted-foreground">no production</span>
+                    )
                   )}
                 </CommandItem>
               ))}

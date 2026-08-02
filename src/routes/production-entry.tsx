@@ -33,6 +33,7 @@ import {
   type FlightOrderRow, type MealSlot, type ItemMaster, type InventoryItem,
 } from "@/lib/sample-data";
 import { getItemStock } from "@/lib/inventory-stock";
+import { disposeStock, clearPostedProductionStock } from "@/lib/stock-adjustments";
 import { roundQty } from "@/lib/num";
 import { logAudit } from "@/lib/audit-log";
 import { useOrderSummaryAdjustments, approvedDeltaFor, type FlightTypeScope } from "@/lib/order-summary-adjustments";
@@ -59,6 +60,7 @@ import {
   gmOrderSummary,
   mealCards,
   loadMealPlanningConfig,
+  perMealQty,
   type FlightType,
   type MealCard,
 } from "@/lib/meal-planning-data";
@@ -70,8 +72,8 @@ function buildForwardedOrders(orders: FlightOrderRow[]): { date: string; totalMe
   const byDate = new Map<string, number>();
   for (const o of orders) {
     // Only count orders that haven't been pushed past Production yet — once an
-    // order is Dispatched or Completed it has left the production pipeline.
-    if (o.status === "Dispatched" || o.status === "Completed") continue;
+    // order is Dispatched, Completed or Departed it has left the pipeline.
+    if (o.status === "Dispatched" || o.status === "Completed" || o.status === "Departed") continue;
     byDate.set(o.date, (byDate.get(o.date) ?? 0) + o.pax + o.crew + o.specialMeals);
   }
   return Array.from(byDate.entries())
@@ -345,7 +347,7 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
   const [viewOpen, setViewOpen] = useState(false);
   const [prDetail, setPrDetail] = useState<PurchaseRequisition | null>(null);
   const [grnDetail, setGrnDetail] = useState<WfGRN | null>(null);
-  const { grns, updateProductionEntryStatus } = useWorkflow();
+  const { grns, updateProductionEntryStatus, applyStockDeltas } = useWorkflow();
   const prList = getPurchaseRequisitions();
 
   // Purchase history per material — was it received via a Direct Purchase (a
@@ -438,6 +440,29 @@ function ProductionEntryRowMenu({ entry }: { entry: WfProductionEntry }) {
                     // a Re-Cook. The QC-failure context (reason / by / at) is kept so
                     // it shows in the Approval Management detail view. On approval the
                     // order becomes "Approved" and available for a fresh entry run.
+                    //
+                    // The failed batch was posted INTO stock at QC fail (blocked
+                    // goods). Re-initiating pulls that food back into the kitchen,
+                    // so the ledger must give it up again — otherwise stock counts
+                    // the failed batch AND the re-cooked one. Wastage disposal is
+                    // the other exit; it posts its own OUT on Final Approval.
+                    if (entry.inventoryAdded && entry.producedQty > 0) {
+                      const item = entry.outputItemName ?? entry.bom;
+                      applyStockDeltas([{
+                        itemId: item,
+                        delta: -entry.producedQty,
+                        date: new Date().toISOString().slice(0, 10),
+                        reference: entry.id,
+                        officeId: entry.officeId,
+                        warehouseId: entry.warehouseId,
+                        label: "Re-Cook Withdrawal",
+                      }]);
+                      // The stock master needs the same withdrawal, releasing the
+                      // QC hold with it — the ledger delta alone left the failed
+                      // batch sitting in Stock Overview until it was disposed.
+                      disposeStock(item, entry.producedQty, entry.batchNo?.trim() || entry.id);
+                      clearPostedProductionStock(entry.id);
+                    }
                     updateProductionEntryStatus(entry.id, "Pending", {
                       producedQty: 0,
                       reCook: true,
@@ -1083,13 +1108,9 @@ export default function ProductionEntryPage() {
         )).sort()
       : [];
     const taggedEntry: ProductionEntry = { ...entry, servesOrderNos };
-    // Count the Approved legs this order will take into Production *before* adding
-    // it — addProductionEntry performs the actual Approved→Production advance (in
-    // the workflow store, so every creation path shares it), after which the
-    // snapshot below would already read Production.
-    const willAdvance = flightOrders.filter(
-      (o) => o.date === entry.date && o.status === "Approved",
-    ).length;
+    // Raising the order does NOT move flight orders to Production — that happens
+    // when the run actually starts (Production Initiation, in Production Entry),
+    // wired in the workflow store's updateProductionEntryStatus.
     addProductionEntry(taggedEntry);
     logAudit({
       action: "Created production order",
@@ -1097,9 +1118,6 @@ export default function ProductionEntryPage() {
       entity: entry.id,
       detail: `${entry.outputItemName ?? entry.bom} · order qty ${entry.orderQty ?? 0}${entry.date ? ` · ${entry.date}` : ""}${servesOrderNos.length ? ` · serves ${servesOrderNos.length} order(s): ${servesOrderNos.join(", ")}` : ""}`,
     });
-    if (willAdvance > 0) {
-      toast.success(`${willAdvance} flight order leg${willAdvance === 1 ? "" : "s"} for ${entry.date} moved to Production.`);
-    }
     setView("list");
     setPendingItem(undefined);
   };
@@ -1317,6 +1335,238 @@ export default function ProductionEntryPage() {
 
   type NumberedEntry = ProductionEntry & { __sl: number };
   const numberedEntries: NumberedEntry[] = entries.map((e, i) => ({ ...e, __sl: i + 1 }));
+
+  // ── Short Materials tab ─────────────────────────────────────────────────────
+  // The per-order Materials pill answers "is THIS order covered?"; this tab
+  // answers "what do we need to procure overall?" — every material summed
+  // across all listed production orders vs live stock, shortfalls only.
+  const [listTab, setListTab] = useState<"orders" | "short">("orders");
+  type CombinedShortMaterial = {
+    id: string; itemCode: string; itemName: string; uom: string;
+    reqQty: number; available: number; short: number; orders: string[];
+  };
+  const combinedShortMaterials = useMemo<CombinedShortMaterial[]>(() => {
+    const map = new Map<string, { itemCode: string; itemName: string; uom: string; reqQty: number; orders: string[] }>();
+    for (const e of entries) {
+      for (const m of orderMaterials(e)) {
+        const key = (m.itemCode || m.itemName).toLowerCase();
+        const g = map.get(key) ?? { itemCode: m.itemCode, itemName: m.itemName, uom: m.uom, reqQty: 0, orders: [] };
+        g.reqQty = roundQty(g.reqQty + m.reqQty);
+        if (!g.orders.includes(e.id)) g.orders.push(e.id);
+        map.set(key, g);
+      }
+    }
+    return [...map.values()]
+      .map((g) => {
+        const available = availableFor(g.itemCode, g.itemName);
+        return { ...g, id: g.itemCode || g.itemName, available, short: roundQty(Math.max(0, g.reqQty - available)) };
+      })
+      .filter((g) => g.short > 0)
+      .sort((a, b) => b.short - a.short);
+    // orderMaterials is a plain closure over availableFor — entries + stock are
+    // the real inputs of this aggregation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries, availableFor]);
+
+  // ── Demand state per short material ─────────────────────────────────────────
+  // Re-Cook (and any shortfall) materials get demanded via Demand Requests, but
+  // an item with an OPEN demand must wait for that demand to be fulfilled or
+  // rejected before it can be demanded again — only never-demanded (or
+  // terminally-closed) shortfalls are eligible for a new demand.
+  const OPEN_DEMAND_STATUSES = new Set<string>([
+    "Pending Approval", "Pending Store Review", "Partially Available",
+    "Partially Issued", "Partially Fulfilled", "Escalated to Supply Chain",
+  ]);
+  type ShortDemandState =
+    | { kind: "open"; ref: string; status: string }
+    | { kind: "fulfilled"; ref: string }
+    | { kind: "rejected"; ref: string }
+    | { kind: "none" };
+  const demandStateForItem = (itemCode: string, itemName: string): ShortDemandState => {
+    const nameKey = itemName.toLowerCase();
+    const codeKey = (itemCode ?? "").toLowerCase();
+    const matching = demands.filter((d) =>
+      d.items.some((it) =>
+        it.name.toLowerCase() === nameKey || (codeKey && it.id.toLowerCase() === codeKey)));
+    const open = matching.find((d) => OPEN_DEMAND_STATUSES.has(d.status));
+    if (open) return { kind: "open", ref: open.id, status: open.status };
+    const latest = [...matching].sort((a, b) => b.date.localeCompare(a.date))[0];
+    if (!latest) return { kind: "none" };
+    return latest.status === "Fulfilled"
+      ? { kind: "fulfilled", ref: latest.id }
+      : { kind: "rejected", ref: latest.id };
+  };
+  const shortDemandState = useMemo(() => {
+    const map = new Map<string, ShortDemandState>();
+    for (const m of combinedShortMaterials) map.set(m.id, demandStateForItem(m.itemCode, m.itemName));
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [combinedShortMaterials, demands]);
+  const canDemandShort = (id: string) => shortDemandState.get(id)?.kind !== "open";
+
+  // Demand-state filter over the Short Materials tab ("Not Demanded" being the
+  // actionable set — those are the rows a fresh demand can be raised for).
+  const [shortFilter, setShortFilter] = useState<"all" | "none" | "open" | "redemand">("all");
+  const shortGroupOf = (id: string): "none" | "open" | "redemand" => {
+    const kind = shortDemandState.get(id)?.kind ?? "none";
+    return kind === "none" ? "none" : kind === "open" ? "open" : "redemand";
+  };
+  const shortGroupCounts = useMemo(() => {
+    const c = { none: 0, open: 0, redemand: 0 };
+    for (const m of combinedShortMaterials) c[shortGroupOf(m.id)]++;
+    return c;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [combinedShortMaterials, shortDemandState]);
+  const visibleShortMaterials = shortFilter === "all"
+    ? combinedShortMaterials
+    : combinedShortMaterials.filter((m) => shortGroupOf(m.id) === shortFilter);
+
+  /** Chip rendering one material's demand state (shared by the Short Materials
+   *  tab and the per-order Materials dialog). */
+  const DemandStateChip = ({ st }: { st: ShortDemandState }) => {
+    if (st.kind === "open") {
+      return (
+        <span
+          className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 whitespace-nowrap"
+          title={`${st.ref} is ${st.status} — no new demand can be sent until it is received or rejected.`}
+        >
+          <AlertCircle className="h-3 w-3" /> Demanded · {st.ref}
+        </span>
+      );
+    }
+    if (st.kind === "rejected") {
+      return (
+        <span className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[10px] font-semibold text-rose-700 whitespace-nowrap"
+          title={`${st.ref} was rejected — this material can be demanded again.`}>
+          Rejected · re-demand
+        </span>
+      );
+    }
+    if (st.kind === "fulfilled") {
+      return (
+        <span className="inline-flex items-center rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 whitespace-nowrap"
+          title={`${st.ref} was fulfilled but the item is short again — it can be demanded again.`}>
+          Fulfilled · short again
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[10px] font-semibold text-slate-600 whitespace-nowrap"
+        title="No demand raised for this shortfall yet.">
+        Not Demanded
+      </span>
+    );
+  };
+
+  /** Raise a Demand Request for ONE order's short materials — the Re-Cook path:
+   *  a failed batch's re-run needs its materials afresh, so its shortfalls are
+   *  demandable straight from the Materials dialog (open demands still block). */
+  const raiseDemandForOrderShorts = (order: NumberedEntry, mats: ReturnType<typeof orderMaterials>) => {
+    const eligible = mats.filter((m) => m.short > 0 && demandStateForItem(m.itemCode, m.itemName).kind !== "open");
+    if (eligible.length === 0) {
+      toast.error("Every short material of this order already has an open demand — wait for it to be received or rejected.");
+      return;
+    }
+    const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const isReCook = order.status === "Re-Cook";
+    const drId = `DR-${String(9000 + demands.length + 1).padStart(4, "0")}`;
+    const dr: WfDemandRequest = {
+      id: drId,
+      reference: order.id,
+      requestedBy: isReCook ? "Production (Re-Cook)" : "Production (Short Materials)",
+      role: "Flight Kitchen Executive",
+      date: stamp,
+      status: "Pending Approval",
+      items: eligible.map<WfDemandItem>((m) => {
+        const invRow = inventory.find((i) => i.name.toLowerCase() === m.itemName.toLowerCase());
+        return { id: invRow?.id ?? m.itemCode, name: m.itemName, qty: m.short, uom: m.uom };
+      }),
+      note: isReCook
+        ? `Re-Cook of ${order.id} (${order.outputItemName ?? order.bom}) — fresh materials for the re-run. Quantities are the outstanding shortfall vs current stock.`
+        : `Raised from ${order.id} (${order.outputItemName ?? order.bom}) Materials view. Quantities are the outstanding shortfall vs current stock.`,
+      source: "Kitchen",
+      officeId: order.officeId ?? "OFF-001",
+      warehouseId: order.warehouseId ?? "WH-003",
+      autoFulfill: false,
+      reCook: isReCook || undefined,
+    };
+    addDemands([dr]);
+    setMaterialsOrder(null);
+    toast.success(`${drId} raised — ${eligible.length} short material${eligible.length === 1 ? "" : "s"} for ${order.id}${isReCook ? " (Re-Cook)" : ""}, pending approval on Demand Requests.`);
+  };
+
+  /** Raise ONE Demand Request covering the selected eligible short materials
+   *  (qty = outstanding shortfall). Items with an open demand are skipped. */
+  const raiseDemandForShorts = (ids: string[], clearSelection: () => void) => {
+    const rows = combinedShortMaterials.filter((m) => ids.includes(m.id) && canDemandShort(m.id));
+    if (rows.length === 0) {
+      toast.error("The selected materials all have an open demand — wait for it to be received or rejected.");
+      return;
+    }
+    const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+    const coveredOrders = [...new Set(rows.flatMap((r) => r.orders))];
+    const drId = `DR-${String(9000 + demands.length + 1).padStart(4, "0")}`;
+    const dr: WfDemandRequest = {
+      id: drId,
+      reference: coveredOrders.join(", "),
+      requestedBy: "Production (Short Materials)",
+      role: "Flight Kitchen Executive",
+      date: stamp,
+      status: "Pending Approval",
+      items: rows.map<WfDemandItem>((r) => {
+        const invRow = inventory.find((i) => i.name.toLowerCase() === r.itemName.toLowerCase());
+        return { id: invRow?.id ?? r.itemCode, name: r.itemName, qty: r.short, uom: r.uom };
+      }),
+      note: `Raised from Production Order → Short Materials: ${rows.length} shortfall item${rows.length === 1 ? "" : "s"} across ${coveredOrders.length} production order${coveredOrders.length === 1 ? "" : "s"}. Quantities are the outstanding shortfall vs current stock (re-demand after Re-Cook / consumption).`,
+      source: "Kitchen",
+      officeId: "OFF-001",
+      warehouseId: "WH-003",
+      autoFulfill: false,
+    };
+    addDemands([dr]);
+    clearSelection();
+    toast.success(`${drId} raised for ${rows.length} short material${rows.length === 1 ? "" : "s"} — pending approval on Demand Requests.`);
+  };
+
+  const shortMaterialCols: Column<CombinedShortMaterial>[] = [
+    { key: "itemCode", header: "Code", render: (r) => <span className="font-mono text-xs">{r.itemCode || "—"}</span> },
+    { key: "itemName", header: "Material" },
+    { key: "uom", header: "UOM" },
+    {
+      key: "reqQty", header: "Required (All Orders)", className: "text-right",
+      render: (r) => <span className="tabular-nums">{r.reqQty.toLocaleString()}</span>,
+    },
+    {
+      key: "available", header: "Available", className: "text-right",
+      render: (r) => <span className="tabular-nums">{r.available.toLocaleString()}</span>,
+    },
+    {
+      key: "short", header: "Shortfall", className: "text-right",
+      render: (r) => <span className="tabular-nums font-semibold text-rose-700">{r.short.toLocaleString()}</span>,
+    },
+    {
+      key: "id" as keyof CombinedShortMaterial, header: "Demand Status", sortable: false,
+      render: (r) => <DemandStateChip st={shortDemandState.get(r.id) ?? { kind: "none" }} />,
+    },
+    {
+      key: "orders" as keyof CombinedShortMaterial, header: "Needed By", sortable: false,
+      render: (r) => {
+        const shown = r.orders.slice(0, 2);
+        return (
+          <div className="flex flex-wrap items-center gap-1" title={`Short across ${r.orders.length} order(s): ${r.orders.join(", ")}`}>
+            {shown.map((id) => (
+              <span key={id} className="inline-flex items-center rounded-full border border-border bg-muted/40 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-600">
+                {id}
+              </span>
+            ))}
+            {r.orders.length > shown.length && (
+              <span className="text-[10px] text-muted-foreground">+{r.orders.length - shown.length}</span>
+            )}
+          </div>
+        );
+      },
+    },
+  ];
 
   // ── Bulk Production Initiation ──────────────────────────────────────────────
   // The same "Production Initiation" action offered per-row (in each row's menu)
@@ -2036,17 +2286,100 @@ export default function ProductionEntryPage() {
             </div>
           )}
 
-          <div data-arrival-id="production-list">
-            <DataTable
-              title="production-entries"
-              data={numberedEntries}
-              columns={cols}
-              searchKeys={["id", "bom", "outputItemName", "status"]}
-              selectable={false}
-              actions={(r) => <ProductionEntryRowMenu entry={r} />}
-              flashRowId={flashPro}
-            />
+          {/* Orders list vs the combined material shortfall across all of them */}
+          <div className="mb-3 inline-flex items-center rounded-lg border border-border bg-muted/40 p-0.5 text-xs font-medium">
+            <button
+              type="button"
+              onClick={() => setListTab("orders")}
+              className={cn(
+                "rounded-md px-3 py-1.5 transition-colors",
+                listTab === "orders" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              Production Orders ({numberedEntries.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setListTab("short")}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 transition-colors",
+                listTab === "short" ? "bg-background shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              <AlertCircle className={cn("h-3.5 w-3.5", combinedShortMaterials.length > 0 ? "text-rose-600" : "text-emerald-600")} />
+              Short Materials ({combinedShortMaterials.length})
+            </button>
           </div>
+
+          {listTab === "orders" ? (
+            <div data-arrival-id="production-list">
+              <DataTable
+                title="production-entries"
+                data={numberedEntries}
+                columns={cols}
+                searchKeys={["id", "bom", "outputItemName", "status"]}
+                selectable={false}
+                actions={(r) => <ProductionEntryRowMenu entry={r} />}
+                flashRowId={flashPro}
+              />
+            </div>
+          ) : combinedShortMaterials.length === 0 ? (
+            <div className="rounded-xl border-2 border-dashed border-emerald-200 bg-emerald-50/40 py-16 text-center">
+              <Package className="h-9 w-9 text-emerald-300 mx-auto mb-3" />
+              <p className="text-sm font-medium text-emerald-700">No short materials</p>
+              <p className="text-xs text-muted-foreground mt-1">Stock covers every material required by the listed production orders.</p>
+            </div>
+          ) : (
+            <>
+            {/* Demand-state filter — "Not Demanded" is the actionable set */}
+            <div className="mb-2 flex flex-wrap items-center gap-1.5">
+              {([
+                ["all", `All (${combinedShortMaterials.length})`],
+                ["none", `Not Demanded (${shortGroupCounts.none})`],
+                ["open", `Demanded — awaiting outcome (${shortGroupCounts.open})`],
+                ["redemand", `Re-demandable (${shortGroupCounts.redemand})`],
+              ] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setShortFilter(key)}
+                  className={cn(
+                    "rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors",
+                    shortFilter === key
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-border bg-background text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <DataTable
+              title="production-short-materials"
+              data={visibleShortMaterials}
+              columns={shortMaterialCols}
+              searchKeys={["itemCode", "itemName"]}
+              selectable
+              isRowSelectable={(r) => canDemandShort(r.id)}
+              bulkActions={(selectedIds, clearSelection, selectAll, totalRows) => (
+                <>
+                  <Button size="sm" variant="outline" className="h-8 text-xs" onClick={selectAll}>
+                    Select all eligible ({totalRows})
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="h-8 text-xs"
+                    disabled={selectedIds.length === 0}
+                    onClick={() => raiseDemandForShorts(selectedIds, clearSelection)}
+                    title="Raise ONE Demand Request for the ticked shortfall materials (items with an open demand cannot be ticked)"
+                  >
+                    <Zap className="h-3.5 w-3.5 mr-1" /> Raise Demand ({selectedIds.length})
+                  </Button>
+                </>
+              )}
+            />
+            </>
+          )}
         </>
       ) : (
         <ProductionEntryCreate key={createKey} initialItem={pendingItem} onSave={addEntry} />
@@ -2272,13 +2605,20 @@ export default function ProductionEntryPage() {
             const mats = orderMaterials(materialsOrder);
             const orderQty = materialsOrder.orderQty ?? materialsOrder.producedQty;
             const shortCount = mats.filter((m) => m.short > 0).length;
+            const isReCook = materialsOrder.status === "Re-Cook";
+            const eligibleShorts = mats.filter((m) => m.short > 0 && demandStateForItem(m.itemCode, m.itemName).kind !== "open");
             return (
               <div className="space-y-4">
                 <div className="rounded-md border border-border bg-muted/20 px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-sm">
                   <div>
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Order</div>
-                    <div className="mt-0.5 font-semibold text-foreground">
+                    <div className="mt-0.5 font-semibold text-foreground flex items-center gap-2">
                       {materialsOrder.outputItemName ?? materialsOrder.bom}
+                      {isReCook && (
+                        <span className="inline-flex items-center gap-1 rounded border border-rose-200 bg-rose-50 px-1.5 h-5 text-[10px] font-bold uppercase tracking-wider text-rose-700">
+                          <Flame className="h-3 w-3" /> Re-Cook
+                        </span>
+                      )}
                     </div>
                     <div className="text-[11px] text-muted-foreground mt-0.5">
                       <span className="font-mono text-primary">{materialsOrder.id}</span> · Order Qty {orderQty.toLocaleString()}
@@ -2295,6 +2635,14 @@ export default function ProductionEntryPage() {
                       : <><CheckCircle2 className="h-3.5 w-3.5" /> All {mats.length} materials in stock</>}
                   </div>
                 </div>
+
+                {isReCook && shortCount > 0 && (
+                  <div className="rounded-md border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-800">
+                    <Flame className="h-3.5 w-3.5 inline-block mr-1.5 -mt-0.5" />
+                    The re-run consumes these materials afresh — raise a new demand for the short items below.
+                    Items already covered by an open demand stay blocked until that demand is received or rejected.
+                  </div>
+                )}
 
                 {mats.length === 0 ? (
                   <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning-foreground">
@@ -2313,6 +2661,7 @@ export default function ProductionEntryPage() {
                           <TableHead className="text-right">Required Qty</TableHead>
                           <TableHead className="text-right">Available Qty</TableHead>
                           <TableHead className="text-right">Shortfall</TableHead>
+                          <TableHead>Demand</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -2329,10 +2678,33 @@ export default function ProductionEntryPage() {
                                 ? <span className="text-rose-700 font-medium">{m.short}</span>
                                 : <span className="text-emerald-600">—</span>}
                             </TableCell>
+                            <TableCell>
+                              {m.short > 0
+                                ? <DemandStateChip st={demandStateForItem(m.itemCode, m.itemName)} />
+                                : <span className="text-xs text-muted-foreground">—</span>}
+                            </TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
                     </Table>
+                  </div>
+                )}
+
+                {shortCount > 0 && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/20 px-3 py-2.5">
+                    <span className="text-xs text-muted-foreground">
+                      {eligibleShorts.length > 0
+                        ? <>{eligibleShorts.length} of {shortCount} short material{shortCount === 1 ? "" : "s"} can be demanded now{eligibleShorts.length < shortCount && " — the rest await an open demand"}.</>
+                        : <>All {shortCount} short material{shortCount === 1 ? "" : "s"} already have an open demand — wait for receipt or rejection.</>}
+                    </span>
+                    <Button
+                      size="sm"
+                      className="h-8 text-xs"
+                      disabled={eligibleShorts.length === 0}
+                      onClick={() => raiseDemandForOrderShorts(materialsOrder, mats)}
+                    >
+                      <Zap className="h-3.5 w-3.5 mr-1" /> Raise Demand ({eligibleShorts.length})
+                    </Button>
                   </div>
                 )}
               </div>
@@ -3342,9 +3714,9 @@ function MealCardView({
                   <ul className="space-y-1.5">
                     {s.items.map((item, i) => {
                       const code = `MP-${slugifyItem(item.name)}`;
-                      // Special-meal portions can come from the meal-plan
-                      // template; if it's a fixed number use that, otherwise
-                      // fall back to the special-meals count from flight orders.
+                      // A special meal is a KIT, not a cook: this line is the
+                      // dish's CONTRIBUTION to its own pool — meals of this code
+                      // × portions per meal — not a production order of its own.
                       const explicitPortions = typeof s.portions === "number" ? s.portions : 0;
                       const computed = computeMealQty({
                         requirements,
@@ -3353,21 +3725,24 @@ function MealCardView({
                         forType: meal.forType,
                         kind: "Special",
                       });
-                      const qty = explicitPortions > 0 ? explicitPortions : computed.qty;
-                      const breakdown = explicitPortions > 0
-                        ? `${explicitPortions} portion${explicitPortions === 1 ? "" : "s"} configured for ${s.type}`
-                        : computed.breakdown;
+                      const mealCount = explicitPortions > 0 ? explicitPortions : computed.qty;
+                      const per = perMealQty(item);
+                      const qty = mealCount * per;
+                      const breakdown = `${mealCount} ${s.type} × ${per} = ${qty}`;
                       return (
                         <li key={i} className="text-[11px] flex items-center gap-2">
                           <div className="flex-1 min-w-0">
                             <div className="text-foreground truncate">{item.name}</div>
                             <div className="text-[10px] text-muted-foreground">
-                              {item.weight}g · {item.calories} kcal
+                              {item.weight}g · {item.calories} kcal · ×{per}/meal
                               {qty > 0 && (
                                 <>
                                   {" · "}
-                                  <span className="text-primary font-medium tabular-nums">
-                                    {qty.toLocaleString()} pcs
+                                  <span
+                                    className="text-primary font-medium tabular-nums"
+                                    title={`${breakdown} — added to ${item.name}'s production pool, not cooked separately`}
+                                  >
+                                    +{qty.toLocaleString()} to pool
                                   </span>
                                 </>
                               )}
@@ -3531,8 +3906,25 @@ function MealPlanningDetailsDialog({
   // meal cards, attaching the computed qty. Items with qty <= 0 are dropped.
   // Used by the "Create All Orders" bulk action below.
   const availableItems = useMemo<MealPlanPickItem[]>(() => {
+    // ── One dish = ONE pool ───────────────────────────────────────────────────
+    // A dish is cooked once and drawn down by everything that contains it: its
+    // own choice lines, the dessert slot, and every special meal whose recipe
+    // includes it. Listing those consumers separately raised two production
+    // orders for the same dish and under-cooked each of them; the shares are
+    // summed here instead, so one order covers the whole day's demand.
     const out: MealPlanPickItem[] = [];
+    const pool = new Map<string, { item: MealPlanPickItem; qty: number; parts: string[] }>();
+    const addToPool = (name: string, qty: number, part: string, fallback?: MealPlanPickItem) => {
+      if (qty <= 0) return;
+      const code = `MP-${slugifyItem(name)}`;
+      const base = itemByCode.get(code) ?? fallback;
+      if (!base) return;
+      const hit = pool.get(code);
+      if (hit) { hit.qty += qty; hit.parts.push(part); }
+      else pool.set(code, { item: base, qty, parts: [part] });
+    };
     for (const [, meals] of byDay) {
+      const rosterCodes = orderedSpecialsByDay.get(meals[0]?.day ?? "");
       for (const meal of meals) {
         for (const choice of meal.choices) {
           for (const it of choice.items) {
@@ -3544,29 +3936,32 @@ function MealPlanningDetailsDialog({
               kind: "Choice",
               percentage: choice.percentage,
             });
-            if (qty <= 0) continue;
-            const base = itemByCode.get(`MP-${slugifyItem(it.name)}`);
-            if (base) out.push({ ...base, computedQty: qty, qtyBreakdown: breakdown });
+            addToPool(it.name, qty * perMealQty(it), breakdown);
           }
         }
         for (const sp of meal.specialMeals) {
           if (!sp.enabled) continue;
+          // Meals of THIS code — the roster is the truth when the orders carry
+          // one; else the card's planned portions; else the day's special total.
+          const computed = computeMealQty({
+            requirements,
+            day: meal.day,
+            flightTypes: meal.flightType,
+            forType: meal.forType,
+            kind: "Special",
+          });
+          const fromRoster = rosterCodes?.get(sp.type) ?? 0;
+          const explicitPortions = typeof sp.portions === "number" ? sp.portions : 0;
+          const mealCount = fromRoster > 0 ? fromRoster : explicitPortions > 0 ? explicitPortions : computed.qty;
+          if (mealCount <= 0) continue;
           for (const it of sp.items) {
-            const explicitPortions = typeof sp.portions === "number" ? sp.portions : 0;
-            const computed = computeMealQty({
-              requirements,
-              day: meal.day,
-              flightTypes: meal.flightType,
-              forType: meal.forType,
-              kind: "Special",
-            });
-            const qty = explicitPortions > 0 ? explicitPortions : computed.qty;
-            if (qty <= 0) continue;
-            const breakdown = explicitPortions > 0
-              ? `${explicitPortions} portion${explicitPortions === 1 ? "" : "s"} configured for ${sp.type}`
-              : computed.breakdown;
-            const base = itemByCode.get(`MP-${slugifyItem(it.name)}`);
-            if (base) out.push({ ...base, computedQty: qty, qtyBreakdown: breakdown });
+            // The kit recipe: portions of this dish in ONE such meal.
+            const per = perMealQty(it);
+            addToPool(
+              it.name,
+              mealCount * per,
+              `${(mealCount * per).toLocaleString()} for ${sp.type} (${mealCount} × ${per})`,
+            );
           }
         }
         // Dessert — served to the whole audience for this card.
@@ -3579,10 +3974,19 @@ function MealPlanningDetailsDialog({
             kind: "Choice",
             percentage: 100,
           });
-          const base = itemByCode.get(`MP-${slugifyItem(meal.dessert.name)}`);
-          if (base && qty > 0) out.push({ ...base, computedQty: qty, qtyBreakdown: breakdown });
+          addToPool(meal.dessert.name, qty * perMealQty(meal.dessert), breakdown);
         }
       }
+      for (const { item, qty, parts } of pool.values()) {
+        out.push({
+          ...item,
+          computedQty: qty,
+          // Say what the pool is made of when more than one line feeds it —
+          // "101 pax × 60% + 8 for VGML" is the number the planner must trust.
+          qtyBreakdown: parts.length > 1 ? `${parts.join(" + ")} = ${qty.toLocaleString()}` : parts[0],
+        });
+      }
+      pool.clear();
 
       // Ordered special meals (roster codes not in the template) — once per day.
       const orderedMap = orderedSpecialsByDay.get(meals[0]?.day ?? "");

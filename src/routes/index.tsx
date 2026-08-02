@@ -1116,6 +1116,7 @@ function aoStatusPill(status: string): { color: string; bg: string; border: stri
   const s = status.toLowerCase();
   if (s === "production") return { color: "#b45309", bg: "#fbf1e6", border: "#f0d9bf" };
   if (s === "packaged")   return { color: "#2563eb", bg: "#eff4ff", border: "#c7d7fe" };
+  if (s === "departed")   return { color: "#475569", bg: "#f1f5f9", border: "#cbd5e1" };
   if (s === "pending")    return { color: "#6b6b72", bg: "#f4f1ef", border: "#e9e4e1" };
   return { color: "#0f7a40", bg: "#ecf5ef", border: "#c9e6d4" };
 }
@@ -1264,6 +1265,18 @@ function OrderGroupCard({
           <span style={{ fontSize: 13, color: "var(--ink, #1a0204)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
             {l.etd}
           </span>
+          {l.status && l.status !== status && (() => {
+            const lp = aoStatusPill(l.status);
+            return (
+              <span style={{
+                fontSize: 10, fontWeight: 600, letterSpacing: ".02em", flex: "none",
+                padding: "2px 8px", borderRadius: 999, whiteSpace: "nowrap",
+                color: lp.color, background: lp.bg, border: `1px solid ${lp.border}`,
+              }}>
+                {l.status}
+              </span>
+            );
+          })()}
           <span style={{
             fontSize: 12, color: "var(--muted-foreground, #6b6b72)", fontVariantNumeric: "tabular-nums",
             width: 42, textAlign: "right", flex: "none",

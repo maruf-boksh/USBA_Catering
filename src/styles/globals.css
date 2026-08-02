@@ -406,6 +406,48 @@ h1, h2, h3 {
   min-width: 0;
 }
 
+/* The breadcrumb must SHRINK, never wrap: Ant's <ol> is flex-wrap by default,
+   and a wrapped crumb line inherits the header's 64px line-height — so on
+   narrow laptops the trail exploded out of the bar and the clock sat on top
+   of it. Nowrap + per-crumb ellipsis keeps the bar one line at every width.
+
+   Each crumb <li> holds a link + its separator (antd v5). The li becomes a
+   flex row so the LINK can be clipped with an ellipsis while the separator
+   never shrinks — clipping the li directly left the text overflow visible,
+   and squeezed crumbs painted over each other instead of ellipsizing. */
+.app-topbar-left .ant-breadcrumb {
+  min-width: 0;
+  overflow: hidden;
+  line-height: normal;
+}
+.app-topbar-left .ant-breadcrumb ol {
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+.app-topbar-left .ant-breadcrumb li {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.app-topbar-left .ant-breadcrumb li > .ant-breadcrumb-link {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-topbar-left .ant-breadcrumb li > .ant-breadcrumb-separator {
+  flex-shrink: 0;
+}
+/* Under pressure the PARENT crumbs give way first — the current page's name
+   is the one worth reading. */
+.app-topbar-left .ant-breadcrumb li:last-child {
+  flex-shrink: 0.25;
+}
+.app-topbar-toggle,
+.app-pin-toggle {
+  flex-shrink: 0;
+}
+
 .app-topbar-right {
   gap: 8px;
   align-items: center;
@@ -1466,6 +1508,25 @@ html[data-theme="dark"] .ant-drawer .ant-drawer-header {
   scrollbar-width: thin;
 }
 
+
+/* ── Small laptops (1024–1500px): give the topbar room BEFORE it collides ──
+   The right block is flex-shrink:0 (icons must not squash), so the flexible
+   pieces have to yield first: the search narrows with the viewport and the
+   clock drops its date. Below 992px the phone rules take over. */
+@media (max-width: 1500px) {
+  .app-global-search {
+    width: clamp(200px, 24vw, 340px) !important;
+  }
+}
+
+@media (max-width: 1280px) {
+  .app-time-date {
+    display: none;
+  }
+  .app-global-search {
+    width: clamp(180px, 20vw, 260px) !important;
+  }
+}
 
 @media (max-width: 992px) {
   .app-global-search {

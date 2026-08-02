@@ -234,6 +234,13 @@ export function getAllAmendments(): OrderAmendment[] {
 // re-points each persisted crew order to the flight order's number for the same
 // date — but only when that date has a SINGLE distinct flight Order # (so the
 // match is unambiguous). Returns the same array reference when nothing changed.
+//
+// Scope guard: ONLY system-minted numbers (ORD-…) are ever rewritten. An Order #
+// that came off the customer's sheet (bulk upload "Order Ref", e.g. USB-4471)
+// is the customer's document number — the one identity this field exists to
+// preserve — so the migration must never overwrite it with a date's number.
+const isSystemOrderNo = (no: string) => /^ORD-\d+$/i.test(no);
+
 function migrateCrewOrderNos(added: FlightOrder[]): FlightOrder[] {
   const flightNosByDate = new Map<string, Set<string>>();
   for (const o of added) {
@@ -245,6 +252,7 @@ function migrateCrewOrderNos(added: FlightOrder[]): FlightOrder[] {
   let changed = false;
   const next = added.map((o) => {
     if (o.orderType !== "crew") return o;
+    if (!isSystemOrderNo(o.orderNo)) return o; // customer ref — keep verbatim
     const set = flightNosByDate.get(o.date);
     if (set && set.size === 1) {
       const target = [...set][0];
@@ -582,6 +590,7 @@ const MOBILE_FLIGHT_STATUS: Record<FlightOrderStatus, string> = {
   Packaged: "boarding",
   Dispatched: "departed",
   Completed: "departed",
+  Departed: "departed",
 };
 
 /**
@@ -652,7 +661,7 @@ export type MobileOrderGroup = {
 
 // Active-first ordering — identical priority table to the web dashboard.
 const ACTIVE_ORDER_PRIORITY: Record<string, number> = {
-  Production: 0, Packaged: 1, Approved: 2, Dispatched: 3, Pending: 4, Completed: 5,
+  Production: 0, Packaged: 1, Approved: 2, Dispatched: 3, Pending: 4, Completed: 5, Departed: 6,
 };
 
 /**

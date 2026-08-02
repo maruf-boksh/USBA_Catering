@@ -24,15 +24,39 @@ export type PackagingAllocationStatus =
   | "Received At Airport"
   | "Dispatched";
 
+/** One production run's contribution to an assembled package. */
+export type PackagingComponent = {
+  /** The production run (PRO-… / PRD-…). */
+  productionId: string;
+  /** The QC/packaging batch it was picked from (PackagingBatch.id). */
+  batchId: string;
+  /** The cooked dish. */
+  item: string;
+  /** Portions of it consumed by this package — one per meal, per dish. */
+  qty: number;
+};
+
 export type PackagingAllocation = {
   id: string;                 // PKA-…
   /** Display id shown on the list and the label (derived from the run). */
   packagingId: string;
-  /** The QC/packaging batch this draws from (PackagingBatch.id). */
+  /** The QC/packaging batch this draws from (PackagingBatch.id). For an
+   *  assembled set this is the PRIMARY component's batch — the full picture is
+   *  in `components`. */
   batchId: string;
-  /** The production run (PRO-… / PRD-…). */
+  /** The production run (PRO-… / PRD-…); the primary component's, for a set. */
   productionId: string;
   item: string;
+  /**
+   * Special-meal code (VGML / CHML / …) when this package is an assembled MEAL
+   * rather than a single run's output. Menu planning defines such a meal as 2-3
+   * component dishes, each cooked as its own run; packaging combines them into
+   * one finished good with one label. `qty` is then meals, not portions.
+   */
+  setCode?: string;
+  /** Every run this package draws on. Present only for assembled sets — a plain
+   *  package draws on `productionId` alone. */
+  components?: PackagingComponent[];
   /** The flight this share is packaged for, and its order. */
   flight: string;
   orderNo?: string;
@@ -66,16 +90,35 @@ export function isAwaitingApproval(a: PackagingAllocation): boolean {
 }
 
 /**
+ * The runs a package draws on, uniformly: its components when it is an assembled
+ * set, otherwise the single run it was created from. Everything that accounts
+ * for run consumption goes through this, so a set draws its components down the
+ * same way a plain package draws down its own run.
+ */
+export function allocationRuns(a: PackagingAllocation): PackagingComponent[] {
+  return a.components && a.components.length > 0
+    ? a.components
+    : [{ productionId: a.productionId, batchId: a.batchId, item: a.item, qty: a.qty }];
+}
+
+/** Does this package draw on the given run (directly, or as a set component)? */
+export function usesRun(a: PackagingAllocation, productionId: string): boolean {
+  return allocationRuns(a).some((r) => r.productionId === productionId);
+}
+
+/**
  * How much of a run is already committed to flights.
  *
  * A rejected allocation commits nothing — its portions go back to the pool so
  * the run can be packaged for that flight again, or for another one.
  */
 export function allocatedQtyOfRun(list: PackagingAllocation[], productionId: string): number {
-  return list.reduce(
-    (s, a) => (a.productionId === productionId && a.status !== "Rejected" ? s + a.qty : s),
-    0,
-  );
+  return list.reduce((s, a) => {
+    if (a.status === "Rejected") return s;
+    return s + allocationRuns(a)
+      .filter((r) => r.productionId === productionId)
+      .reduce((n, r) => n + r.qty, 0);
+  }, 0);
 }
 
 /**
@@ -90,14 +133,46 @@ export function remainingQtyOfRun(
 
 /** The flights a run has already been allocated to (for "also serving" notes). */
 export function flightsOfRun(list: PackagingAllocation[], productionId: string): string[] {
-  return [...new Set(list.filter((a) => a.productionId === productionId).map((a) => a.flight))];
+  return [...new Set(list.filter((a) => usesRun(a, productionId)).map((a) => a.flight))];
 }
 
-/** Allocation already recorded for this run on this flight+date, if any. */
+/**
+ * Allocation already recorded for this run on this flight+date, if any — set
+ * packages included, since a run committed through a meal is just as committed
+ * as one packaged on its own.
+ */
 export function existingAllocation(
   list: PackagingAllocation[], productionId: string, flight: string, date: string,
 ): PackagingAllocation | undefined {
-  return list.find((a) => a.productionId === productionId && a.flight === flight && a.date === date);
+  return list.find((a) => usesRun(a, productionId) && a.flight === flight && a.date === date);
+}
+
+/**
+ * The LOOSE package already recorded for this run on this flight+date — special
+ * meals excluded. A dish is a pool with several consumers: its own menu line and
+ * whatever special meals contain it. Packaging the VGML must not lock the dish's
+ * own line, because the portions the kit reserved are not the portions the PAX
+ * line needs. Use this wherever the question is "is this dish's own line already
+ * packaged?"; use `existingAllocation` where the question is "is any of this run
+ * spoken for?".
+ */
+export function existingRunAllocation(
+  list: PackagingAllocation[], productionId: string, flight: string, date: string,
+): PackagingAllocation | undefined {
+  return list.find((a) => !a.setCode && a.productionId === productionId
+    && a.flight === flight && a.date === date);
+}
+
+/** The meal package already recorded for this code on this flight+date, if any. */
+export function existingSetAllocation(
+  list: PackagingAllocation[], setCode: string, flight: string, date: string,
+): PackagingAllocation | undefined {
+  return list.find((a) => a.setCode === setCode && a.flight === flight && a.date === date);
+}
+
+/** Every dish a package puts on the trolley — its components, or its own item. */
+export function allocationItems(a: PackagingAllocation): string[] {
+  return a.components && a.components.length > 0 ? a.components.map((c) => c.item) : [a.item];
 }
 
 let seq = 0;

@@ -1,8 +1,18 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { usePersistedState } from "@/lib/use-persisted-state";
 import { getDemandRequests, saveDemandRequests } from "@/lib/demand-requests";
-import { requisitions as seedReqs, purchaseOrders as seedPOs } from "@/lib/sample-data";
-import { updateFlightOrdersWhere } from "@/lib/flight-orders-store";
+import {
+  requisitions as seedReqs, purchaseOrders as seedPOs, cookingTempLogs,
+} from "@/lib/sample-data";
+import { loadMealPlanningConfig } from "@/lib/meal-planning-data";
+import { planSpecialMealDemoProduction } from "@/lib/demo-special-meal-production";
+import { updateFlightOrdersWhere, getFlightOrders } from "@/lib/flight-orders-store";
+import { servedOrderNosFor } from "@/lib/production-order-link";
+import { resolveItemMaster, isItemBatchTracked } from "@/lib/item-registry";
+import {
+  addInventoryBatchLot, applyInventoryStock, blockStock, releaseStock,
+  hasPostedProductionStock, markPostedProductionStock,
+} from "@/lib/stock-adjustments";
 
 // ── Status enums ───────────────────────────────────────────────────────────────
 export type WfDemandStatus =
@@ -229,7 +239,7 @@ export type WfFinancialAccount = {
   active: boolean;
 };
 
-export type WfCashTxnType = "Deposit" | "Withdrawal" | "Adjustment";
+export type WfCashTxnType = "Deposit" | "Withdrawal" | "Adjustment" | "Transfer";
 
 /** A manual movement on a Cash/Bank account (top-up, cash-out, correction). */
 export type WfCashTxn = {
@@ -243,6 +253,25 @@ export type WfCashTxn = {
   note?: string;
   by: string;
   recordedAt: string;
+  /**
+   * Transfers are written as a LINKED PAIR — one negative leg on the source
+   * account, one positive leg on the destination — sharing a transfer id.
+   *
+   * Banking cash-in-hand used to mean recording a withdrawal and a deposit as
+   * two unrelated rows: nothing tied them, and if only one side was entered the
+   * books drifted with nothing to show it. The pair id makes the other leg
+   * findable, so the ledger can show a transfer as one movement and a missing
+   * leg is a detectable state rather than a silent hole.
+   */
+  transferId?: string;
+  /** The account on the other side of the transfer (for display). */
+  counterAccountId?: string;
+  /**
+   * Matched against a bank/cash statement. Undefined = never reviewed, which is
+   * what the Unreconciled filter looks for.
+   */
+  reconciledAt?: string;
+  reconciledBy?: string;
 };
 
 /** Live balance = opening + cash movements − supplier payments drawn from it. */
@@ -381,6 +410,11 @@ export type WfProductionEntry = {
   qcCheckedBy?: string;
   completedAt?: string;
   inventoryAdded?: boolean;
+  /** Batch/lot number + expiry for this run's output, captured at Production
+   *  Entry (auto-generated or typed) and used when the produced lot is posted to
+   *  Stock Overview. Only meaningful for batch-tracked output items. */
+  batchNo?: string;
+  batchExpiry?: string;
   qcFailedAt?: string;
   qcFailedBy?: string;
   qcFailReason?: string;
@@ -468,6 +502,7 @@ export type WfProductionEntryRecord = {
   outputItemCode?: string;
   producedQty: number;         // amount produced in this single entry
   batchNo?: string;
+  batchExpiry?: string;        // ISO date — lot expiry captured at entry (batch items)
   shift?: "Morning" | "Evening" | "Night";
   producedBy: string;
   remarks?: string;
@@ -509,6 +544,10 @@ type WorkflowCtx = {
   updateFinancialAccount: (id: string, patch: Partial<WfFinancialAccount>) => void;
   cashTxns: WfCashTxn[];
   addCashTxn: (txn: WfCashTxn) => void;
+  /** Both legs of a transfer, written together so a pair can never be half-saved. */
+  addCashTxns: (txns: WfCashTxn[]) => void;
+  /** Mark movements as matched against a statement (or clear the mark). */
+  reconcileCashTxns: (ids: string[], by: string, reconciled: boolean) => void;
 
   transferNotes: WfTransferNote[];
   addTransferNote: (tn: WfTransferNote) => void;
@@ -561,7 +600,7 @@ const WorkflowContext = createContext<WorkflowCtx>({
   grns: [], addGRN: () => {}, updateGRNLineQC: () => {},
   supplierPayments: [], addSupplierPayment: () => {},
   financialAccounts: [], addFinancialAccount: () => {}, updateFinancialAccount: () => {},
-  cashTxns: [], addCashTxn: () => {},
+  cashTxns: [], addCashTxn: () => {}, addCashTxns: () => {}, reconcileCashTxns: () => {},
   transferNotes: [], addTransferNote: () => {}, acknowledgeTransfer: () => {},
   stockDeltas: [], applyStockDeltas: () => {},
   prdStatuses: {}, prdProgress: {}, setPRDStatus: () => {},
@@ -572,6 +611,102 @@ const WorkflowContext = createContext<WorkflowCtx>({
   dispatchApprovals: [], addDispatchApproval: () => {}, updateDispatchApproval: () => {},
   maintenanceApprovals: [], addMaintenanceApproval: () => {}, updateMaintenanceApproval: () => {},
 });
+
+type ProducedEntry = {
+  id: string;
+  bom: string;
+  outputItemName?: string;
+  outputItemCode?: string;
+  producedQty: number;
+  completedAt?: string;
+  date?: string;
+  batchNo?: string;
+  batchExpiry?: string;
+};
+
+/** The lot number a run posts under — typed batch no, else the run id. */
+const producedBatchNo = (entry: ProducedEntry) => entry.batchNo?.trim() || entry.id;
+
+/**
+ * Post a produced item's quantity to Stock Overview, once per production run.
+ *
+ *   • Batch-tracked output → append a lot (batch no + expiry) to the item's batch
+ *     ladder and bump its stock. The batch no / expiry come from the Production
+ *     Entry (auto-generated or typed); they fall back to the run id + shelf-life
+ *     projection when not supplied.
+ *   • Non-batch output → bump the pooled stock only (no lot).
+ *
+ * The quantity is posted HELD, because this fires at Ready for QC — before the
+ * sensory check has said anything. The food exists and must be on the books
+ * (yield, cost, recall), but nothing may consume it until QC signs off, which
+ * is what `releaseProducedStock` below does. Posting it as plain available
+ * stock is what previously let a batch be issued while its QC was still open,
+ * and let a FAILED batch stay issuable afterwards.
+ *
+ * Idempotent by production-order id so firing at both Ready for QC and Completed
+ * (and any re-fire) posts exactly once. No-op for unknown masters or zero qty.
+ */
+function postProducedBatchLot(entry: ProducedEntry): void {
+  const name = (entry.outputItemName ?? entry.bom) || "";
+  const master = resolveItemMaster(name, entry.outputItemCode);
+  const qty = entry.producedQty;
+  if (!master || qty <= 0) return;
+  if (hasPostedProductionStock(entry.id)) return;
+
+  const reason = `Awaiting QC — ${entry.id}`;
+
+  if (!isItemBatchTracked(master)) {
+    // Single-bucket item — no lot to flag, so the hold is a quantity only.
+    applyInventoryStock(master.name, qty);
+    blockStock(master.name, qty, { reason });
+    markPostedProductionStock(entry.id);
+    return;
+  }
+
+  const baseDate = (entry.completedAt ?? entry.date ?? "").slice(0, 10);
+  const base = baseDate ? new Date(baseDate) : new Date();
+  const shelf = master.shelfLifeDays && master.shelfLifeDays > 0
+    ? master.shelfLifeDays
+    : master.subCategory === "Fresh" ? 3 : master.subCategory === "Frozen" ? 90 : 30;
+  const iso = (d: Date) => d.toISOString().slice(0, 10);
+  addInventoryBatchLot(master.name, {
+    batchNo: producedBatchNo(entry),
+    qty,
+    expiry: entry.batchExpiry || iso(new Date(base.getTime() + shelf * 86400000)),
+    costPrice: master.costPrice ?? 0,
+    receivedOn: baseDate || iso(base),
+    status: "Blocked",
+    blockedReason: reason,
+  });
+  markPostedProductionStock(entry.id);
+}
+
+/**
+ * QC signed the run off — release its hold so the goods become issuable. This is
+ * the moment stock genuinely becomes available; everything before it is on the
+ * books but unusable.
+ */
+function releaseProducedStock(entry: ProducedEntry): void {
+  const master = resolveItemMaster((entry.outputItemName ?? entry.bom) || "", entry.outputItemCode);
+  if (!master || entry.producedQty <= 0) return;
+  releaseStock(master.name, entry.producedQty, {
+    batchNo: isItemBatchTracked(master) ? producedBatchNo(entry) : undefined,
+  });
+}
+
+/**
+ * QC failed the run. The stock stays held — it was already posted that way at
+ * Ready for QC — but the reason is restated so Stock Overview shows why, and so
+ * a hold awaiting inspection is never confused with one that has been rejected.
+ */
+function markProducedStockFailed(entry: ProducedEntry): void {
+  const master = resolveItemMaster((entry.outputItemName ?? entry.bom) || "", entry.outputItemCode);
+  if (!master || entry.producedQty <= 0) return;
+  blockStock(master.name, entry.producedQty, {
+    batchNo: isItemBatchTracked(master) ? producedBatchNo(entry) : undefined,
+    reason: `QC Failed — ${entry.id}`,
+  });
+}
 
 // ── Provider ───────────────────────────────────────────────────────────────────
 export function WorkflowProvider({ children }: { children: ReactNode }) {
@@ -646,7 +781,12 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   ]);
   // One part-payment already made against GRN-6001 (rice & oil, ৳58,000 payable)
   // — leaves a ৳28,000 balance outstanding to Green Valley Foods.
-  const [supplierPayments, setSupplierPayments] = useState<WfSupplierPayment[]>([
+  // Persisted: money is the one thing a demo must not forget. Accounts,
+  // movements and supplier payments together ARE the balance — holding them in
+  // memory meant every recorded transaction vanished on reload and each
+  // account silently snapped back to its opening figure.
+  const [supplierPayments, setSupplierPayments] = usePersistedState<WfSupplierPayment[]>(
+    "wf-supplier-payments", [
     {
       id: "PAY-2026-30001",
       vendor: "Green Valley Foods",
@@ -663,13 +803,15 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   ]);
 
   // Cash & Bank accounts the business settles suppliers from.
-  const [financialAccounts, setFinancialAccounts] = useState<WfFinancialAccount[]>([
+  const [financialAccounts, setFinancialAccounts] = usePersistedState<WfFinancialAccount[]>(
+    "wf-financial-accounts", [
     { id: "ACC-001", name: "Cash in Hand", type: "Cash", openingBalance: 250000, active: true },
     { id: "ACC-002", name: "City Bank — Current A/C", type: "Bank", bankName: "City Bank PLC", accountNo: "1102-3345-90021", openingBalance: 4500000, active: true },
     { id: "ACC-003", name: "Petty Cash", type: "Cash", openingBalance: 60000, active: true },
   ]);
-  const [cashTxns, setCashTxns] = useState<WfCashTxn[]>([
-    { id: "TXN-1001", accountId: "ACC-002", type: "Deposit", amount: 500000, date: "2026-07-01", reference: "Owner capital top-up", by: "A. Rahman", recordedAt: "2026-07-01 09:30" },
+  const [cashTxns, setCashTxns] = usePersistedState<WfCashTxn[]>(
+    "wf-cash-txns", [
+    { id: "TXN-1001", accountId: "ACC-002", type: "Deposit", amount: 500000, date: "2026-07-01", reference: "Owner capital top-up", by: "A. Rahman", recordedAt: "2026-07-01 09:30", reconciledAt: "2026-07-02 10:00", reconciledBy: "F. Begum" },
     { id: "TXN-1002", accountId: "ACC-001", type: "Withdrawal", amount: -75000, date: "2026-07-04", reference: "Cash drawn for market purchase", by: "M. Karim", recordedAt: "2026-07-04 10:15" },
   ]);
 
@@ -820,8 +962,73 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
     },
   ]);
 
+  // ── Demo top-up: production behind the day's special meals ──────────────────
+  // The demo order book carries special meals, but nothing cooks their component
+  // dishes — so Packaging had trays it could never assemble. This fills that gap
+  // once per load: it works out the day's shortfall from the live order book and
+  // menu plan, adds the runs + entry records, and writes their QC passes into
+  // the cooking-temp store (which is what promotes them into Packaging).
+  //
+  // Purely additive and keyed by deterministic ids: a dish already produced in
+  // sufficient quantity is skipped, so production entered through the app is
+  // never duplicated or overwritten.
+  const demoTopUpDone = useRef(false);
+  useEffect(() => {
+    if (demoTopUpDone.current) return;
+    demoTopUpDone.current = true;
+    const date = new Date().toISOString().slice(0, 10);
+    const producedFor = (item: string, on: string) =>
+      productionEntries
+        .filter((e) => e.date === on && (e.outputItemName ?? e.bom) === item)
+        .reduce((s, e) => s + (e.producedQty ?? 0), 0);
+    const plan = planSpecialMealDemoProduction({
+      date,
+      orders: getFlightOrders(),
+      cards: loadMealPlanningConfig(),
+      producedFor,
+      existingIds: new Set(productionEntries.map((e) => e.id)),
+    });
+    if (plan.entries.length === 0) return;
+    setProductionEntries((prev) => {
+      const have = new Set(prev.map((e) => e.id));
+      const add = plan.entries.filter((e) => !have.has(e.id));
+      return add.length ? [...add, ...prev] : prev;
+    });
+    setProductionEntryRecords((prev) => {
+      const have = new Set(prev.map((r) => r.id));
+      const add = plan.records.filter((r) => !have.has(r.id));
+      return add.length ? [...add, ...prev] : prev;
+    });
+    // QC lives in its own persisted store, read straight from localStorage by the
+    // packaging pipeline. Seed it the way Cooking Temp would if it has never been
+    // opened, so the demo passes land alongside the existing log rather than
+    // replacing it.
+    try {
+      const KEY = "harvest-data-v1:cooking-temp-records";
+      const raw = window.localStorage.getItem(KEY);
+      const existing: { id: string }[] = raw
+        ? JSON.parse(raw)
+        : cookingTempLogs.map((r) => ({ ...r, date: "2026-05-22" }));
+      const have = new Set((Array.isArray(existing) ? existing : []).map((r) => r.id));
+      const add = plan.qc.filter((r) => !have.has(r.id));
+      if (add.length > 0 || !raw) {
+        window.localStorage.setItem(KEY, JSON.stringify([...add, ...(Array.isArray(existing) ? existing : [])]));
+      }
+    } catch {
+      // localStorage unavailable — the demo top-up is best-effort.
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const [mrpRuns, setMrpRuns] = useState<WfMrpRun[]>([]);
-  const [qcClearedFlights, setQcClearedFlights] = useState<Record<string, string>>({});
+  // Persisted: saving a Dispatch Monitoring entry clears its flights for
+  // dispatch, and that clearance is what stops the Dispatch page offering
+  // Vehicle Load for a run it has already recorded. Held in memory it was lost
+  // on reload, so a load that had been monitored, verified and forwarded looked
+  // untouched again and could be loaded — and re-monitored — a second time.
+  const [qcClearedFlights, setQcClearedFlights] = usePersistedState<Record<string, string>>(
+    "wf-qc-cleared-flights", {},
+  );
   const [maintenanceApprovals, setMaintenanceApprovals] = useState<WfMaintenanceApproval[]>([
     {
       id: "MNT-7001",
@@ -835,7 +1042,12 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       status: "Pending Approval",
     },
   ]);
-  const [dispatchApprovals, setDispatchApprovals] = useState<WfDispatchApproval[]>([
+  // Persisted for the same reason: a dispatch forwarded to the Head of Catering
+  // is an outstanding approval, and losing it on reload dropped the entry out of
+  // Approval Management entirely — the monitoring record survived (sessionStorage)
+  // while the approval it was waiting on did not.
+  const [dispatchApprovals, setDispatchApprovals] = usePersistedState<WfDispatchApproval[]>(
+    "wf-dispatch-approvals", [
     {
       id: "DSP-SEED-001",
       flightId: "FLT-SEED-01",
@@ -901,6 +1113,14 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         setFinancialAccounts(prev => prev.map(a => a.id === id ? { ...a, ...patch } : a)),
       cashTxns,
       addCashTxn: (txn) => setCashTxns(prev => [txn, ...prev]),
+      // One setState for both legs — a transfer that saved only its outgoing
+      // side would take money out of the business books entirely.
+      addCashTxns: (txns) => setCashTxns(prev => [...txns, ...prev]),
+      reconcileCashTxns: (ids, by, reconciled) => setCashTxns(prev => prev.map((t) => {
+        if (!ids.includes(t.id)) return t;
+        if (!reconciled) return { ...t, reconciledAt: undefined, reconciledBy: undefined };
+        return { ...t, reconciledAt: new Date().toISOString().slice(0, 16).replace("T", " "), reconciledBy: by };
+      })),
 
       transferNotes,
       addTransferNote: (tn) => setTransferNotes(prev => [tn, ...prev]),
@@ -911,22 +1131,60 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       applyStockDeltas: (deltas) => setStockDeltas(prev => [...prev, ...deltas]),
 
       productionEntries,
-      addProductionEntry: (entry) => {
-        setProductionEntries(prev => [entry, ...prev]);
-        // Raising a production order takes that date's Approved flight orders
-        // into Production — their real entry into the stage. Universal here so
-        // EVERY creation path (single Create form, batch "from meal plan", the
-        // mobile flow) advances the status. Only Approved legs match, so it's a
-        // no-op once they're already Production.
-        if (entry.date) {
-          updateFlightOrdersWhere(
-            (o) => o.date === entry.date && o.status === "Approved",
-            { status: "Production" },
-          );
+      addProductionEntry: (entry) => setProductionEntries(prev => [entry, ...prev]),
+      updateProductionEntryStatus: (id, status, extra) => {
+        setProductionEntries(prev => prev.map(e => e.id === id ? { ...e, status, ...extra } : e));
+        // A flight order enters Production when a run that ACTUALLY SERVES it
+        // begins execution (Production Initiation onward) — not when the order was
+        // raised (still Pending/Approved), and NOT for every same-date run. A
+        // flight is fed by many runs and a run feeds many flights, so we advance
+        // only the flights this run serves — its servesOrderNos (recomputed via
+        // servedOrderNosFor when the stamp is missing). The first serving run to
+        // start is enough (the flight has entered production); "all runs done" is
+        // captured later by Packaged. Only Approved legs move, so a leg already
+        // Packaged/Dispatched never regresses.
+        const started = status !== "Pending" && status !== "Approved";
+        const entry = productionEntries.find((e) => e.id === id);
+        if (started && entry) {
+          const served = entry.servesOrderNos?.length
+            ? entry.servesOrderNos
+            : servedOrderNosFor(entry.outputItemName ?? entry.bom, entry.date, getFlightOrders());
+          const servedSet = new Set(served);
+          if (servedSet.size > 0) {
+            updateFlightOrdersWhere(
+              (o) => servedSet.has(o.orderNo) && o.status === "Approved",
+              { status: "Production" },
+            );
+          }
+        }
+
+        // Once a batch-tracked item is fully produced (Ready for QC) or signed off
+        // (Completed), record its produced quantity as a batch lot on the Stock
+        // Overview so its batch records are maintained there. Idempotent by
+        // production-order id, so firing at both points never double-posts.
+        //
+        // The QC gate is applied on top of that posting: the quantity goes on the
+        // books HELD and only a pass releases it. So the three outcomes are
+        //   Ready for QC → on the books, not issuable
+        //   Completed    → released, issuable
+        //   Re-Cook      → still held, now labelled as failed
+        if ((status === "Ready for QC" || status === "Completed" || status === "Re-Cook") && entry) {
+          const produced = {
+            ...entry,
+            outputItemName: extra?.outputItemName ?? entry.outputItemName,
+            outputItemCode: extra?.outputItemCode ?? entry.outputItemCode,
+            producedQty: extra?.producedQty ?? entry.producedQty,
+            completedAt: extra?.completedAt ?? entry.completedAt,
+            batchNo: extra?.batchNo ?? entry.batchNo,
+            batchExpiry: extra?.batchExpiry ?? entry.batchExpiry,
+          };
+          // Re-Cook can only follow a posting, so it never needs to post itself —
+          // posting there would re-add stock that QC has just rejected.
+          if (status !== "Re-Cook") postProducedBatchLot(produced);
+          if (status === "Completed") releaseProducedStock(produced);
+          if (status === "Re-Cook") markProducedStockFailed(produced);
         }
       },
-      updateProductionEntryStatus: (id, status, extra) =>
-        setProductionEntries(prev => prev.map(e => e.id === id ? { ...e, status, ...extra } : e)),
 
       mrpRuns,
       addMrpRun: (run) => setMrpRuns((prev) => [run, ...prev]),
@@ -965,9 +1223,36 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
             } else if (o.status === "In Preparation" && nextProduced >= orderTarget) {
               nextStatus = "Ready for QC";
             }
-            return { ...o, producedQty: nextProduced, status: nextStatus };
+            // Stamp the run's batch no / expiry from the first entry that carries
+            // one, so the Completed path posts the same lot (idempotent).
+            return {
+              ...o,
+              producedQty: nextProduced,
+              status: nextStatus,
+              batchNo: o.batchNo ?? record.batchNo,
+              batchExpiry: o.batchExpiry ?? record.batchExpiry,
+            };
           }),
         );
+        // If this record pushes the order to Ready for QC (full quantity made),
+        // post the produced quantity to Stock Overview now — before QC sign-off.
+        // Runs off the pre-update snapshot (same pattern the status advance uses).
+        const o = productionEntries.find((e) => e.id === record.productionOrderId);
+        if (o) {
+          const nextProduced = o.producedQty + record.producedQty;
+          const orderTarget = o.orderQty ?? nextProduced;
+          const wasBeforeQc =
+            o.status === "Pending" || o.status === "Approved" ||
+            o.status === "Production Initiation" || o.status === "In Preparation";
+          if (wasBeforeQc && nextProduced >= orderTarget) {
+            postProducedBatchLot({
+              ...o,
+              producedQty: nextProduced,
+              batchNo: record.batchNo ?? o.batchNo,
+              batchExpiry: record.batchExpiry ?? o.batchExpiry,
+            });
+          }
+        }
       },
 
       prdStatuses, prdProgress,

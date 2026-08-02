@@ -6,9 +6,11 @@ import { RowActions } from "@/components/common/RowActions";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Plus, ShoppingCart, FileText, Truck, X } from "lucide-react";
+import { Plus, ShoppingCart, FileText, Truck, X, Banknote, ClipboardList, Download } from "lucide-react";
 import { vendors, activeItems } from "@/lib/sample-data";
 import { KpiCard } from "@/components/common/KpiCard";
+import { exportTableCsv } from "@/lib/list-export";
+import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -211,16 +213,33 @@ export default function ProcurementPage() {
   );
 
   const poCols: Column<WfPurchaseOrder>[] = [
-    { key: "id", header: "PO #" },
-    { key: "vendor", header: "Vendor" },
-    { key: "requisitionRef", header: "Req Ref" },
+    { key: "id", header: "PO #", render: (r) => <span className="font-mono text-xs font-semibold text-primary">{r.id}</span> },
+    { key: "vendor", header: "Vendor", render: (r) => <span className="font-medium">{r.vendor}</span> },
+    {
+      key: "requisitionRef", header: "Req Ref",
+      render: (r) => r.requisitionRef && r.requisitionRef !== "—"
+        ? <span className="font-mono text-xs">{r.requisitionRef}</span>
+        : <span className="text-xs text-muted-foreground">Direct</span>,
+    },
     {
       key: "officeId" as keyof WfPurchaseOrder, header: "Office / Warehouse",
       render: (r) => <LocationCell officeId={r.officeId} warehouseId={r.warehouseId} />,
     },
-    { key: "items", header: "Items" },
-    { key: "amount", header: "Amount (৳)", render: (r) => r.amount > 0 ? r.amount.toLocaleString() : "—" },
-    { key: "date", header: "Date" },
+    {
+      key: "items", header: "Items",
+      render: (r) => (
+        <span className="inline-flex items-center rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[11px] font-semibold tabular-nums">
+          {r.items}
+        </span>
+      ),
+    },
+    {
+      key: "amount", header: "Amount (৳)", className: "text-right",
+      render: (r) => r.amount > 0
+        ? <span className="tabular-nums font-semibold">{r.amount.toLocaleString()}</span>
+        : <span className="text-muted-foreground">—</span>,
+    },
+    { key: "date", header: "Date", render: (r) => <span className="tabular-nums whitespace-nowrap">{r.date}</span> },
     { key: "status", header: "Status", render: (r) => (
       <ReviewStatusCell category="Purchase Order" refId={r.id}>
         <StatusBadge status={r.status} />
@@ -254,6 +273,34 @@ export default function ProcurementPage() {
     return true;
   });
 
+  // ── Status chips over the PO list ───────────────────────────────────────────
+  const [statusChip, setStatusChip] = useState("all");
+  const STATUS_ORDER = ["Draft", "Pending Approval", "Approved", "Ordered", "Received", "Completed", "Rejected"];
+  const statusCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const p of filteredPOs) m.set(p.status, (m.get(p.status) ?? 0) + 1);
+    const known = STATUS_ORDER.filter((s) => m.has(s));
+    const rest = [...m.keys()].filter((s) => !STATUS_ORDER.includes(s)).sort();
+    return [...known, ...rest].map((s) => ({ status: s, count: m.get(s)! }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredPOs]);
+  const visiblePOs = statusChip === "all" ? filteredPOs : filteredPOs.filter((p) => p.status === statusChip);
+  const poTotalValue = useMemo(() => filteredPOs.reduce((s, p) => s + (p.amount || 0), 0), [filteredPOs]);
+
+  // Real CSV export of the PO list as currently filtered.
+  const exportPOs = () => {
+    exportTableCsv({
+      title: "Purchase Orders",
+      fileName: "purchase-orders",
+      columns: ["PO #", "Vendor", "Req Ref", "Items", "Amount", "Date", "Delivery Date", "Status"],
+      rows: visiblePOs.map((p) => [
+        p.id, p.vendor, p.requisitionRef ?? "—", p.items,
+        p.amount || 0, p.date, p.deliveryDate ?? "", p.status,
+      ]),
+    });
+    toast.success(`Exported ${visiblePOs.length} purchase order${visiblePOs.length === 1 ? "" : "s"}.`);
+  };
+
   return (
     <>
       <PageHeader
@@ -261,8 +308,8 @@ export default function ProcurementPage() {
         subtitle="Create and manage purchase orders; vendor selection and procurement workflow for supply chain"
         actions={
           <>
-            <Button variant="outline" onClick={() => toast.success("Export started.")}>
-              <FileText className="h-4 w-4 mr-1" /> Export
+            <Button variant="outline" onClick={exportPOs} title="Download the PO list below as CSV">
+              <Download className="h-4 w-4 mr-1" /> Export
             </Button>
             <Button onClick={openBlankPODialog}>
               <Plus className="h-4 w-4 mr-1" /> New PO
@@ -271,13 +318,14 @@ export default function ProcurementPage() {
         }
       />
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
-        <KpiCard label="Open POs" value={openPOs} icon={ShoppingCart} tone="warning" />
-        <KpiCard label="Pending Approval" value={pendingApproval} icon={FileText} tone="red" />
-        <KpiCard label="Active Vendors" value={vendors.length} icon={Truck} tone="success" />
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <KpiCard label="Open POs" value={openPOs} sub="pending, approved & ordered" icon={ShoppingCart} tone="warning" />
+        <KpiCard label="Pending Approval" value={pendingApproval} sub="awaiting Accounts sign-off" icon={FileText} tone="red" />
+        <KpiCard label="PO Value" value={`৳ ${poTotalValue.toLocaleString()}`} sub={`across ${filteredPOs.length} listed PO${filteredPOs.length === 1 ? "" : "s"}`} icon={Banknote} tone="navy" />
+        <KpiCard label="Active Vendors" value={vendors.length} sub="approved supplier base" icon={Truck} tone="success" />
       </div>
 
-      <div className="mb-4">
+      <div className="mb-5">
         <LocationFilter
           officeId={filterOffice}
           warehouseId={filterWarehouse}
@@ -285,58 +333,131 @@ export default function ProcurementPage() {
         />
       </div>
 
-      {/* Requisitions from Store */}
-      <Card className="mb-6">
-        <CardHeader>
-          <CardTitle className="text-sm font-semibold">Requisitions from Store</CardTitle>
+      {/* ── Requisitions from Store — approved, waiting for a PO ── */}
+      <Card className="mb-6 overflow-hidden border-border shadow-sm">
+        <CardHeader className="border-b border-border bg-gradient-to-r from-emerald-50/80 to-transparent py-3.5">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="inline-grid h-9 w-9 place-items-center rounded-lg bg-emerald-100 text-emerald-700 shrink-0">
+              <ClipboardList className="h-[18px] w-[18px]" />
+            </span>
+            <div className="min-w-0">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                Requisitions from Store
+                <span className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-bold text-emerald-700 tabular-nums">
+                  {filteredReqs.length}
+                </span>
+              </CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Approved requisitions with no purchase order yet — raise one with Create PO.
+              </p>
+            </div>
+          </div>
         </CardHeader>
-        <CardContent>
-          <DataTable
-            title="requisitions"
-            data={filteredReqs}
-            columns={reqCols}
-            searchKeys={["id", "reference", "requestedBy", "status"]}
-            selectable={false}
-            actions={(r) => (
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={r.status !== "Approved"}
-                onClick={() => openPODialog(r)}
-              >
-                Create PO
-              </Button>
-            )}
-          />
+        <CardContent className="pt-4">
+          {filteredReqs.length === 0 ? (
+            <div className="rounded-lg border-2 border-dashed border-border bg-muted/20 py-10 text-center">
+              <ClipboardList className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
+              <p className="text-sm text-muted-foreground">No approved requisitions waiting — all caught up.</p>
+            </div>
+          ) : (
+            <DataTable
+              title="requisitions"
+              data={filteredReqs}
+              columns={reqCols}
+              searchKeys={["id", "reference", "requestedBy", "status"]}
+              selectable={false}
+              actions={(r) => (
+                <Button
+                  size="sm"
+                  disabled={r.status !== "Approved"}
+                  onClick={() => openPODialog(r)}
+                >
+                  <Plus className="h-3.5 w-3.5 mr-1" /> Create PO
+                </Button>
+              )}
+            />
+          )}
         </CardContent>
       </Card>
 
-      {/* Purchase Orders list */}
-      <div className="mb-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-        Purchase Orders
-      </div>
-      <div data-arrival-id="po-list">
-        <DataTable
-          title="purchase-orders"
-          data={filteredPOs}
-          columns={poCols}
-          searchKeys={["id", "vendor", "status", "requisitionRef"]}
-          selectable={false}
-          actions={(r) => (
-            <RowActions
-              row={r}
-              actions={["view", "edit", "print"]}
-              onSave={(u) => updatePurchaseOrder(u.id as string, u as Partial<WfPurchaseOrder>)}
+      {/* ── Purchase Orders — status chips + list ── */}
+      <Card className="overflow-hidden border-border shadow-sm">
+        <CardHeader className="border-b border-border bg-gradient-to-r from-primary/5 to-transparent py-3.5">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="inline-grid h-9 w-9 place-items-center rounded-lg bg-primary/10 text-primary shrink-0">
+              <ShoppingCart className="h-[18px] w-[18px]" />
+            </span>
+            <div className="min-w-0">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                Purchase Orders
+                <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-bold text-primary tabular-nums">
+                  {filteredPOs.length}
+                </span>
+              </CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                ৳ {poTotalValue.toLocaleString()} total value in the current scope.
+              </p>
+            </div>
+          </div>
+          {/* Status chips — click to scope the list */}
+          <div className="flex flex-wrap items-center gap-1.5 mt-3">
+            <button
+              type="button"
+              onClick={() => setStatusChip("all")}
+              className={cn(
+                "rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors",
+                statusChip === "all"
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border bg-background text-muted-foreground hover:text-foreground",
+              )}
+            >
+              All ({filteredPOs.length})
+            </button>
+            {statusCounts.map(({ status, count }) => (
+              <button
+                key={status}
+                type="button"
+                onClick={() => setStatusChip(statusChip === status ? "all" : status)}
+                className={cn(
+                  "rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors",
+                  statusChip === status
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-border bg-background text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {status} ({count})
+              </button>
+            ))}
+          </div>
+        </CardHeader>
+        <CardContent className="pt-4">
+          <div data-arrival-id="po-list">
+            <DataTable
+              title="purchase-orders"
+              data={visiblePOs}
+              columns={poCols}
+              searchKeys={["id", "vendor", "status", "requisitionRef"]}
+              selectable={false}
+              actions={(r) => (
+                <RowActions
+                  row={r}
+                  actions={["view", "edit", "print"]}
+                  onSave={(u) => updatePurchaseOrder(u.id as string, u as Partial<WfPurchaseOrder>)}
+                />
+              )}
             />
-          )}
-        />
-      </div>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* PO Creation Dialog */}
       <Dialog open={poDialogOpen} onOpenChange={setPoDialogOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogContent className="max-w-[95vw] sm:max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              <span className="inline-grid h-8 w-8 place-items-center rounded-lg bg-primary/10 text-primary shrink-0">
+                <ShoppingCart className="h-4 w-4" />
+              </span>
               {selectedReq ? `Create Purchase Order — Req: ${selectedReq.id}` : "Create Purchase Order — Direct"}
             </DialogTitle>
           </DialogHeader>
@@ -381,7 +502,7 @@ export default function ProcurementPage() {
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <Label>PO Number (auto)</Label>
               <Input disabled value={`PO-${new Date().getFullYear()}-XXXX`} className="mt-1 bg-muted/50" />
@@ -430,8 +551,8 @@ export default function ProcurementPage() {
                 <Plus className="h-3.5 w-3.5 mr-1" /> Add Item
               </Button>
             </div>
-            <div className="rounded-md border border-border overflow-hidden">
-              <table className="w-full text-sm">
+            <div className="rounded-md border border-border overflow-x-auto">
+              <table className="w-full text-sm min-w-[560px]">
                 <thead className="bg-muted/50">
                   <tr>
                     <th className="p-2 text-left font-semibold">Item</th>

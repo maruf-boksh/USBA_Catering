@@ -26,7 +26,7 @@ import { activeItems, warehouses as ALL_WAREHOUSES, offices as ALL_OFFICES, acti
 import { getActiveStaff } from "@/lib/staff";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import { useWorkflow, type WfTransferNote, type StockDelta } from "@/lib/workflow-store";
-import { applyInventoryStock } from "@/lib/stock-adjustments";
+import { applyInventoryStock, availableOf, blockedOf, type StoredLot } from "@/lib/stock-adjustments";
 import { useArrivalFlash } from "@/lib/arrival-flash";
 import { INITIAL_RECORDS as DISPATCH_RECORDS, type DispatchRecord, type DispatchStatus } from "@/routes/dispatch";
 import { loadDispatchEntries, flightLabel, type DispatchEntry } from "@/routes/dispatch-monitoring";
@@ -167,8 +167,15 @@ const itemCodeByName = new Map(ITEMS.map((i) => [i.name.toLowerCase(), i.code]))
 const itemCodeOf = (name: string) => itemCodeByName.get(name.toLowerCase()) ?? "—";
 
 // ── Approved-request issue ───────────────────────────────────────────────────
-/** Minimal live-stock shape read from the persisted inventory store. */
-type InvLite = { id?: string; name: string; stock: number; category?: string };
+/**
+ * Minimal live-stock shape read from the persisted inventory store. Carries the
+ * hold fields so the issue screen can offer AVAILABLE stock rather than on-hand
+ * — a transfer of QC-held goods would move an unusable problem to another store.
+ */
+type InvLite = {
+  id?: string; name: string; stock: number; category?: string;
+  blockedQty?: number; batches?: StoredLot[];
+};
 /** How much of a request line is still to be issued (its qty less what's out). */
 const lineRemainingToIssue = (l: { qty: number; issuedQty?: number }) =>
   roundQty(l.qty - (l.issuedQty ?? 0));
@@ -1282,8 +1289,12 @@ function TransferOutIssue({
     opts: { outDate: string; issuedBy: string },
   ) => void;
 }) {
-  const stockOf = (name: string) =>
-    invStock.find((iv) => iv.name.toLowerCase() === name.toLowerCase())?.stock ?? 0;
+  // Issuable, not on-hand: anything held for QC stays put until it passes or is
+  // written off.
+  const rowOf = (name: string) =>
+    invStock.find((iv) => iv.name.toLowerCase() === name.toLowerCase());
+  const stockOf = (name: string) => availableOf(rowOf(name));
+  const heldOf = (name: string) => blockedOf(rowOf(name));
   const categoryOf = (name: string) =>
     invStock.find((iv) => iv.name.toLowerCase() === name.toLowerCase())?.category ?? "—";
   const remainingOf = (l: TransferRequest["lines"][number]) => lineRemainingToIssue(l);
@@ -1370,6 +1381,7 @@ function TransferOutIssue({
                 {request.lines.map((l, i) => {
                   const remaining = remainingOf(l);
                   const stock = stockOf(l.item);
+                  const held = heldOf(l.item);
                   const max = Math.min(remaining, stock);
                   return (
                     <TableRow key={l.id}>
@@ -1381,7 +1393,17 @@ function TransferOutIssue({
                       <TableCell className="text-right tabular-nums">{roundQty(l.qty)}</TableCell>
                       <TableCell className="text-right tabular-nums text-muted-foreground">{roundQty(l.issuedQty ?? 0)}</TableCell>
                       <TableCell className="text-right tabular-nums font-medium">{roundQty(remaining)}</TableCell>
-                      <TableCell className={`text-right tabular-nums ${stock < remaining ? "text-destructive font-medium" : ""}`}>{roundQty(stock)}</TableCell>
+                      <TableCell className={`text-right tabular-nums ${stock < remaining ? "text-destructive font-medium" : ""}`}>
+                        {roundQty(stock)}
+                        {held > 0 && (
+                          <div
+                            className="text-[10px] text-warning font-medium"
+                            title="On hand but held for QC — not transferable until it passes or is disposed"
+                          >
+                            +{roundQty(held)} held
+                          </div>
+                        )}
+                      </TableCell>
                       <TableCell className="text-right">
                         <Input
                           type="number"

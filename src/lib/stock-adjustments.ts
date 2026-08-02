@@ -4,6 +4,17 @@
 // `setStockAdjustmentStatus()` so the two stay in sync.
 
 import { roundQty } from "@/lib/num";
+import { mutateInventoryRow, type LotStatus } from "@/lib/inventory-store";
+
+// Availability helpers live in lib/inventory-store.ts and are re-exported here
+// so the many screens that already import from this module get them in one
+// place. `applyInventoryStock` moves ON-HAND; `disposeStock` writes off held
+// goods and releases the hold with them.
+export {
+  availableStock, blockedStock, blockStock, releaseStock, disposeStock,
+  findInventoryRow, availableOf, blockedOf, lotIsBlocked,
+  type StoredItem, type StoredLot, type LotStatus,
+} from "@/lib/inventory-store";
 
 export type AdjType = "Increase" | "Decrease";
 export type AdjReason =
@@ -101,10 +112,8 @@ export function addAdjustment(adj: Adjustment): void {
   } catch {}
 }
 
-const INV_KEY = "harvest-data-v1:inventory-items";
-
 /**
- * Apply a signed delta to an inventory item's on-hand stock, matched by item
+ * Apply a signed delta to an inventory item's ON-HAND stock, matched by item
  * code (id) OR name (case-insensitive). Positive increases (receipts), negative
  * decreases (issues / consumption); stock never drops below zero. Safe no-op if
  * the item isn't in the persisted stock master.
@@ -113,23 +122,101 @@ const INV_KEY = "harvest-data-v1:inventory-items";
  * every operational event that should move stock — GRN/QC acceptance, item
  * issue, warehouse transfer, stock-adjustment approval, wastage disposal —
  * routes through here and stays consistent.
+ *
+ * On-hand only. A decrease here does NOT release a QC hold, so a write-off of
+ * held goods must go through `disposeStock` instead — see lib/inventory-store.
+ * Any hold is re-clamped to the new on-hand so it can never exceed it.
  */
 export function applyInventoryStock(idOrName: string, delta: number): void {
-  try {
-    const raw = window.localStorage.getItem(INV_KEY);
-    if (!raw) return;
-    const key = idOrName.toLowerCase();
-    const items = JSON.parse(raw) as Array<{ id?: string; name: string; stock: number; [k: string]: unknown }>;
-    const updated = items.map((i) =>
-      i.id === idOrName || i.name.toLowerCase() === key
-        ? { ...i, stock: roundQty(Math.max(0, (i.stock as number) + delta)) }
-        : i,
-    );
-    window.localStorage.setItem(INV_KEY, JSON.stringify(updated));
-  } catch {}
+  // A blank key must never post — it would silently match (and mutate) any
+  // row whose name is empty instead of the item the caller meant.
+  mutateInventoryRow(idOrName, (row) => {
+    const stock = roundQty(Math.max(0, row.stock + delta));
+    const held = Math.max(0, row.blockedQty ?? 0);
+    return held > stock ? { ...row, stock, blockedQty: stock } : { ...row, stock };
+  });
 }
 
 /** Reduce an inventory item's stock by name. Safe no-op if item not found. */
 export function reduceInventoryStock(itemName: string, qty: number): void {
   applyInventoryStock(itemName, -qty);
+}
+
+/** One received/produced lot appended to an inventory row's batch ladder. */
+export type InventoryBatchLotInput = {
+  batchNo: string;
+  qty: number;
+  expiry: string;
+  costPrice: number;
+  receivedOn: string;
+  binLocation?: string;
+  /** Held on arrival — e.g. produced but not yet QC-signed-off. */
+  status?: LotStatus;
+  blockedReason?: string;
+  blockedAt?: string;
+};
+
+/**
+ * Append a batch lot to an inventory item's `batches` ladder AND bump its
+ * on-hand `stock` by the lot quantity, matched by item code (id) OR name. This
+ * is how a produced batch-tracked finished good gets its lot recorded in the
+ * Stock Overview batch popup while keeping the Stock column reconciled with the
+ * lot ladder.
+ *
+ * Idempotent by `batchNo`: if a lot with the same batch number already exists on
+ * the item, the call is a no-op — so re-firing a completion event never
+ * double-posts. Safe no-op if the item isn't in the persisted stock master.
+ */
+export function addInventoryBatchLot(idOrName: string, lot: InventoryBatchLotInput): void {
+  mutateInventoryRow(idOrName, (row) => {
+    const batches = Array.isArray(row.batches) ? row.batches : [];
+    if (batches.some((b) => b.batchNo === lot.batchNo)) return row; // already posted
+    return {
+      ...row,
+      batches: [...batches, lot],
+      stock: roundQty(Math.max(0, row.stock + lot.qty)),
+    };
+  });
+}
+
+// ── Produced-run stock idempotency ──────────────────────────────────────────
+// A production run can hit the "post to stock" point more than once (Ready for
+// QC, then Completed, and each may re-fire). We record which run ids have already
+// posted their produced quantity so the stock/lot is written exactly once,
+// keyed by production-order id. Persisted so a reload can't re-post either.
+const POSTED_KEY = "harvest-data-v1:production-stock-posted";
+
+export function hasPostedProductionStock(runId: string): boolean {
+  try {
+    const raw = window.localStorage.getItem(POSTED_KEY);
+    if (!raw) return false;
+    const arr = JSON.parse(raw) as string[];
+    return Array.isArray(arr) && arr.includes(runId);
+  } catch {
+    return false;
+  }
+}
+
+export function markPostedProductionStock(runId: string): void {
+  try {
+    const raw = window.localStorage.getItem(POSTED_KEY);
+    const arr = raw ? (JSON.parse(raw) as string[]) : [];
+    if (!Array.isArray(arr) || arr.includes(runId)) return;
+    window.localStorage.setItem(POSTED_KEY, JSON.stringify([...arr, runId]));
+  } catch {}
+}
+
+/**
+ * Forget that a run posted, so a re-cook of the SAME order can post its new
+ * batch. Called only after the original quantity has been withdrawn from stock —
+ * clearing the mark without that would let one run post its quantity twice.
+ */
+export function clearPostedProductionStock(runId: string): void {
+  try {
+    const raw = window.localStorage.getItem(POSTED_KEY);
+    if (!raw) return;
+    const arr = JSON.parse(raw) as string[];
+    if (!Array.isArray(arr)) return;
+    window.localStorage.setItem(POSTED_KEY, JSON.stringify(arr.filter((r) => r !== runId)));
+  } catch {}
 }
