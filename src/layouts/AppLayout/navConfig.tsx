@@ -222,7 +222,7 @@ export const NAV_MODULES: NavModule[] = [
     label: 'Asset Management',
     icon: I(Package),
     children: [
-      { key: '/fleet-overview',        label: 'Asset Overview',     icon: I(LayoutDashboard) },
+      { key: '/fleet-overview',        label: 'Asset Dashboard',    icon: I(LayoutDashboard) },
       { key: '/airline-equipments',    label: 'Asset Registration', icon: I(Boxes) },
       { key: '/asset-assignment',      label: 'Asset Assign',       icon: I(Send) },
       { key: '/asset-disposal',        label: 'Asset Disposal',     icon: I(Trash2) },

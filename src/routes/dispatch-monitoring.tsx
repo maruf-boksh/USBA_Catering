@@ -19,15 +19,15 @@ import {
   Plus, Minus, Truck, Pencil, Trash2, ThermometerSun, ShieldCheck,
   AlertOctagon, AlertTriangle, PlaneTakeoff, PlaneLanding, Warehouse,
   Clock, User, CheckCircle2, Eye, Smartphone, ChevronRight, QrCode, X as CloseIcon, Timer, Play,
-  Search, Package, CupSoda, Sparkles, Boxes,
+  Search, Package, CupSoda, Sparkles, Boxes, Save,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
-  flights as FLIGHT_BOARD, seedFlightOrders, activeOffices, activeWarehouses, activeWarehousesByOffice,
+  flights as FLIGHT_BOARD, activeOffices, activeWarehouses, activeWarehousesByOffice,
   aircraftFleet as AIRCRAFT_SEED, airlines as AIRLINE_SEED,
   type Aircraft, type Airline,
 } from "@/lib/sample-data";
-import { getFlightOrders } from "@/lib/flight-orders-store";
+import { getFlightOrders, useFlightOrders, type FlightOrder } from "@/lib/flight-orders-store";
 import { INITIAL_RECORDS as DISPATCH_SEED_RECORDS, INITIAL_PACKAGING_ROWS, type PackagingRow } from "@/routes/dispatch";
 import { useRole } from "@/lib/roles";
 import { useWorkflow } from "@/lib/workflow-store";
@@ -35,24 +35,39 @@ import { useDispatchMonitoringSettings } from "@/lib/dispatch-monitoring-setting
 import { KpiCard } from "@/components/common/KpiCard";
 import { loadStandardsForAircraft, computeStandard, isMealMixKey, galleyAircraftTypes } from "@/lib/galley-standards";
 import { usePersistedState } from "@/lib/use-persisted-state";
-import { readVehicleLoadingSessions, loadingWindowFor, completeSessionsFor } from "@/lib/vehicle-loading";
+import {
+  readVehicleLoadingSessions, loadingWindowFor, completeSessionsFor, draftLoads,
+  type VehicleLoadingSession, type LoadingDraft,
+} from "@/lib/vehicle-loading";
 import { AircraftFields, modelsForAircraftType } from "@/routes/config-aircraft";
 import { getGalleySections, computeAutoTotals, loadGalleyItems } from "@/lib/galley-items";
 
 // Flight options for the dispatch-monitoring form. The operational flight board
-// (`FLIGHT_BOARD`) only carries a handful of flights, so we merge in every
-// distinct flight number from the order book (`seedFlightOrders`) — deduped by
-// flight code — so the Flight Number dropdown has them all pre-loaded.
+// (`FLIGHT_BOARD`) only carries a handful of flights, so every distinct flight
+// number from the order book is merged in, deduped by flight code.
 export type FlightOption = {
   id: string; flight: string; sector: string; aircraft: string; dep: string; arr: string;
   pax: number; adult: number; child: number; infant: number; crew: number;
   type: string; window: string; duration: string; status: string;
 };
-export const flights: FlightOption[] = (() => {
+
+/**
+ * Build the option list from an order book.
+ *
+ * Reads the LIVE store, not `seedFlightOrders`. The seed is only part of the
+ * store's contents — orders created in-app and the demo orders generated into
+ * the current window sit alongside it — so a seed-only list left real flights
+ * invisible here: the `?flight=` deep link from Packaging couldn't match them
+ * and fell back to opening a bare entry with no departure time, pax or crew,
+ * and the Flight Number dropdown didn't offer them either.
+ */
+export function buildFlightOptions(orders: FlightOrder[]): FlightOption[] {
   const merged: FlightOption[] = FLIGHT_BOARD.map((f) => ({ ...f }));
   const seen = new Set(merged.map((f) => f.flight));
-  for (const o of seedFlightOrders) {
-    if (!o.flight || seen.has(o.flight)) continue;
+  for (const o of orders) {
+    // A crew-meal order is a SECOND booking against the same flight number and
+    // carries pax 0 — it must never become that flight's option.
+    if (!o.flight || (o.orderType ?? "flight") === "crew" || seen.has(o.flight)) continue;
     seen.add(o.flight);
     merged.push({
       id: `MFL-${o.flight}`,
@@ -73,7 +88,27 @@ export const flights: FlightOption[] = (() => {
     });
   }
   return merged.sort((a, b) => a.flight.localeCompare(b.flight));
-})();
+}
+
+// Cached so the module-level resolvers below stay live without rebuilding a few
+// thousand orders on every lookup — `flightNo` is called inside render loops.
+// The store swaps `current` for a NEW array on every mutation, so comparing the
+// array identity is a sound version check.
+let optionsCache: FlightOption[] | null = null;
+let optionsBuiltFrom: FlightOrder[] | null = null;
+/** The live flight options. Use this over `flights` outside React. */
+export function currentFlightOptions(): FlightOption[] {
+  const orders = getFlightOrders();
+  if (!optionsCache || optionsBuiltFrom !== orders) {
+    optionsBuiltFrom = orders;
+    optionsCache = buildFlightOptions(orders);
+  }
+  return optionsCache;
+}
+/** Snapshot taken at import. Kept for existing importers; inside this file the
+ *  component shadows it with a reactive list, and the resolvers below re-read
+ *  the live one, so neither goes stale as orders change. */
+export const flights: FlightOption[] = currentFlightOptions();
 
 // ── Constants ───────────────────────────────────────────────────────────────
 export const APT_EXECUTIVES = ["M. Hossain", "T. Ahmed", "K. Sultana", "A. Chowdhury", "R. Islam"];
@@ -93,7 +128,6 @@ export const HOC_DESIG: Record<string, string> = {
   "S. Karim": "Head of Catering",
   "R. Ahmed": "Sr. Catering Officer",
 };
-const DEP_TIMES = [...new Set(flights.map((f) => f.dep))].sort();
 const todayStr = new Date().toISOString().split("T")[0];
 
 export function nowTimeStr() {
@@ -455,14 +489,18 @@ const chilledOOR = (v: string) => { const n = parseFloat(v); return v !== "" && 
 const frozenOOR  = (v: string) => { const n = parseFloat(v); return v !== "" && !isNaN(n) && (n < -12 || n > -8); };
 const vehOOR     = (v: string) => { const n = parseFloat(v); return v !== "" && !isNaN(n) && n > 8; };
 const totalQty   = (lines: MealLine[]) => lines.reduce((s, l) => s + (parseInt(l.qty) || 0), 0);
-export const flightLabel = (id: string) => { const f = flights.find((x) => x.id === id); return f ? `${f.flight} — ${f.sector}` : id; };
-const flightNo    = (id: string) => { const f = flights.find((x) => x.id === id); return f ? f.flight : id; };
+// These resolve against the LIVE options (currentFlightOptions), not the
+// import-time snapshot: they are called from other modules and from render
+// paths long after orders have been created or amended.
+export const flightLabel = (id: string) => { const f = currentFlightOptions().find((x) => x.id === id); return f ? `${f.flight} — ${f.sector}` : id; };
+const flightNo    = (id: string) => { const f = currentFlightOptions().find((x) => x.id === id); return f ? f.flight : id; };
 /** Destination airport for an entry's flight. Matches the flight board by id OR
  *  by flight number (an entry raised from a dispatch carries the number), then
  *  falls back to the order book — otherwise a real flight read "— Airport".
  *  Sectors come in both "DAC-CGP" and "DAC → DXB" forms, so split on either. */
 const flightDest = (id: string) => {
-  const f = flights.find((x) => x.id === id) ?? flights.find((x) => x.flight === id);
+  const opts = currentFlightOptions();
+  const f = opts.find((x) => x.id === id) ?? opts.find((x) => x.flight === id);
   const sector = f?.sector ?? getFlightOrders().find((o) => o.flight === id)?.sector;
   if (!sector) return "—";
   const parts = sector.split(/→|->|-/).map((s) => s.trim()).filter(Boolean);
@@ -476,6 +514,25 @@ const MEAL_TYPE_TONE: Record<string, string> = {
   Snack: "bg-sky-100 text-sky-700",
   Special: "bg-fuchsia-100 text-fuchsia-700",
 };
+/**
+ * The other legs on this entry's vehicle, beyond its primary flight.
+ *
+ * One entry records the WHOLE load, so a round trip loaded as one run is a
+ * single row — which showed the outbound leg only and left the return with no
+ * trace on this sheet at all. Every leg the entry covers is named on the row.
+ */
+function otherLegs(entry: DispatchEntry): string[] {
+  const primary = flightNo(entry.flightId);
+  return [...new Set(entry.loadFlights ?? [])].filter((f) => f && f !== primary);
+}
+
+/** Status shown on a draft row — a vehicle load whose entry isn't saved yet. */
+function draftStatusBadge(d: LoadingDraft) {
+  return d.endHm
+    ? { label: "Draft · Loaded", cls: "bg-amber-100 text-amber-800" }
+    : { label: "Draft · Loading", cls: "bg-amber-100 text-amber-800" };
+}
+
 function dispatchStatusBadge(entry: DispatchEntry) {
   if (entry.receivedAt) return { label: "Received by Airport", cls: "bg-emerald-100 text-emerald-700" };
   if (entry.approvalStage >= 3) return { label: "Forwarded to Airport", cls: "bg-blue-100 text-blue-700" };
@@ -563,6 +620,15 @@ export default function DispatchMonitoring() {
   useRole();
   const doc = useDispatchMonitoringSettings();
 
+  // Deliberately SHADOWS the module-level `flights` snapshot for the whole
+  // component, so every lookup, dropdown and deep-link match below reads the
+  // live order book and re-renders when it changes. Shadowing rather than
+  // renaming keeps the ~30 existing call sites honest: there is one definition
+  // of "the flights this page knows about", and it cannot silently go stale.
+  const liveFlightOrders = useFlightOrders();
+  const flights = useMemo(() => buildFlightOptions(liveFlightOrders), [liveFlightOrders]);
+  const DEP_TIMES = useMemo(() => [...new Set(flights.map((f) => f.dep))].sort(), [flights]);
+
   const [entries, setEntries] = useState<DispatchEntry[]>(() => {
     try {
       const s = sessionStorage.getItem("dm_entries");
@@ -612,6 +678,24 @@ export default function DispatchMonitoring() {
   const [unloadTimerTick, setUnloadTimerTick] = useState(0);
   const [fsRemarksInput, setFsRemarksInput] = useState("");
   const [hocRemarksInput, setHocRemarksInput] = useState("");
+  // Vehicle-loading sessions recorded on the Dispatch page. Polled rather than
+  // read once: the writer lives on another page, and localStorage's `storage`
+  // event only fires for OTHER tabs — never the one that navigated here — so a
+  // load started (or completed) while this page stays mounted in the tab bar
+  // would otherwise never show up. The state only changes when the stored JSON
+  // does, so a quiet page re-renders no more than it does today.
+  const [loadingSessions, setLoadingSessions] = useState<Record<string, VehicleLoadingSession>>(
+    () => readVehicleLoadingSessions(),
+  );
+  useEffect(() => {
+    const pull = () => setLoadingSessions((prev) => {
+      const next = readVehicleLoadingSessions();
+      return JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
+    });
+    pull();
+    const id = setInterval(pull, 2000);
+    return () => clearInterval(id);
+  }, []);
   // Daily Product Dispatch Monitoring — table search + date-range filter.
   const [dmSearch, setDmSearch] = useState("");
   const [dmStatus, setDmStatus] = useState("all");
@@ -893,6 +977,43 @@ export default function DispatchMonitoring() {
     setExtraFlights([]);
   };
 
+  /**
+   * Open a NEW monitoring entry for one vehicle load: its primary flight plus
+   * every other leg on the same vehicle, with the Load Start/End already
+   * recorded on the Dispatch page pulled in. Shared by the ?flight= deep link
+   * and by the draft rows, so a load picked up later opens exactly as it would
+   * have when it was started.
+   */
+  const openEntryForFlights = (primary: string, others: string[]) => {
+    const f = flights.find((x) => x.flight === primary);
+    openNew();
+    setExtraFlights(others.filter((x) => x !== primary));
+    // Earliest start / latest end across the runs on this vehicle.
+    const win = loadingWindowFor(readVehicleLoadingSessions(), [...new Set([primary, ...others])]);
+    if (win.start) sf("loadStartTime", win.start);
+    if (win.end) sf("loadEndTime", win.end);
+    if (f) {
+      setDepTime(f.dep);
+      handleFlightSelect(f.id);
+      toast.info(`Dispatch monitoring opened for flight ${primary}.`);
+    } else if (dispatchPackagingRows.some((r) => r.flight === primary)) {
+      // Directly-packaged production associated to a flight order not in the
+      // schedule list. flightNo(id) falls back to the id, so airportDispatch
+      // still resolves its batch for scanning.
+      setForm((prev) => ({ ...prev, flightId: primary, packagingDate: todayStr }));
+      toast.info(`Dispatch entry opened for ${primary}.`);
+    } else {
+      toast.info(`New dispatch entry — flight ${primary} isn't in the flight list, please select it manually.`);
+    }
+  };
+
+  /** Resume an unsaved vehicle load from its draft row. */
+  const openDraft = (d: LoadingDraft) => {
+    const primary = d.flights[0];
+    if (!primary) { toast.error("This vehicle load has no flight on it."); return; }
+    openEntryForFlights(primary, d.flights.slice(1));
+  };
+
   // Deep link from Packaging & Dispatch → "Initiate QC": open a new monitoring
   // entry pre-scoped to the flight number passed via ?flight=BS-225.
   useEffect(() => {
@@ -900,35 +1021,50 @@ export default function DispatchMonitoring() {
     const flightNo = searchParams.get("flight");
     if (!flightNo) return;
     deepLinkHandled.current = true;
-    const f = flights.find((x) => x.flight === flightNo);
-    openNew();
     // A vehicle load selected across several dispatches arrives as ?flights=a,b,c.
     const others = (searchParams.get("flights") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-    setExtraFlights(others.filter((x) => x !== flightNo));
-    // Loading recorded on the Dispatch page (Start/Complete Loading) pre-fills
-    // the Load Start/End times — earliest start / latest end across the runs.
-    const win = loadingWindowFor(readVehicleLoadingSessions(), [...new Set([flightNo, ...others])]);
-    if (win.start) sf("loadStartTime", win.start);
-    if (win.end) sf("loadEndTime", win.end);
-    if (f) {
-      setDepTime(f.dep);
-      handleFlightSelect(f.id);
-      toast.info(`Dispatch monitoring opened for flight ${flightNo}.`);
-    } else if (dispatchPackagingRows.some((r) => r.flight === flightNo)) {
-      // Directly-packaged production associated to a flight order not in the
-      // schedule list. flightNo(id) falls back to the id, so airportDispatch
-      // still resolves its batch for scanning.
-      setForm((prev) => ({ ...prev, flightId: flightNo, packagingDate: todayStr }));
-      toast.info(`Dispatch entry opened for ${flightNo}.`);
-    } else {
-      toast.info(`New dispatch entry — flight ${flightNo} isn't in the flight list, please select it manually.`);
-    }
+    openEntryForFlights(flightNo, others);
     // Clear the param so a refresh / re-render doesn't reopen the form.
     searchParams.delete("flight");
     searchParams.delete("flights");
     setSearchParams(searchParams, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
+
+  /**
+   * Pick up the loading times while the form is OPEN.
+   *
+   * Load End is recorded on a different page (Dispatch → Complete Loading), and
+   * both existing prefills are one-shot: the deep-link effect above runs once on
+   * arrival — when the load has only just started, so there is no end time yet —
+   * and handleFlightSelect only fires when a flight is picked. So completing the
+   * load left this form sitting on a filled Load Start and a blank Load End with
+   * no way to pull it in short of retyping it.
+   *
+   * Polling is the honest mechanism here: the sessions live in localStorage, and
+   * the `storage` event only fires for OTHER tabs, never the one that navigated.
+   * It stops as soon as an end time lands (the effect re-runs and bails).
+   */
+  useEffect(() => {
+    if (!showForm || form.loadEndTime) return;
+    const flight = flights.find((f) => f.id === form.flightId)?.flight ?? form.flightId;
+    if (!flight) return;
+    const legs = [...new Set([flight, ...extraFlights])];
+    const pull = () => {
+      const win = loadingWindowFor(readVehicleLoadingSessions(), legs);
+      if (!win.start && !win.end) return;
+      setForm((prev) => {
+        // Never overwrite what the user typed — only fill what is still blank.
+        const start = prev.loadStartTime || win.start || "";
+        const end = prev.loadEndTime || win.end || "";
+        if (start === prev.loadStartTime && end === prev.loadEndTime) return prev;
+        return { ...prev, loadStartTime: start, loadEndTime: end };
+      });
+    };
+    pull();
+    const id = setInterval(pull, 2000);
+    return () => clearInterval(id);
+  }, [showForm, form.loadEndTime, form.loadStartTime, form.flightId, extraFlights, flights]);
 
   // Sync galley records to sessionStorage whenever they change
   useEffect(() => { saveGalleyRecords(galleyRecords); }, [galleyRecords]);
@@ -1449,6 +1585,18 @@ export default function DispatchMonitoring() {
   const unsatisfiedCount = entries.filter((e) => e.resultSatisfy === "No").length;
   const vehicleIssues = entries.filter((e) => e.vehicleClean === "No").length;
 
+  /** Vehicle loads with no monitoring entry behind them yet — listed as draft
+   *  rows that reopen the entry with everything already known filled in. */
+  const loadingDrafts: LoadingDraft[] = useMemo(() => {
+    const coveredFlights: string[] = [];
+    const coveredRefs: string[] = [];
+    for (const e of entries) {
+      coveredFlights.push(flightNo(e.flightId), ...(e.loadFlights ?? []));
+      coveredRefs.push(...(e.sourceDispatchIds ?? []));
+    }
+    return draftLoads(loadingSessions, coveredFlights, coveredRefs);
+  }, [entries, loadingSessions]);
+
   // Rows shown in the table after applying the search box + date-range filter.
   // KPI totals above stay based on the full `entries` set.
   const dmQuery = dmSearch.trim().toLowerCase();
@@ -1457,7 +1605,20 @@ export default function DispatchMonitoring() {
     if (dmFrom && e.packagingDate < dmFrom) return false;
     if (dmTo && e.packagingDate > dmTo) return false;
     if (dmQuery) {
-      const hay = `${flightNo(e.flightId)} ${doc.originLabel} ${flightDest(e.flightId)} ${dispatchStatusBadge(e).label}`.toLowerCase();
+      const hay = `${flightNo(e.flightId)} ${otherLegs(e).join(" ")} ${doc.originLabel} ${flightDest(e.flightId)} ${dispatchStatusBadge(e).label}`.toLowerCase();
+      if (!hay.includes(dmQuery)) return false;
+    }
+    return true;
+  });
+
+  // Drafts obey the same toolbar filters. No saved entry ever carries a "Draft"
+  // status, so picking it in the dropdown shows the outstanding loads alone.
+  const visibleDrafts = loadingDrafts.filter((d) => {
+    if (dmStatus !== "all" && dmStatus !== "Draft") return false;
+    if (dmFrom && d.date < dmFrom) return false;
+    if (dmTo && d.date > dmTo) return false;
+    if (dmQuery) {
+      const hay = `${d.flights.join(" ")} ${d.dspRef ?? ""} ${doc.originLabel} ${draftStatusBadge(d).label}`.toLowerCase();
       if (!hay.includes(dmQuery)) return false;
     }
     return true;
@@ -1501,6 +1662,7 @@ export default function DispatchMonitoring() {
             <SelectTrigger className="h-9 w-44 text-sm"><SelectValue placeholder="All statuses" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All statuses</SelectItem>
+              <SelectItem value="Draft">Draft (not saved)</SelectItem>
               <SelectItem value="Pending">Pending</SelectItem>
               <SelectItem value="Verified">Verified</SelectItem>
               <SelectItem value="Forwarded to Airport">Forwarded to Airport</SelectItem>
@@ -1534,18 +1696,26 @@ export default function DispatchMonitoring() {
                 ["Search", dmSearch.trim() || false],
               ]),
               columns: ["Flight", "Destination", "Date", "Vehicle", "Vehicle Clean", "Chilled Temp", "Frozen Temp", "Result", "Status"],
-              rows: visibleEntries.map((e) => [
-                flightNo(e.flightId), flightDest(e.flightId), e.packagingDate,
-                e.vehicleNo ?? "", e.vehicleClean ?? "", e.chilledTemp ?? "", e.frozenTemp ?? "",
-                e.resultSatisfy ?? "", dispatchStatusBadge(e).label,
-              ]),
+              rows: [
+                // Unsaved vehicle loads print as they appear on screen — the
+                // columns they have no answer for yet stay blank.
+                ...visibleDrafts.map((d) => [
+                  d.flights.join(" / "), flightDest(d.flights[0] ?? ""), d.date,
+                  "", "", "", "", "", draftStatusBadge(d).label,
+                ]),
+                ...visibleEntries.map((e) => [
+                  [flightNo(e.flightId), ...otherLegs(e)].join(" / "), flightDest(e.flightId), e.packagingDate,
+                  e.vehicleNo ?? "", e.vehicleClean ?? "", e.chilledTemp ?? "", e.frozenTemp ?? "",
+                  e.resultSatisfy ?? "", dispatchStatusBadge(e).label,
+                ]),
+              ],
             })}
           />
         </div>
       </div>
 
       {/* Entries Table */}
-      {entries.length > 0 && (() => {
+      {(entries.length > 0 || loadingDrafts.length > 0) && (() => {
         const receivableVisible = visibleEntries.filter(isReceivable);
         const allReceivableSelected = receivableVisible.length > 0 && receivableVisible.every((e) => selectedEntryIds.has(e.id));
         return (
@@ -1597,13 +1767,51 @@ export default function DispatchMonitoring() {
               </tr>
             </thead>
             <tbody>
-              {visibleEntries.length === 0 ? (
+              {visibleEntries.length === 0 && visibleDrafts.length === 0 && (
                 <tr>
                   <td colSpan={8} className="px-3 py-8 text-center text-muted-foreground">
                     No dispatches match the current search / date filter.
                   </td>
                 </tr>
-              ) : visibleEntries.map((entry, idx) => (
+              )}
+              {/* Vehicle loads started but not saved yet — first, so the work
+                  still owed sits above the completed records. */}
+              {visibleDrafts.map((d) => (
+                <tr key={`draft-${d.key}`} className="border-b border-amber-200 bg-amber-50/70 hover:bg-amber-50 transition-colors">
+                  <td className="px-3 py-2 sticky left-0 z-10 bg-inherit text-center" />
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    <span className="font-semibold text-amber-900">{d.flights[0] ?? "—"}</span>
+                    {d.flights.length > 1 && (
+                      <div className="text-[10px] text-amber-700">+ {d.flights.slice(1).join(", ")}</div>
+                    )}
+                    {d.dspRef && <div className="text-[10px] text-amber-700/80">{d.dspRef}</div>}
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap">{d.date}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    {d.date} {d.startHm}{d.endHm ? ` → ${d.endHm}` : ""}
+                  </td>
+                  <td className="px-3 py-2 whitespace-nowrap text-slate-600">{doc.originLabel} Point</td>
+                  <td className="px-3 py-2 whitespace-nowrap font-medium">{flightDest(d.flights[0] ?? "")} Airport</td>
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    {(() => { const s = draftStatusBadge(d); return (
+                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${s.cls}`}>
+                        {!d.endHm && <Timer className="h-2.5 w-2.5 inline mr-0.5 -mt-px" />}{s.label}
+                      </span>
+                    ); })()}
+                  </td>
+                  <td className="px-3 py-2 sticky right-0 z-10 bg-inherit">
+                    <Button
+                      size="sm"
+                      className="h-6 px-2.5 text-[10px] bg-amber-600 hover:bg-amber-700 text-white border-0"
+                      onClick={() => openDraft(d)}
+                      title="Open the dispatch entry for this vehicle load and finish it"
+                    >
+                      <Pencil className="h-3 w-3 mr-1" /> Continue Entry
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+              {visibleEntries.map((entry, idx) => (
                 <Fragment key={entry.id}>
                   <tr className={`border-b border-border/40 hover:bg-blue-50/40 transition-colors ${idx % 2 === 1 ? "bg-slate-50/60" : "bg-white"}`}>
                     <td className="px-3 py-2 sticky left-0 z-10 bg-inherit text-center">
@@ -1620,7 +1828,12 @@ export default function DispatchMonitoring() {
                         />
                       )}
                     </td>
-                    <td className="px-3 py-2 font-semibold whitespace-nowrap text-blue-700">{flightNo(entry.flightId)}</td>
+                    <td className="px-3 py-2 whitespace-nowrap">
+                      <span className="font-semibold text-blue-700">{flightNo(entry.flightId)}</span>
+                      {otherLegs(entry).length > 0 && (
+                        <div className="text-[10px] text-slate-500">+ {otherLegs(entry).join(", ")}</div>
+                      )}
+                    </td>
                     <td className="px-3 py-2 whitespace-nowrap">{entry.packagingDate}</td>
                     <td className="px-3 py-2 whitespace-nowrap">{entry.packagingDate}{entry.loadStartTime ? ` ${entry.loadStartTime}` : ""}</td>
                     <td className="px-3 py-2 whitespace-nowrap text-slate-600">{doc.originLabel} Point</td>
@@ -2355,8 +2568,8 @@ export default function DispatchMonitoring() {
               <Button variant="outline" onClick={resetForm}>Cancel</Button>
               {!isAirportReceiveMode && (
                 <Button className="bg-indigo-600 hover:bg-indigo-700 text-white px-8 shadow-md" onClick={saveEntry}>
-                  <ShieldCheck className="h-4 w-4 mr-2" />
-                  {editId ? "Save Changes" : "Submit for Approval"}
+                  <Save className="h-4 w-4 mr-2" />
+                  {editId ? "Save Changes" : "Save"}
                 </Button>
               )}
               {isAirportReceiveMode && (

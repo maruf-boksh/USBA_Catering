@@ -40,6 +40,7 @@ import {
 } from "@/lib/workflow-store";
 import { mergePassedBatches, type PackagingBatch } from "@/lib/packaging-batches";
 import { type PackagingAllocation } from "@/lib/packaging-allocations";
+import { isCrewSetCode, isPaxSetCode } from "@/lib/menu-meal-sets";
 import { inventory, warehouses, consumableItems, type ConsumableItem, activeOffices, activeWarehousesByOffice } from "@/lib/sample-data";
 import {
   TR_STORAGE_KEY, TR_SEED, officeNameOf as trOfficeNameOf,
@@ -1269,7 +1270,10 @@ export default function ApprovalManagementPage() {
           : [{ name: a.item, qty: a.qty, uom: "portions", note: `${a.flight} · ${a.productionId}` }],
         fields: [
           { label: "Packaging ID", value: a.packagingId },
-          ...(a.setCode ? [{ label: "Special Meal Set", value: `${a.setCode} · ${a.components?.length ?? 0} items per meal` }] : []),
+          ...(a.setCode ? [{
+            label: isCrewSetCode(a.setCode) ? "Crew Meal Set" : isPaxSetCode(a.setCode) ? "Pax Meal Set" : "Special Meal Set",
+            value: `${a.setCode} · ${a.components?.length ?? 0} items per meal`,
+          }] : []),
           {
             label: a.components?.length ? "Production IDs" : "Production ID",
             value: a.components?.length ? a.components.map((c) => c.productionId).join(", ") : a.productionId,

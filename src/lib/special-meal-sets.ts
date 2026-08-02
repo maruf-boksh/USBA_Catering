@@ -47,6 +47,22 @@ export type SpecialMealSet = {
   crewQty?: number;
   /** True when the roster asks for a code no meal card plans — nothing to assemble. */
   unplanned?: boolean;
+  /**
+   * Set when this is a MENU-CARD meal assembled off a choice line rather than a
+   * passenger SSR: "pax" for a passenger meal, "crew" for a crew meal. Both ride
+   * the same assembly machinery (a Lunch choice is 2-3 dishes packed as one
+   * meal, exactly like a VGML), but they are sized from the order's pax/crew
+   * booking and labelled by service, so consumers that treat codes as IATA SSRs
+   * must branch on this. Undefined ⇒ a special meal. See @/lib/menu-meal-sets.
+   */
+  kind?: "pax" | "crew";
+  /** The card's serving window ("12:00 – 14:30"), when it states one. For a
+   *  menu-card meal this is WHY this service was chosen for the leg, so it
+   *  belongs next to the meal wherever the choice needs justifying. */
+  servingWindow?: string;
+  /** The choice's share of the audience (60 for a 60% choice) — what makes a
+   *  quantity of 101 off a 168-pax flight explainable on the row. */
+  choicePct?: number;
 };
 
 type LegOrder = Pick<FlightOrderRow, "date" | "sector" | "specialMeals" | "specialMealRoster">;

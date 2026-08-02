@@ -53,15 +53,44 @@ export type ItemDemand = {
 const EMPTY: ItemDemand = { direct: 0, special: 0, total: 0, claims: [], onMenu: false };
 
 /**
+ * Services this leg actually serves, per audience, taken from the assembled
+ * sets. Empty for an audience whose meals are NOT being assembled as sets.
+ */
+type ServedServices = Map<string, Set<string>>;   // forType → service names
+
+function servedServicesOf(sets: SpecialMealSet[]): ServedServices {
+  const m: ServedServices = new Map();
+  for (const s of sets) {
+    if (!s.kind) continue;   // a special meal is an SSR, not a service
+    const who = s.kind === "crew" ? "Crew" : "Passengers";
+    let set = m.get(who);
+    if (!set) m.set(who, (set = new Set()));
+    if (s.mealType) set.add(s.mealType);
+  }
+  return m;
+}
+
+/**
  * The dish's own menu lines for this leg — choice lines and the dessert, NOT
  * special-meal components. Percentage-weighted against the audience the card
  * serves, summed over every line that carries it (a dish in two choices is
  * needed for both).
+ *
+ * `served` names the services being assembled as SETS, per audience. For those
+ * audiences:
+ *   • choice lines are the assembly's claim, not a direct line — counting them
+ *     here too would size every dish twice (once loose, once inside the meal);
+ *   • only the SERVED service's dessert counts. A flight carries one service,
+ *     so summing every service's dessert on the day fed a single leg three of
+ *     them.
+ * The dessert itself stays direct either way: it is served alongside the meal,
+ * not packed inside the choice, so it ships as its own line.
  */
 function directDemand(
   item: string,
   order: LegOrder,
   cards: MealCard[],
+  served: ServedServices,
 ): { qty: number; found: boolean } {
   const day = dayFromDate(order.date);
   const ftype = flightTypeFromSector(order.sector ?? "");
@@ -72,13 +101,18 @@ function directDemand(
   let found = false;
   for (const card of applicable) {
     const audience = card.forType === "Crew" ? (order.crew ?? 0) : (order.pax ?? 0);
-    for (const ch of card.choices) {
-      const line = ch.items.find((it) => it.name.trim().toLowerCase() === key);
-      if (!line) continue;
-      found = true;
-      qty += Math.round((audience * (ch.percentage ?? 100)) / 100) * perMealQty(line);
+    const asSets = served.get(card.forType);
+    if (!asSets) {
+      for (const ch of card.choices) {
+        const line = ch.items.find((it) => it.name.trim().toLowerCase() === key);
+        if (!line) continue;
+        found = true;
+        qty += Math.round((audience * (ch.percentage ?? 100)) / 100) * perMealQty(line);
+      }
     }
     if (card.dessert?.name?.trim().toLowerCase() === key) {
+      // Off-service dessert: the card is for a service this leg doesn't serve.
+      if (asSets && card.mealType && !asSets.has(card.mealType)) continue;
       found = true;
       // Dessert honours the per-meal quantity too (2 pastries per pax = ×2).
       qty += audience * perMealQty(card.dessert);
@@ -121,8 +155,11 @@ export function itemDemandForOrder(
   sets?: SpecialMealSet[],
 ): ItemDemand {
   if (!item || !order) return EMPTY;
-  const direct = directDemand(item, order, cards);
-  const claims = specialClaimsFor(item, sets ?? specialMealSetsForLeg(order, cards));
+  const allSets = sets ?? specialMealSetsForLeg(order, cards);
+  // Menu-card sets in the list mean the caller assembles that audience's meals
+  // as kits — those choice lines then live in the claims, not in direct demand.
+  const direct = directDemand(item, order, cards, servedServicesOf(allSets));
+  const claims = specialClaimsFor(item, allSets);
   const special = claims.reduce((s, c) => s + c.qty, 0);
   return {
     direct: direct.qty,

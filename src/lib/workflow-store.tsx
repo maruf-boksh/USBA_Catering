@@ -239,7 +239,7 @@ export type WfFinancialAccount = {
   active: boolean;
 };
 
-export type WfCashTxnType = "Deposit" | "Withdrawal" | "Adjustment";
+export type WfCashTxnType = "Deposit" | "Withdrawal" | "Adjustment" | "Transfer";
 
 /** A manual movement on a Cash/Bank account (top-up, cash-out, correction). */
 export type WfCashTxn = {
@@ -253,6 +253,25 @@ export type WfCashTxn = {
   note?: string;
   by: string;
   recordedAt: string;
+  /**
+   * Transfers are written as a LINKED PAIR — one negative leg on the source
+   * account, one positive leg on the destination — sharing a transfer id.
+   *
+   * Banking cash-in-hand used to mean recording a withdrawal and a deposit as
+   * two unrelated rows: nothing tied them, and if only one side was entered the
+   * books drifted with nothing to show it. The pair id makes the other leg
+   * findable, so the ledger can show a transfer as one movement and a missing
+   * leg is a detectable state rather than a silent hole.
+   */
+  transferId?: string;
+  /** The account on the other side of the transfer (for display). */
+  counterAccountId?: string;
+  /**
+   * Matched against a bank/cash statement. Undefined = never reviewed, which is
+   * what the Unreconciled filter looks for.
+   */
+  reconciledAt?: string;
+  reconciledBy?: string;
 };
 
 /** Live balance = opening + cash movements − supplier payments drawn from it. */
@@ -525,6 +544,10 @@ type WorkflowCtx = {
   updateFinancialAccount: (id: string, patch: Partial<WfFinancialAccount>) => void;
   cashTxns: WfCashTxn[];
   addCashTxn: (txn: WfCashTxn) => void;
+  /** Both legs of a transfer, written together so a pair can never be half-saved. */
+  addCashTxns: (txns: WfCashTxn[]) => void;
+  /** Mark movements as matched against a statement (or clear the mark). */
+  reconcileCashTxns: (ids: string[], by: string, reconciled: boolean) => void;
 
   transferNotes: WfTransferNote[];
   addTransferNote: (tn: WfTransferNote) => void;
@@ -577,7 +600,7 @@ const WorkflowContext = createContext<WorkflowCtx>({
   grns: [], addGRN: () => {}, updateGRNLineQC: () => {},
   supplierPayments: [], addSupplierPayment: () => {},
   financialAccounts: [], addFinancialAccount: () => {}, updateFinancialAccount: () => {},
-  cashTxns: [], addCashTxn: () => {},
+  cashTxns: [], addCashTxn: () => {}, addCashTxns: () => {}, reconcileCashTxns: () => {},
   transferNotes: [], addTransferNote: () => {}, acknowledgeTransfer: () => {},
   stockDeltas: [], applyStockDeltas: () => {},
   prdStatuses: {}, prdProgress: {}, setPRDStatus: () => {},
@@ -715,7 +738,12 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   ]);
   // One part-payment already made against GRN-6001 (rice & oil, ৳58,000 payable)
   // — leaves a ৳28,000 balance outstanding to Green Valley Foods.
-  const [supplierPayments, setSupplierPayments] = useState<WfSupplierPayment[]>([
+  // Persisted: money is the one thing a demo must not forget. Accounts,
+  // movements and supplier payments together ARE the balance — holding them in
+  // memory meant every recorded transaction vanished on reload and each
+  // account silently snapped back to its opening figure.
+  const [supplierPayments, setSupplierPayments] = usePersistedState<WfSupplierPayment[]>(
+    "wf-supplier-payments", [
     {
       id: "PAY-2026-30001",
       vendor: "Green Valley Foods",
@@ -732,13 +760,15 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   ]);
 
   // Cash & Bank accounts the business settles suppliers from.
-  const [financialAccounts, setFinancialAccounts] = useState<WfFinancialAccount[]>([
+  const [financialAccounts, setFinancialAccounts] = usePersistedState<WfFinancialAccount[]>(
+    "wf-financial-accounts", [
     { id: "ACC-001", name: "Cash in Hand", type: "Cash", openingBalance: 250000, active: true },
     { id: "ACC-002", name: "City Bank — Current A/C", type: "Bank", bankName: "City Bank PLC", accountNo: "1102-3345-90021", openingBalance: 4500000, active: true },
     { id: "ACC-003", name: "Petty Cash", type: "Cash", openingBalance: 60000, active: true },
   ]);
-  const [cashTxns, setCashTxns] = useState<WfCashTxn[]>([
-    { id: "TXN-1001", accountId: "ACC-002", type: "Deposit", amount: 500000, date: "2026-07-01", reference: "Owner capital top-up", by: "A. Rahman", recordedAt: "2026-07-01 09:30" },
+  const [cashTxns, setCashTxns] = usePersistedState<WfCashTxn[]>(
+    "wf-cash-txns", [
+    { id: "TXN-1001", accountId: "ACC-002", type: "Deposit", amount: 500000, date: "2026-07-01", reference: "Owner capital top-up", by: "A. Rahman", recordedAt: "2026-07-01 09:30", reconciledAt: "2026-07-02 10:00", reconciledBy: "F. Begum" },
     { id: "TXN-1002", accountId: "ACC-001", type: "Withdrawal", amount: -75000, date: "2026-07-04", reference: "Cash drawn for market purchase", by: "M. Karim", recordedAt: "2026-07-04 10:15" },
   ]);
 
@@ -920,7 +950,14 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const [mrpRuns, setMrpRuns] = useState<WfMrpRun[]>([]);
-  const [qcClearedFlights, setQcClearedFlights] = useState<Record<string, string>>({});
+  // Persisted: saving a Dispatch Monitoring entry clears its flights for
+  // dispatch, and that clearance is what stops the Dispatch page offering
+  // Vehicle Load for a run it has already recorded. Held in memory it was lost
+  // on reload, so a load that had been monitored, verified and forwarded looked
+  // untouched again and could be loaded — and re-monitored — a second time.
+  const [qcClearedFlights, setQcClearedFlights] = usePersistedState<Record<string, string>>(
+    "wf-qc-cleared-flights", {},
+  );
   const [maintenanceApprovals, setMaintenanceApprovals] = useState<WfMaintenanceApproval[]>([
     {
       id: "MNT-7001",
@@ -934,7 +971,12 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
       status: "Pending Approval",
     },
   ]);
-  const [dispatchApprovals, setDispatchApprovals] = useState<WfDispatchApproval[]>([
+  // Persisted for the same reason: a dispatch forwarded to the Head of Catering
+  // is an outstanding approval, and losing it on reload dropped the entry out of
+  // Approval Management entirely — the monitoring record survived (sessionStorage)
+  // while the approval it was waiting on did not.
+  const [dispatchApprovals, setDispatchApprovals] = usePersistedState<WfDispatchApproval[]>(
+    "wf-dispatch-approvals", [
     {
       id: "DSP-SEED-001",
       flightId: "FLT-SEED-01",
@@ -1000,6 +1042,14 @@ export function WorkflowProvider({ children }: { children: ReactNode }) {
         setFinancialAccounts(prev => prev.map(a => a.id === id ? { ...a, ...patch } : a)),
       cashTxns,
       addCashTxn: (txn) => setCashTxns(prev => [txn, ...prev]),
+      // One setState for both legs — a transfer that saved only its outgoing
+      // side would take money out of the business books entirely.
+      addCashTxns: (txns) => setCashTxns(prev => [...txns, ...prev]),
+      reconcileCashTxns: (ids, by, reconciled) => setCashTxns(prev => prev.map((t) => {
+        if (!ids.includes(t.id)) return t;
+        if (!reconciled) return { ...t, reconciledAt: undefined, reconciledBy: undefined };
+        return { ...t, reconciledAt: new Date().toISOString().slice(0, 16).replace("T", " "), reconciledBy: by };
+      })),
 
       transferNotes,
       addTransferNote: (tn) => setTransferNotes(prev => [tn, ...prev]),
