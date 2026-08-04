@@ -25,6 +25,8 @@ import { consumableItems, type ConsumableItem } from "@/lib/sample-data";
 import { officeName, warehouseName } from "@/components/common/LocationPicker";
 import { printGalleySheet } from "@/lib/galley-sheet";
 import { getGalleySections, loadGalleyItems } from "@/lib/galley-items";
+import { filterEnabledGalleyItems } from "@/lib/galley-item-scope";
+import { getGalleyGroups } from "@/lib/galley-groups";
 import {
   loadDrafts, persistDrafts, type GalleyDraft,
 } from "@/lib/galley-drafts";
@@ -161,7 +163,8 @@ export function GalleySheetViewModal({
   flight: FlightOption | undefined;
   onClose: () => void;
 }) {
-  const allSections = getGalleySections();
+  // Same scope the planner had — see lib/galley-item-scope.ts.
+  const allSections = getGalleySections(filterEnabledGalleyItems());
   // Meals are integrated live from Dispatch (Order → Meal Planning → Dispatch),
   // not the fixed catalog fields — so the sheet always reflects the real meal
   // plan. Load counts are recovered from the plan (buildInitialGalley stores
@@ -179,9 +182,11 @@ export function GalleySheetViewModal({
   const retMeals = returnLeg
     ? scaleDispatchMeals(returnLeg.flight, returnLeg.pax, returnLeg.crew, returnLeg.crew)?.scaled ?? null
     : null;
-  const groups = (["Beverages", "Amenities", "Equipment"] as const).map((group) => ({
-    group,
-    sections: allSections.filter((s) => s.group === group),
+  // Loading groups come from the galley group master (Item Profile data), so a
+  // group added there shows on the read-only sheet without a code change.
+  const groups = getGalleyGroups().map((gr) => ({
+    group: gr.label,
+    sections: allSections.filter((s) => s.group === gr.id),
   }));
   const signRows = [
     { label: "Dispatch Sheet Prepared By", ...rec.signOff.preparedBy },

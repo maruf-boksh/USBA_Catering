@@ -8,8 +8,15 @@ export type PRLineItem = {
   itemName: string;
   description: string;
   qty: number;
+  /** UOM the line was raised in — the item's Primary UOM, or any Alt UOM
+   *  configured on its Item Profile. `rate` (and therefore the amount) is per
+   *  THIS unit, so qty/uom/rate always stay in the unit the buyer ordered in. */
   uom: string;
   rate: number;
+  /** Stock-unit equivalent of `qty`, recorded when `uom` is an Alt UOM (e.g.
+   *  2 Carton → 720 Piece). Absent when the line is already in the Primary UOM. */
+  primaryQty?: number;
+  primaryUom?: string;
   /** Quantity placed on a Purchase Order against this requisition line. Absent /
    *  0 until a PO is raised — this is procurement (PO), separate from the
    *  requisitioned (requested) qty above. */

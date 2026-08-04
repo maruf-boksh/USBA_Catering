@@ -694,7 +694,9 @@ export type ConsumableItem = {
   // Galley-sheet fields (present on items that are galley Handing/Taking lines).
   // The galley plan's Beverages/Amenities/Equipment tabs read these from the
   // inventory store so the sheet is driven by inventory data, not hardcoded.
-  galleyGroup?: "Beverages" | "Amenities" | "Equipment";
+  /** Open string, not a fixed union — galley groups are Item Profile data now
+   *  (see ItemMaster.galleyGroup / lib/galley-groups.ts). */
+  galleyGroup?: string;
   galleySection?: string;
   galleyUnit?: string;
   rollupTo?: string;
@@ -743,7 +745,7 @@ const GALLEY_STOCK_CONSUMABLES: ConsumableItem[] = GALLEY_STOCK_DEFS.map((d) => 
     reorder,
     unitCost: d.unitCost ?? 0,
     status: seededStatus(stock, reorder),
-    galleyGroup: d.group as "Beverages" | "Amenities" | "Equipment",
+    galleyGroup: d.group,
     galleySection: d.section,
     galleyUnit: d.unit,
     rollupTo: d.rollupTo,
@@ -1943,6 +1945,13 @@ export type ItemMaster = {
   itemType: "Raw Material" | "Packaging" | "Consumable" | "Finished Good" | "Semi-Finished Good" | "Asset";
   category: string;
   subCategory: string;
+  /**
+   * Third and finest classification level, below Sub Category — the grain a
+   * storekeeper actually picks by ("Protein → Frozen → Cut / Portioned").
+   * Optional: items classified before it existed carry none, and every consumer
+   * must treat a blank as "not classified" rather than filtering the item out.
+   */
+  minorCategory?: string;
   uom: string;
   status: "Active" | "Inactive";
   currentStock?: number;
@@ -1980,6 +1989,28 @@ export type ItemMaster = {
   warehouseIds?: string[];
   /** Default bin/rack/shelf location for this item. */
   binLocation?: string;
+  /**
+   * Galley Handing/Taking sheet placement — the Item Profile is the master for
+   * what the Galley Plan can load.
+   *
+   *   • galleyGroup   — the sheet TAB this item loads under ("Beverages",
+   *                     "Amenities", "Equipment", or any group configured on the
+   *                     Item Profile's Galley Item Group list). Setting it is
+   *                     what puts the item on the galley sheet at all; leaving it
+   *                     unset keeps the item off the sheet entirely.
+   *   • galleySection — the card within that tab, e.g. "Tea, Coffee & Others".
+   *                     Falls back to the group name when unset.
+   *   • galleyUnit    — sheet unit override (btl / cans / pkts); falls back to
+   *                     the item's primary `uom`.
+   *   • gallerySortOrder — position within the section (ascending, unset last).
+   *
+   * The plan reads these through lib/galley-items.ts, so tagging an item here is
+   * all it takes for the line — and a new tab, if the group is new — to appear.
+   */
+  galleyGroup?: string;
+  galleySection?: string;
+  galleyUnit?: string;
+  gallerySortOrder?: number;
   /**
    * Whether the item is tracked as discrete batches/lots (each with their own
    * expiry, cost, receipt date) or as a single non-batched stock. When false,
@@ -2037,6 +2068,19 @@ export const ITEM_CATEGORIES = [
 ] as const;
 
 export const ITEM_SUB_CATEGORIES = ["Fresh", "Frozen", "Dry", "Liquid"] as const;
+
+/**
+ * Minor Category presets — the level below Sub Category. Sub Category records
+ * the state an item is HELD in (Fresh / Frozen / Dry / Liquid); the minor level
+ * records the form it arrives and is issued in, which is what distinguishes two
+ * otherwise identical store lines (whole vs portioned chicken, powder vs paste
+ * spice). Deliberately generic so it applies across categories; the DDL also
+ * offers "+ Add new" and picks up any value already in use on a profile.
+ */
+export const ITEM_MINOR_CATEGORIES = [
+  "Whole", "Cut / Portioned", "Powder", "Paste", "Concentrate",
+  "Ready-to-Eat", "Pre-Packed", "Bulk",
+] as const;
 
 /** Category presets for the "Asset" item type (Item Configuration → Create Item). */
 export const ASSET_CATEGORIES = ["Catering", "Electronic Devices"] as const;

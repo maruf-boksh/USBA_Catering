@@ -5,6 +5,7 @@
 // contains, so custom items appear in the printed sheet automatically.
 
 import { getGalleySections, type GalleyPlan } from "@/lib/galley-items";
+import { filterEnabledGalleyItems } from "@/lib/galley-item-scope";
 
 export type { GalleyPlan, GalleySheetField, GalleySheetSection } from "@/lib/galley-items";
 export { getGalleySections } from "@/lib/galley-items";
@@ -122,7 +123,10 @@ export function printGalleySheet(plan: GalleyPlan, meta: GalleySheetMeta) {
 
   // Meals are printed from the Dispatch-integrated snapshot (meta.meals), so the
   // catalog Meals sections are skipped to avoid showing the fixed-share fields.
-  const sectionHtml = getGalleySections()
+  // Scoped to what Galley Items Group leaves switched on, so the printed sheet
+  // carries the same lines the planner was given — a paper sheet with a section
+  // the plan never offered is a line the loader is invited to fill by hand.
+  const sectionHtml = getGalleySections(filterEnabledGalleyItems())
     .filter((sec) => sec.group !== "Meals")
     .map((sec) => `
     <div class="sec">

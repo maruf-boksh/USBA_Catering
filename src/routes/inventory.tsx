@@ -33,8 +33,9 @@ import {
 import { useArrivalFlash, peekArrivalRows } from "@/lib/arrival-flash";
 import { useWorkflow, type StockDelta } from "@/lib/workflow-store";
 import { getStockAdjustments, blockedOf, lotIsBlocked } from "@/lib/stock-adjustments";
-import { roundQty } from "@/lib/num";
-import { getItemProfiles } from "@/lib/item-profiles";
+import { roundQty, fmtQty } from "@/lib/num";
+import { getItemProfiles, displayAltUom, splitQtyByAlt } from "@/lib/item-profiles";
+import type { UomOption } from "@/lib/sample-data";
 import { buildItemLedger, itemMovementTotals, itemLedgerSummary, type LedgerSources, type LedgerRange, type RawMovement } from "@/lib/stock-ledger";
 import { weightedAvg, poUnitPrice, blendedOutCost, movingAverage } from "@/lib/item-cost";
 
@@ -268,9 +269,25 @@ export default function Inventory() {
     return m;
   }, []);
   const profileFor = (i: Item) => profileByName.get(i.name.toLowerCase());
+  // Alt UOM per item — the packing unit printed beside the primary UoM and used
+  // to break the Closing Qty down ("124 (12 - 4)" = 12 full packs, 4 loose).
+  // Resolved once here so the table never re-reads the profile store per cell.
+  const altUomByName = useMemo(() => {
+    const profiles = getItemProfiles();
+    const m = new Map<string, UomOption>();
+    for (const p of profiles) {
+      const alt = displayAltUom(p.name, profiles);
+      if (alt) m.set(p.name.toLowerCase(), alt);
+    }
+    return m;
+  }, []);
+  const altUomFor = (i: Item) => altUomByName.get(i.name.toLowerCase());
   const effType = (i: Item) => profileFor(i)?.itemType ?? i.itemType ?? "";
   const effCategory = (i: Item) => profileFor(i)?.category ?? i.category;
   const effSubCategory = (i: Item) => profileFor(i)?.subCategory ?? i.subCategory ?? "";
+  // Minor category has no cached copy on the row — it only ever came from the
+  // Item Profile, so the live profile is the only source.
+  const effMinorCategory = (i: Item) => profileFor(i)?.minorCategory ?? "";
   const effUom = (i: Item) => profileFor(i)?.uom ?? i.uom;
   const effStorage = (i: Item) => profileFor(i)?.storage ?? i.storage;
 
@@ -279,13 +296,14 @@ export default function Inventory() {
   const [filterType, setFilterType] = useState("");
   const [filterCategory, setFilterCategory] = useState("");
   const [filterSubCategory, setFilterSubCategory] = useState("");
+  const [filterMinorCategory, setFilterMinorCategory] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
 
   // Cascading filter options, derived from each item's live Item Profile. Item
   // Type comes first; Category is scoped to the chosen type; Sub-category to
-  // type + category.
+  // type + category; Minor category to all three.
   const typeOptions = Array.from(new Set(items.map(effType).filter(Boolean) as string[])).sort(sortStr);
   const categoryOptions = Array.from(new Set(
     items.filter((i) => !filterType || effType(i) === filterType).map(effCategory).filter(Boolean),
@@ -294,6 +312,14 @@ export default function Inventory() {
     items
       .filter((i) => (!filterType || effType(i) === filterType) && (!filterCategory || effCategory(i) === filterCategory))
       .map(effSubCategory).filter(Boolean) as string[],
+  )).sort(sortStr);
+  const minorCategoryOptions = Array.from(new Set(
+    items
+      .filter((i) =>
+        (!filterType || effType(i) === filterType) &&
+        (!filterCategory || effCategory(i) === filterCategory) &&
+        (!filterSubCategory || effSubCategory(i) === filterSubCategory))
+      .map(effMinorCategory).filter(Boolean) as string[],
   )).sort(sortStr);
 
   const f = (field: keyof FormState, value: string) =>
@@ -400,12 +426,6 @@ export default function Inventory() {
     setSelected(item);
     setViewOpen(true);
   };
-
-  // Counts span kitchen stock + airline consumables (both roll into this report).
-  const statusPool = [...items, ...consumableInventoryRows];
-  const lowStockCount = statusPool.filter((i) => i.status === "Low").length;
-  const criticalCount = statusPool.filter((i) => i.status === "Critical").length;
-  const okCount = statusPool.filter((i) => i.status === "OK").length;
 
   // Stock on the books that nothing may consume — produced but not yet QC-signed
   // off, or QC-failed and awaiting disposal or re-cook.
@@ -529,6 +549,47 @@ export default function Inventory() {
     itemLedgerSummary(r.id, r.name, totalStockFor(r), ledgerSources, dateRange);
 
   /**
+   * The one set of figures the whole row agrees on. Closing Qty IS the row's
+   * stock — there is no separate on-hand column — and the QC hold is expressed
+   * against it:
+   *
+   *   closing = usable + held
+   *
+   * Held is clamped to the closing balance rather than read raw off the row,
+   * because Opening/In/Out/Closing are scoped to the date window while a hold is
+   * always a live fact; unclamped, a back-dated window could print more held
+   * than the balance sitting next to it.
+   */
+  const rowFigures = (r: Item) => {
+    const { opening, inQty, outQty, closing } = ledgerSummaryFor(r);
+    const held = roundQty(Math.min(blockedOf(r), Math.max(0, closing)));
+    return { opening, inQty, outQty, closing, held, usable: roundQty(Math.max(0, closing - held)) };
+  };
+
+  /**
+   * Stock status has to be judged on what can actually be consumed. An item
+   * whose stock is entirely held for QC is not "OK" — nothing may be issued
+   * from it — so once a hold exists the status is re-derived from the usable
+   * balance. With no hold the row keeps its stored status untouched.
+   *
+   * Deliberately reads live on-hand rather than the windowed closing: a hold is
+   * a fact about the stock sitting in the store now, not about a past balance.
+   */
+  const effStatus = (r: Item): Item["status"] => {
+    const held = blockedOf(r);
+    if (held <= 0) return r.status;
+    const usable = roundQty(Math.max(0, totalStockFor(r) - held));
+    return computeStatus(usable, r.reorder, r.threshold ?? 20);
+  };
+
+  // Counts span kitchen stock + airline consumables (both roll into this report)
+  // and read the same held-aware status the table's Status column shows.
+  const statusPool = [...items, ...consumableInventoryRows];
+  const lowStockCount = statusPool.filter((i) => effStatus(i) === "Low").length;
+  const criticalCount = statusPool.filter((i) => effStatus(i) === "Critical").length;
+  const okCount = statusPool.filter((i) => effStatus(i) === "OK").length;
+
+  /**
    * Per-item costing context for the ledger. Batch items cost issues by FIFO/
    * FEFO drawdown (`blendedOutCost`); single items by moving weighted-average
    * (`wac`). Purchases price at their PO line rate. Returns the opening-row cost,
@@ -568,17 +629,21 @@ export default function Inventory() {
         const batched = isBatchTrackedForInventory(r.id);
         return (
           <div className="flex items-center gap-1.5">
-            {batched && (
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); openBatches(r); }}
-                title="View batch lots"
-                aria-label={`View batch lots for ${r.name}`}
-                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-primary hover:bg-primary/10"
-              >
-                <Layers className="h-3.5 w-3.5" />
-              </button>
-            )}
+            {/* Sole entry to the stock/batch popup now that the Stock column is
+                gone — shown for single items too, where it explains the pooled
+                (lot-less) holding. */}
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); openBatches(r); }}
+              title={batched ? "View batch lots" : "Single-item stock — view details"}
+              aria-label={`View stock detail for ${r.name}`}
+              className={cn(
+                "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-primary/10",
+                batched ? "text-primary" : "text-muted-foreground",
+              )}
+            >
+              <Layers className="h-3.5 w-3.5" />
+            </button>
             <span>{r.name}</span>
           </div>
         );
@@ -589,14 +654,24 @@ export default function Inventory() {
       render: (r) => <LocationCell officeId={r.officeId} warehouseId={r.warehouseId} />,
     },
     { key: "category", header: "Category", render: (r) => effCategory(r) },
-    { key: "uom", header: "UOM", render: (r) => effUom(r) },
     {
-      key: "stock", header: "Stock",
-      render: (r) => <StockCell item={r} onClick={() => openBatches(r)} />,
-    },
-    {
-      key: "blockedQty" as keyof Item, header: "Held (QC)",
-      render: (r) => <BlockedCell item={r} onClick={() => openBatches(r)} />,
+      key: "uom", header: "UoM - Alt.UoM",
+      render: (r) => {
+        const alt = altUomFor(r);
+        return (
+          <span className="whitespace-nowrap">
+            {effUom(r)}
+            {alt && (
+              <span
+                className="text-muted-foreground"
+                title={`1 ${alt.uom} = ${fmtQty(alt.conversion)} ${effUom(r)}`}
+              >
+                {" "}- {alt.uom}
+              </span>
+            )}
+          </span>
+        );
+      },
     },
     {
       key: "id" as keyof Item, header: "Opening Qty",
@@ -623,23 +698,22 @@ export default function Inventory() {
     },
     {
       key: "id" as keyof Item, header: "Closing Qty",
-      render: (r) => {
-        const { closing } = ledgerSummaryFor(r);
-        const isFlashed = closingFlashIds.has(r.id);
-        return (
-          <button
-            type="button"
-            onClick={() => openLedger(r)}
-            className="group inline-flex items-center text-left rounded-sm px-1 py-0.5 -mx-1 hover:bg-sky-50 transition-colors"
-            title="Click to see the transaction ledger"
-            style={isFlashed ? { animation: "wastage-closing-blink 0.75s ease-in-out 3" } : undefined}
-          >
-            <span className="tabular-nums font-semibold text-sky-700 underline decoration-dotted decoration-sky-300 underline-offset-2 group-hover:decoration-sky-500">
-              {closing.toLocaleString()}
-            </span>
-          </button>
-        );
-      },
+      render: (r) => (
+        <ClosingQtyCell
+          item={r}
+          figures={rowFigures(r)}
+          alt={altUomFor(r)}
+          uom={effUom(r)}
+          flashed={closingFlashIds.has(r.id)}
+          onClick={() => openLedger(r)}
+        />
+      ),
+    },
+    // Sits directly after Closing Qty: it is the slice of that balance which
+    // nothing may consume, not a stock figure of its own.
+    {
+      key: "blockedQty" as keyof Item, header: "Held (QC)",
+      render: (r) => <BlockedCell item={r} held={rowFigures(r).held} onClick={() => openBatches(r)} />,
     },
     { key: "reorder", header: "Reorder Lvl" },
     {
@@ -647,7 +721,7 @@ export default function Inventory() {
       header: "Method",
       render: (r) => <MethodBadge inventoryId={r.id} />,
     },
-    { key: "status", header: "Status", render: (r) => <StatusBadge status={r.status} /> },
+    { key: "status", header: "Status", render: (r) => <StatusBadge status={effStatus(r)} /> },
   ];
 
   const filteredItems = items.filter((i) => {
@@ -656,7 +730,8 @@ export default function Inventory() {
     if (filterType && effType(i) !== filterType) return false;
     if (filterCategory && effCategory(i) !== filterCategory) return false;
     if (filterSubCategory && effSubCategory(i) !== filterSubCategory) return false;
-    if (filterStatus && i.status !== filterStatus) return false;
+    if (filterMinorCategory && effMinorCategory(i) !== filterMinorCategory) return false;
+    if (filterStatus && effStatus(i) !== filterStatus) return false;
     return true;
   });
 
@@ -666,7 +741,8 @@ export default function Inventory() {
     if (filterType && effType(i) !== filterType) return false;
     if (filterCategory && effCategory(i) !== filterCategory) return false;
     if (filterSubCategory && effSubCategory(i) !== filterSubCategory) return false;
-    if (filterStatus && i.status !== filterStatus) return false;
+    if (filterMinorCategory && effMinorCategory(i) !== filterMinorCategory) return false;
+    if (filterStatus && effStatus(i) !== filterStatus) return false;
     return true;
   });
 
@@ -676,7 +752,8 @@ export default function Inventory() {
     if (filterType && effType(i) !== filterType) return false;
     if (filterCategory && effCategory(i) !== filterCategory) return false;
     if (filterSubCategory && effSubCategory(i) !== filterSubCategory) return false;
-    if (filterStatus && i.status !== filterStatus) return false;
+    if (filterMinorCategory && effMinorCategory(i) !== filterMinorCategory) return false;
+    if (filterStatus && effStatus(i) !== filterStatus) return false;
     return true;
   });
 
@@ -732,7 +809,7 @@ export default function Inventory() {
           <span className="field-label">Item Type</span>
           <AntSelect
             value={filterType || ""}
-            onChange={(next: string) => { setFilterType(next); setFilterCategory(""); setFilterSubCategory(""); }}
+            onChange={(next: string) => { setFilterType(next); setFilterCategory(""); setFilterSubCategory(""); setFilterMinorCategory(""); }}
             size="small"
             variant="borderless"
             style={{ minWidth: 150 }}
@@ -744,7 +821,7 @@ export default function Inventory() {
           <span className="field-label">Category</span>
           <AntSelect
             value={filterCategory || ""}
-            onChange={(next: string) => { setFilterCategory(next); setFilterSubCategory(""); }}
+            onChange={(next: string) => { setFilterCategory(next); setFilterSubCategory(""); setFilterMinorCategory(""); }}
             size="small"
             variant="borderless"
             disabled={categoryOptions.length === 0}
@@ -757,7 +834,7 @@ export default function Inventory() {
           <span className="field-label">Sub-category</span>
           <AntSelect
             value={filterSubCategory || ""}
-            onChange={(next: string) => setFilterSubCategory(next)}
+            onChange={(next: string) => { setFilterSubCategory(next); setFilterMinorCategory(""); }}
             size="small"
             variant="borderless"
             disabled={subCategoryOptions.length === 0}
@@ -765,6 +842,22 @@ export default function Inventory() {
             options={[
               { value: "", label: subCategoryOptions.length === 0 ? "—" : "All" },
               ...subCategoryOptions.map((s) => ({ value: s, label: s })),
+            ]}
+          />
+        </div>
+        <div className="inline-flex items-center gap-1.5 bg-card border border-border rounded-lg px-2 py-1 shadow-sm">
+          <TagsOutlined style={{ color: "var(--color-muted-foreground)", fontSize: 12 }} />
+          <span className="field-label">Minor category</span>
+          <AntSelect
+            value={filterMinorCategory || ""}
+            onChange={(next: string) => setFilterMinorCategory(next)}
+            size="small"
+            variant="borderless"
+            disabled={minorCategoryOptions.length === 0}
+            style={{ minWidth: 150 }}
+            options={[
+              { value: "", label: minorCategoryOptions.length === 0 ? "—" : "All" },
+              ...minorCategoryOptions.map((m) => ({ value: m, label: m })),
             ]}
           />
         </div>
@@ -806,12 +899,12 @@ export default function Inventory() {
             aria-label="To date"
           />
         </div>
-        {(filterType || filterCategory || filterSubCategory || filterDateFrom || filterDateTo) && (
+        {(filterType || filterCategory || filterSubCategory || filterMinorCategory || filterDateFrom || filterDateTo) && (
           <AntButton
             size="small"
             type="text"
             icon={<CloseOutlined />}
-            onClick={() => { setFilterType(""); setFilterCategory(""); setFilterSubCategory(""); setFilterDateFrom(""); setFilterDateTo(""); }}
+            onClick={() => { setFilterType(""); setFilterCategory(""); setFilterSubCategory(""); setFilterMinorCategory(""); setFilterDateFrom(""); setFilterDateTo(""); }}
             style={{ color: "var(--color-muted-foreground)" }}
           >
             Clear
@@ -1285,45 +1378,62 @@ export default function Inventory() {
   );
 }
 
-/**
- * Stock cell — shows the total qty as a clickable button that opens the batch
- * popup. For batch-tracked items the small caption summarises how many lots
- * are held; for Single Items it shows a quiet "single" marker.
- */
-function StockCell({ item, onClick }: { item: Item; onClick: () => void }) {
-  const batched = isBatchTrackedForInventory(item.id);
-  const lots = batched ? item.batches.filter((b) => b.qty > 0).length : 0;
+/** Fixed 2-dp quantity, the format the stock report prints balances in. */
+const qty2 = (n: number) =>
+  n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-  // Actual stock = this item summed across every warehouse it's held in. The
-  // primary-warehouse figure is the live `item.stock`; any other warehouses'
-  // holdings come from the aggregation helper.
-  const others = getItemStockByWarehouse(item.name).slice(1); // beyond primary
-  const total = item.stock + others.reduce((s, w) => s + w.stock, 0);
-  // On-hand includes anything held for QC, so the reorder comparison has to run
-  // on what is usable — otherwise an item whose stock is entirely blocked reads
-  // as healthy and never triggers a reorder.
-  const held = blockedOf(item);
-  const usable = roundQty(Math.max(0, total - held));
+/**
+ * Closing Qty — the row's stock balance, and the only quantity column that
+ * carries the full picture:
+ *
+ *   124.00 (12.00 - 4.00)   ← balance, then whole Alt UOM packs and the loose
+ *                             remainder in the primary UoM
+ *   96.00 usable · 28.00 held (QC)
+ *
+ * The parenthetical only appears for items whose Item Profile configures a
+ * packing Alt UOM; the held line only when something is actually held. Clicking
+ * opens the transaction ledger that explains how the balance was reached.
+ */
+function ClosingQtyCell({
+  item, figures, alt, uom, flashed, onClick,
+}: {
+  item: Item;
+  figures: { closing: number; held: number; usable: number };
+  alt: UomOption | undefined;
+  uom: string;
+  flashed: boolean;
+  onClick: () => void;
+}) {
+  const { closing, held, usable } = figures;
+  const split = alt ? splitQtyByAlt(closing, alt) : null;
   const low = usable < item.reorder;
 
   return (
     <button
       type="button"
       onClick={onClick}
-      className="group inline-flex flex-col items-start text-left rounded-sm px-1 py-0.5 -mx-1 hover:bg-primary/5 transition-colors"
-      title={batched
-        ? `Click to see ${lots} batch lot${lots === 1 ? "" : "s"}`
-        : "Single-item stock — click for details"}
+      className="group inline-flex flex-col items-start text-left rounded-sm px-1 py-0.5 -mx-1 hover:bg-sky-50 transition-colors"
+      title={split
+        ? `${qty2(closing)} ${uom} = ${qty2(split.altQty)} ${alt!.uom} + ${qty2(split.remainder)} ${uom} — click for the transaction ledger`
+        : "Click to see the transaction ledger"}
+      style={flashed ? { animation: "wastage-closing-blink 0.75s ease-in-out 3" } : undefined}
     >
-      <span className={cn(
-        "tabular-nums font-semibold underline decoration-dotted decoration-muted-foreground/40 underline-offset-2 group-hover:decoration-primary",
-        low && "text-destructive",
-      )}>
-        {total.toLocaleString()}
+      <span className="whitespace-nowrap">
+        <span className={cn(
+          "tabular-nums font-semibold underline decoration-dotted decoration-sky-300 underline-offset-2 group-hover:decoration-sky-500",
+          low ? "text-destructive" : "text-sky-700",
+        )}>
+          {qty2(closing)}
+        </span>
+        {split && (
+          <span className="ml-1 text-[11px] text-muted-foreground tabular-nums">
+            ({qty2(split.altQty)} - {qty2(split.remainder)})
+          </span>
+        )}
       </span>
       {held > 0 && (
-        <span className="text-[10px] font-medium text-amber-600 tabular-nums">
-          {usable.toLocaleString()} usable
+        <span className="text-[10px] font-medium tabular-nums text-amber-600">
+          {qty2(usable)} usable · {qty2(held)} held (QC)
         </span>
       )}
     </button>
@@ -1362,8 +1472,7 @@ function QuantityHoldNote({ item }: { item: Item }) {
  * physically. That difference is the whole practical case for batch tracking,
  * so the cell states it rather than hiding it behind an identical figure.
  */
-function BlockedCell({ item, onClick }: { item: Item; onClick: () => void }) {
-  const held = blockedOf(item);
+function BlockedCell({ item, held, onClick }: { item: Item; held: number; onClick: () => void }) {
   if (held <= 0) return <span className="text-muted-foreground tabular-nums">—</span>;
 
   const lots = (item.batches ?? []).filter(lotIsBlocked);
@@ -1379,7 +1488,7 @@ function BlockedCell({ item, onClick }: { item: Item; onClick: () => void }) {
       className="inline-flex flex-col items-start text-left rounded-sm px-1 py-0.5 -mx-1 hover:bg-amber-500/10 transition-colors"
       title={`${detail}${reason ? ` — ${reason}` : ""}`}
     >
-      <span className="tabular-nums font-semibold text-amber-600">{held.toLocaleString()}</span>
+      <span className="tabular-nums font-semibold text-amber-600">{qty2(held)}</span>
       <span className="text-[10px] text-muted-foreground">
         {lots.length > 0 ? `${lots.length} lot${lots.length === 1 ? "" : "s"}` : "no lot"}
       </span>

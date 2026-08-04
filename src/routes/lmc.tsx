@@ -28,6 +28,10 @@ import {
 } from "@/lib/flight-orders-store";
 import { productionOrders, aircraftFleet, type Aircraft } from "@/lib/sample-data";
 import { getAuthUser } from "@/lib/auth";
+import {
+  MANUAL_TYPES, readManualLmc, LMC_MANUAL_KEY,
+  type ManualLmc, type ManualType,
+} from "@/lib/lmc-manual";
 import { INITIAL_RECORDS, type DispatchRecord } from "@/routes/dispatch";
 import { flights, loadGalleyRecords } from "@/routes/dispatch-monitoring";
 
@@ -68,22 +72,14 @@ const APPROVAL_BADGE: Record<"awaiting" | "rejected", { label: string; cls: stri
 };
 
 // ── Manual LMC events (non-edit) ──────────────────────────────────────────────
-const MANUAL_TYPES = [
-  "Aircraft Swap",
-  "PAX Change",
-  "Special Meal Change",
-  "Flight Cancellation",
-  "Nil Catering / Offload",
-  "Schedule / Delay",
-  "Extra / Reduced Crew",
-  "Other",
-] as const;
-type ManualType = typeof MANUAL_TYPES[number];
-
+// The type list, record shape and storage live in lib/lmc-manual.ts so other
+// modules can RAISE an entry (Galley Planning raises one for a dish swap)
+// without importing this page — which imports Galley Planning in turn.
 const MANUAL_DEFAULT_SEV: Record<ManualType, LmcSeverity> = {
   "Aircraft Swap": "critical",
   "PAX Change": "critical",
   "Special Meal Change": "critical",
+  "Meal Change": "critical",
   "Flight Cancellation": "critical",
   "Nil Catering / Offload": "critical",
   "Schedule / Delay": "major",
@@ -98,6 +94,7 @@ const MANUAL_FT: Record<ManualType, { show: boolean; kind: FtKind; fromLabel: st
   "Aircraft Swap":          { show: true,  kind: "aircraft", fromLabel: "From aircraft", toLabel: "To aircraft" },
   "PAX Change":             { show: true,  kind: "number",   fromLabel: "PAX was", toLabel: "PAX now" },
   "Special Meal Change":    { show: true,  kind: "number",   fromLabel: "Special meals was", toLabel: "Special meals now" },
+  "Meal Change":            { show: true,  kind: "text",     fromLabel: "Dish was", toLabel: "Dish now" },
   "Flight Cancellation":    { show: false, kind: "text",     fromLabel: "", toLabel: "" },
   "Nil Catering / Offload": { show: false, kind: "text",     fromLabel: "", toLabel: "" },
   "Schedule / Delay":       { show: true,  kind: "time",     fromLabel: "Scheduled STD", toLabel: "Revised STD" },
@@ -125,28 +122,14 @@ type FlightOption = {
   pax: number; crew: number; specialMeals: number;
 };
 
-export type ManualLmc = {
-  id: string;
-  at: string;
-  by: string;
-  role: string;
-  flight: string;
-  orderNo?: string;
-  sector?: string;
-  type: ManualType;
-  from?: string;
-  to?: string;
-  reason: string;
-  severity: LmcSeverity;
-  leadHours: number | null;
-};
+export type { ManualLmc, ManualType } from "@/lib/lmc-manual";
 
 // ── Cross-module contract (Approval Management + Accounts) ────────────────────
 // Critical LMCs are routed through Approval Management (Phase 3) and, once
 // approved, are billable last-minute changes surfaced in Accounts. The approval
 // decision is a light persisted overlay keyed by LMC id — it never mutates the
 // amendment history.
-export const LMC_MANUAL_KEY = "lmc-manual";
+export { LMC_MANUAL_KEY } from "@/lib/lmc-manual";
 export const LMC_APPROVALS_KEY = "lmc-approvals";
 /** Flat charge applied to a billable (critical) last-minute change. */
 export const LMC_CHARGE = 5000;
@@ -169,14 +152,6 @@ export type LmcApprovalRow = {
   leadHours: number | null;
 };
 
-function readManualLmc(): ManualLmc[] {
-  try {
-    const raw = window.localStorage.getItem(`harvest-data-v1:${LMC_MANUAL_KEY}`);
-    return raw ? (JSON.parse(raw) as ManualLmc[]) : [];
-  } catch {
-    return [];
-  }
-}
 
 // ── Downstream commitment ─────────────────────────────────────────────────────
 // "How committed is this leg already?" — the core LMC question. The further a

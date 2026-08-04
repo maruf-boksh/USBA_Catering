@@ -10,7 +10,18 @@
 // them from there, so those tabs are driven by inventory data, not hardcoded.
 // Meal-summary and auto-subtotal lines are computed (not inventory).
 
-export type GalleyItemGroup = "Meals" | "Beverages" | "Amenities" | "Equipment";
+/**
+ * Sheet tab an item loads under. Open string: "Meals" is the one reserved,
+ * computed group (it comes from Order → Dispatch, never from stock), and every
+ * other group is Item Profile data — see ItemMaster.galleyGroup and
+ * lib/galley-groups.ts. The three below are only what this seed ships with.
+ */
+export type GalleyItemGroup =
+  | "Meals" | "Beverages" | "Amenities" | "Equipment"
+  | "Fresh Fruits" | "Medicine" | "Forms" | (string & {});
+
+/** The one group that is computed rather than loaded from stock. */
+export const MEALS_GROUP = "Meals";
 
 export type GalleyCatalogDef = {
   key: string;
@@ -116,11 +127,18 @@ export const GALLEY_CATALOG: GalleyCatalogDef[] = [
   ...S("Safety & Sickness", "Amenities", true, [
     ["safetyCard", "Safety Instruction Card", "pcs", 4], ["sicknessBag", "Sickness Bag", "pcs", 2],
   ]),
-  ...S("Medical Kits", "Amenities", true, [
+  // ── Medicine (stock) ───────────────────────────────────────────────────────
+  // Its own group rather than an Amenities section: the kits are sealed,
+  // regulated and checked against a seal number at sign-off, so they are counted
+  // by a different person to the one counting blankets and tissues.
+  ...S("Medical Kits", "Medicine", true, [
     ["dailyMedeline", "Daily Medeline (Set)", "pcs", 350], ["emkBox", "EMK Box", "pc", 1200],
     ["upkBox", "UPK Box", "pcs", 900], ["fanBox", "FAN Box", "pcs", 650],
   ]),
-  ...S("Forms & Cards", "Amenities", true, [
+  // ── Forms (stock) ──────────────────────────────────────────────────────────
+  // Paperwork carried for the passengers to fill in — driven by the destination's
+  // requirements, not by the cabin's amenity standard, so it is planned on its own.
+  ...S("Forms & Cards", "Forms", true, [
     ["healthDeclForm", "RD Health Declaration Form", "pcs", 1], ["baggageDeclForm", "Baggage Declaration Form", "pcs", 1],
     ["bdEdCard", "Bangladeshi ED Card", "pcs", 1.5], ["commentsCard", "Comments Card", "pcs", 1],
   ]),
@@ -140,7 +158,11 @@ export const GALLEY_CATALOG: GalleyCatalogDef[] = [
     ["dinnerKnife", "Dinner Knife", "pcs", 24], ["longSpoon", "Long Spoon", "pcs", 20], ["iceTong", "Ice Tong", "pcs", 60],
     ["iceBucket", "Ice Bucket", "pcs", 180], ["roundTraySteel", "Round Tray (Steel)", "pcs", 140], ["serviceTrayBig", "Service Tray (Big)", "pcs", 160],
   ]),
-  ...S("Fresh Fruits", "Equipment", true, [
+  // ── Fresh Fruits (stock) ───────────────────────────────────────────────────
+  // Its own group, not an Equipment section: fruit is consumed on board and
+  // re-ordered per flight, while everything under Equipment is service ware that
+  // comes back. Sharing a tab put a perishable on the same sheet page as cutlery.
+  ...S("Fresh Fruits", "Fresh Fruits", true, [
     ["banana", "Banana", "pcs", 8], ["apple", "Apple", "pcs", 15],
   ]),
 ].map((d) => ({
@@ -155,6 +177,9 @@ export const GALLEY_STOCK_DEFS = GALLEY_CATALOG.filter((d) => d.stock);
 /** Keys of the physical stock lines. */
 export const GALLEY_STOCK_KEYS = new Set(GALLEY_STOCK_DEFS.map((d) => d.key));
 
-/** True for groups whose items are physical stock (loadable / issuable). */
-export const isStockGroup = (group?: string) =>
-  group === "Beverages" || group === "Amenities" || group === "Equipment";
+/**
+ * True for groups whose items are physical stock (loadable / issuable) — i.e.
+ * every galley group except the computed Meals one. Deliberately not a list of
+ * the three seeded groups: a group added on the Item Profile is stock too.
+ */
+export const isStockGroup = (group?: string) => !!group && group !== MEALS_GROUP;
