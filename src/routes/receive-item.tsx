@@ -245,6 +245,8 @@ export default function ReceiveItem() {
   const [dpLines, setDpLines] = useState<FormLine[]>([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
   // Direct-receive attachments (approving authority is decided in Approval Management).
   const [dpAttachments, setDpAttachments] = useState<{ name: string; url: string; isImage: boolean }[]>([]);
+  /** Line ids blocked on a missing purchase rate — highlighted until filled. */
+  const [dpRateErrors, setDpRateErrors] = useState<string[]>([]);
   // Item rates come from Configuration → Price Setup (shared store), so a picked
   // item's Rate auto-fills and the user needn't type it. Lines the user edits by
   // hand are tracked in `dpManualRate` so auto-pricing never clobbers an override.
@@ -374,6 +376,8 @@ export default function ReceiveItem() {
   // Mark a line's rate as manually overridden, then apply the edit.
   const dpEditRate = (id: string, value: number) => {
     setDpManualRate(prev => new Set(prev).add(id));
+    // Clear the "rate required" flag the moment a real rate is entered.
+    if (value > 0) setDpRateErrors((prev) => prev.filter((x) => x !== id));
     dpUpdateLine(id, "rate", value);
   };
   const dpRateIsAuto = (l: FormLine) => l.name !== "" && !dpManualRate.has(l.id);
@@ -385,6 +389,7 @@ export default function ReceiveItem() {
     setDpDate(new Date().toISOString().slice(0, 10)); setDpChallanNo(""); setDpVehicleNo("");
     setDpLines([{ id: "d0", name: "", qty: 1, uom: "Kg", expiry: "", rate: 0 }]);
     setDpManualRate(new Set());
+    setDpRateErrors([]);
     dpAttachments.forEach((a) => { try { URL.revokeObjectURL(a.url); } catch { /* ignore */ } });
     setDpAttachments([]);
   };
@@ -460,7 +465,19 @@ export default function ReceiveItem() {
     if (!dpJustification.trim()) { toast.error("A justification is required for a direct receive."); return; }
     if (dpLines.some(l => !l.name.trim())) { toast.error("All item rows must have an item name."); return; }
     if (dpLines.some(l => (Number(l.qty) || 0) <= 0)) { toast.error("Every item needs a quantity greater than zero."); return; }
-    if (dpLines.some(l => (Number(l.rate) || 0) <= 0)) { toast.error("Every item needs a purchase rate greater than zero."); return; }
+    // A rate the price setup couldn't fill lands at 0.00, and a toast alone made
+    // Submit look like it did nothing. Mark the offending rows so the block is
+    // visible on the row that caused it.
+    const noRate = dpLines.filter(l => (Number(l.rate) || 0) <= 0);
+    if (noRate.length > 0) {
+      setDpRateErrors(noRate.map((l) => l.id));
+      toast.error(
+        `Enter a purchase rate for ${noRate.map((l) => l.name || "the blank row").join(", ")} — ` +
+        `no price is set up for ${noRate.length === 1 ? "it" : "them"}.`,
+      );
+      return;
+    }
+    setDpRateErrors([]);
 
     const stamp = Date.now().toString().slice(-5);
     const grnId = `GRN-${stamp}`;
@@ -511,9 +528,15 @@ export default function ReceiveItem() {
       status: "Pending",
     });
 
-    toast.success(`Direct receive ${dpRef} submitted to Approval Management — pending approval.`);
+    toast.success(`Direct receive ${dpRef} submitted — opening Approval Management.`);
     setDirectOpen(false);
     resetDirect();
+    // Take the user to the queue it was submitted to. Closing the dialog onto the
+    // page they started from left the submission with nowhere to go — especially
+    // arriving here from a requisition's "Initiate Purchase", where Approval
+    // Management is the very next step in the chain. Deferred so the approval
+    // store's write lands before that page mounts and reads it.
+    setTimeout(() => navigate("/approval-management"), 0);
   };
 
   // Approved POs — plus partially-received ones still awaiting their balance —
@@ -1347,10 +1370,22 @@ export default function ReceiveItem() {
                           value={line.rate || ""}
                           placeholder="0.00"
                           onChange={(e) => dpEditRate(line.id, Number(e.target.value))}
-                          className="h-8 text-xs text-right tabular-nums"
-                          title={dpRateIsAuto(line) && line.rate > 0 ? "Auto-filled from Price Setup — edit to override" : undefined}
+                          className={`h-8 text-xs text-right tabular-nums${
+                            dpRateErrors.includes(line.id)
+                              ? " border-destructive focus-visible:ring-destructive"
+                              : ""
+                          }`}
+                          title={dpRateErrors.includes(line.id)
+                            ? "A purchase rate is required — no price is set up for this item"
+                            : dpRateIsAuto(line) && line.rate > 0
+                              ? "Auto-filled from Price Setup — edit to override"
+                              : undefined}
                         />
-                        {dpRateIsAuto(line) && line.rate > 0 && (
+                        {dpRateErrors.includes(line.id) ? (
+                          <span className="mt-0.5 block text-right text-[9px] uppercase tracking-wider text-destructive">
+                            rate required
+                          </span>
+                        ) : dpRateIsAuto(line) && line.rate > 0 && (
                           <span className="mt-0.5 block text-right text-[9px] uppercase tracking-wider text-primary/70">
                             from Price Setup
                           </span>

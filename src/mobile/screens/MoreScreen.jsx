@@ -12,7 +12,7 @@ const INVENTORY = [
 ];
 
 const LOCAL_PURCHASE = [
-  { key: 'purchase-requisition', icon: '📋', label: 'Purchase Requisition', sub: 'Requisitions synced from web' },
+  { key: 'purchase-requisition', icon: '📋', label: 'Purchase Requisition', sub: 'Requisition, approve, receive & inspect' },
 ];
 
 const GALLEY = [

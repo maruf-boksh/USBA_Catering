@@ -10,12 +10,15 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import {
   Replace, Search, AlertTriangle, ShieldAlert, Factory, Truck,
   LayoutGrid, CheckCircle2, CornerUpLeft, Eye, X as CloseIcon, Receipt, Plus,
+  ChevronDown,
 } from "lucide-react";
 import { toast } from "sonner";
 import { ListExportActions } from "@/components/common/ListExportActions";
@@ -428,10 +431,16 @@ export default function LmcPage() {
     });
   };
 
-  const saveManual = (m: ManualLmc) => {
-    setManual((prev) => [m, ...prev]);
+  // One LMC can cover several flights at once (an aircraft swap or a station
+  // stoppage hits every leg on the ground), so this takes a batch and logs each
+  // as its own entry — the worklist rows stay per-flight exactly as before.
+  const saveManual = (list: ManualLmc[]) => {
+    if (list.length === 0) return;
+    setManual((prev) => [...list, ...prev]);
     setLogOpen(false);
-    toast.success(`LMC logged — ${m.type} on ${m.flight}.`);
+    toast.success(list.length === 1
+      ? `LMC logged — ${list[0].type} on ${list[0].flight}.`
+      : `LMC logged — ${list[0].type} on ${list.length} flights.`);
   };
 
   const viewRow = viewId ? rows.find((r) => r.it.id === viewId) : undefined;
@@ -823,63 +832,98 @@ function LogLmcDialog({
 }: {
   flightOptions: FlightOption[];
   onClose: () => void;
-  onSave: (m: ManualLmc) => void;
+  onSave: (list: ManualLmc[]) => void;
 }) {
-  const [flight, setFlight] = useState("");
-  const [type, setType] = useState<ManualType>("Aircraft Swap");
-  const [from, setFrom] = useState("");
-  const [to, setTo] = useState("");
+  /** Every flight this change applies to — one LMC can hit several legs. */
+  const [selectedFlights, setSelectedFlights] = useState<string[]>([]);
+  /** Change types per flight — a leg can take several at once (an aircraft swap
+   *  AND the pax change that came with it), and they differ leg to leg. */
+  const [typesByFlight, setTypesByFlight] = useState<Record<string, ManualType[]>>({});
+  // Values are captured PER FLIGHT AND TYPE — an aircraft swap, a pax count or a
+  // special meal figure is its own change on its own leg.
+  const [fromBy, setFromBy] = useState<Record<string, string>>({});
+  const [toBy, setToBy] = useState<Record<string, string>>({});
+  /** Manual severity per flight+type. Order-field types derive theirs instead. */
+  const [sevBy, setSevBy] = useState<Record<string, LmcSeverity>>({});
   const [reason, setReason] = useState("");
-  const [severity, setSeverity] = useState<LmcSeverity>(MANUAL_DEFAULT_SEV["Aircraft Swap"]);
-  const [sevTouched, setSevTouched] = useState(false);
   const [aircraftRows] = usePersistedState<Aircraft[]>("config-aircraft-rows", aircraftFleet);
   const aircraftOptions = useMemo(
     () => aircraftRows.filter((a) => a.status === "Active").map((a) => `${a.type} (${a.registration})`),
     [aircraftRows],
   );
 
-  const match = flightOptions.find((f) => f.flight === flight);
-  const ft = MANUAL_FT[type];
-  const orderField = MANUAL_ORDER_FIELD[type];
+  // The picker offers the flights scheduled for TODAY — an LMC is by definition
+  // same-day. If nothing is on today's schedule the full list is offered rather
+  // than an empty picker, and the caption says which it is showing.
+  const today = useMemo(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }, []);
+  const todaysFlights = useMemo(
+    () => flightOptions.filter((f) => f.date === today),
+    [flightOptions, today],
+  );
+  const dayFlights = todaysFlights.length > 0 ? todaysFlights : flightOptions;
+
+  /** Key for one change: this type, on this leg. */
+  const pk = (flight: string, t: ManualType) => `${flight}::${t}`;
+
+  const toggleFlight = (f: string) =>
+    setSelectedFlights((prev) => prev.includes(f) ? prev.filter((x) => x !== f) : [...prev, f]);
+  const selectedMatches = selectedFlights
+    .map((f) => flightOptions.find((o) => o.flight === f))
+    .filter((o): o is FlightOption => !!o);
+  const match = selectedMatches[0];
+  const typesOf = (flight: string) => typesByFlight[flight] ?? [];
+  const toggleType = (flight: string, t: ManualType) =>
+    setTypesByFlight((prev) => {
+      const cur = prev[flight] ?? [];
+      return { ...prev, [flight]: cur.includes(t) ? cur.filter((x) => x !== t) : [...cur, t] };
+    });
+  /** Every change being logged: one entry per flight × type. */
+  const pairs = selectedMatches.flatMap((m) => typesOf(m.flight).map((t) => ({ m, type: t })));
 
   // For an order-field change the "was" side is the order's real value — read-only
-  // ground truth. Mirror the selected flight's current figure into `from` whenever
-  // the flight or type changes. Free-entry types (aircraft / other) are left alone
-  // so the user's typed value survives a flight switch (onType clears on retype).
+  // ground truth. Mirror each leg's current figure into its own "was" slot whenever
+  // the selection or its types change. Free-entry types (aircraft / other) are left
+  // alone so a typed value survives.
+  const pairKey = pairs.map((p) => pk(p.m.flight, p.type)).join("|");
   useEffect(() => {
-    if (!orderField) return;
-    setFrom(match ? String(match[orderField] ?? "") : "");
-    // match is derived from `flight`; `flightOptions` refreshes when an order changes.
+    const next: Record<string, string> = {};
+    for (const p of pairs) {
+      const field = MANUAL_ORDER_FIELD[p.type];
+      if (field) next[pk(p.m.flight, p.type)] = String(p.m[field] ?? "");
+    }
+    setFromBy((prev) => ({ ...prev, ...next }));
+    // pairs is derived from the selection; `flightOptions` refreshes on an order change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flight, type, flightOptions]);
+  }, [pairKey, flightOptions]);
 
   // Order-field changes are classified by the amendment engine (lead time × impact),
-  // so the manual Severity control doesn't apply — surface the value it will get.
-  const derivedSeverity: LmcSeverity | null =
-    orderField && match
-      ? (isLmcLead(leadHoursToDeparture({ date: match.date, etd: match.etd })) ? "critical" : "minor")
-      : null;
+  // so the manual Severity control doesn't apply — surface the value each leg will
+  // get. Lead time is per flight, so two legs can land on different severities.
+  const severityOf = (m: FlightOption): LmcSeverity =>
+    isLmcLead(leadHoursToDeparture({ date: m.date, etd: m.etd })) ? "critical" : "minor";
+  /** The severity a given change will be logged with. */
+  const sevFor = (m: FlightOption, t: ManualType): LmcSeverity =>
+    MANUAL_ORDER_FIELD[t] ? severityOf(m) : (sevBy[pk(m.flight, t)] ?? MANUAL_DEFAULT_SEV[t]);
 
-  const onType = (t: ManualType) => {
-    setType(t);
-    if (!sevTouched) setSeverity(MANUAL_DEFAULT_SEV[t]); // auto-follow type until user overrides
-    // Control changes with the type — clear both sides. The effect re-fills the
-    // "was" side for order-field types; free-entry types start blank.
-    setFrom("");
-    setTo("");
-  };
-
-  // Render the from/to value control appropriate to the selected type.
-  const renderValueField = (which: "from" | "to") => {
-    const val = which === "from" ? from : to;
-    const setVal = which === "from" ? setFrom : setTo;
+  // Render the from/to value control appropriate to ONE change — this type on
+  // this leg.
+  const renderValueField = (which: "from" | "to", f: FlightOption, t: ManualType) => {
+    const ft = MANUAL_FT[t];
+    const orderField = MANUAL_ORDER_FIELD[t];
+    const key = pk(f.flight, t);
+    const val = (which === "from" ? fromBy : toBy)[key] ?? "";
+    const setVal = (v: string) =>
+      (which === "from" ? setFromBy : setToBy)((prev) => ({ ...prev, [key]: v }));
     const label = which === "from" ? ft.fromLabel : ft.toLabel;
     // The "was" side of an order-field change is locked to the order's real value.
     if (which === "from" && orderField) {
       return (
         <div>
           <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</label>
-          <Input value={val} readOnly disabled placeholder={match ? "" : "Select a flight first"} className="h-9 mt-1 text-sm bg-muted/50" />
+          <Input value={val} readOnly disabled className="h-9 mt-1 text-sm bg-muted/50" />
         </div>
       );
     }
@@ -907,121 +951,283 @@ function LogLmcDialog({
   };
 
   const save = () => {
-    if (!flight.trim()) { toast.error("Pick or enter a flight."); return; }
+    if (selectedFlights.length === 0) { toast.error("Pick at least one flight."); return; }
     if (!reason.trim()) { toast.error("A reason is required for a last-minute change."); return; }
     const user = getAuthUser();
 
-    // Order-field change → run it through the amendment engine so the order's real
-    // figures update and it flows into the same worklist / Approval / Accounts path
-    // as any in-window Order Management edit (rather than a disconnected note).
-    if (orderField) {
-      if (!match) { toast.error("That flight has no order to amend."); return; }
-      if (!to.trim()) { toast.error("Enter the new value."); return; }
-      let patch: Partial<FlightOrder>;
-      if (orderField === "etd") {
-        patch = { etd: to.trim() };
+    const missingType = selectedMatches.filter((m) => typesOf(m.flight).length === 0);
+    if (missingType.length > 0) {
+      toast.error(`Pick a change type for ${missingType.map((m) => m.flight).join(", ")}.`);
+      return;
+    }
+
+    // Split the changes by how they are recorded. Order-field changes run through
+    // the amendment engine so the order's real figures update and they flow into
+    // the same worklist / Approval / Accounts path as any in-window Order
+    // Management edit; the rest are standalone operational log entries. A single
+    // submission can carry both — one leg swapping aircraft while another drops
+    // pax — so each pair is handled on its own terms.
+    const orderPairs = pairs.filter((p) => MANUAL_ORDER_FIELD[p.type]);
+    const manualPairs = pairs.filter((p) => !MANUAL_ORDER_FIELD[p.type]);
+
+    // Validate every order-field change before touching a single order.
+    const patches: Array<{ m: FlightOption; type: ManualType; patch: Partial<FlightOrder> }> = [];
+    for (const p of orderPairs) {
+      const field = MANUAL_ORDER_FIELD[p.type]!;
+      const raw = (toBy[pk(p.m.flight, p.type)] ?? "").trim();
+      if (!raw) { toast.error(`Enter the new value for ${p.type} on ${p.m.flight}.`); return; }
+      if (field === "etd") {
+        patches.push({ m: p.m, type: p.type, patch: { etd: raw } });
       } else {
-        const n = Number(to);
-        if (!Number.isFinite(n) || n < 0) { toast.error("Enter a valid number."); return; }
-        patch = { [orderField]: n } as Partial<FlightOrder>;
+        const n = Number(raw);
+        if (!Number.isFinite(n) || n < 0) {
+          toast.error(`Enter a valid number for ${p.type} on ${p.m.flight}.`);
+          return;
+        }
+        patches.push({ m: p.m, type: p.type, patch: { [field]: n } as Partial<FlightOrder> });
       }
-      const rev = amendOrder(match.id, patch, {
+    }
+
+    // Each change is amended on its own — same engine, same audit trail, one
+    // amendment per order field. One already holding the new value is a no-op.
+    const amended: string[] = [];
+    let anyLmc = false;
+    for (const { m, type: t, patch } of patches) {
+      const rev = amendOrder(m.id, patch, {
         by: user?.name ?? "—",
         role: user?.role ?? "Operations",
         reason: reason.trim(),
       });
-      if (!rev) { toast.info("No change — that already matches the current order."); return; }
-      toast.success(`${type} on ${flight} — order amended${rev.isLmc ? " (last-minute change)" : ""}.`);
-      onClose();
-      return;
+      if (!rev) continue;
+      amended.push(`${t} on ${m.flight}`);
+      if (rev.isLmc) anyLmc = true;
     }
 
-    // Non-order operational event (aircraft swap, cancellation, nil-catering, other)
-    // — no order field to touch, so keep it as a standalone manual LMC log entry.
-    const leadHours = match ? leadHoursToDeparture({ date: match.date, etd: match.etd }) : null;
-    onSave({
-      id: `MLMC-${Date.now().toString(36)}`,
+    const stamp = Date.now().toString(36);
+    const entries: ManualLmc[] = manualPairs.map((p, i) => ({
+      id: `MLMC-${stamp}-${i}`,
       at: new Date().toISOString(),
       by: user?.name ?? "—",
       role: user?.role ?? "Operations",
-      flight: flight.trim(),
-      orderNo: match?.orderNo,
-      sector: match?.sector,
-      type,
-      from: from.trim() || undefined,
-      to: to.trim() || undefined,
+      flight: p.m.flight,
+      orderNo: p.m.orderNo,
+      sector: p.m.sector,
+      type: p.type,
+      from: (fromBy[pk(p.m.flight, p.type)] ?? "").trim() || undefined,
+      to: (toBy[pk(p.m.flight, p.type)] ?? "").trim() || undefined,
       reason: reason.trim(),
-      severity,
-      leadHours,
-    });
+      severity: sevFor(p.m, p.type),
+      leadHours: leadHoursToDeparture({ date: p.m.date, etd: p.m.etd }),
+    }));
+
+    if (amended.length > 0) {
+      toast.success(
+        `${amended.join(", ")} — order${amended.length === 1 ? "" : "s"} amended` +
+        `${anyLmc ? " (last-minute change)" : ""}.`,
+      );
+    } else if (orderPairs.length > 0 && entries.length === 0) {
+      toast.info(orderPairs.length === 1
+        ? "No change — that already matches the current order."
+        : "No change — those already match the current orders.");
+      return;
+    }
+
+    // onSave logs the operational entries and closes; with none, close here.
+    if (entries.length > 0) onSave(entries);
+    else onClose();
   };
 
   return (
     <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
-      <DialogContent className="w-full max-w-[95vw] sm:max-w-lg p-0 overflow-hidden">
-        <div className="bg-white text-slate-900 border-b px-6 py-4">
+      {/* Wide enough for the per-flight cards' two-column value grids, and capped
+          at the viewport so a submission covering several legs scrolls in the
+          body while the header and the actions stay put. */}
+      <DialogContent className="w-full max-w-[95vw] sm:max-w-3xl p-0 overflow-hidden max-h-[90vh] flex flex-col">
+        <div className="bg-white text-slate-900 border-b px-6 py-4 shrink-0">
           <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold">Operations</p>
           <h2 className="text-lg font-bold mt-0.5">Log Last-Minute Change</h2>
           <p className="text-xs text-slate-500 mt-0.5">Record an operational LMC that isn't an order edit — aircraft swap, cancellation, nil-catering, delay.</p>
         </div>
-        <div className="px-6 py-5 space-y-4">
+        <div className="px-6 py-5 space-y-4 flex-1 min-h-0 overflow-y-auto">
           <div>
-            <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Flight</label>
-            <Select value={flight} onValueChange={setFlight}>
-              <SelectTrigger className="h-9 mt-1 text-sm">
-                <SelectValue placeholder="Select flight" />
-              </SelectTrigger>
-              <SelectContent className="max-h-72">
-                {flightOptions.map((f) => (
-                  <SelectItem key={f.flight} value={f.flight}>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Flight(s)
+                {selectedFlights.length > 0 && (
+                  <span className="ml-1 font-normal normal-case text-primary">
+                    · {selectedFlights.length} selected
+                  </span>
+                )}
+              </label>
+              {selectedFlights.length > 0 && (
+                <button
+                  type="button"
+                  className="text-[11px] text-muted-foreground hover:text-foreground"
+                  onClick={() => setSelectedFlights([])}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            {/* Multi-select: one operational change often hits several legs at
+                once, and each still logs as its own LMC entry. */}
+            <Popover>
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  className="mt-1 h-9 w-full flex items-center justify-between rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  <span className={selectedFlights.length === 0 ? "text-muted-foreground truncate" : "truncate"}>
+                    {selectedFlights.length === 0 ? "Select flight(s)…" : selectedFlights.join(", ")}
+                  </span>
+                  <ChevronDown className="h-4 w-4 opacity-60 shrink-0" />
+                </button>
+              </PopoverTrigger>
+              <PopoverContent
+                align="start"
+                className="w-[var(--radix-popover-trigger-width)] p-1 max-h-72 overflow-y-auto overscroll-contain"
+                onWheel={(e) => e.stopPropagation()}
+              >
+                {dayFlights.length === 0 ? (
+                  <div className="px-2 py-3 text-xs text-muted-foreground">No scheduled flights found.</div>
+                ) : dayFlights.map((f) => (
+                  <label
+                    key={f.flight}
+                    className="flex items-center gap-2 px-2 py-1.5 text-sm cursor-pointer rounded hover:bg-muted/50"
+                  >
+                    <Checkbox
+                      checked={selectedFlights.includes(f.flight)}
+                      onCheckedChange={() => toggleFlight(f.flight)}
+                    />
                     <span className="font-medium">{f.flight}</span>
-                    <span className="text-muted-foreground ml-2">{`${f.sector} · ${f.orderNo}`}</span>
-                  </SelectItem>
+                    <span className="text-muted-foreground text-xs truncate">
+                      {`${f.sector} · ${f.orderNo} · STD ${f.etd}`}
+                    </span>
+                  </label>
                 ))}
-              </SelectContent>
-            </Select>
+              </PopoverContent>
+            </Popover>
             <p className="text-[11px] text-muted-foreground mt-1 h-4">
-              {match ? `${match.sector} · ${match.orderNo} · STD ${match.etd}` : ""}
+              {selectedMatches.length > 1
+                ? `${selectedMatches.length} legs — ${selectedMatches.map((m) => m.orderNo).join(", ")}`
+                : match
+                  ? `${match.sector} · ${match.orderNo} · STD ${match.etd}`
+                  : todaysFlights.length > 0
+                    ? `Scheduled today · ${today}`
+                    : `No flights scheduled today — showing all scheduled flights`}
             </p>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Type</label>
-              <Select value={type} onValueChange={(v) => onType(v as ManualType)}>
-                <SelectTrigger className="h-9 mt-1 text-sm"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {MANUAL_TYPES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Severity</label>
-              {orderField ? (
-                <div className="h-9 mt-1 flex items-center gap-2 rounded-md border border-input bg-muted/50 px-3">
-                  <Badge variant="outline" className={`h-5 px-1.5 text-[10px] font-bold uppercase ${SEVERITY_META[derivedSeverity ?? "minor"].cls}`}>
-                    {SEVERITY_META[derivedSeverity ?? "minor"].label}
-                  </Badge>
-                  <span className="text-[11px] text-muted-foreground">auto · from lead time</span>
-                </div>
-              ) : (
-                <Select value={severity} onValueChange={(v) => { setSeverity(v as LmcSeverity); setSevTouched(true); }}>
-                  <SelectTrigger className="h-9 mt-1 text-sm"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {(["critical", "major", "minor", "info"] as LmcSeverity[]).map((s) => (
-                      <SelectItem key={s} value={s}>{SEVERITY_META[s].label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              )}
-            </div>
-          </div>
+          {/* One card per selected leg, prefilled with that flight's own figures.
+              Type lives on the card too: a leg can take several changes at once,
+              and they differ leg to leg — each is captured, and logged, on its own. */}
+          {(
+            selectedMatches.length === 0 ? (
+              <div className="rounded-md border border-dashed border-input px-3 py-4 text-center text-xs text-muted-foreground">
+                Select one or more flights to record their changes.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {selectedMatches.map((f) => {
+                  const picked = typesOf(f.flight);
+                  return (
+                  <div key={f.flight} className="rounded-md border border-input bg-muted/20 overflow-hidden">
+                    {/* Tinted leg banner — with several cards stacked, this is
+                        what tells you whose change you are editing. */}
+                    <div className="flex items-baseline gap-2 flex-wrap bg-sky-50 border-b border-sky-100 px-3 py-2">
+                      <span className="text-sm font-semibold text-sky-900">{f.flight}</span>
+                      <span className="text-[11px] text-sky-800/80">
+                        {f.sector} · {f.orderNo} · STD {f.etd}
+                      </span>
+                    </div>
 
-          {ft.show && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {renderValueField("from")}
-              {renderValueField("to")}
-            </div>
+                    <div className="p-3 space-y-3">
+                    <div>
+                      <label className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        Type(s)
+                        {picked.length > 0 && (
+                          <span className="ml-1 font-normal normal-case text-primary">· {picked.length} selected</span>
+                        )}
+                      </label>
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <button
+                            type="button"
+                            className="mt-1 h-9 w-full flex items-center justify-between rounded-md border border-input bg-background px-3 text-sm"
+                          >
+                            <span className={picked.length === 0 ? "text-muted-foreground truncate" : "truncate"}>
+                              {picked.length === 0 ? "Select Change Type" : picked.join(", ")}
+                            </span>
+                            <ChevronDown className="h-4 w-4 opacity-60 shrink-0" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent
+                          align="start"
+                          className="w-[var(--radix-popover-trigger-width)] p-1 max-h-72 overflow-y-auto overscroll-contain"
+                          onWheel={(e) => e.stopPropagation()}
+                        >
+                          {MANUAL_TYPES.map((t) => (
+                            <label
+                              key={t}
+                              className="flex items-center gap-2 px-2 py-1.5 text-sm cursor-pointer rounded hover:bg-muted/50"
+                            >
+                              <Checkbox
+                                checked={picked.includes(t)}
+                                onCheckedChange={() => toggleType(f.flight, t)}
+                              />
+                              <span>{t}</span>
+                            </label>
+                          ))}
+                        </PopoverContent>
+                      </Popover>
+                    </div>
+
+                    {/* One block per change on this leg — its own severity and
+                        its own before/after values. */}
+                    {picked.map((t) => {
+                      const tft = MANUAL_FT[t];
+                      const tOrderField = MANUAL_ORDER_FIELD[t];
+                      const key = pk(f.flight, t);
+                      return (
+                        <div key={t} className="rounded-md border border-input bg-background p-3 space-y-3">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <span className="text-xs font-semibold">{t}</span>
+                            {tOrderField ? (
+                              <div className="flex items-center gap-1.5">
+                                <Badge variant="outline" className={`h-5 px-1.5 text-[10px] font-bold uppercase ${SEVERITY_META[severityOf(f)].cls}`}>
+                                  {SEVERITY_META[severityOf(f)].label}
+                                </Badge>
+                                <span className="text-[10px] text-muted-foreground">auto · from lead time</span>
+                              </div>
+                            ) : (
+                              <Select
+                                value={sevBy[key] ?? MANUAL_DEFAULT_SEV[t]}
+                                onValueChange={(v) => setSevBy((prev) => ({ ...prev, [key]: v as LmcSeverity }))}
+                              >
+                                <SelectTrigger className="h-7 w-32 text-xs"><SelectValue /></SelectTrigger>
+                                <SelectContent>
+                                  {(["critical", "major", "minor", "info"] as LmcSeverity[]).map((s) => (
+                                    <SelectItem key={s} value={s}>{SEVERITY_META[s].label}</SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            )}
+                          </div>
+                          {tft.show && (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              {renderValueField("from", f, t)}
+                              {renderValueField("to", f, t)}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    </div>
+                  </div>
+                  );
+                })}
+              </div>
+            )
           )}
 
           <div>
@@ -1029,7 +1235,7 @@ function LogLmcDialog({
             <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Why the change — feeds the audit trail" className="h-9 mt-1 text-sm" />
           </div>
         </div>
-        <div className="border-t bg-white px-6 py-3 flex items-center justify-end gap-2">
+        <div className="border-t bg-white px-6 py-3 flex items-center justify-end gap-2 shrink-0">
           <Button variant="outline" onClick={onClose}>Cancel</Button>
           <Button onClick={save}><Plus className="h-4 w-4 mr-1" /> Log LMC</Button>
         </div>

@@ -949,6 +949,66 @@ type MealOrderConfirmation = {
   };
 };
 
+// ── Production category (kitchen section) of a production order ───────────────
+// The BOM master is the authority: every BOM carries the section that cooks it
+// ("Hot Kitchen" / "Cold Kitchen" / "Bakery"), so an order is looked up by its
+// output item code first, then by name. Menu items planned without a BOM of
+// their own fall back to a small keyword read, and anything still unresolved
+// belongs to the main line — the hot kitchen. Read-only: nothing here changes an
+// order, it only decides which heading it is listed under.
+const BOM_CATEGORY_BY_KEY: Map<string, string> = (() => {
+  const m = new Map<string, string>();
+  const put = (k: string | undefined, v: string | undefined) => {
+    const key = (k ?? "").trim().toLowerCase();
+    if (key && v && !m.has(key)) m.set(key, v);
+  };
+  for (const b of billOfMaterials) {
+    put(b.itemCode, b.category);
+    put(b.itemName, b.category);
+    put(b.name, b.category);
+  }
+  return m;
+})();
+
+/** Dishes with no BOM yet — read the name the way a chef would. */
+const BAKERY_WORDS = ["bread", "bun", "toast", "cake", "pastry", "croissant", "muffin",
+  "donut", "doughnut", "cookie", "biscuit", "danish", "brownie", "tart", "jamun", "mousse", "tukra"];
+const COLD_WORDS = ["yoghurt", "yogurt", "salad", "fruit", "banana", "apple", "orange",
+  "custard", "firni", "raita", "juice", "cold", "chilled", "fresh cut", "boiled egg"];
+
+function productionCategoryOf(e: { outputItemCode?: string; outputItemName?: string; bom: string }): string {
+  const fromBom =
+    BOM_CATEGORY_BY_KEY.get((e.outputItemCode ?? "").trim().toLowerCase()) ??
+    BOM_CATEGORY_BY_KEY.get((e.outputItemName ?? "").trim().toLowerCase()) ??
+    BOM_CATEGORY_BY_KEY.get((e.bom ?? "").trim().toLowerCase());
+  if (fromBom) return fromBom;
+  const name = `${e.outputItemName ?? ""} ${e.bom ?? ""}`.toLowerCase();
+  if (BAKERY_WORDS.some((w) => name.includes(w))) return "Bakery";
+  if (COLD_WORDS.some((w) => name.includes(w))) return "Cold Kitchen";
+  return "Hot Kitchen";
+}
+
+/** Section order on screen — the kitchen sections first, anything else after. */
+const CATEGORY_ORDER = ["Hot Kitchen", "Cold Kitchen", "Bakery"];
+
+/** Group orders under their production category, in a stable section order. */
+function groupByProductionCategory<T extends { outputItemCode?: string; outputItemName?: string; bom: string }>(
+  list: T[],
+): { category: string; entries: T[] }[] {
+  const groups = new Map<string, T[]>();
+  for (const e of list) {
+    const c = productionCategoryOf(e);
+    groups.set(c, [...(groups.get(c) ?? []), e]);
+  }
+  return Array.from(groups.entries())
+    .sort(([a], [b]) => {
+      const ia = CATEGORY_ORDER.indexOf(a), ib = CATEGORY_ORDER.indexOf(b);
+      if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+      return a.localeCompare(b);
+    })
+    .map(([category, entries]) => ({ category, entries }));
+}
+
 export default function ProductionEntryPage() {
   useArrivalFlash();
   const location = useLocation();
@@ -981,11 +1041,19 @@ export default function ProductionEntryPage() {
   // pending, and those stay counted in the banner).
   const [initiateOpen, setInitiateOpen] = useState(false);
   const [initiateSel, setInitiateSel] = useState<Set<string>>(new Set());
-  // Cumulative log of every bulk-initiation run this session — each run keeps its
-  // own timestamp + order snapshot, so "View Details" shows the full history
+  // Cumulative log of every bulk-initiation run — each run keeps its own
+  // timestamp + order snapshot, so "View Details" shows the full history
   // (batch of 10, then batch of 4, …) and the banner can summarise the latest.
+  //
+  // Held for the DAY, not the session: the banner is the day's initiation record,
+  // so it survives a reload and rolls over to a fresh record the next day. Runs
+  // from an earlier day are dropped when the first run of a new day is recorded.
   type InitiationRun = { at: string; orders: NumberedEntry[] };
-  const [initiationRuns, setInitiationRuns] = useState<InitiationRun[]>([]);
+  const [initiationRuns, setInitiationRuns] = usePersistedState<InitiationRun[]>(
+    "production-initiation-runs", [],
+  );
+  /** The day the banner is reporting on. */
+  const initiationDay = toLocalDateStr(new Date());
   const [initiatedDetailOpen, setInitiatedDetailOpen] = useState(false);
   // "Total Approved" list — every order that has been approved (still-pending +
   // already-initiated), opened from the clickable count in the banner.
@@ -1591,6 +1659,29 @@ export default function ProductionEntryPage() {
     initiatableEntries.length > 0 && initiatableEntries.every((e) => initiateSel.has(e.id));
   const toggleInitiateAll = () =>
     setInitiateSel(allInitiateSelected ? new Set() : new Set(initiatableEntries.map((e) => e.id)));
+  // The picker lists the same orders, segregated by the kitchen section that
+  // cooks them, so each section sees its own run. Selection is unchanged — one
+  // flat set of ids — the grouping is only how the rows are laid out.
+  const initiateGroups = groupByProductionCategory(initiatableEntries);
+  const groupAllSelected = (entries: NumberedEntry[]) =>
+    entries.length > 0 && entries.every((e) => initiateSel.has(e.id));
+  /** Part of the section is ticked — the box shows a dash, not a tick. */
+  const groupSomeSelected = (entries: NumberedEntry[]) =>
+    entries.some((e) => initiateSel.has(e.id)) && !groupAllSelected(entries);
+  /**
+   * Tick a section: every order in THAT section is marked, and nothing else is
+   * touched — the other sections keep whatever they were. Ticking again clears
+   * the section the same way. The header's select-all is untouched and still
+   * marks or clears the whole list in one go.
+   */
+  const toggleInitiateGroup = (entries: NumberedEntry[]) => {
+    const on = !groupAllSelected(entries);
+    setInitiateSel((prev) => {
+      const next = new Set(prev);
+      for (const e of entries) { if (on) next.add(e.id); else next.delete(e.id); }
+      return next;
+    });
+  };
   // Initiate only the ticked orders; the unticked ones stay Approved and remain
   // counted in the banner for a later run.
   const confirmBulkInitiate = () => {
@@ -1599,8 +1690,12 @@ export default function ProductionEntryPage() {
     for (const e of targets) {
       updateProductionEntryStatus(e.id, "Production Initiation");
     }
-    const at = new Date().toISOString().slice(0, 16).replace("T", " ");
-    setInitiationRuns((prev) => [...prev, { at, orders: targets }]);
+    // Stamped in local time — the banner's record is a day record, so the day it
+    // carries has to be the day the user is actually on.
+    const now = new Date();
+    const at = `${toLocalDateStr(now)} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    // A run belongs to its day: recording today's first run clears yesterday's.
+    setInitiationRuns((prev) => [...prev.filter((r) => r.at.slice(0, 10) === initiationDay), { at, orders: targets }]);
     toast.success(
       `${targets.length} order${targets.length === 1 ? "" : "s"} moved to Production Initiation — now available in the Production Entry order list.`,
     );
@@ -1608,15 +1703,17 @@ export default function ProductionEntryPage() {
   };
   // Derived initiation summary — latest run for the banner, cumulative counts for
   // the "Total Approved" figure (still-pending + everything already initiated).
-  const lastRun = initiationRuns[initiationRuns.length - 1];
-  const totalInitiated = initiationRuns.reduce((s, r) => s + r.orders.length, 0);
+  // Scoped to the current day, so the banner reads as today's initiation record.
+  const todaysRuns = initiationRuns.filter((r) => r.at.slice(0, 10) === initiationDay);
+  const lastRun = todaysRuns[todaysRuns.length - 1];
+  const totalInitiated = todaysRuns.reduce((s, r) => s + r.orders.length, 0);
   const totalApproved = initiatableEntries.length + totalInitiated;
   // Every approved order tagged with whether it's already been initiated. The
   // snapshot orders in `initiationRuns` keep their frozen "Approved" status, so
   // the flag (not e.status) is the source of truth for the display badge.
   const allApprovedList: { entry: NumberedEntry; initiated: boolean }[] = [
     ...initiatableEntries.map((e) => ({ entry: e, initiated: false })),
-    ...initiationRuns.flatMap((r) => r.orders.map((e) => ({ entry: e, initiated: true }))),
+    ...todaysRuns.flatMap((r) => r.orders.map((e) => ({ entry: e, initiated: true }))),
   ];
 
   // ── Row-level LMC awareness ─────────────────────────────────────────────────
@@ -2244,45 +2341,76 @@ export default function ProductionEntryPage() {
           </div>
 
           {/* Bulk Production Initiation — initiate every Approved order at once.
-              The per-row menu still offers the same action one order at a time. */}
-          {initiatableEntries.length > 0 && (
+              The per-row menu still offers the same action one order at a time.
+
+              The banner is the DAY's initiation record: it stays up once the
+              day's orders are initiated (nothing pending) and only its text is
+              rewritten as further orders are approved and initiated — never a
+              second line. Once nothing is pending it reads the day's total with
+              the time of the last initiation, and the Initiate button goes. */}
+          {(initiatableEntries.length > 0 || todaysRuns.length > 0) && (
             <div className="flex items-center justify-between gap-3 mb-3 rounded-md border border-primary/30 bg-primary/[0.06] px-3 py-2">
               <span className="text-xs font-medium text-foreground shrink-0">
-                {initiatableEntries.length} approved order{initiatableEntries.length === 1 ? "" : "s"} ready for production initiation
-                {totalApproved > 0 && (
+                {initiatableEntries.length > 0 ? (
                   <>
-                    {" "}(Total Approved:{" "}
-                    <button
-                      type="button"
-                      className="font-semibold text-primary underline underline-offset-2 hover:no-underline"
-                      onClick={() => setApprovedListOpen(true)}
-                      title="View all approved production orders"
-                    >
-                      {totalApproved}
-                    </button>
-                    )
+                    {initiatableEntries.length} approved order{initiatableEntries.length === 1 ? "" : "s"} ready for production initiation
+                    {totalApproved > 0 && (
+                      <>
+                        {" "}(Total Approved:{" "}
+                        <button
+                          type="button"
+                          className="font-semibold text-primary underline underline-offset-2 hover:no-underline"
+                          onClick={() => setApprovedListOpen(true)}
+                          title="View all approved production orders"
+                        >
+                          {totalApproved}
+                        </button>
+                        )
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    {totalInitiated} Production Order{totalInitiated === 1 ? "" : "s"} {totalInitiated === 1 ? "has" : "have"} been initiated, 0 pending
                   </>
                 )}
               </span>
               {lastRun && (
                 <span className="flex-1 min-w-0 text-center text-xs text-muted-foreground truncate">
-                  {lastRun.orders.length} Production Order{lastRun.orders.length === 1 ? "" : "s"} {lastRun.orders.length === 1 ? "has" : "have"} been initiated and {initiatableEntries.length} Pending from the latest production order.{" "}
-                  <button
-                    type="button"
-                    className="font-medium text-primary underline underline-offset-2 hover:no-underline"
-                    onClick={() => setInitiatedDetailOpen(true)}
-                  >
-                    View Details
-                  </button>
+                  {initiatableEntries.length > 0 ? (
+                    <>
+                      {lastRun.orders.length} Production Order{lastRun.orders.length === 1 ? "" : "s"} {lastRun.orders.length === 1 ? "has" : "have"} been initiated and {initiatableEntries.length} Pending from the latest production order.
+                    </>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5">
+                      <Clock className="h-3 w-3" />
+                      <span className="tabular-nums">Last initiated {lastRun.at}</span>
+                    </span>
+                  )}
                 </span>
               )}
-              <Button
-                size="sm"
-                className="h-7 px-2.5 text-[11px] shrink-0"
-                onClick={openBulkInitiate}
-              >
-                <Zap className="h-3 w-3 mr-1" /> Initiate {initiatableEntries.length}
-              </Button>
+              <div className="flex items-center gap-2 shrink-0">
+                {todaysRuns.length > 0 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 px-2.5 text-[11px]"
+                    onClick={() => setInitiatedDetailOpen(true)}
+                    title="Today's full initiation details"
+                  >
+                    View Details
+                  </Button>
+                )}
+                {initiatableEntries.length > 0 && (
+                  <Button
+                    size="sm"
+                    className="h-7 px-2.5 text-[11px]"
+                    onClick={openBulkInitiate}
+                  >
+                    <Zap className="h-3 w-3 mr-1" /> Initiate {initiatableEntries.length}
+                  </Button>
+                )}
+              </div>
             </div>
           )}
 
@@ -2430,31 +2558,65 @@ export default function ProductionEntryPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {initiatableEntries.map((e) => (
-                    <TableRow
-                      key={e.id}
-                      className={cn("cursor-pointer hover:bg-muted/30", initiateSel.has(e.id) && "bg-primary/[0.04]")}
-                      onClick={() => toggleInitiate(e.id)}
-                    >
-                      <TableCell onClick={(ev) => ev.stopPropagation()}>
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4 accent-primary cursor-pointer align-middle"
-                          checked={initiateSel.has(e.id)}
-                          onChange={() => toggleInitiate(e.id)}
-                          aria-label={`Select ${e.id}`}
-                        />
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">{e.id}</TableCell>
-                      <TableCell className="text-sm">{e.date}</TableCell>
-                      <TableCell className="text-sm">
-                        {e.outputItemCode && (
-                          <span className="font-mono text-xs text-muted-foreground mr-1">{e.outputItemCode}</span>
-                        )}
-                        {e.outputItemName ?? e.bom}
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums">{(e.orderQty ?? e.producedQty).toLocaleString()}</TableCell>
-                    </TableRow>
+                  {/* One block per production category — the section heading
+                      carries its own select-all so a kitchen can take its whole
+                      list in one tick. */}
+                  {initiateGroups.map((g) => (
+                    <Fragment key={g.category}>
+                      <TableRow
+                        className="bg-muted/60 hover:bg-muted/70 cursor-pointer"
+                        onClick={() => toggleInitiateGroup(g.entries)}
+                        title={`${groupAllSelected(g.entries) ? "Unmark" : "Mark"} all ${g.category} orders`}
+                      >
+                        <TableCell onClick={(ev) => ev.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 accent-primary cursor-pointer align-middle"
+                            checked={groupAllSelected(g.entries)}
+                            // Part-marked reads as a dash, so a section is never
+                            // shown as fully ticked when it isn't.
+                            ref={(el) => { if (el) el.indeterminate = groupSomeSelected(g.entries); }}
+                            onChange={() => toggleInitiateGroup(g.entries)}
+                            aria-label={`Select all ${g.category} orders`}
+                            title={`${groupAllSelected(g.entries) ? "Unmark" : "Mark"} all ${g.category} orders`}
+                          />
+                        </TableCell>
+                        <TableCell colSpan={4} className="py-2">
+                          <span className="text-xs font-semibold uppercase tracking-wider text-foreground">
+                            {g.category}
+                          </span>
+                          <span className="ml-2 text-[11px] text-muted-foreground tabular-nums">
+                            {g.entries.filter((e) => initiateSel.has(e.id)).length} of {g.entries.length} marked
+                          </span>
+                        </TableCell>
+                      </TableRow>
+                      {g.entries.map((e) => (
+                        <TableRow
+                          key={e.id}
+                          className={cn("cursor-pointer hover:bg-muted/30", initiateSel.has(e.id) && "bg-primary/[0.04]")}
+                          onClick={() => toggleInitiate(e.id)}
+                        >
+                          <TableCell onClick={(ev) => ev.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              className="h-4 w-4 accent-primary cursor-pointer align-middle"
+                              checked={initiateSel.has(e.id)}
+                              onChange={() => toggleInitiate(e.id)}
+                              aria-label={`Select ${e.id}`}
+                            />
+                          </TableCell>
+                          <TableCell className="font-mono text-xs">{e.id}</TableCell>
+                          <TableCell className="text-sm">{e.date}</TableCell>
+                          <TableCell className="text-sm">
+                            {e.outputItemCode && (
+                              <span className="font-mono text-xs text-muted-foreground mr-1">{e.outputItemCode}</span>
+                            )}
+                            {e.outputItemName ?? e.bom}
+                          </TableCell>
+                          <TableCell className="text-right tabular-nums">{(e.orderQty ?? e.producedQty).toLocaleString()}</TableCell>
+                        </TableRow>
+                      ))}
+                    </Fragment>
                   ))}
                 </TableBody>
               </Table>
@@ -2475,8 +2637,8 @@ export default function ProductionEntryPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Initiated orders — full session log, one group per initiation run, each
-          stamped with its initiation time (batch of 10, then batch of 4, …). */}
+      {/* Initiated orders — the DAY's full log, one group per initiation run,
+          each stamped with its initiation time (batch of 10, then batch of 4, …). */}
       <Dialog open={initiatedDetailOpen} onOpenChange={setInitiatedDetailOpen}>
         <DialogContent className="max-w-3xl max-h-[85vh] overflow-hidden flex flex-col p-0 gap-0">
           <DialogHeader className="px-6 pt-5 pb-4 border-b border-border">
@@ -2485,12 +2647,12 @@ export default function ProductionEntryPage() {
               Initiated Production Orders
             </DialogTitle>
             <p className="text-xs text-muted-foreground mt-1">
-              {totalInitiated} order{totalInitiated === 1 ? "" : "s"} moved to Production Initiation across {initiationRuns.length} run{initiationRuns.length === 1 ? "" : "s"}.
+              {initiationDay} — {totalInitiated} order{totalInitiated === 1 ? "" : "s"} moved to Production Initiation across {todaysRuns.length} run{todaysRuns.length === 1 ? "" : "s"}.
             </p>
           </DialogHeader>
 
           <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
-            {initiationRuns.map((run, ri) => (
+            {todaysRuns.map((run, ri) => (
               <div key={ri}>
                 <div className="flex items-center justify-between gap-3 mb-2">
                   <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -2512,18 +2674,34 @@ export default function ProductionEntryPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {run.orders.map((e) => (
-                        <TableRow key={e.id}>
-                          <TableCell className="font-mono text-xs">{e.id}</TableCell>
-                          <TableCell className="text-sm">{e.date}</TableCell>
-                          <TableCell className="text-sm">
-                            {e.outputItemCode && (
-                              <span className="font-mono text-xs text-muted-foreground mr-1">{e.outputItemCode}</span>
-                            )}
-                            {e.outputItemName ?? e.bom}
-                          </TableCell>
-                          <TableCell className="text-right tabular-nums">{(e.orderQty ?? e.producedQty).toLocaleString()}</TableCell>
-                        </TableRow>
+                      {/* Each initiation is listed under the kitchen sections it
+                          went to, the same segregation the picker uses. */}
+                      {groupByProductionCategory(run.orders).map((g) => (
+                        <Fragment key={g.category}>
+                          <TableRow className="bg-muted/60 hover:bg-muted/60">
+                            <TableCell colSpan={4} className="py-2">
+                              <span className="text-xs font-semibold uppercase tracking-wider text-foreground">
+                                {g.category}
+                              </span>
+                              <span className="ml-2 text-[11px] text-muted-foreground tabular-nums">
+                                {g.entries.length} order{g.entries.length === 1 ? "" : "s"}
+                              </span>
+                            </TableCell>
+                          </TableRow>
+                          {g.entries.map((e) => (
+                            <TableRow key={e.id}>
+                              <TableCell className="font-mono text-xs">{e.id}</TableCell>
+                              <TableCell className="text-sm">{e.date}</TableCell>
+                              <TableCell className="text-sm">
+                                {e.outputItemCode && (
+                                  <span className="font-mono text-xs text-muted-foreground mr-1">{e.outputItemCode}</span>
+                                )}
+                                {e.outputItemName ?? e.bom}
+                              </TableCell>
+                              <TableCell className="text-right tabular-nums">{(e.orderQty ?? e.producedQty).toLocaleString()}</TableCell>
+                            </TableRow>
+                          ))}
+                        </Fragment>
                       ))}
                     </TableBody>
                   </Table>

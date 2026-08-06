@@ -24,7 +24,7 @@ import { toast } from "sonner";
 import { activeItems } from "@/lib/sample-data";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import { useWorkflow, type WfRequisition, type WfDemandItem } from "@/lib/workflow-store";
-import { useArrivalFlash } from "@/lib/arrival-flash";
+import { useArrivalFlash, peekArrivalRows } from "@/lib/arrival-flash";
 import {
   seedRequisitions,
   procurementStage,
@@ -120,6 +120,10 @@ type PRPrefill = {
 
 export default function PurchaseRequisitionPage() {
   useArrivalFlash();
+  // Arrived from a deep link that targets one requisition (e.g. a delay's
+  // purchase reference) — grab it once so the table can jump to the page holding
+  // that row, otherwise a paginated-away row never flashes.
+  const [arrivalRowId] = useState<string | undefined>(() => peekArrivalRows()[0]);
   const navigate = useNavigate();
   const { wfRequisitions, updateRequisition } = useWorkflow();
   const [requisitions, setRequisitions] = usePersistedState<PurchaseRequisition[]>("purchase-requisitions", seedRequisitions);
@@ -138,6 +142,49 @@ export default function PurchaseRequisitionPage() {
   // rejected / closed the form is read-only.
   const isEditable = (r: PurchaseRequisition) =>
     r.status === "Pending Approval" || r.status === "Draft";
+
+  /**
+   * An approved requisition with quantity still outstanding is ready to be
+   * bought. Terminal requisitions (closed / cancelled / rejected) are not, and
+   * neither is one already fully received.
+   */
+  const canInitiatePurchase = (r: PurchaseRequisition) => {
+    if (r.status.toLowerCase() !== "approved") return false;
+    const { ordered, received } = prReceived(r);
+    return ordered > 0 && received < ordered;
+  };
+
+  /**
+   * Initiate the purchase: hand the requisition's outstanding lines to Receive
+   * Items' Direct Receive, which opens pre-filled on arrival. Recording the
+   * receipt there runs the existing approval → GRN → stock path and writes the
+   * received quantity back onto this requisition, so nothing is duplicated here.
+   */
+  const initiatePurchase = (r: PurchaseRequisition) => {
+    const lines = r.lines
+      .map((l) => ({
+        name: l.itemName,
+        qty: Math.max(0, l.qty - (l.receivedQty ?? 0)),
+        uom: l.uom,
+        prLineId: l.id,
+      }))
+      .filter((l) => l.qty > 0);
+    if (lines.length === 0) { toast.info(`${r.id} is already fully received.`); return; }
+    try {
+      sessionStorage.setItem("direct-receive-prefill", JSON.stringify({
+        source: `Purchase Requisition ${r.id}`,
+        prId: r.id,
+        justification: r.justification,
+        officeId: r.officeId,
+        warehouseId: r.warehouseId,
+        lines,
+      }));
+    } catch {
+      toast.error("Could not open Direct Receive — browser storage unavailable.");
+      return;
+    }
+    navigate("/receive-item");
+  };
 
   /**
    * Persist an edited requisition. If it lives in our local seed array we
@@ -380,6 +427,7 @@ export default function PurchaseRequisitionPage() {
               columns={cols}
               searchKeys={["id", "requestedBy", "status"]}
               selectable={false}
+              flashRowId={arrivalRowId}
               actions={(r) => (
                 <div className="flex items-center gap-1.5">
                   {isPrApprovalOverdue(r) && (
@@ -391,6 +439,17 @@ export default function PurchaseRequisitionPage() {
                       title={`Re-send ${r.id} for approval`}
                     >
                       <Send className="h-3 w-3 mr-1" /> Re-send
+                    </Button>
+                  )}
+                  {canInitiatePurchase(r) && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2 text-[11px] border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+                      onClick={() => initiatePurchase(r)}
+                      title={`Buy ${r.id} — opens Direct Receive`}
+                    >
+                      <ShoppingCart className="h-3 w-3 mr-1" /> Initiate Purchase
                     </Button>
                   )}
                   {isEditable(r) && (

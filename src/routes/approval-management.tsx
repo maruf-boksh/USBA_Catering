@@ -1539,12 +1539,23 @@ export default function ApprovalManagementPage() {
       });
   }, [wastageEntries]);
 
+  // A delay's fulfilment queues where the WORK is: meals drawn from the kitchen
+  // are a PRODUCTION decision, so they queue under Production — the same place
+  // the delay's production orders land — while stock issues stay under Delay
+  // Refreshment. (A spot buy already queues under Purchase Req: it is raised as
+  // a Purchase Requisition, not as one of these records.) Either way it is the
+  // same record: approving writes back to `delay-approval-records`, keyed off
+  // the `DA-AP-` id rather than the category.
   const delayApprovalItems: ApprovalItem[] = useMemo(() => {
     return delayApprovals.map((da) => ({
       id: `DA-AP-${da.id}`,
-      category: "Delay Refreshment Fulfillment" as Category,
+      category: (da.fulfillmentType === "From Production"
+        ? "Production Order"
+        : "Delay Refreshment Fulfillment") as Category,
       refId: da.id,
-      title: `Delay Refreshment — ${da.flightNumber} (${da.sector})`,
+      title: da.fulfillmentType === "From Production"
+        ? `Delay Refreshment (From Production) — ${da.flightNumber} (${da.sector})`
+        : `Delay Refreshment — ${da.flightNumber} (${da.sector})`,
       requestedBy: da.submittedBy,
       requestedAt: da.submittedAt,
       summary: `${da.delayDurationHours}h delay · ${da.paxCount + da.crewCount} pax+crew · ${da.fulfillmentType} · ৳ ${da.totalCost.toLocaleString()}`,
@@ -2024,7 +2035,9 @@ export default function ApprovalManagementPage() {
       if (!silent) toast.success(`${it.refId} — Return items approved for Airport Store.`);
       return;
     }
-    if (it.category === "Delay Refreshment Fulfillment") {
+    // Keyed off the id, not the category: a production-sourced delay fulfilment
+    // is filed under Production, and it is still this record that clears.
+    if (it.id.startsWith("DA-AP-")) {
       setDelayApprovals((prev) =>
         prev.map((da) =>
           da.id === it.refId
@@ -2367,7 +2380,7 @@ export default function ApprovalManagementPage() {
             : ra,
         ),
       );
-    } else if (it.category === "Delay Refreshment Fulfillment") {
+    } else if (it.id.startsWith("DA-AP-")) {
       setDelayApprovals((prev) =>
         prev.map((da) =>
           da.id === it.refId

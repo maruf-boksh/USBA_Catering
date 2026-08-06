@@ -30,7 +30,9 @@ import { cn } from "@/lib/utils";
 import { roundQty } from "@/lib/num";
 import { toast } from "sonner";
 import { flagArrival } from "@/lib/arrival-flash";
-import { addPurchaseRequisition, getPurchaseRequisitions, type PRLineItem } from "@/lib/purchase-requisitions";
+import {
+  addPurchaseRequisition, getPurchaseRequisitions, prReceived, type PRLineItem,
+} from "@/lib/purchase-requisitions";
 import { ListExportActions } from "@/components/common/ListExportActions";
 import { filterMeta as listExportFilterMeta } from "@/lib/list-export";
 import { useFlightOrders } from "@/lib/flight-orders-store";
@@ -48,6 +50,9 @@ import {
 } from "@/lib/delay-production-fulfillment";
 import { isProducedItem } from "@/lib/meal-recipe";
 import { getItemProfiles } from "@/lib/item-profiles";
+import {
+  newAllocationId, isPackaged, usesRun, type PackagingAllocation,
+} from "@/lib/packaging-allocations";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -59,6 +64,8 @@ export type DelayStatus =
   | "Approved"
   | "Rejected"
   | "Sent To Production"
+  /** Packaging run raised — the meals are being packed, not yet dispatched. */
+  | "Sent To Packaging"
   | "Sent To Dispatch"
   | "Dispatched"
   | "Closed";
@@ -135,6 +142,14 @@ export type DelayEvent = {
   /** Events logged together in one submission share a batch id, so the
    *  production check can present the whole delayed set as one worklist. */
   batchId?: string;
+  /** When the run's items were taken out of stock. Set on Send To Packaging,
+   *  cleared (and reversed) if the run is cancelled. */
+  stockDeductedAt?: string;
+  /** Packaging allocations raised for this delay (PKA-… ids in the shared
+   *  `packaging-allocations` store). The delay's cooked items are packed on the
+   *  Packaging board with the flight's scheduled meals, under the same flight
+   *  header — this is the link between the two. */
+  packagingAllocationIds?: string[];
   /** Every routing decision taken for this delay — which items went to stock,
    *  to the kitchen, or out to be bought, and the document each raised. The
    *  View modal reads this to show the full fulfilment breakdown. */
@@ -303,6 +318,28 @@ function to24hGmt6(hhmm: string): string {
   return `${m[1].padStart(2, "0")}:${m[2]} GMT+6`;
 }
 
+/**
+ * The date a delayed flight actually departs. A 23:55 departure pushed 2 hours
+ * leaves at 01:55 the NEXT day, so it is served that day's menu — the day-wise
+ * menu config follows the revised departure, not the original schedule. Returns
+ * the original date when there is no delay, no ETD, or no midnight rollover.
+ */
+function delayedServiceDate(date: string, etd: string | undefined, hours: number): string {
+  if (!etd || !(hours > 0)) return date;
+  const m = etd.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return date;
+  const shift = Math.floor(
+    (parseInt(m[1]) * 60 + parseInt(m[2]) + Math.round(hours * 60)) / (24 * 60),
+  );
+  if (shift <= 0) return date;
+  const d = new Date(date + "T00:00:00");
+  if (Number.isNaN(d.getTime())) return date;
+  d.setDate(d.getDate() + shift);
+  // Local parts, not toISOString() — the schedule is Dhaka-local, and UTC would
+  // roll the date back a day.
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 /** Add `hours` to an "HH:MM" ETD string; returns new "HH:MM" (wraps past midnight). */
 function addHoursToEtd(etd: string, hours: number): string {
   const match = etd.match(/^(\d{1,2}):(\d{2})$/);
@@ -323,10 +360,64 @@ const STATUS_BADGE: Record<DelayStatus, string> = {
   "Approved":           "bg-emerald-100 text-emerald-700",
   "Rejected":           "bg-red-100 text-red-700",
   "Sent To Production": "bg-indigo-100 text-indigo-700",
+  "Sent To Packaging":  "bg-sky-100 text-sky-700",
   "Sent To Dispatch":   "bg-teal-100 text-teal-700",
   "Dispatched":         "bg-emerald-200 text-emerald-800",
   "Closed":             "bg-gray-100 text-gray-500",
 };
+
+/**
+ * Minutes until a flight's REVISED departure — the clock the whole delay runs
+ * against. Null when the schedule can't be resolved. Negative once it has gone.
+ */
+function minutesToRevisedDeparture(ev: {
+  flightDate: string; originalEtd?: string; delayDurationHours: number;
+}): number | null {
+  if (!ev.originalEtd) return null;
+  const m = ev.originalEtd.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const date = delayedServiceDate(ev.flightDate, ev.originalEtd, ev.delayDurationHours);
+  const hhmm = addHoursToEtd(ev.originalEtd, ev.delayDurationHours);
+  const dep = new Date(`${date}T${hhmm}:00`);
+  if (Number.isNaN(dep.getTime())) return null;
+  return Math.round((dep.getTime() - Date.now()) / 60000);
+}
+
+/** "2h 15m" / "45m" — compact enough to sit in a table cell. */
+function shortDuration(mins: number): string {
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+/**
+ * Countdown chip against the revised departure. A delay is defined by its new
+ * departure time, so the list has to say which one is 40 minutes out — without
+ * it every row looks equally urgent.
+ */
+function departureChip(ev: {
+  flightDate: string; originalEtd?: string; delayDurationHours: number; status: DelayStatus;
+}) {
+  if (["Dispatched", "Closed", "Rejected"].includes(ev.status)) return null;
+  const mins = minutesToRevisedDeparture(ev);
+  // Nothing to count down to once the slot has passed — the column already
+  // carries the delay itself, so a "Departed" tag on every past flight is noise.
+  if (mins == null || mins < 0) return null;
+  const cls = mins <= 120 ? "border-red-200 bg-red-50 text-red-700"
+    : mins <= 360 ? "border-amber-200 bg-amber-50 text-amber-700"
+    : "border-emerald-200 bg-emerald-50 text-emerald-700";
+  return (
+    <span
+      title="Time to revised departure"
+      className={cn(
+        "inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap",
+        cls,
+      )}
+    >
+      T-{shortDuration(mins)}
+    </span>
+  );
+}
 
 function delayBadge(status: DelayStatus) {
   return (
@@ -700,6 +791,13 @@ export default function DelayManagementPage() {
   const [delayApprovals, setDelayApprovals] = usePersistedState<DelayApprovalRecord[]>("delay-approval-records", SEED_APPROVALS);
   const [dispatchRecords, setDispatchRecords] = usePersistedState<DispatchRecordLike[]>("dispatch-records", []);
   const [packagingRows, setPackagingRows]   = usePersistedState<PackagingRowLike[]>("dispatch-packaging-rows", []);
+  // The Packaging board's own rows — run × flight × qty. A delay's cooked items
+  // are packed there alongside the flight's scheduled meals, so Send To
+  // Packaging writes real allocations rather than a parallel record.
+  const [pkgAllocations, setPkgAllocations] = usePersistedState<PackagingAllocation[]>("packaging-allocations", []);
+  // QC/packaging batches, read-only — used to link an allocation back to the
+  // batch its run passed QC on, exactly as New Packaging does.
+  const [pkgBatches] = usePersistedState<Array<{ id: string; batch: string }>>("packaging-batches", []);
   const { applyStockDeltas, addProductionEntry, productionEntries } = useWorkflow();
 
   // Ensure the demo dispatch record is present in dispatch-records on first load
@@ -728,7 +826,7 @@ export default function DelayManagementPage() {
           changed = true;
           return { ...e, status: "Dispatched" as DelayStatus };
         }
-        if (e.status === "Sent To Dispatch" && e.dispatchId) {
+        if ((e.status === "Sent To Packaging" || e.status === "Sent To Dispatch") && e.dispatchId) {
           const rows = packagingRows.filter((r) => r.dspRef === e.dispatchId);
           if (rows.length > 0 && rows.every((r) => r.packagingStatus === "Dispatched")) {
             changed = true;
@@ -851,7 +949,8 @@ export default function DelayManagementPage() {
    * a PURCHASE, so it queues under Purchase Req in Approval Management (not
    * Delay Refreshment): the requisition carries the received lines and the event
    * keeps a purchase-requisition ref, so the Purchase Status column tracks it as
-   * Purchase Req Pending → (approval) → Purchase Req Approved.
+   * Purchase Req Pending → (approval) → Sent To Purchase Requisition →
+   * (goods received) → Purchase Fulfillment Completed.
    */
   const submitInstantPurchase = (
     eventId: string,
@@ -897,7 +996,7 @@ export default function DelayManagementPage() {
               fulfilmentRefs: [...(e.fulfilmentRefs ?? []), ref],
               // A spot buy raised after the meals already moved must not drag
               // the flight back out of its dispatch state.
-              status: e.status === "Sent To Dispatch" || e.status === "Dispatched"
+              status: ["Sent To Packaging", "Sent To Dispatch", "Dispatched"].includes(e.status)
                 ? e.status
                 : "Approval Pending",
               updatedAt: at,
@@ -1020,12 +1119,17 @@ export default function DelayManagementPage() {
       }),
     );
     setDelayApprovals((prev) => [...plans.map((p) => p.approval), ...prev]);
+    // Meals drawn from the kitchen are a production decision, so they queue under
+    // Production in Approval Management; a pure stock issue stays under Delay
+    // Refreshment. Name the queue the approver will actually find it in.
+    const allStock = plans.every((p) => p.plan.totalProduction === 0 && p.plan.totalStock > 0);
+    const queue = allStock ? "Delay Refreshment" : "Production";
     // Deliberately no view change — the Production Availability modal stays open
     // so the purchase balance can be forwarded from the same plan.
     toast.success(
       plans.length === 1
-        ? `${plans[0].approval.id} submitted — pending Delay Refreshment approval.`
-        : `${plans.length} fulfilment requests submitted — pending Delay Refreshment approval.`,
+        ? `${plans[0].approval.id} submitted — pending ${queue} approval.`
+        : `${plans.length} fulfilment requests submitted — pending ${queue} approval.`,
     );
   };
 
@@ -1279,8 +1383,14 @@ export default function DelayManagementPage() {
 
     let packedAhead = 0;
     const newPkgRows: PackagingRowLike[] = sourceItems.map((item, idx) => {
-      const packed = stockIssued.has(item.name.trim().toLowerCase())
-        && alreadyPackaged(item.name);
+      // A bought-in item has no kitchen run: it comes off the shelf already
+      // sealed (boxed meal, juice, bottled water), so there is nothing to pack.
+      // Leaving it at "Ready for Packaging" stranded it — the Dispatch board
+      // hides those rows and nothing else could ever advance them, so a delay
+      // met entirely from stock or a spot buy could never be dispatched.
+      const boughtIn = !runFor(item.name);
+      const packed = boughtIn
+        || (stockIssued.has(item.name.trim().toLowerCase()) && alreadyPackaged(item.name));
       if (packed) packedAhead++;
       return {
         // NOT a `PKG-…` id: the Dispatch board clears rows with that prefix as
@@ -1301,6 +1411,50 @@ export default function DelayManagementPage() {
         orderNo:  event.orderNo,
       };
     });
+
+    // ── Packaging allocations — the Packaging board's own rows ──────────────
+    // One per cooked item: run × flight × qty, the same record "New Packaging"
+    // writes, so the delay lands under this flight's header on that page and
+    // runs the existing lifecycle (Pending Approval → In Packaging → Packaged).
+    // A run ALREADY packaged for this flight is linked, never duplicated — the
+    // delay then simply reads "Packaged". Bought-in consumables carry no run,
+    // so they raise no allocation, exactly as they don't today.
+    const allocAt = now.slice(0, 16).replace("T", " ");
+    const newAllocs: PackagingAllocation[] = [];
+    const allocIds: string[] = [];
+    for (const item of sourceItems) {
+      const proId = runFor(item.name);
+      if (!proId) continue;
+      const packed = pkgAllocations.find((a) =>
+        a.flight === event.flightNumber && a.date === event.flightDate
+        && usesRun(a, proId) && isPackaged(a));
+      if (packed) { allocIds.push(packed.id); continue; }
+      const id = newAllocationId();
+      allocIds.push(id);
+      newAllocs.push({
+        id,
+        // Same derivation the board uses: PRO-2026-1234 → PKG-2026-1234.
+        packagingId: `PKG-${proId.replace(/^PRO-?/i, "")}`,
+        batchId: pkgBatches.find((b) => b.batch === proId)?.id ?? "",
+        productionId: proId,
+        item: item.name,
+        flight: event.flightNumber,
+        orderNo: event.orderNo,
+        date: event.flightDate,
+        // The flight now leaves later — the header should say so.
+        depTime: rawDelayed ?? event.originalEtd,
+        qty: item.qty,
+        // Released straight to the packers. A scheduled run needs packaging
+        // sign-off because nothing authorised it yet; a delay run already
+        // carries its own fulfilment approval, and a fourth gate on a same-day
+        // disruption is where people start working around the system.
+        status: "In Packaging",
+        createdAt: allocAt,
+        createdBy: `Delay Mgmt (${event.id})`,
+        approvedBy: `Delay Mgmt (${event.id})`,
+        approvedAt: allocAt,
+      });
+    }
 
     const newRecord: DispatchRecordLike = {
       id:          newDspId,
@@ -1330,16 +1484,28 @@ export default function DelayManagementPage() {
     // Prepend (like the regular New Dispatch flow) so the just-sent delay
     // dispatch lands at the TOP of the Dispatch table / first page.
     setPackagingRows((prev) => [...newPkgRows, ...prev]);
+    if (newAllocs.length > 0) setPkgAllocations((prev) => [...newAllocs, ...prev]);
     setDispatchRecords((prev) => [newRecord, ...prev]);
     setDelayEvents((prev) =>
       prev.map((e) =>
         e.id === event.id
-          ? { ...e, status: "Sent To Dispatch", dispatchId: newDspId, updatedAt: stamp() }
+          ? {
+              ...e,
+              // The run has been raised, not dispatched — saying "Sent To
+              // Dispatch" here misled every other screen reading `status`.
+              status: "Sent To Packaging",
+              dispatchId: newDspId,
+              packagingAllocationIds: allocIds.length > 0 ? allocIds : e.packagingAllocationIds,
+              stockDeductedAt: stamp(),
+              updatedAt: stamp(),
+            }
           : e,
       ),
     );
 
-    // Deduct dispatched items from stock (OUT QTY in the ledger)
+    // Deduct dispatched items from stock (OUT QTY in the ledger). Stamped on the
+    // event so cancelling the run can put it back — an un-reversible deduction
+    // on a run that never leaves is how ledgers drift.
     sourceItems.forEach((item) => reduceInventoryStock(item.name, item.qty));
     const deltas: StockDelta[] = sourceItems.map((item) => ({
       itemId: item.name,
@@ -1382,14 +1548,27 @@ export default function DelayManagementPage() {
     ev.fulfillment?.directReceive?.items?.map((i) => ({ name: i.name, qty: i.qty }))
     ?? (ev.menuItems ?? []).map((mi) => ({ name: mi.name, qty: mi.requiredQty }));
 
-  /** A packaging row for this flight that has already been packed, if any. */
-  const packedRowFor = (ev: DelayEvent, name: string) =>
-    packagingRows.find((r) =>
+  /**
+   * Is this item already packed for this flight? Checks BOTH boards — the
+   * packaging allocations (where a cooked run is packed) and the dispatch rows
+   * (where a bought-in line sits). Reading only one of them let the two disagree
+   * about the same item, which is how a run could be sent to packaging twice.
+   */
+  const packedRowFor = (ev: DelayEvent, name: string): { id: string; status: string } | undefined => {
+    const key = name.trim().toLowerCase();
+    const alloc = pkgAllocations.find((a) =>
+      a.flight === ev.flightNumber
+      && a.item.trim().toLowerCase() === key
+      && (!ev.orderNo || !a.orderNo || a.orderNo === ev.orderNo)
+      && isPackaged(a));
+    if (alloc) return { id: alloc.packagingId, status: alloc.status };
+    const row = packagingRows.find((r) =>
       r.flight === ev.flightNumber
-      && r.mealName.trim().toLowerCase() === name.trim().toLowerCase()
+      && r.mealName.trim().toLowerCase() === key
       && (!ev.orderNo || !r.orderNo || r.orderNo === ev.orderNo)
-      && ["Packaging Done", "Ready for Dispatch", "Dispatched"].includes(r.packagingStatus),
-    );
+      && ["Packaging Done", "Ready for Dispatch", "Dispatched"].includes(r.packagingStatus));
+    return row ? { id: row.id, status: row.packagingStatus } : undefined;
+  };
 
   const sendToPackaging = (event: DelayEvent) => {
     // Blocked before the check even runs — a flight whose meals are still being
@@ -1410,7 +1589,7 @@ export default function DelayManagementPage() {
           id: m.row!.id,
           name: m.it.name,
           qty: m.it.qty,
-          status: m.row!.packagingStatus,
+          status: m.row!.status,
         })),
       });
       return;
@@ -1446,6 +1625,61 @@ export default function DelayManagementPage() {
     // Same packaging run as the single-flight action — each flight's already
     // packed items skip ahead on their own, the rest go through packaging.
     clear.forEach((ev, i) => sendToDispatch(ev, i, { goTo: "packaging" }));
+  };
+
+  /**
+   * Roll a packaging run back. A flight that recovers, or a run raised in error,
+   * previously left its allocations, packaging rows, dispatch record AND the
+   * stock deduction behind with no way to undo any of it. This unwinds all four
+   * and returns the delay to Approved so it can be routed again. Refused once
+   * anything has actually been packed or dispatched — at that point the food has
+   * moved and the correction belongs on the Dispatch board.
+   */
+  const cancelRun = (eventId: string) => {
+    const ev = delayEvents.find((e) => e.id === eventId);
+    if (!ev?.dispatchId) return;
+    const rows = packagingRows.filter((r) => r.dspRef === ev.dispatchId);
+    const allocs = pkgAllocations.filter((a) => (ev.packagingAllocationIds ?? []).includes(a.id));
+    const moved = rows.some((r) => r.packagingStatus === "Dispatched")
+      || allocs.some((a) => a.status === "Dispatched")
+      || ev.status === "Dispatched";
+    if (moved) {
+      toast.error("Already dispatched — this run can no longer be cancelled.");
+      return;
+    }
+
+    const at = stamp();
+    // Put the stock back exactly as it was taken out.
+    if (ev.stockDeductedAt) {
+      const items = ev.fulfillment?.directReceive?.items?.map((i) => ({ name: i.name, qty: i.qty }))
+        ?? (ev.menuItems ?? []).map((mi) => ({ name: mi.name, qty: mi.requiredQty }));
+      items.forEach((it) => reduceInventoryStock(it.name, -it.qty));
+      applyStockDeltas(items.map((it) => ({
+        itemId: it.name,
+        delta: it.qty,
+        date: at.slice(0, 10),
+        reference: ev.dispatchId!,
+        label: "Delay Run Cancelled",
+      })));
+    }
+
+    // Drop only the records this run raised — nothing else on those boards.
+    const allocIds = new Set(allocs.map((a) => a.id));
+    setPkgAllocations((prev) => prev.filter((a) => !allocIds.has(a.id)));
+    setPackagingRows((prev) => prev.filter((r) => r.dspRef !== ev.dispatchId));
+    setDispatchRecords((prev) => prev.filter((d) => d.id !== ev.dispatchId));
+    setDelayEvents((prev) => prev.map((e) => e.id === eventId
+      ? {
+          ...e,
+          status: "Approved" as DelayStatus,
+          dispatchId: undefined,
+          packagingAllocationIds: undefined,
+          stockDeductedAt: undefined,
+          updatedAt: at,
+        }
+      : e));
+    setViewModalEventId(null);
+    toast.success(`${ev.dispatchId} cancelled — stock restored, ${ev.flightNumber} back to Approved.`);
   };
 
   const closeEvent = (eventId: string) => {
@@ -1587,6 +1821,7 @@ export default function DelayManagementPage() {
                     setViewModalEventId(null);
                     openFulfillment(ev.id);
                   }}
+                  onCancelRun={() => cancelRun(ev.id)}
                   onClose={() => {
                     setViewModalEventId(null);
                     closeEvent(ev.id);
@@ -1715,8 +1950,11 @@ function DelayList({
 
   const { productionEntries: allProductionOrders } = useWorkflow();
   // Read-only: the dispatch record raised for a packaging run drives the Status
-  // column's packaging → dispatch chain.
+  // column's packaging → dispatch chain, and the packaging board says when the
+  // delay's own allocations are actually packed.
   const [dispatchRecords] = usePersistedState<DispatchRecordLike[]>("dispatch-records", []);
+  const [pkgAllocations] = usePersistedState<PackagingAllocation[]>("packaging-allocations", []);
+  const [packagingRows] = usePersistedState<PackagingRowLike[]>("dispatch-packaging-rows", []);
 
   // One row per delay submission: flights logged together share a batchId, so
   // they show under ONE delay id with a single Fulfil action for the whole set.
@@ -1784,7 +2022,7 @@ function DelayList({
    *  other stages fall back to the base badge. */
   const stockLabelsOf = (ev: DelayEvent): string[] => {
     // Dispatch states live in the Dispatch Status column, not here.
-    if (ev.status === "Sent To Dispatch" || ev.status === "Dispatched") return [];
+    if (["Sent To Packaging", "Sent To Dispatch", "Dispatched"].includes(ev.status)) return [];
     const inFlight = ["Approval Pending", "Sent To Production", "Approved"].includes(ev.status);
     if (!inFlight) return [ev.status];
     const refs = (ev.fulfilmentRefs ?? []).filter(
@@ -1821,17 +2059,34 @@ function DelayList({
   };
 
   /**
-   * Column 4 — the packaging → dispatch leg. Once the run is raised it carries a
-   * dispatch record, and that record's own status IS the stage, so the column
-   * follows the real pipeline rather than a copy of it:
-   *   Preparing → Sent To Packaging · Prepared / Ready For QC → Packaging Done
-   *   · Ready For Dispatch → Ready for Dispatch · Dispatched → Sent To Dispatch
+   * Column 4 — the packaging → dispatch leg:
+   *   Sent To Packaging → Packaging Done → Ready for Dispatch → Sent To Dispatch
+   *
+   * Derived from the run's OWN records — its packaging rows and its packaging
+   * allocations — with the dispatch record as an accelerator. Reading the record
+   * alone stalled runs it never advanced: it only moves when someone acts on the
+   * Dispatch board, and a run whose rows are all packed never surfaces there
+   * until they are. The rows are the ground truth for where the food is.
    */
   const dispatchLabelOf = (ev: DelayEvent): string => {
     if (ev.status === "Dispatched") return "Sent To Dispatch";
     const s = (dispatchRecords.find((d) => d.id === ev.dispatchId)?.status ?? "Preparing").toLowerCase();
     if (s === "dispatched")          return "Sent To Dispatch";
     if (s === "ready for dispatch")  return "Ready for Dispatch";
+
+    // The run's own packaging lines, and the board rows for its cooked items.
+    const rows = ev.dispatchId ? packagingRows.filter((r) => r.dspRef === ev.dispatchId) : [];
+    const allocs = pkgAllocations.filter((a) => (ev.packagingAllocationIds ?? []).includes(a.id));
+    if (rows.length > 0 && rows.every((r) => r.packagingStatus === "Dispatched")) return "Sent To Dispatch";
+
+    const PACKED_ROW = ["Packaging Done", "Ready for Dispatch", "Dispatched"];
+    const rowsPacked = rows.length > 0 && rows.every((r) => PACKED_ROW.includes(r.packagingStatus));
+    const allocsPacked = allocs.length === 0 || allocs.every(isPackaged);
+    if (rowsPacked && allocsPacked) {
+      // Everything is packed. QC on the Dispatch board is the last gate, so the
+      // run is ready to go the moment the board reports it prepared.
+      return s === "prepared" || s === "ready for qc" ? "Ready for Dispatch" : "Packaging Done";
+    }
     if (s === "prepared" || s === "ready for qc") return "Packaging Done";
     return "Sent To Packaging";
   };
@@ -1864,10 +2119,18 @@ function DelayList({
       })
       || approvalPending(ipRefs);
     if (pending) return ["Purchase Req Pending"];
-    // Approved. The spot buy itself follows: Instant Purchase → Direct Receive →
-    // one more approval. Only once the goods are actually received (a Direct
-    // Receive is on the event) is the purchase leg complete.
-    return [ev.fulfillment?.directReceive ? "Purchase Completed" : "Purchase Req Approved"];
+    // Approved — the requisition is handed to the Purchase Requisition module,
+    // where "Initiate Purchase" opens Direct Receive and the goods are received
+    // against it. The leg only reads approved once that receipt lands: the
+    // requisition's own received quantity is the signal, not a copy of it here.
+    const fullyReceived = prRefs.length > 0 && prRefs.every((r) => {
+      const pr = prs.find((p) => p.id === r.ref);
+      if (!pr) return false;
+      const { ordered, received } = prReceived(pr);
+      return ordered > 0 && received >= ordered;
+    });
+    if (fullyReceived || ev.fulfillment?.directReceive) return ["Purchase Fulfillment Completed"];
+    return ["Sent To Purchase Requisition"];
   };
 
   /** One renderer for every status label — chips for the routed states, the
@@ -1881,8 +2144,8 @@ function DelayList({
     "In Production": CHIP_WORKING,
     "Production Completed": CHIP_DONE,
     "Purchase Req Pending": CHIP_PENDING,
-    "Purchase Req Approved": CHIP_DONE,
-    "Purchase Completed": CHIP_DONE,
+    "Sent To Purchase Requisition": CHIP_WORKING,
+    "Purchase Fulfillment Completed": CHIP_DONE,
     "Sent To Packaging": CHIP_WORKING,
     "Packaging Done": CHIP_DONE,
     "Ready for Dispatch": CHIP_DONE,
@@ -1892,16 +2155,38 @@ function DelayList({
     STATUS_CHIP_CLS[label] ? chip(label, STATUS_CHIP_CLS[label]) : delayBadge(label as DelayStatus);
 
   /**
-   * Dispatchable ONLY when every routed approval has cleared AND every
-   * production order raised for the flight is Completed with QC passed —
-   * preparing production can never be dispatched. Packaging then happens on the
-   * Dispatch page exactly as today.
+   * Every routed leg has actually FINISHED — stock issued, production cooked and
+   * QC-passed, purchased goods received. Read off the very labels the three
+   * status columns show, so the button and the columns can never disagree: if a
+   * column doesn't read "completed", packaging isn't open.
+   *
+   * An approved requisition is not a finished purchase — the goods still have to
+   * be bought and received. Judging the purchase leg by its approval alone let a
+   * flight reach packaging while its "Sent To Purchase Requisition" chip was
+   * still showing.
+   */
+  const legsComplete = (ev: DelayEvent): boolean => {
+    const unfinished = (labels: string[], done: string[]) => labels.some((l) => !done.includes(l));
+    // Only the routed stock labels — an unrouted event falls back to its own
+    // status here, which says nothing about a stock leg it never had.
+    const stock = stockLabelsOf(ev).filter((l) => l.startsWith("Stock Fulfillment"));
+    if (unfinished(stock, ["Stock Fulfillment Completed"])) return false;
+    if (unfinished(productionLabelsOf(ev), ["Prod. Fulfillment Completed", "Production Completed"])) return false;
+    if (unfinished(purchaseLabelsOf(ev), ["Purchase Fulfillment Completed"])) return false;
+    return true;
+  };
+
+  /**
+   * Dispatchable ONLY when every routed leg has completed AND every production
+   * order raised for the flight is Completed with QC passed — preparing
+   * production can never be packaged. Packaging then happens exactly as today.
    */
   const readyToDispatch = (ev: DelayEvent): boolean => {
     // Any in-flight state qualifies — the routed approvals are the truth, not
     // the raw label (which can lag when several fulfilments were raised).
     if (!["Approved", "Sent To Production", "Approval Pending"].includes(ev.status)) return false;
     if (pendingSources(ev).length > 0) return false;
+    if (!legsComplete(ev)) return false;
     const ids = ev.productionOrderIds ?? [];
     if (ids.length > 0) {
       return ids.every((id) => {
@@ -1928,7 +2213,12 @@ function DelayList({
 
   const active     = events.filter(isActiveDelayEvent).length;
   const pending    = events.filter((e) => e.status === "Approval Pending").length;
-  const dispatched = events.filter((e) => e.status === "Dispatched" || e.status === "Sent To Dispatch").length;
+  // A run in packaging has left the fulfilment stage — it belongs with the
+  // dispatch tally, not the active one, exactly as "Sent To Dispatch" did before
+  // the packaging stage was split out of it.
+  const inDispatchStage = (e: DelayEvent) =>
+    ["Sent To Packaging", "Sent To Dispatch", "Dispatched"].includes(e.status);
+  const dispatched = events.filter(inDispatchStage).length;
 
   // ── At-a-glance breakdowns for the KPI cards ────────────────────────────────
   // Extra stage counts + passenger tallies so each card reads like the dashboard
@@ -1936,9 +2226,10 @@ function DelayList({
   // two-column breakdown of the sub-stages that make up the total.
   const pendingEvents      = events.filter((e) => e.status === "Approval Pending");
   const activeEvents       = events.filter(isActiveDelayEvent);
-  const dispatchedEvents   = events.filter((e) => e.status === "Dispatched" || e.status === "Sent To Dispatch");
+  const dispatchedEvents   = events.filter(inDispatchStage);
   const dispatchedOnly     = events.filter((e) => e.status === "Dispatched").length;
-  const sentToDispatch     = events.filter((e) => e.status === "Sent To Dispatch").length;
+  const sentToDispatch     = events.filter((e) =>
+    e.status === "Sent To Dispatch" || e.status === "Sent To Packaging").length;
   const closed             = events.filter((e) => e.status === "Closed").length;
   const fulfillmentPending = events.filter((e) => e.status === "Fulfillment Pending").length;
   const inProduction       = events.filter((e) => e.status === "Sent To Production").length;
@@ -2014,7 +2305,7 @@ function DelayList({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All Statuses</SelectItem>
-            {(["Received","Validated","Fulfillment Pending","Approval Pending","Approved","Rejected","Sent To Production","Sent To Dispatch","Dispatched","Closed"] as DelayStatus[]).map((s) => (
+            {(["Received","Validated","Fulfillment Pending","Approval Pending","Approved","Rejected","Sent To Production","Sent To Packaging","Sent To Dispatch","Dispatched","Closed"] as DelayStatus[]).map((s) => (
               <SelectItem key={s} value={s}>{s}</SelectItem>
             ))}
           </SelectContent>
@@ -2110,15 +2401,16 @@ function DelayList({
                 // ONE Fulfil for the whole submission — it opens the production
                 // check worklist covering every flight in the batch.
                 const pendingFulfil = g.events.find((e) => e.status === "Fulfillment Pending");
-                // Instant Purchase is the action while the purchase leg is open:
-                // it raises the requisition, and once that is APPROVED it opens
-                // the Direct Receive spot buy. It goes away while a requisition
-                // is still pending, and for good once the goods are received.
+                // Instant Purchase RAISES the requisition — that is all it does
+                // now. Buying against it happens in the Purchase Requisition
+                // module ("Initiate Purchase" → Direct Receive), so once a
+                // requisition exists this column is a status only. Two entry
+                // points to the same spot buy is how the two drifted apart.
                 const canPurchase = (e: DelayEvent) => {
-                  if (e.status !== "Approved" && e.status !== "Sent To Dispatch") return false;
+                  if (!["Approved", "Sent To Packaging", "Sent To Dispatch"].includes(e.status)) return false;
                   if ((e.productionPlan?.totalPurchase ?? 0) <= 0) return false;
                   if (e.fulfillment?.directReceive) return false;
-                  return !purchaseLabelsOf(e).includes("Purchase Req Pending");
+                  return purchaseLabelsOf(e).length === 0;
                 };
                 // The delay id's marking box covers every dispatch-ready flight
                 // under it — tick the id, the whole submission joins the
@@ -2176,9 +2468,14 @@ function DelayList({
                       <div key={ev.id} className="min-h-[2.25rem] whitespace-nowrap flex items-center">{ev.sector}</div>
                     ))}
                   </TableCell>
+                  {/* Delay length, and how long is left before the revised
+                      departure — the clock the whole run is racing. */}
                   <TableCell className="text-center tabular-nums font-semibold text-warning align-top">
                     {g.events.map((ev) => (
-                      <div key={ev.id} className="min-h-[2.25rem] flex items-center justify-center">{ev.delayDurationHours}h</div>
+                      <div key={ev.id} className="min-h-[2.25rem] flex flex-col items-center justify-center gap-0.5">
+                        <span>{ev.delayDurationHours}h</span>
+                        {departureChip(ev)}
+                      </div>
                     ))}
                   </TableCell>
                   <TableCell className="align-top">
@@ -2251,16 +2548,29 @@ function DelayList({
                     {(() => {
                       // Not in the pipeline yet: either still waiting on a
                       // fulfilment route, or ready for the packaging run.
-                      const ready = g.events.filter((e) => !e.dispatchId && readyToDispatch(e));
+                      // ONE button per flight — a submission can log the same
+                      // flight more than once, and two identical buttons side by
+                      // side is a coin toss for the user. The button sends every
+                      // ready event on that flight.
+                      const readyAll = g.events.filter((e) => !e.dispatchId && readyToDispatch(e));
+                      const byFlight = new Map<string, DelayEvent[]>();
+                      for (const e of readyAll) {
+                        const list = byFlight.get(e.flightNumber);
+                        if (list) list.push(e); else byFlight.set(e.flightNumber, [e]);
+                      }
+                      const ready = Array.from(byFlight.values());
                       const stillPending = g.events.some((e) =>
                         !e.dispatchId
                         && !["Dispatched", "Rejected", "Closed"].includes(e.status)
                         && !readyToDispatch(e));
                       const inPipeline = g.events.filter((e) => !!e.dispatchId || e.status === "Dispatched");
                       const labels = Array.from(new Set(inPipeline.map(dispatchLabelOf)));
-                      // "Ready for Dispatch" is where the run leaves this page —
-                      // the dispatch itself happens on the Dispatch board.
-                      const dispatchable = inPipeline.filter((e) => dispatchLabelOf(e) === "Ready for Dispatch");
+                      // Once everything is packed the run leaves this page — the
+                      // loading, QC and dispatch itself happen on the Dispatch
+                      // board, so this opens it there rather than pretending to
+                      // dispatch from here.
+                      const dispatchable = inPipeline.filter((e) =>
+                        ["Packaging Done", "Ready for Dispatch"].includes(dispatchLabelOf(e)));
                       if (labels.length === 0 && ready.length === 0 && !stillPending) {
                         return <span className="text-xs text-muted-foreground">—</span>;
                       }
@@ -2274,25 +2584,29 @@ function DelayList({
                           ))}
                           {/* Packaging opens ONLY once every approval has cleared
                               and production (incl. QC) is complete. */}
-                          {ready.map((ev) => (
-                            <div key={ev.id} className="mt-1.5 first:mt-0" onClick={(e) => e.stopPropagation()}>
+                          {ready.map((evs) => {
+                            const ev = evs[0];
+                            const marked = evs.every((e) => markedDispatch.includes(e.id));
+                            return (
+                            <div key={ev.flightNumber} className="mt-1.5 first:mt-0" onClick={(e) => e.stopPropagation()}>
                               <Button size="sm" className="h-7 text-xs bg-teal-600 text-white hover:bg-teal-700"
-                                disabled={markedDispatch.includes(ev.id)}
-                                onClick={() => onSendToPackaging(ev)}
-                                title={markedDispatch.includes(ev.id)
+                                disabled={marked}
+                                onClick={() => evs.forEach((e) => onSendToPackaging(e))}
+                                title={marked
                                   ? "Included in the combined packaging run"
                                   : `Check packaging for ${ev.flightNumber}`}>
                                 Send To Packaging{multi ? ` · ${ev.flightNumber}` : ""}
                                 <PackageOpen className="h-3 w-3 ml-1" />
                               </Button>
                             </div>
-                          ))}
+                            );
+                          })}
                           {dispatchable.map((ev) => (
                             <div key={`d-${ev.id}`} className="mt-1.5" onClick={(e) => e.stopPropagation()}>
                               <Button size="sm" className="h-7 text-xs bg-teal-600 text-white hover:bg-teal-700"
                                 onClick={() => onNavigate("/dispatch")}
-                                title={`Dispatch ${ev.flightNumber} on the Dispatch board`}>
-                                Send To Dispatch{multi ? ` · ${ev.flightNumber}` : ""}
+                                title={`Load, QC and dispatch ${ev.flightNumber} on the Dispatch board`}>
+                                Open in Dispatch{multi ? ` · ${ev.flightNumber}` : ""}
                                 <Truck className="h-3 w-3 ml-1" />
                               </Button>
                             </div>
@@ -2433,6 +2747,14 @@ function DelayCreate({
   // combination, so every downstream screen keeps working on single-value events.
   const selectedOrders = dispatched.filter((o) => selectedOrderIds.includes(o.id));
   const hoursFor = (id: string) => Number(durationByFlight[id]) || 0;
+  /**
+   * The day whose menu config this flight is served, once its delay is applied.
+   * A late-night departure pushed past midnight takes the NEXT day's config —
+   * everything that reads the day-wise plan goes through here so the preview,
+   * Change Menu and the saved items all agree.
+   */
+  const serviceDateFor = (o: { id: string; date: string; etd?: string }) =>
+    delayedServiceDate(o.date, o.etd, hoursFor(o.id));
   /** One delay for the whole submission — typing on any flight fills them all. */
   const [sameDelay, setSameDelay] = useState(false);
   const setDurationFor = (id: string, v: string) =>
@@ -2478,7 +2800,7 @@ function DelayCreate({
   const itemsFor = (order: typeof dispatched[number], meal: string, tp: number): DelayMenuItem[] =>
     meal === "Other"
       ? otherItems.filter((i) => i.name.trim() !== "").map((i) => ({ name: i.name.trim(), requiredQty: i.qty, uom: i.uom ?? "pcs", unitCost: i.unitCost }))
-      : (tp > 0 ? menuItemsFromPlan(meal, order.date, tp, mealPlanCards) : []);
+      : (tp > 0 ? menuItemsFromPlan(meal, serviceDateFor(order), tp, mealPlanCards) : []);
 
   const updateOtherItem = (idx: number, field: "qty" | "unitCost", val: string) => {
     setOtherItems((prev) => prev.map((it, i) => (i === idx ? { ...it, [field]: Number(val) || 0 } : it)));
@@ -2581,7 +2903,7 @@ function DelayCreate({
     for (const mt of MEAL_TYPES) {
       const removed = groupRemovals[mt] ?? [];
       const extras = groupExtras[mt] ?? [];
-      const base = mt === "Other" ? otherBaseRows(tp) : menuItemsFromPlan(mt, order.date, tp, mealPlanCards);
+      const base = mt === "Other" ? otherBaseRows(tp) : menuItemsFromPlan(mt, serviceDateFor(order), tp, mealPlanCards);
       const display = [
         ...base.filter((it) => !removed.includes(optKey(it.name))
           && !extras.some((x) => optKey(x.name) === optKey(it.name))),
@@ -2741,7 +3063,10 @@ function DelayCreate({
           const hrs = hoursFor(o.id);
           const revised = o.etd && hrs > 0 ? to24hGmt6(addHoursToEtd(o.etd, hrs)) : null;
           const tone = CARD_TONES[idx % CARD_TONES.length];
-          const weekday = new Date(o.date + "T00:00:00").toLocaleDateString("en-US", { weekday: "long" });
+          // The delay can push departure past midnight — the menu shown is the
+          // one configured for the day the flight now actually leaves.
+          const serviceDate = serviceDateFor(o);
+          const weekday = new Date(serviceDate + "T00:00:00").toLocaleDateString("en-US", { weekday: "long" });
           const tp = (o.pax ?? 0) + (o.crew ?? 0);
           const meals = mealsFor(o.id);
           return (
@@ -2926,7 +3251,7 @@ function DelayCreate({
                       const isOther = meal === "Other";
                       const items = isOther
                         ? otherItems.filter((i) => i.name.trim() !== "").map((i) => ({ name: i.name.trim(), requiredQty: i.qty, uom: i.uom ?? "pcs" }))
-                        : menuItemsFromPlan(meal, o.date, tp, mealPlanCards);
+                        : menuItemsFromPlan(meal, serviceDate, tp, mealPlanCards);
                       const matched = !isOther && mealPlanCards.some(
                         (c) => c.mealType.toLowerCase() === meal.toLowerCase() && c.day === weekday,
                       );
@@ -3100,7 +3425,11 @@ function DelayCreate({
                 <DialogHeader>
                   <DialogTitle className="flex items-center gap-2">
                     <Pencil className="h-4 w-4 text-primary" /> Change Menu — {order.flight}
-                    <span className="font-mono text-xs font-normal text-muted-foreground">{order.sector} · {order.date}</span>
+                    {/* The day the cards below are drawn from — the revised
+                        departure day when the delay pushes past midnight. */}
+                    <span className="font-mono text-xs font-normal text-muted-foreground">
+                      {order.sector} · {serviceDateFor(order)}
+                    </span>
                   </DialogTitle>
                   <DialogDescription>
                     Combine items across every meal type: untick to remove, tick to add —
@@ -3119,7 +3448,7 @@ function DelayCreate({
                     // Other draws from its Configure Items rows; the rest from the plan.
                     const base: DelayMenuItem[] = isOtherGroup
                       ? otherBaseRows(tp)
-                      : menuItemsFromPlan(mt, order.date, tp, mealPlanCards);
+                      : menuItemsFromPlan(mt, serviceDateFor(order), tp, mealPlanCards);
                     const items = [
                       ...base.filter((it) => !removed.includes(optKey(it.name))
                         && !extras.some((x) => optKey(x.name) === optKey(it.name))),
@@ -4917,11 +5246,9 @@ function DelayProductionScreen({
                   {confirmRoute.flight} — review the quantities below. Confirming sends them to{" "}
                   {confirmRoute.source === "Instant Purchase"
                     ? "Approval Management under Purchase Req"
-                    : confirmRoute.title === "Fulfill from Production"
-                      ? "Approval Management under Delay Refreshment"
-                      : confirmRoute.source === "Production"
-                        ? "Approval Management under Production"
-                        : "Approval Management under Delay Refreshment"}.
+                    : confirmRoute.source === "Production"
+                      ? "Approval Management under Production"
+                      : "Approval Management under Delay Refreshment"}.
                 </DialogDescription>
               </DialogHeader>
 
@@ -5693,13 +6020,15 @@ function DelayFulfillmentScreen({
 // ─── Delay Detail Screen ──────────────────────────────────────────────────────
 
 function DelayDetailScreen({
-  event, approval, onOpenFulfillment, onClose, onNavigate,
+  event, approval, onOpenFulfillment, onClose, onNavigate, onCancelRun,
 }: {
   event: DelayEvent;
   approval: DelayApprovalRecord | undefined;
   onOpenFulfillment: () => void;
   onClose: () => void;
   onNavigate: (path: string) => void;
+  /** Roll the packaging run back — absent when there is nothing to roll back. */
+  onCancelRun?: () => void;
 }) {
   const [drLog] = usePersistedState<DrLogEntry[]>("delay-dr-log", []);
   const [detailStockLog, setDetailStockLog] = useState<{ item: DrItem; log: DrLogEntry[] } | null>(null);
@@ -5737,6 +6066,16 @@ function DelayDetailScreen({
     }
     return map;
   }, [stockRows]);
+
+  // The delay's rows on the Packaging board, in the order they were raised.
+  const [allPkgAllocations] = usePersistedState<PackagingAllocation[]>("packaging-allocations", []);
+  const myAllocations = useMemo(() => {
+    const ids = event.packagingAllocationIds ?? [];
+    if (ids.length === 0) return [];
+    return ids
+      .map((id) => allPkgAllocations.find((a) => a.id === id))
+      .filter((a): a is PackagingAllocation => !!a);
+  }, [event.packagingAllocationIds, allPkgAllocations]);
 
   // ── Approval log ──────────────────────────────────────────────────────────
   // One line per sign-off this event needed, whichever queue it went to:
@@ -5809,11 +6148,30 @@ function DelayDetailScreen({
   /**
    * Where a single item actually came from. A cooked meal points at the kitchen
    * run that made it — the order raised for this flight, or the finished batch it
-   * was drawn from. Anything bought in points at its Stock Overview row. Both
-   * open the row they name, flashed on arrival.
+   * was drawn from. A spot-bought item points at the Purchase Requisition raised
+   * for it, because that requisition IS the record the purchase is worked on
+   * (Initiate Purchase → Direct Receive → approval → received). Anything else
+   * points at its Stock Overview row. All open the row they name, flashed on
+   * arrival.
    */
-  const itemRef = (name: string, source: string): { label: string; open: () => void } | null => {
+  const itemRef = (
+    name: string,
+    source: string,
+    /** The routing record this item was listed under — carries the requisition
+     *  id for a purchase, so the row can reference it. */
+    from?: NonNullable<DelayEvent["fulfilmentRefs"]>[number],
+  ): { label: string; open: () => void } | null => {
     const key = name.trim().toLowerCase();
+    if (source === "Instant Purchase" && from?.refKind === "purchase-requisition") {
+      const prId = from.ref;
+      return {
+        label: prId,
+        open: () => {
+          flagArrival({ target: "pr-list", ids: [prId] });
+          onNavigate("/purchase-requisition");
+        },
+      };
+    }
     if (source === "Production") {
       const run = productionEntries.find((o) =>
         (event.productionOrderIds ?? []).includes(o.id)
@@ -5856,13 +6214,18 @@ function DelayDetailScreen({
     prodOrders.every((o) => ["Approved", "In Preparation", "Ready for QC", "Completed"].includes(o.status));
   const allProdCompleted = prodOrders.length > 0 && prodOrders.every((o) => o.status === "Completed");
 
+  // Packaging is a stage of its own now, so the timeline shows it instead of
+  // jumping from Approved straight to Sent To Dispatch.
+  const PACKED_ON = ["Sent To Packaging", "Sent To Dispatch", "Dispatched", "Closed"];
+  const DISPATCHED_ON = ["Sent To Dispatch", "Dispatched", "Closed"];
   const timelineSteps: Array<{ label: string; done: boolean; active: boolean }> = isProductionRoute
     ? [
         { label: "Delay Received",   done: true, active: false },
         { label: "Sent To Production", done: true, active: event.status === "Sent To Production" && !allProdApproved },
         { label: "Prod. Approved",   done: allProdApproved, active: allProdApproved && !allProdCompleted },
         { label: "Produced",         done: allProdCompleted, active: allProdCompleted && event.status === "Sent To Production" },
-        { label: "Sent To Dispatch", done: ["Sent To Dispatch","Dispatched","Closed"].includes(event.status), active: event.status === "Sent To Dispatch" },
+        { label: "Packaging",        done: PACKED_ON.includes(event.status), active: event.status === "Sent To Packaging" },
+        { label: "Sent To Dispatch", done: DISPATCHED_ON.includes(event.status), active: event.status === "Sent To Dispatch" },
         { label: "Dispatched",       done: ["Dispatched","Closed"].includes(event.status), active: ["Dispatched","Closed"].includes(event.status) },
       ]
     : [
@@ -5870,8 +6233,9 @@ function DelayDetailScreen({
         { label: "Validated",         done: event.status !== "Received", active: event.status === "Validated" },
         { label: "Fulfillment",       done: !["Received","Validated"].includes(event.status), active: event.status === "Fulfillment Pending" },
         { label: "Approval Pending",  done: !["Received","Validated","Fulfillment Pending"].includes(event.status), active: event.status === "Approval Pending" },
-        { label: "Approved",          done: ["Approved","Sent To Dispatch","Dispatched","Closed"].includes(event.status), active: event.status === "Approved" },
-        { label: "Sent To Dispatch",  done: ["Sent To Dispatch","Dispatched","Closed"].includes(event.status), active: event.status === "Sent To Dispatch" },
+        { label: "Approved",          done: ["Approved", ...PACKED_ON].includes(event.status), active: event.status === "Approved" },
+        { label: "Packaging",         done: PACKED_ON.includes(event.status), active: event.status === "Sent To Packaging" },
+        { label: "Sent To Dispatch",  done: DISPATCHED_ON.includes(event.status), active: event.status === "Sent To Dispatch" },
         { label: "Dispatched",        done: ["Dispatched","Closed"].includes(event.status), active: ["Dispatched","Closed"].includes(event.status) },
       ];
 
@@ -5890,6 +6254,15 @@ function DelayDetailScreen({
         {event.dispatchId && (
           <Button size="sm" variant="outline" onClick={() => onNavigate("/packaging")}>
             <ExternalLink className="h-3.5 w-3.5 mr-1.5" /> View In Packaging
+          </Button>
+        )}
+        {/* A flight can recover, or a run can be raised in error — until the food
+            has actually moved, this puts everything back. */}
+        {onCancelRun && event.dispatchId && event.status !== "Dispatched" && (
+          <Button size="sm" variant="outline"
+            className="border-red-200 text-red-700 hover:bg-red-50"
+            onClick={onCancelRun}>
+            <X className="h-3.5 w-3.5 mr-1.5" /> Cancel Run
           </Button>
         )}
       </div>
@@ -6051,7 +6424,7 @@ function DelayDetailScreen({
                             </thead>
                             <tbody>
                               {r.items.map((i, ii) => {
-                                const ref = itemRef(i.name, s);
+                                const ref = itemRef(i.name, s, r);
                                 return (
                                   <tr key={`${i.name}-${ii}`} className="border-t border-current/10">
                                     <td className="px-2 py-1 font-medium">{i.name}</td>
@@ -6065,7 +6438,9 @@ function DelayDetailScreen({
                                           className="font-mono font-semibold underline decoration-dotted underline-offset-2 hover:opacity-70"
                                           title={s === "Production"
                                             ? "Open this production run"
-                                            : "Open this item in Stock Overview"}
+                                            : s === "Instant Purchase" && r.refKind === "purchase-requisition"
+                                              ? "Open this requisition in Purchase Requisition"
+                                              : "Open this item in Stock Overview"}
                                         >
                                           {ref.label}
                                         </button>
@@ -6218,6 +6593,71 @@ function DelayDetailScreen({
                 </div>
               </div>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Packaging — the delay's own rows on the Packaging board, packed with
+          this flight's scheduled meals under the same flight header. */}
+      {myAllocations.length > 0 && (
+        <Card>
+          <CardContent className="pt-4 space-y-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Packaging — {event.flightNumber}
+              </div>
+              <Button size="sm" variant="outline" onClick={() => onNavigate("/packaging")}>
+                <ExternalLink className="h-3.5 w-3.5 mr-1.5" /> View In Packaging
+              </Button>
+            </div>
+            <div className="border border-border rounded-md overflow-x-auto">
+              <Table className="min-w-[620px]">
+                <TableHeader className="bg-muted/40">
+                  <TableRow>
+                    <TableHead className="text-xs uppercase tracking-wider">Packaging ID</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Production ID</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider">Item</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider text-right w-28">Qty For Flight</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider w-28">Date</TableHead>
+                    <TableHead className="text-xs uppercase tracking-wider w-36">Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {myAllocations.map((a) => (
+                    <TableRow key={a.id}>
+                      <TableCell className="font-mono text-xs font-semibold">{a.packagingId}</TableCell>
+                      <TableCell>
+                        <button
+                          type="button"
+                          className="font-mono text-xs font-semibold text-primary underline decoration-dotted underline-offset-2 hover:opacity-80"
+                          title="Open this production run"
+                          onClick={() => {
+                            flagArrival({ target: "production-list", ids: [a.productionId] });
+                            onNavigate(`/production-entry?pro=${encodeURIComponent(a.productionId)}`);
+                          }}
+                        >
+                          {a.productionId}
+                        </button>
+                      </TableCell>
+                      <TableCell className="text-sm font-medium">{a.item}</TableCell>
+                      <TableCell className="text-right tabular-nums text-sm">{a.qty}</TableCell>
+                      <TableCell className="text-xs tabular-nums">{a.date}</TableCell>
+                      <TableCell>
+                        <span className={cn(
+                          "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold whitespace-nowrap",
+                          isPackaged(a) ? "bg-emerald-100 text-emerald-700"
+                            : a.status === "Rejected" ? "bg-red-100 text-red-700"
+                            : a.status === "In Packaging" ? "bg-indigo-100 text-indigo-700"
+                            : "bg-amber-100 text-amber-700",
+                        )}>
+                          {a.status}
+                        </span>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           </CardContent>
         </Card>
       )}
