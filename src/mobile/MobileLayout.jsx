@@ -20,7 +20,7 @@ function StatusClock() {
   return <span>{time}</span>;
 }
 
-export function MobileLayout({ children, onClose }) {
+export function MobileLayout({ children, onClose, fontZoom = 1 }) {
   // Scale the phone frame so it always fits inside the viewport with breathing room.
   // Layout box is set to the *scaled* visual size so flexbox centers it correctly.
   const [scale, setScale] = useState(1);
@@ -160,7 +160,9 @@ export function MobileLayout({ children, onClose }) {
               </div>
             </div>
 
-            {/* Screen content */}
+            {/* Screen content. `zoom` is the Theme Center's display-size dial —
+                mobile styles are absolute px, so scaling the rendered UI (like a
+                phone's own Display Size setting) is the honest implementation. */}
             <div
               style={{
                 flex: 1,
@@ -169,6 +171,7 @@ export function MobileLayout({ children, onClose }) {
                 flexDirection: 'column',
                 position: 'relative',
                 background: T.bgBase,
+                zoom: fontZoom,
               }}
             >
               {children}

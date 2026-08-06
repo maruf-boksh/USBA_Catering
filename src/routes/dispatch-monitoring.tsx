@@ -19,7 +19,8 @@ import {
   Plus, Minus, Truck, Pencil, Trash2, ThermometerSun, ShieldCheck,
   AlertOctagon, AlertTriangle, PlaneTakeoff, PlaneLanding, Warehouse,
   Clock, User, CheckCircle2, Eye, Smartphone, ChevronRight, QrCode, X as CloseIcon, Timer, Play,
-  Search, Package, CupSoda, Sparkles, Boxes, Save,
+  Search, Package, CupSoda, Sparkles, Boxes, Save, Utensils, Coffee, ShoppingBag, UtensilsCrossed, Replace, Apple,
+  BriefcaseMedical, FileText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -41,6 +42,31 @@ import {
 } from "@/lib/vehicle-loading";
 import { AircraftFields, modelsForAircraftType } from "@/routes/config-aircraft";
 import { getGalleySections, computeAutoTotals, loadGalleyItems } from "@/lib/galley-items";
+import { getGalleyGroups } from "@/lib/galley-groups";
+import { filterEnabledGalleyItems } from "@/lib/galley-item-scope";
+import { createGalleyStockLookup, buildableSets } from "@/lib/galley-stock";
+import { fmtQty } from "@/lib/num";
+import { serviceForLeg, mealSetsForLeg, dessertSetKey, type MealService } from "@/lib/menu-meal-sets";
+import { specialMealSetsForLeg, dedupeSetsByCode } from "@/lib/special-meal-sets";
+import { dayFromDate, parseMealQty, loadMealPlanningConfig, type MealItem } from "@/lib/meal-planning-data";
+import {
+  readMealSwaps, writeMealSwaps, upsertMealSwap, removeMealSwap, applyMealSwaps,
+  menuDishMaster, type MealSwap, type SwappedItem,
+} from "@/lib/galley-meal-swaps";
+import { addManualLmc } from "@/lib/lmc-manual";
+import { getAuthUser } from "@/lib/auth";
+import { leadHoursToDeparture, isLmcLead } from "@/lib/flight-orders-store";
+import { flightTypeFromSector } from "@/lib/production-order-link";
+
+/**
+ * Icons a galley group may name (`GalleyGroupDef.icon`). Persisted data can only
+ * carry the NAME, so this is the one place that maps a name to a component —
+ * anything unknown falls back to the generic box.
+ */
+const GROUP_ICONS: Record<string, typeof Boxes> = {
+  CupSoda, Sparkles, Boxes, Package, Utensils, Coffee, ShoppingBag, Apple,
+  BriefcaseMedical, FileText,
+};
 
 // Flight options for the dispatch-monitoring form. The operational flight board
 // (`FLIGHT_BOARD`) only carries a handful of flights, so every distinct flight
@@ -3787,8 +3813,12 @@ export function GalleyPlanningModal({
     source: { officeId: string; warehouseId: string },
   ) => void;
 }) {
-  type GTab = "overview" | "meals" | "beverages" | "amenities" | "equipment";
+  // "overview" and "meals" are the two fixed tabs; every other tab is a galley
+  // group id straight from the Item Profile data (see lib/galley-groups.ts).
+  type GTab = "overview" | "meals" | (string & {});
   const [tab, setTab] = useState<GTab>("overview");
+  const galleyGroups = useMemo(() => getGalleyGroups(), []);
+  const isGroupTab = (t: GTab) => galleyGroups.some((gr) => gr.id === t);
   const [g, setG] = useState<GalleyPlan>(() => ({ ...buildInitialGalley(entry, flight), ...(initialPlan ?? {}) }));
   const sg = (k: string, v: string) => setG((prev) => ({ ...prev, [k]: v }));
 
@@ -3796,6 +3826,8 @@ export function GalleyPlanningModal({
   // when the plan is forwarded to the aircraft. Defaults to the central store.
   const [source, setSource] = useState({ officeId: "OFF-001", warehouseId: "WH-001" });
   const warehouseChoices = activeWarehousesByOffice(source.officeId);
+  const sourceWarehouseName =
+    activeWarehouses.find((w) => w.id === source.warehouseId)?.name ?? source.warehouseId;
   const changeOffice = (officeId: string) => {
     const whs = activeWarehousesByOffice(officeId);
     const keep = whs.some((w) => w.id === source.warehouseId);
@@ -3844,6 +3876,12 @@ export function GalleyPlanningModal({
   // same sector the return leg was matched against — so both legs of the
   // rotation read as one round trip (DAC-CXB out, CXB-DAC back).
   const outboundSector = flight?.sector || order?.sector || "—";
+
+  // The outbound leg as the Menu resolver needs it — the order when there is
+  // one, else the schedule the plan was opened against.
+  const outboundLeg = order ?? (entry.packagingDate
+    ? { date: entry.packagingDate, sector: outboundSector, etd: flight?.dep ?? "" }
+    : undefined);
 
   const retSection = useMemo(() => dispatchSectionForFlight(returnOrder?.flight), [returnOrder?.flight]);
   const retSpecialTotal = (retSection?.vgml ?? 0) + (retSection?.chml ?? 0) + (retSection?.spml ?? 0);
@@ -3970,15 +4008,94 @@ export function GalleyPlanningModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // If the aircraft is cleared while on a loading tab, fall back to Load Summary.
+  // If the aircraft is cleared while on a loading tab — or the tab's group has
+  // been switched off in Galley Items Group since the plan was opened — fall
+  // back to Load Summary rather than leaving a tab that renders nothing.
   useEffect(() => {
-    if (!aircraftType && (tab === "beverages" || tab === "amenities" || tab === "equipment")) setTab("overview");
+    if (isGroupTab(tab) && (!aircraftType || !TABS.some((t) => t.key === tab))) setTab("overview");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aircraftType, tab]);
 
   // Editable tabs render straight from the Galley Item Master — items added on
   // the Galley Items page appear here without code changes.
-  const galleyItems = useMemo(() => loadGalleyItems(), []);
+  // Only the lines the Galley Items Group config leaves switched on — a sheet
+  // that offers a line the station has taken out of scope invites it to be
+  // loaded anyway.
+  const galleyItems = useMemo(() => filterEnabledGalleyItems(loadGalleyItems()), []);
   const sheetSections = useMemo(() => getGalleySections(galleyItems), [galleyItems]);
+  // Loadable stock in the warehouse the plan transfers FROM — so counts are set
+  // against what the store can actually give. One index serves both the sheet
+  // lines (by key) and the meal lines (by item name, as Dispatch supplies them).
+  // Menu Planning config, read once — every resolver below takes it, otherwise
+  // each of them re-parses the whole card store on every render.
+  const menuCards = useMemo(() => loadMealPlanningConfig(), []);
+  const stockLookup = useMemo(() => createGalleyStockLookup(source.warehouseId), [source.warehouseId]);
+  // Per-leg dish substitutions. They live ON the plan (reserved key), so they
+  // travel with the sheet through draft → forward → sign-off, and they never
+  // touch the menu card, which is the standing plan for every other flight.
+  const mealSwaps = useMemo(() => readMealSwaps(g), [g]);
+  const dishMaster = useMemo(() => menuDishMaster(menuCards), [menuCards]);
+  /** Row the swap dialog is open for. */
+  const [swapTarget, setSwapTarget] = useState<{
+    flight: string; setKey: string; mealName: string; components: SwappedItem[];
+    leg?: { date: string; sector?: string; etd?: string; orderNo?: string };
+  } | null>(null);
+
+  /**
+   * Record a substitution and raise the LMC entry for it.
+   *
+   * The LMC is not optional politeness: by the time a galley plan exists,
+   * production has runs open against the dish being swapped out, so the change
+   * has to reach the same worklist an aircraft swap or a PAX change would.
+   * Severity follows the lead time — inside the LMC window it is critical (and
+   * therefore routed to Approval Management), outside it is still major, because
+   * a cooked dish is being replaced either way.
+   */
+  const applySwap = (
+    target: NonNullable<typeof swapTarget>,
+    from: string,
+    to: string,
+    reason: string,
+  ) => {
+    const user = getAuthUser();
+    const leadHours = target.leg?.date
+      ? leadHoursToDeparture({ date: target.leg.date, etd: target.leg.etd ?? "" })
+      : null;
+    const lmc = addManualLmc({
+      id: `MLMC-${Date.now().toString(36)}`,
+      at: new Date().toISOString(),
+      by: user?.name ?? "—",
+      role: user?.role ?? "Galley Planning",
+      flight: target.flight,
+      orderNo: target.leg?.orderNo,
+      sector: target.leg?.sector,
+      type: "Meal Change",
+      from: `${from} (${target.mealName})`,
+      to,
+      reason: reason.trim() || `Dish substituted on the galley plan for ${target.flight}.`,
+      severity: isLmcLead(leadHours) ? "critical" : "major",
+      leadHours,
+      source: "Galley Plan",
+    });
+    const swap: MealSwap = {
+      flight: target.flight, setKey: target.setKey, from, to,
+      reason: reason.trim(), at: lmc.at, by: lmc.by, lmcId: lmc.id,
+    };
+    setG((prev) => ({ ...prev, ...writeMealSwaps(upsertMealSwap(readMealSwaps(prev), swap)) }));
+    setSwapTarget(null);
+    toast.success(`${from} → ${to} on ${target.flight}. Logged as LMC ${lmc.id}.`);
+  };
+
+  /** Undo a substitution — the LMC entry stays, because it happened. */
+  const undoSwap = (flight: string, setKey: string, from: string) => {
+    setG((prev) => ({ ...prev, ...writeMealSwaps(removeMealSwap(readMealSwaps(prev), flight, setKey, from)) }));
+    toast.success(`Reverted to ${from}. The LMC entry remains on the log.`);
+  };
+  const lineStock = useMemo(() => {
+    const m = new Map<string, ReturnType<typeof stockLookup.forItem>>();
+    for (const it of galleyItems) if (!it.auto) m.set(it.key, stockLookup.forItem(it.key, it.label));
+    return m;
+  }, [galleyItems, stockLookup]);
   // Auto-total fields are the sum of the items that roll up to them (never
   // hand-keyed) and merged into the plan on save/forward.
   const derivedTotals = computeAutoTotals(g, galleyItems);
@@ -4028,55 +4145,471 @@ export function GalleyPlanningModal({
 
   // The meal breakdown of ONE leg. A plain function (not a component) so the
   // outbound and return legs render identically without remounting.
-  const mealsBlock = (scaled: ScaledMeals | null, legFlight: string) => {
-    if (!scaled) {
+  /**
+   * The menu configuration behind a leg's meals — read from Menu Planning
+   * (Operations → Menu Planning), not restated here.
+   *
+   * The galley sheet says how many meals go on the aircraft; this says WHAT they
+   * are: the service the leg carries, its serving window, each choice with its
+   * share and dishes, the dessert served alongside, and the special meals the
+   * card plans. It renders whether or not a dispatch exists, so the planner can
+   * see the menu before the flight is dispatched.
+   *
+   * `match` is shown rather than hidden: a service picked because its window is
+   * merely NEAREST the departure is a near-miss, not a planned answer, and the
+   * planner should be able to tell the two apart.
+   */
+  const MATCH_NOTE: Record<MealService["match"], string> = {
+    window: "serving window covers ETD",
+    nearest: "nearest service to ETD",
+    slot: "named by the Meal Slots master",
+    only: "only menu planned that day",
+  };
+
+  const MenuServiceCard = ({ service, audience }: { service: MealService; audience: string }) => {
+    const { card } = service;
+    const choices = card.choices.filter((ch) => ch.items.length > 0);
+    const specials = card.specialMeals.filter((s) => s.enabled);
+    return (
+      <div className="rounded-lg border border-violet-200 bg-violet-50/40 overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-violet-100 bg-violet-50 px-3 py-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <UtensilsCrossed className="h-3.5 w-3.5 text-violet-600 shrink-0" />
+            <span className="text-xs font-bold text-violet-900">{card.mealType || "Meal"}</span>
+            <span className="text-[11px] text-violet-700">· {audience}</span>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {service.window && (
+              <span className="rounded-full bg-white/70 border border-violet-200 px-2 py-0.5 text-[10px] font-semibold text-violet-700 tabular-nums">
+                {service.window}
+              </span>
+            )}
+            <span
+              className={cn(
+                "rounded-full px-2 py-0.5 text-[10px] font-medium",
+                service.match === "nearest"
+                  ? "bg-amber-100 text-amber-800"
+                  : "bg-violet-100 text-violet-700",
+              )}
+              title={MATCH_NOTE[service.match]}
+            >
+              {MATCH_NOTE[service.match]}
+            </span>
+          </div>
+        </div>
+
+        <div className="divide-y divide-violet-100">
+          {choices.map((ch, i) => (
+            <div key={i} className="flex items-start gap-2 px-3 py-2">
+              <span className="mt-[1px] shrink-0 rounded bg-violet-100 px-1.5 py-0.5 text-[10px] font-bold text-violet-700 tabular-nums">
+                {(ch.label || `Choice ${i + 1}`).replace(/^CHOICE\s*/i, "C")} · {ch.percentage}%
+              </span>
+              <span className="text-[11px] text-slate-700 leading-relaxed">
+                {ch.items.map((it) => `${it.name} (${it.weight}g)`).join(" · ")}
+              </span>
+            </div>
+          ))}
+          {card.dessert?.name && (
+            <div className="flex items-start gap-2 px-3 py-2">
+              <span className="mt-[1px] shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
+                Dessert
+              </span>
+              {/* Served alongside the meal rather than packed into a choice — it
+                  carries its own line on the sheet, so it is listed separately. */}
+              <span className="text-[11px] text-slate-700 leading-relaxed">
+                {card.dessert.name} ({card.dessert.weight}g · {card.dessert.calories} kcal)
+              </span>
+            </div>
+          )}
+          {specials.length > 0 && (
+            <div className="flex items-start gap-2 px-3 py-2">
+              <span className="mt-[1px] shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
+                Special
+              </span>
+              <span className="text-[11px] text-slate-700 leading-relaxed">
+                {specials.map((s) => `${s.type} × ${s.portions}`).join(" · ")}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {card.totalKcal > 0 && (
+          <div className="border-t border-violet-100 bg-white/60 px-3 py-1.5 text-right">
+            <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Total </span>
+            <span className="text-[11px] font-bold text-violet-800 tabular-nums">{card.totalKcal} kcal</span>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  /**
+   * A leg as the Menu / meal-set resolvers need it. Deliberately looser than a
+   * FlightOrder: a flight can reach the galley without an order record (planned
+   * straight off the dispatch board), and the menu is resolvable from the
+   * schedule alone — which day, which sector, what time it departs.
+   */
+  type MenuLeg = {
+    date: string;
+    sector?: string;
+    etd?: string;
+    orderNo?: string;
+    specialMeals?: number;
+    specialMealRoster?: FlightOrder["specialMealRoster"];
+  };
+  const menuBlock = (legOrder: MenuLeg | undefined, legFlight: string) => {
+    if (!legOrder?.date) return null;
+    const leg = { date: legOrder.date, sector: legOrder.sector ?? "", etd: legOrder.etd ?? "" };
+    const pax = serviceForLeg(leg, "Passengers", menuCards);
+    const crew = serviceForLeg(leg, "Crew", menuCards);
+    const day = dayFromDate(legOrder.date);
+    const ftype = flightTypeFromSector(legOrder.sector ?? "");
+    return (
+      <div>
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+          <GalleySecTitle>Menu Configuration</GalleySecTitle>
+          <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+            {day && <span className="rounded-full border border-border bg-muted/40 px-2 py-0.5 font-medium">{day}</span>}
+            <span className="rounded-full border border-border bg-muted/40 px-2 py-0.5 font-medium">{ftype}</span>
+            {legOrder.etd && <span className="tabular-nums">ETD {legOrder.etd}</span>}
+          </div>
+        </div>
+        {!pax && !crew ? (
+          <div className="rounded-md border border-dashed border-violet-300 bg-violet-50/50 px-3 py-2 text-[11px] text-violet-800">
+            No menu is planned for <strong>{legFlight}</strong> on {day || "this day"} ({ftype}) — set one up in
+            Operations → Menu Planning and it will appear here.
+          </div>
+        ) : (
+          <div className="grid gap-3 md:grid-cols-2">
+            {pax && <MenuServiceCard service={pax} audience="Passengers" />}
+            {crew && <MenuServiceCard service={crew} audience="Crew" />}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  /**
+   * One meal row: what it is, the dishes it is assembled from, how many complete
+   * SETS the source warehouse can assemble, and the count going on board.
+   *
+   * The stock figure counts sets, not dish quantities — a meal is a set of
+   * dishes and its scarcest component caps it, so the tooltip names the dish
+   * holding the line back.
+   */
+  const MealRow = ({
+    name, note, components, qty, first, onSwap, onUndo,
+  }: {
+    name: string;
+    note?: string;
+    /** Only what a row needs to render: a dish name, its per-meal count for the
+     *  stock maths, and whether it stands in for another dish. */
+    components: { name: string; qtyPerMeal?: number; swappedFrom?: string }[];
+    qty: number;
+    first: boolean;
+    /** Present ⇒ the row's dishes may be substituted for this leg. */
+    onSwap?: () => void;
+    onUndo?: (from: string) => void;
+  }) => {
+    const stock = components.length > 0 ? buildableSets(components, stockLookup) : undefined;
+    const swapped = components.filter((c) => c.swappedFrom);
+    return (
+      <div className={cn(
+        "flex items-start justify-between gap-3 px-3 py-2 text-sm",
+        !first && "border-t border-border",
+        swapped.length > 0 && "bg-amber-50/40",
+      )}>
+        <div className="min-w-0">
+          <span className="text-slate-700">{name}</span>
+          {note && <span className="text-muted-foreground"> · {note}</span>}
+          {swapped.length > 0 && (
+            <span
+              className="ml-1.5 inline-flex items-center gap-1 rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-amber-800 align-middle"
+              title="Substituted on this leg only — the menu card is unchanged and an LMC entry was raised."
+            >
+              <Replace className="h-2.5 w-2.5" /> LMC
+            </span>
+          )}
+          {components.length > 0 && (
+            <p className="text-[10px] text-muted-foreground mt-0.5">
+              {components.map((c, i) => (
+                <span key={`${c.name}-${i}`}>
+                  {i > 0 && " · "}
+                  {c.swappedFrom ? (
+                    <span>
+                      <span className="line-through opacity-60">{c.swappedFrom}</span>
+                      {" → "}
+                      <span className="font-semibold text-amber-800">{c.name}</span>
+                      {onUndo && (
+                        <>
+                          {" "}
+                          <button
+                            type="button"
+                            onClick={() => onUndo(c.swappedFrom!)}
+                            className="underline decoration-dotted hover:text-amber-900"
+                          >
+                            undo
+                          </button>
+                        </>
+                      )}
+                    </span>
+                  ) : c.name}
+                </span>
+              ))}
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {stock && (stock.tracked ? (
+            <span
+              className={cn(
+                "flex items-center gap-1 rounded-md px-1.5 py-[3px] text-[10px] font-medium leading-none",
+                qty > stock.available
+                  ? "bg-amber-100/70 text-amber-800"
+                  : stock.available <= 0 ? "bg-rose-50 text-rose-600" : "bg-slate-50 text-slate-500",
+              )}
+              title={`${fmtQty(stock.available)} complete set${stock.available === 1 ? "" : "s"} assemblable from stock in ${sourceWarehouseName}${stock.limiting ? ` — limited by ${stock.limiting}` : ""}`}
+            >
+              {qty > stock.available
+                ? <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
+                : <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", stock.available <= 0 ? "bg-rose-400" : "bg-emerald-500")} />}
+              <span className="tabular-nums whitespace-nowrap">
+                {qty > stock.available
+                  ? `${fmtQty(stock.available)} sets · short ${fmtQty(qty - stock.available)}`
+                  : `${fmtQty(stock.available)} sets in stock`}
+              </span>
+            </span>
+          ) : (
+            // Said plainly rather than left blank: none of this meal's dishes is
+            // set up as a stock item, so there is nothing to read — which is a
+            // different fact from "none in stock".
+            <span
+              className="rounded-md bg-slate-50 px-1.5 py-[3px] text-[10px] font-medium leading-none text-slate-400 whitespace-nowrap"
+              title={`No stock record for ${components.map((c) => c.name).join(", ")} — add them on the Item Profile to track galley stock for this meal.`}
+            >
+              no stock record
+            </span>
+          ))}
+          {onSwap && (
+            <button
+              type="button"
+              onClick={onSwap}
+              title="Substitute a dish on this leg only"
+              aria-label={`Substitute a dish in ${name}`}
+              className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-input text-muted-foreground hover:border-amber-300 hover:bg-amber-50 hover:text-amber-700 transition-colors"
+            >
+              <Replace className="h-3 w-3" />
+            </button>
+          )}
+          <span className="font-semibold tabular-nums">{qty}</span>
+        </div>
+      </div>
+    );
+  };
+
+  /**
+   * A leg's meal breakdown, built from the MENU the leg carries rather than
+   * restated from the dispatch snapshot — so the counts here are of the dishes
+   * shown in Menu Configuration directly above, not of whatever an unrelated
+   * dispatch happened to record.
+   *
+   * Dispatch stays the fallback: a leg whose menu is not planned still shows the
+   * dispatched breakdown, so nothing goes blank.
+   */
+  const mealsBlock = (
+    scaled: ScaledMeals | null,
+    legFlight: string,
+    leg: MenuLeg | undefined,
+    pax: number,
+    crew: number,
+  ) => {
+    // The resolvers read a leg as an order; a leg planned off the dispatch board
+    // has no order record, so the schedule fields are normalised to that shape.
+    const legOrder = leg
+      ? {
+          date: leg.date,
+          sector: leg.sector ?? "",
+          etd: leg.etd ?? "",
+          specialMeals: leg.specialMeals ?? 0,
+          specialMealRoster: leg.specialMealRoster,
+        }
+      : undefined;
+    const paxSets = legOrder ? mealSetsForLeg(legOrder, "Passengers", pax, menuCards) : [];
+    const crewSets = legOrder ? mealSetsForLeg(legOrder, "Crew", crew, menuCards) : [];
+    const specialSets = legOrder ? dedupeSetsByCode(specialMealSetsForLeg(legOrder, menuCards)) : [];
+
+    // The dessert is planned on the card but excluded from the meal sets — it is
+    // served alongside the choice rather than packed into it, so it carries its
+    // own line (and its own production run). Each audience's card states its
+    // own, so both sections get one, served one per person on that service.
+    //
+    // It is still a cooked dish on a menu card, so it is substitutable for a leg
+    // exactly like a choice dish — it just needs a set key of its own to be
+    // addressed by, since it belongs to no set.
+    const dessertOf = (forType: "Passengers" | "Crew") => {
+      if (!legOrder) return null;
+      const service = serviceForLeg(legOrder, forType, menuCards);
+      const d = service?.card.dessert;
+      if (!d?.name) return null;
+      const serviceName = service!.card.mealType || "Meal";
+      return {
+        dish: d,
+        key: dessertSetKey(forType, serviceName),
+        // Names the service, not the dish — an LMC reading "Dessert · Yoghurt →
+        // Firni" says nothing about which meal it belongs to.
+        label: `${forType === "Passengers" ? "Pax" : "Crew"} ${serviceName} · Dessert`,
+      };
+    };
+    const paxDessert = paxSets.length > 0 ? dessertOf("Passengers") : null;
+    const crewDessert = crewSets.length > 0 ? dessertOf("Crew") : null;
+
+    // A meal's dishes as served ON THIS LEG — the card's components with any
+    // substitution applied — plus the wiring to change or revert one.
+    const dishesOf = (setKey: string, components: MealItem[]): SwappedItem[] =>
+      applyMealSwaps(components, legFlight, setKey, mealSwaps, dishMaster);
+    const swapProps = (setKey: string, mealName: string, components: MealItem[]) => ({
+      onSwap: () => setSwapTarget({
+        flight: legFlight, setKey, mealName,
+        components: dishesOf(setKey, components),
+        leg: leg && { date: leg.date, sector: leg.sector, etd: leg.etd, orderNo: leg.orderNo },
+      }),
+      onUndo: (from: string) => undoSwap(legFlight, setKey, from),
+    });
+
+    /** The card's dessert as served on this leg — substitution and all. The row
+     *  title follows the dish actually going on board, not the card's. */
+    const DessertRow = ({
+      d, per, qty,
+    }: { d: { dish: MealItem; key: string; label: string }; per: string; qty: number }) => {
+      const served = dishesOf(d.key, [d.dish])[0] ?? d.dish;
+      return (
+        <MealRow
+          first={false}
+          name={`Dessert · ${served.name}`}
+          note={`${served.weight}g · ${served.calories} kcal · 1 per ${per}`}
+          components={[served]}
+          qty={qty}
+          {...swapProps(d.key, d.label, [d.dish])}
+        />
+      );
+    };
+
+    if (!scaled && paxSets.length === 0 && crewSets.length === 0 && specialSets.length === 0) {
       return (
         <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
           No dispatch has been built for <strong>{legFlight}</strong> yet — the meal breakdown will populate here once this flight is dispatched in Packaging &amp; Dispatch.
         </div>
       );
     }
+
+    // Special meals split by who eats them. The roster carries an audience per
+    // passenger, so the split is counted, not apportioned; a leg with only a
+    // flat special-meal count has no split to show and says so.
+    const specialPax = specialSets.reduce((s, x) => s + (x.paxQty ?? 0), 0);
+    const specialCrew = specialSets.reduce((s, x) => s + (x.crewQty ?? 0), 0);
+    const specialTotalQty = specialSets.reduce((s, x) => s + x.qty, 0);
+    const rostered = specialSets.some((x) => x.source === "roster");
+
     return (
       <div className="space-y-5">
         <div>
           <GalleySecTitle>Passenger Meals</GalleySecTitle>
           <div className="rounded-lg border border-border overflow-hidden">
-            {scaled.paxLines.length === 0 ? (
-              <div className="px-3 py-2 text-xs text-muted-foreground">No passenger meal lines.</div>
-            ) : scaled.paxLines.map((l, i) => (
-              <div key={i} className={`flex items-center justify-between px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
-                <span className="text-slate-700">{l.itemName}{l.percent != null ? ` · ${l.percent}%` : ""}</span>
-                <span className="font-semibold tabular-nums">{l.qty}</span>
-              </div>
-            ))}
+            {paxSets.length > 0
+              ? paxSets.map((s, i) => (
+                  <MealRow
+                    key={s.key} first={i === 0} name={s.name}
+                    note={s.choicePct != null ? `${s.choicePct}% of ${pax} PAX` : undefined}
+                    components={dishesOf(s.key, s.components)} qty={s.qty}
+                    {...swapProps(s.key, s.name, s.components)}
+                  />
+                ))
+              : (scaled?.paxLines ?? []).length === 0
+                ? <div className="px-3 py-2 text-xs text-muted-foreground">No passenger meal lines.</div>
+                : scaled!.paxLines.map((l, i) => (
+                    <MealRow
+                      key={i} first={i === 0} name={l.itemName}
+                      note={l.percent != null ? `${l.percent}%` : undefined}
+                      components={[{ name: l.itemName }]} qty={Number(l.qty) || 0}
+                    />
+                  ))}
+            {paxDessert && <DessertRow d={paxDessert} per="PAX" qty={pax} />}
           </div>
         </div>
-        {scaled.crewMeals.length > 0 && (
+
+        {(crewSets.length > 0 || (scaled?.crewMeals.length ?? 0) > 0) && (
           <div>
             <GalleySecTitle>Crew Meals</GalleySecTitle>
             <div className="rounded-lg border border-border overflow-hidden">
-              {scaled.crewMeals.map((c, i) => (
-                <div key={i} className={`flex items-center justify-between px-3 py-2 text-sm ${i > 0 ? "border-t border-border" : ""}`}>
-                  <span className="text-slate-700">{c.type}</span>
-                  <span className="font-semibold tabular-nums">{c.qty}</span>
-                </div>
-              ))}
+              {crewSets.length > 0
+                ? crewSets.map((s, i) => (
+                    <MealRow
+                      key={s.key} first={i === 0} name={s.name}
+                      note={s.choicePct != null ? `${s.choicePct}% of ${crew} crew` : undefined}
+                      components={dishesOf(s.key, s.components)} qty={s.qty}
+                      {...swapProps(s.key, s.name, s.components)}
+                    />
+                  ))
+                : scaled!.crewMeals.map((c, i) => (
+                    <MealRow key={i} first={i === 0} name={c.type} components={[]} qty={parseMealQty(c.qty)} />
+                  ))}
+              {crewDessert && <DessertRow d={crewDessert} per="crew" qty={crew} />}
             </div>
           </div>
         )}
+
         <div>
-          <GalleySecTitle>Special Meals</GalleySecTitle>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {/* Scaled to the current PAX; zero-count types hidden. */}
-            {[
-              { label: "VGML — Veg / Vegan", qty: scaled.special.vgml },
-              { label: "CHML — Child", qty: scaled.special.chml },
-              { label: "SPML — Special", qty: scaled.special.spml },
-            ].filter((s) => s.qty > 0).map((s) => (
-              <RO key={s.label} label={s.label} value={s.qty} />
-            ))}
-            <RO label="Total Special" value={scaled.specialTotal} />
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <GalleySecTitle>Special Meals</GalleySecTitle>
+            {specialTotalQty > 0 && (
+              <div className="flex items-center gap-1.5 text-[10px]">
+                <span className="rounded-full bg-sky-100 px-2 py-0.5 font-semibold text-sky-700 tabular-nums">
+                  {specialPax} PAX
+                </span>
+                <span className="rounded-full bg-violet-100 px-2 py-0.5 font-semibold text-violet-700 tabular-nums">
+                  {specialCrew} Crew
+                </span>
+                {!rostered && (
+                  <span className="text-amber-700" title="No per-passenger special-meal roster on the order — the flat count cannot be split by audience.">
+                    (no roster — split unknown)
+                  </span>
+                )}
+              </div>
+            )}
           </div>
+          {specialSets.length > 0 ? (
+            <div className="rounded-lg border border-border overflow-hidden">
+              {specialSets.map((s, i) => (
+                <MealRow
+                  key={s.key} first={i === 0}
+                  name={`${s.code} — ${s.name}`}
+                  note={[
+                    s.paxQty ? `${s.paxQty} pax` : null,
+                    s.crewQty ? `${s.crewQty} crew` : null,
+                    s.unplanned ? "not on the menu plan" : null,
+                  ].filter(Boolean).join(" · ") || undefined}
+                  components={dishesOf(s.key, s.components)} qty={s.qty}
+                  {...(s.components.length > 0 ? swapProps(s.key, `${s.code} — ${s.name}`, s.components) : {})}
+                />
+              ))}
+              <div className="flex items-center justify-between border-t border-border bg-muted/40 px-3 py-2 text-sm font-semibold">
+                <span className="uppercase text-[11px] tracking-wider text-muted-foreground">Total Special</span>
+                <span className="tabular-nums">{specialTotalQty}</span>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {/* No menu-planned specials — fall back to the dispatched counts. */}
+              {[
+                { label: "VGML — Veg / Vegan", qty: scaled?.special.vgml ?? 0 },
+                { label: "CHML — Child", qty: scaled?.special.chml ?? 0 },
+                { label: "SPML — Special", qty: scaled?.special.spml ?? 0 },
+              ].filter((s) => s.qty > 0).map((s) => (
+                <RO key={s.label} label={s.label} value={s.qty} />
+              ))}
+              <RO label="Total Special" value={scaled?.specialTotal ?? 0} />
+            </div>
+          )}
         </div>
       </div>
     );
@@ -4084,6 +4617,61 @@ export function GalleyPlanningModal({
 
   // Sign-off (handing/taking accountability) is captured later, at the physical
   // hand-off, on the Loading QC & Sign-Off page — not here at planning time.
+
+  /**
+   * Live stock read-out under a load field: what the selected Transfer From
+   * warehouse holds for this line, and whether the planned count exceeds it.
+   *
+   * Three states, so the sheet can be scanned rather than read:
+   *   • in stock   — quiet slate, an emerald dot
+   *   • short      — amber, with how many units are missing
+   *   • none here  — rose; the item isn't held in this warehouse at all
+   * Lines with no stock record (meal-derived rows) show nothing — a zero there
+   * would look authoritative and mean nothing.
+   */
+  const StockChip = ({
+    stock, planned, unit, inline,
+  }: {
+    stock?: { available: number; tracked: boolean };
+    planned: number;
+    unit?: string;
+    /** Sits beside a value (meal rows) rather than under a field. */
+    inline?: boolean;
+  }) => {
+    if (!stock?.tracked) return null;
+    const { available } = stock;
+    const short = planned > available;
+    const empty = available <= 0;
+    return (
+      <div
+        className={cn(
+          "flex items-center gap-1 rounded-md px-1.5 py-[3px] text-[10px] font-medium leading-none",
+          inline ? "shrink-0" : "mt-1.5",
+          short ? "bg-amber-100/70 text-amber-800"
+            : empty ? "bg-rose-50 text-rose-600"
+            : "bg-slate-50 text-slate-500",
+        )}
+        title={
+          short
+            ? `Only ${fmtQty(available)}${unit ? ` ${unit}` : ""} available in ${sourceWarehouseName} — short by ${fmtQty(planned - available)}`
+            : `${fmtQty(available)}${unit ? ` ${unit}` : ""} available in ${sourceWarehouseName}`
+        }
+      >
+        {short ? (
+          <AlertTriangle className="h-2.5 w-2.5 shrink-0" />
+        ) : (
+          <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", empty ? "bg-rose-400" : "bg-emerald-500")} />
+        )}
+        <span className="tabular-nums truncate">
+          {empty && !short
+            ? "none here"
+            : short
+              ? `${fmtQty(available)} left · short ${fmtQty(planned - available)}`
+              : `${fmtQty(available)} in stock`}
+        </span>
+      </div>
+    );
+  };
 
   function GF({ label, k, unit }: { label: string; k: string; unit?: string }) {
     // Load counts are adjustable with −/＋ steppers (clamped at 0) as well as by
@@ -4093,10 +4681,17 @@ export function GalleyPlanningModal({
     const active = (Number(g[k]) || 0) > 0;
     const step = (delta: number) => sg(k, String(Math.max(0, (Number(g[k]) || 0) + delta)));
     const stepBtn = "h-6 w-6 shrink-0 flex items-center justify-center rounded-md border border-input bg-muted/40 text-muted-foreground hover:bg-sky-100 hover:text-sky-700 hover:border-sky-200 active:scale-95 transition-all";
+    // What the selected warehouse can actually give for this line. Asking for
+    // more is flagged here, not at forward-to-loading time when the plan is
+    // already committed.
+    const st = lineStock.get(k);
+    const short = !!st?.tracked && (Number(g[k]) || 0) > st.available;
     return (
       <div className={cn(
         "rounded-lg border px-2.5 py-2 transition-colors",
-        active ? "border-sky-200 bg-sky-50/50" : "border-slate-200 bg-white hover:border-slate-300",
+        short ? "border-amber-300 bg-amber-50/40"
+          : active ? "border-sky-200 bg-sky-50/50"
+          : "border-slate-200 bg-white hover:border-slate-300",
       )}>
         <div className="flex items-center justify-between gap-1.5 mb-1.5">
           <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium leading-tight truncate" title={label}>{label}</p>
@@ -4121,6 +4716,7 @@ export function GalleyPlanningModal({
             <Plus className="h-3 w-3" />
           </button>
         </div>
+        <StockChip stock={st} planned={Number(g[k]) || 0} unit={unit} />
       </div>
     );
   }
@@ -4143,19 +4739,21 @@ export function GalleyPlanningModal({
   // Renders every sheet section of an item-master group as an editable grid,
   // each section boxed as a card with a filled-lines count. A top summary strip
   // rolls up how many lines across the whole group are loaded.
-  const GROUP_META: Record<"Beverages" | "Amenities" | "Equipment", { icon: typeof CupSoda; label: string; sub: string }> = {
-    Beverages: { icon: CupSoda, label: "Beverages & Tea", sub: "Cold drinks, juice, hot beverage & service items" },
-    Amenities: { icon: Sparkles, label: "Amenities & Consumables", sub: "Tissues, bedding, hygiene, medical kits & forms" },
-    Equipment: { icon: Boxes, label: "Equipment", sub: "Carts, ceramic, cutlery & service ware" },
-  };
-  const renderItemGroup = (group: "Beverages" | "Amenities" | "Equipment") => {
+  const renderItemGroup = (group: string) => {
     const secs = sheetSections.filter((sec) => sec.group === group);
     const editableOf = (sec: (typeof secs)[number]) => sec.fields.filter((f) => !f.auto);
     const setCountOf = (sec: (typeof secs)[number]) => editableOf(sec).filter((f) => (Number(g[f.k]) || 0) > 0).length;
+    // Lines asking for more than the selected warehouse holds.
+    const isShort = (key: string) => {
+      const st = lineStock.get(key);
+      return !!st?.tracked && (Number(g[key]) || 0) > st.available;
+    };
+    const shortCountOf = (sec: (typeof secs)[number]) => editableOf(sec).filter((f) => isShort(f.k)).length;
     const groupLines = secs.reduce((n, sec) => n + editableOf(sec).length, 0);
     const groupSet = secs.reduce((n, sec) => n + setCountOf(sec), 0);
-    const meta = GROUP_META[group];
-    const GroupIcon = meta.icon;
+    const groupShort = secs.reduce((n, sec) => n + shortCountOf(sec), 0);
+    const meta = galleyGroups.find((gr) => gr.id === group) ?? { id: group, label: group, caption: undefined, icon: undefined };
+    const GroupIcon = GROUP_ICONS[meta.icon ?? ""] ?? Boxes;
     return (
       <div className="space-y-4">
         {/* Group summary strip */}
@@ -4166,14 +4764,34 @@ export function GalleyPlanningModal({
             </div>
             <div className="min-w-0">
               <p className="text-sm font-bold text-slate-800 leading-tight">{meta.label}</p>
-              <p className="text-[11px] text-muted-foreground truncate">{meta.sub}</p>
+              {meta.caption && <p className="text-[11px] text-muted-foreground truncate">{meta.caption}</p>}
             </div>
           </div>
-          <div className="text-right shrink-0">
-            <p className="text-lg font-bold text-sky-700 tabular-nums leading-none">
-              {groupSet}<span className="text-xs font-medium text-slate-400">/{groupLines}</span>
-            </p>
-            <p className="text-[10px] uppercase tracking-wider text-muted-foreground">lines loaded</p>
+          <div className="flex items-center gap-3 shrink-0">
+            {/* Where the counts are being drawn from — the stock figures on every
+                line below are this warehouse's, so it is named up front. */}
+            <div className="hidden sm:flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white/70 px-2.5 py-1.5">
+              <Warehouse className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+              <div className="leading-tight">
+                <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Stock from</p>
+                <p className="text-[11px] font-semibold text-slate-700">{sourceWarehouseName}</p>
+              </div>
+            </div>
+            {groupShort > 0 && (
+              <div className="flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-amber-800">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <div className="leading-tight">
+                  <p className="text-sm font-bold tabular-nums">{groupShort}</p>
+                  <p className="text-[9px] uppercase tracking-wider">over stock</p>
+                </div>
+              </div>
+            )}
+            <div className="text-right">
+              <p className="text-lg font-bold text-sky-700 tabular-nums leading-none">
+                {groupSet}<span className="text-xs font-medium text-slate-400">/{groupLines}</span>
+              </p>
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground">lines loaded</p>
+            </div>
           </div>
         </div>
 
@@ -4181,16 +4799,25 @@ export function GalleyPlanningModal({
         {secs.map((sec) => {
           const editable = editableOf(sec);
           const setCount = editable.filter((f) => (Number(g[f.k]) || 0) > 0).length;
+          const shortCount = shortCountOf(sec);
           return (
             <div key={sec.title} className="rounded-xl border border-slate-200 bg-white overflow-hidden shadow-sm">
               <div className="flex items-center justify-between gap-2 border-b border-slate-100 bg-slate-50/70 px-4 py-2.5">
                 <span className="text-[11px] font-bold uppercase tracking-widest text-sky-700">{sec.title}</span>
-                <span className={cn(
-                  "text-[10px] font-semibold px-2 py-0.5 rounded-full tabular-nums",
-                  setCount > 0 ? "bg-sky-100 text-sky-700" : "bg-slate-100 text-slate-400",
-                )}>
-                  {setCount}/{editable.length} set
-                </span>
+                <div className="flex items-center gap-1.5">
+                  {shortCount > 0 && (
+                    <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 tabular-nums">
+                      <AlertTriangle className="h-2.5 w-2.5" />
+                      {shortCount} over stock
+                    </span>
+                  )}
+                  <span className={cn(
+                    "text-[10px] font-semibold px-2 py-0.5 rounded-full tabular-nums",
+                    setCount > 0 ? "bg-sky-100 text-sky-700" : "bg-slate-100 text-slate-400",
+                  )}>
+                    {setCount}/{editable.length} set
+                  </span>
+                </div>
               </div>
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2.5 p-4">
                 {sec.fields.map((f) =>
@@ -4206,21 +4833,138 @@ export function GalleyPlanningModal({
     );
   };
 
-  // Standard galley-loading sequence: load summary → meals → beverages →
-  // amenities/consumables → equipment.
-  // Load Summary + Meals always show; the loading sections appear only once an
-  // aircraft type is selected (their quantities come from that type's standard).
+  // Load Summary + Meals always show; one loading tab per galley group follows,
+  // in the group master's order — the groups themselves come from the Item
+  // Profile, so a new group needs no change here. The loading tabs appear only
+  // once an aircraft type is selected (quantities come from its standard).
+  //
+  // A group whose every line is switched off in Galley Items Group drops out
+  // too: an empty tab reads as "nothing configured" when the truth is "nothing
+  // in scope", and there is nothing to do on it either way.
   const TABS: { key: GTab; label: string }[] = [
     { key: "overview", label: "Load Summary" },
     { key: "meals", label: "Meals" },
+    ...(aircraftType
+      ? galleyGroups
+          .filter((gr) => sheetSections.some((sec) => sec.group === gr.id))
+          .map((gr) => ({ key: gr.id as GTab, label: gr.label }))
+      : []),
   ];
-  if (aircraftType) {
-    TABS.push(
-      { key: "beverages", label: "Beverages & Tea" },
-      { key: "amenities", label: "Amenities & Consumables" },
-      { key: "equipment", label: "Equipment" },
+
+  /**
+   * Substitute one dish of one meal, on one leg.
+   *
+   * The replacement list is Menu Planning's dish master, not free text: a dish
+   * the kitchen already has a recipe and a cost for is something production can
+   * actually make, and anything else would be a note that nobody can cook. Each
+   * option shows what the source warehouse holds, so a substitution isn't made
+   * into a second shortage.
+   */
+  const SwapDishDialog = () => {
+    const [from, setFrom] = useState("");
+    const [to, setTo] = useState("");
+    const [reason, setReason] = useState("");
+    const [query, setQuery] = useState("");
+
+    useEffect(() => {
+      setFrom(swapTarget?.components[0]?.name ?? "");
+      setTo(""); setReason(""); setQuery("");
+    }, [swapTarget]);
+
+    if (!swapTarget) return null;
+    const options = dishMaster.filter(
+      (d) => d.name !== from && d.name.toLowerCase().includes(query.trim().toLowerCase()),
     );
-  }
+
+    return (
+      <Dialog open onOpenChange={(open) => !open && setSwapTarget(null)}>
+        <DialogContent className="max-w-lg p-0 gap-0 overflow-hidden">
+          <DialogHeader className="border-b border-border px-5 py-4 space-y-0">
+            <DialogTitle className="flex items-center gap-2 text-sm font-bold text-slate-800">
+              <Replace className="h-4 w-4 text-amber-600" /> Substitute a dish
+            </DialogTitle>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              {swapTarget.mealName} · {swapTarget.flight} — this leg only. The menu card is
+              unchanged, and the change is logged as an LMC so Production and Packaging see it.
+            </p>
+          </DialogHeader>
+
+          <div className="px-5 py-4 space-y-4">
+            <div>
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Dish to replace</p>
+              <select value={from} onChange={(e) => { setFrom(e.target.value); setTo(""); }} className="w-full h-8 rounded-md border border-input bg-background px-2 text-xs focus:outline-none focus:ring-1 focus:ring-ring">
+                {swapTarget.components.map((c) => (
+                  <option key={c.name} value={c.swappedFrom ?? c.name}>
+                    {c.swappedFrom ? `${c.swappedFrom} (currently ${c.name})` : c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Replace with</p>
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search the menu's dishes…"
+                className="h-8 text-xs mb-1.5"
+              />
+              <div className="max-h-52 overflow-y-auto rounded-md border border-input divide-y divide-border">
+                {options.length === 0 ? (
+                  <p className="px-3 py-2 text-xs text-muted-foreground">No dish matches.</p>
+                ) : options.map((d) => {
+                  const st = stockLookup.forName(d.name);
+                  return (
+                    <button
+                      key={d.name}
+                      type="button"
+                      onClick={() => setTo(d.name)}
+                      className={cn(
+                        "flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs transition-colors",
+                        to === d.name ? "bg-amber-50 text-amber-900" : "hover:bg-muted/60",
+                      )}
+                    >
+                      <span className="min-w-0 truncate">
+                        {d.name}
+                        <span className="text-muted-foreground"> · {d.weight}g · {d.calories} kcal</span>
+                      </span>
+                      <span className="shrink-0 text-[10px] text-muted-foreground tabular-nums">
+                        {st.tracked ? `${fmtQty(st.available)} in stock` : "no stock record"}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                Reason <span className="normal-case tracking-normal">— goes on the LMC entry</span>
+              </p>
+              <Input
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                placeholder="e.g. Beef unavailable — supplier short"
+                className="h-8 text-xs"
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
+            <Button variant="outline" size="sm" onClick={() => setSwapTarget(null)}>Cancel</Button>
+            <Button
+              size="sm"
+              className="bg-amber-600 hover:bg-amber-700 text-white"
+              disabled={!from || !to}
+              onClick={() => applySwap(swapTarget, from, to, reason)}
+            >
+              Substitute &amp; log LMC
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    );
+  };
 
   // A rotation leg rendered as a compact stat card — direction, flight, sector,
   // date and its own PAX/Crew load. Both the outbound and return legs use it.
@@ -4517,7 +5261,19 @@ export function GalleyPlanningModal({
                   {dirBadge(order?.direction)}
                   <span className="text-xs font-semibold text-slate-700">{order?.flight ?? flightNo}</span>
                 </div>
-                {mealsBlock(dispatchSection ? scaledMeals : null, order?.flight ?? flightNo)}
+                {/* What the meals ARE (Menu Planning) before how many go on
+                    board (Dispatch) — the counts below are of these dishes. */}
+                <div className="mb-4">{menuBlock(outboundLeg, order?.flight ?? flightNo)}</div>
+                {mealsBlock(
+                  dispatchSection ? scaledMeals : null,
+                  order?.flight ?? flightNo,
+                  // The EDITED special-meal count, not the order's original — the
+                  // Load Counts field exists to override an outdated record, so
+                  // the special rows have to follow it.
+                  outboundLeg && { ...outboundLeg, specialMeals },
+                  planPax,
+                  planCrew,
+                )}
               </div>
               {planReturn && (
                 <div>
@@ -4526,7 +5282,12 @@ export function GalleyPlanningModal({
                     <span className="text-xs font-semibold text-slate-700">{planReturn.flight}</span>
                     <span className="text-[11px] text-muted-foreground">{planReturn.sector}</span>
                   </div>
-                  {mealsBlock(retScaledMeals, planReturn.flight)}
+                  <div className="mb-4">{menuBlock(planReturn, planReturn.flight)}</div>
+                  {mealsBlock(
+                    retScaledMeals, planReturn.flight,
+                    { ...planReturn, specialMeals: retSpecialMeals },
+                    retPax, retCrew,
+                  )}
                 </div>
               )}
               {returnOrder && !includeReturn && (
@@ -4538,12 +5299,10 @@ export function GalleyPlanningModal({
             </div>
           )}
 
-          {tab === "beverages" && renderItemGroup("Beverages")}
-
-          {tab === "amenities" && renderItemGroup("Amenities")}
-
-          {tab === "equipment" && renderItemGroup("Equipment")}
+          {isGroupTab(tab) && renderItemGroup(tab)}
         </div>
+
+        <SwapDishDialog />
 
         {/* Footer */}
         <div className="border-t bg-white px-6 py-4 shrink-0">

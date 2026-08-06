@@ -19,13 +19,28 @@
 import { DAYS, loadMealPlanningConfig, type FlightType, type MealCard } from "@/lib/meal-planning-data";
 import type { FlightOrder } from "@/lib/flight-orders-store";
 
-const DOMESTIC_AIRPORTS = new Set(["DAC", "CXB", "CGP", "ZYL", "JSR"]);
+/** Bangladesh domestic stations. ZYL and SYL are both in use for Sylhet. */
+const DOMESTIC_AIRPORTS = new Set([
+  "DAC", "CGP", "CXB", "ZYL", "SYL", "JSR", "RJH", "BZL", "SPD",
+]);
 
-/** Domestic when the sector's destination is a domestic airport. */
+/**
+ * A sector's flight type.
+ *
+ * DOMESTIC ONLY WHEN EVERY STOP IS DOMESTIC. Reading the destination alone made
+ * a rotation contradict itself — DAC → DXB was International while its own
+ * return DXB → DAC was Domestic — and put the wrong menu card on the leg coming
+ * home, since flight type is what selects it.
+ *
+ * Stops are split on anything that is not a code character, because sectors are
+ * written three ways in this app ("DAC → DXB", "DAC→DXB", "DAC-DXB"); splitting
+ * on the arrow alone left "DAC-CGP" as one token that matched no airport, so
+ * every hyphen-written domestic flight read as International.
+ */
 export function flightTypeFromSector(sector: string): FlightType {
-  const parts = sector.split("→");
-  const dest = parts[parts.length - 1]?.trim();
-  return dest && DOMESTIC_AIRPORTS.has(dest) ? "Domestic" : "International";
+  const stops = sector.toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
+  if (stops.length === 0) return "International";
+  return stops.every((s) => DOMESTIC_AIRPORTS.has(s)) ? "Domestic" : "International";
 }
 
 /** Weekday name for a yyyy-mm-dd date, Monday-first to match the menu cards. */

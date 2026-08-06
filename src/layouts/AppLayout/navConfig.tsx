@@ -213,6 +213,7 @@ export const NAV_MODULES: NavModule[] = [
       { key: '/consumable-allocation', label: 'Flight Allocation', icon: I(Plane) },
       { key: '/consumable-returns',    label: 'Returns',           icon: I(Undo2) },
       { key: '/galley-loading-standards', label: 'Loading Standards', icon: I(Scale) },
+      { key: '/galley-item-groups',       label: 'Galley Items Group', icon: I(Layers) },
     ],
   },
 

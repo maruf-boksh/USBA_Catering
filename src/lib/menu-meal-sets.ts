@@ -91,6 +91,17 @@ function setCodeFor(kind: SetKind, service: string, choiceIdx: number, choiceCou
   return choiceCount > 1 ? `${base}-C${choiceIdx + 1}` : base;
 }
 
+/**
+ * The set key a card's DESSERT line carries. A dessert is not a set — it is one
+ * loose dish served alongside the choices — but per-leg overrides are addressed
+ * by (flight, setKey, dish), so it needs a key of the same shape to be
+ * substitutable. `dessert` in the choice-index slot can never collide with a
+ * real choice index.
+ */
+export function dessertSetKey(forType: ForType, serviceName: string): string {
+  return `${PREFIX_OF[KIND_OF[forType]]}|${serviceName || "Meal"}|dessert`;
+}
+
 /** "CHOICE 1" → "Choice 1" for display next to the service name. */
 function choiceLabel(raw: string | undefined, idx: number): string {
   const s = (raw ?? "").trim();

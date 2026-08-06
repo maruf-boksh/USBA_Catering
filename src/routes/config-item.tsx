@@ -66,6 +66,7 @@ import {
   type Warehouse,
 } from "@/lib/sample-data";
 import { usePrimaryUoms, useAltUoms, addPrimaryUom, addAltUom } from "@/lib/custom-uoms";
+import { getMinorCategoryOptions } from "@/lib/item-profiles";
 import { AgeingAddPanels } from "@/routes/stock-ageing";
 import { roundQty } from "@/lib/num";
 import {
@@ -853,6 +854,7 @@ function ItemProfileView({ row }: { row: ItemRow }) {
       <Section title="Classification">
         <Field label="Category">{row.category}</Field>
         <Field label="Sub Category">{row.subCategory}</Field>
+        <Field label="Minor Category">{row.minorCategory}</Field>
         <Field label="Primary UOM">{row.uom}</Field>
         <Field label="Can be Produced">{itemCanProduce(row) ? "Yes" : "No"}</Field>
         <Field label="Can be Purchased">{itemCanPurchase(row) ? "Yes" : "No"}</Field>
@@ -913,6 +915,12 @@ function ItemList({
         r.subCategory ? r.subCategory : <span className="text-muted-foreground text-xs">—</span>,
     },
     {
+      key: "minorCategory",
+      header: "Minor Category",
+      render: (r) =>
+        r.minorCategory ? r.minorCategory : <span className="text-muted-foreground text-xs">—</span>,
+    },
+    {
       key: "uom",
       header: "UOM",
       render: (r) => (
@@ -960,7 +968,7 @@ function ItemList({
       title="items"
       data={data}
       columns={cols}
-      searchKeys={["id", "code", "name", "itemType", "category"]}
+      searchKeys={["id", "code", "name", "itemType", "category", "subCategory", "minorCategory"]}
       selectable={false}
       actions={(r) => (
         <RowActions
@@ -990,6 +998,7 @@ function ItemEditForm({
   const [itemType, setItemType] = useState<string>(row.itemType ?? ITEM_TYPES[0]);
   const [category, setCategory] = useState(row.category ?? "");
   const [subCategory, setSubCategory] = useState(row.subCategory ?? "");
+  const [minorCategory, setMinorCategory] = useState(row.minorCategory ?? "");
   const [uom, setUom] = useState<string>(row.uom ?? UOMS[0]);
   const [status, setStatus] = useState<string>(row.status ?? "Active");
   const [costPrice, setCostPrice] = useState(String(row.costPrice ?? ""));
@@ -1018,10 +1027,21 @@ function ItemEditForm({
     if (row.subCategory && !base.includes(row.subCategory)) base.push(row.subCategory);
     return base;
   });
+  const [minorCategoryExtras, setMinorCategoryExtras] = useState<string[]>([]);
+  const minorCategoryOptions = useMemo(() => {
+    const base = getMinorCategoryOptions({ category, subCategory });
+    for (const extra of [...minorCategoryExtras, row.minorCategory ?? ""]) {
+      const v = extra.trim();
+      if (v && !base.some((o) => o.toLowerCase() === v.toLowerCase())) base.push(v);
+    }
+    return base;
+  }, [category, subCategory, minorCategoryExtras, row.minorCategory]);
   const [addingCategory, setAddingCategory] = useState(false);
   const [newCategory, setNewCategory] = useState("");
   const [addingSubCategory, setAddingSubCategory] = useState(false);
   const [newSubCategory, setNewSubCategory] = useState("");
+  const [addingMinorCategory, setAddingMinorCategory] = useState(false);
+  const [newMinorCategory, setNewMinorCategory] = useState("");
 
   // Primary UOM list — seed + any units added from the system. Include the row's
   // own UOM in case it was a custom unit saved on another device/session.
@@ -1062,6 +1082,12 @@ function ItemEditForm({
     if (!subCategoryOptions.some((s) => s.toLowerCase() === val.toLowerCase())) setSubCategoryOptions((p) => [...p, val]);
     setSubCategory(val); setNewSubCategory(""); setAddingSubCategory(false);
   };
+  const commitNewMinorCategory = () => {
+    const val = newMinorCategory.trim();
+    if (!val) { toast.error("Enter a minor category name."); return; }
+    if (!minorCategoryOptions.some((m) => m.toLowerCase() === val.toLowerCase())) setMinorCategoryExtras((p) => [...p, val]);
+    setMinorCategory(val); setNewMinorCategory(""); setAddingMinorCategory(false);
+  };
 
   const submit = () => {
     if (!code.trim()) { toast.error("Item code is required."); return; }
@@ -1078,6 +1104,7 @@ function ItemEditForm({
       itemType,
       category,
       subCategory,
+      minorCategory: minorCategory || undefined,
       uom,
       status,
       costPrice: Number(costPrice) || 0,
@@ -1154,6 +1181,25 @@ function ItemEditForm({
               <Input autoFocus value={newSubCategory} onChange={(e) => setNewSubCategory(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewSubCategory(); } }} placeholder="New sub category name" className="h-9" />
               <Button type="button" size="sm" onClick={commitNewSubCategory}>Add</Button>
               <Button type="button" size="sm" variant="outline" onClick={() => { setAddingSubCategory(false); setNewSubCategory(""); }}>Cancel</Button>
+            </div>
+          )}
+        </div>
+        <div>
+          <Label className={lbl}>Minor Category</Label>
+          <select
+            value={minorCategory}
+            onChange={(e) => { e.target.value === ADD_NEW ? setAddingMinorCategory(true) : setMinorCategory(e.target.value); }}
+            className={selectCls}
+          >
+            <option value="">Select minor category</option>
+            {minorCategoryOptions.map((m) => <option key={m}>{m}</option>)}
+            <option value={ADD_NEW}>+ Add new minor category…</option>
+          </select>
+          {addingMinorCategory && (
+            <div className="mt-2 flex items-center gap-2">
+              <Input autoFocus value={newMinorCategory} onChange={(e) => setNewMinorCategory(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewMinorCategory(); } }} placeholder="New minor category name" className="h-9" />
+              <Button type="button" size="sm" onClick={commitNewMinorCategory}>Add</Button>
+              <Button type="button" size="sm" variant="outline" onClick={() => { setAddingMinorCategory(false); setNewMinorCategory(""); }}>Cancel</Button>
             </div>
           )}
         </div>
@@ -1256,6 +1302,7 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
   const [itemType, setItemType] = useState<string>(ITEM_TYPES[0]);
   const [category, setCategory] = useState("");
   const [subCategory, setSubCategory] = useState("");
+  const [minorCategory, setMinorCategory] = useState("");
   const [uom, setUom] = useState<string>(UOMS[0]);
 
   // Item Type is editable: users can add a new one inline via "+ Add new…",
@@ -1270,6 +1317,16 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
   // "+ Add new…" option. Options seed from the master list and grow per session.
   const [categoryOptions, setCategoryOptions] = useState<string[]>([...CATEGORIES]);
   const [subCategoryOptions, setSubCategoryOptions] = useState<string[]>([...SUB_CATEGORIES]);
+  // Minor Category has no fixed master — its options are the presets plus what
+  // other profiles already use, narrowed to the classification being entered.
+  const [minorCategoryExtras, setMinorCategoryExtras] = useState<string[]>([]);
+  const minorCategoryOptions = useMemo(() => {
+    const base = getMinorCategoryOptions({ category, subCategory });
+    for (const extra of minorCategoryExtras) {
+      if (!base.some((o) => o.toLowerCase() === extra.toLowerCase())) base.push(extra);
+    }
+    return base;
+  }, [category, subCategory, minorCategoryExtras]);
 
   // Primary / Alt UOM lists — seed + any units the user added from the system.
   // Persisted app-wide via the custom-uoms store so new units survive and appear
@@ -1330,6 +1387,8 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
   const [newCategory, setNewCategory] = useState("");
   const [addingSubCategory, setAddingSubCategory] = useState(false);
   const [newSubCategory, setNewSubCategory] = useState("");
+  const [addingMinorCategory, setAddingMinorCategory] = useState(false);
+  const [newMinorCategory, setNewMinorCategory] = useState("");
 
   const activeCategoryOptions = isAsset ? Object.keys(assetCategoryMap) : categoryOptions;
   const activeSubCategoryOptions = isAsset ? (assetCategoryMap[category] ?? []) : subCategoryOptions;
@@ -1352,6 +1411,7 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
     if ((next === "Asset") !== isAsset) {
       setCategory("");
       setSubCategory("");
+      setMinorCategory("");
     }
   };
 
@@ -1404,6 +1464,17 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
     setSubCategory(val);
     setNewSubCategory("");
     setAddingSubCategory(false);
+  };
+  const commitNewMinorCategory = () => {
+    const val = newMinorCategory.trim();
+    if (!val) { toast.error("Enter a minor category name."); return; }
+    if (!minorCategoryOptions.some((m) => m.toLowerCase() === val.toLowerCase())) {
+      setMinorCategoryExtras((prev) => [...prev, val]);
+      toast.success(`Minor category "${val}" added.`);
+    }
+    setMinorCategory(val);
+    setNewMinorCategory("");
+    setAddingMinorCategory(false);
   };
 
   const requiresBom = BOM_REQUIRED_ITEM_TYPES.includes(itemType as ItemRow["itemType"]);
@@ -1570,6 +1641,7 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
       name: name.trim(),
       itemType: itemTypeTyped,
       category, subCategory, uom,
+      minorCategory: minorCategory || undefined,
       status: fgWithoutBom ? "Inactive" : "Active",
       weightG: (Number(weightVal) * weightGramsPerUnit(uom)) || undefined,
       kcal: Number(kcal) || undefined,
@@ -1720,6 +1792,35 @@ function ItemCreate({ nextId, onSave }: { nextId: string; onSave: (row: ItemRow)
                 />
                 <Button type="button" size="sm" onClick={commitNewSubCategory}>Add</Button>
                 <Button type="button" size="sm" variant="outline" onClick={() => { setAddingSubCategory(false); setNewSubCategory(""); }}>Cancel</Button>
+              </div>
+            )}
+          </div>
+          <div>
+            <Label className="text-xs uppercase tracking-wider text-muted-foreground">Minor Category</Label>
+            <select
+              value={minorCategory}
+              onChange={(e) => { e.target.value === ADD_NEW ? setAddingMinorCategory(true) : setMinorCategory(e.target.value); }}
+              className={selectCls}
+            >
+              <option value="">Select minor category</option>
+              {minorCategoryOptions.map((m) => <option key={m}>{m}</option>)}
+              <option value={ADD_NEW}>+ Add new minor category…</option>
+            </select>
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              Optional third level below Sub Category — the form the item is stocked in.
+            </div>
+            {addingMinorCategory && (
+              <div className="mt-2 flex items-center gap-2">
+                <Input
+                  autoFocus
+                  value={newMinorCategory}
+                  onChange={(e) => setNewMinorCategory(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitNewMinorCategory(); } }}
+                  placeholder="New minor category name"
+                  className="h-9"
+                />
+                <Button type="button" size="sm" onClick={commitNewMinorCategory}>Add</Button>
+                <Button type="button" size="sm" variant="outline" onClick={() => { setAddingMinorCategory(false); setNewMinorCategory(""); }}>Cancel</Button>
               </div>
             )}
           </div>
@@ -2333,7 +2434,7 @@ type ParsedRow = {
 };
 
 const BULK_TEMPLATE_HEADERS = [
-  "code", "name", "itemType", "category", "subCategory", "uom",
+  "code", "name", "itemType", "category", "subCategory", "minorCategory", "uom",
   "reorderLevel", "thresholdPct", "office", "warehouse", "binLocation",
   "batchTracked", "allocationMethod",
 ] as const;
@@ -2341,9 +2442,9 @@ const BULK_TEMPLATE_HEADERS = [
 const TEMPLATE_CSV =
   BULK_TEMPLATE_HEADERS.join(",") + "\n" +
   [
-    "RM-RICE-PSHM,Premium Basmati Rice,Raw Material,Grains,Rice,Kg,150,20,HQ-DAC,WH-DAC-01,A1-R2-S1,true,FEFO",
-    "PK-BAG-BRN,Brown Paper Bag,Packaging,Packaging,Boxes & Trays,Pcs,500,15,HQ-DAC,WH-DAC-01,B2-R1-S3,false,FIFO",
-    "BV-JCE-MNG,Mango Juice 200ml,Finished Good,Beverage,Juice,Pcs,200,25,HQ-DAC,CS-DAC-01,C1-R4-S2,true,FEFO",
+    "RM-RICE-PSHM,Premium Basmati Rice,Raw Material,Grains,Dry,Bulk,Kg,150,20,HQ-DAC,WH-DAC-01,A1-R2-S1,true,FEFO",
+    "PK-BAG-BRN,Brown Paper Bag,Packaging,Packaging,Dry,Pre-Packed,Piece,500,15,HQ-DAC,WH-DAC-01,B2-R1-S3,false,FIFO",
+    "BV-JCE-MNG,Mango Juice 200ml,Finished Good,Beverage,Liquid,Ready-to-Eat,Piece,200,25,HQ-DAC,CS-DAC-01,C1-R4-S2,true,FEFO",
   ].join("\n");
 
 function parseCsv(text: string): Array<Record<string, string>> {
@@ -2372,6 +2473,9 @@ function validateRow(
   const itemTypeRaw = (raw.itemType ?? "").trim();
   const category = (raw.category ?? "").trim();
   const subCategory = (raw.subCategory ?? "").trim();
+  // Free-form by design (the Item Profile DDL grows from what is in use), so it
+  // is taken as given rather than checked against a master list.
+  const minorCategory = (raw.minorCategory ?? "").trim();
   const uom = (raw.uom ?? "").trim();
   const reorderRaw = (raw.reorderLevel ?? "0").trim();
   const thresholdRaw = (raw.thresholdPct ?? "20").trim();
@@ -2460,6 +2564,7 @@ function validateRow(
       itemType: itemType as ItemRow["itemType"],
       category,
       subCategory,
+      minorCategory: minorCategory || undefined,
       uom: uom || ITEM_UOMS[0],
       status: "Active",
       reorderLevel: reorder,

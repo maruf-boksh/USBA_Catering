@@ -20,6 +20,11 @@ const GALLEY = [
   { key: 'return-log',      icon: '↩️', label: 'Return Log',       sub: 'Consumable returns & reusables' },
 ];
 
+const SETTINGS = [
+  { key: 'theme',   icon: '🎨', label: 'Theme & Appearance', sub: 'Colour theme, dark mode & font size' },
+  { key: 'profile', icon: '👤', label: 'Profile',            sub: 'Account details & sign out' },
+];
+
 function SectionLabel({ children }) {
   return (
     <div style={{
@@ -101,6 +106,11 @@ export function MoreScreen({ nav, onLogout }) {
 
         <SectionLabel>Galley Planning</SectionLabel>
         {GALLEY.map(item => (
+          <MenuRow key={item.key} item={item} onPress={() => nav.navigate(item.key)} />
+        ))}
+
+        <SectionLabel>Settings</SectionLabel>
+        {SETTINGS.map(item => (
           <MenuRow key={item.key} item={item} onPress={() => nav.navigate(item.key)} />
         ))}
 

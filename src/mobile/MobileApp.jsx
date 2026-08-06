@@ -23,10 +23,9 @@ import { PurchaseRequisitionScreen } from './screens/PurchaseRequisitionScreen';
 import { ProfileScreen }         from './screens/ProfileScreen';
 import { GalleyOverviewScreen }  from './screens/GalleyOverviewScreen';
 import { ReturnLogScreen }       from './screens/ReturnLogScreen';
-import { applyMobileTheme, getMobileThemeMode } from './theme';
+import { ThemeScreen }           from './screens/ThemeScreen';
+import { applyMobileThemeSettings, loadMobileThemeSettings, getMobileThemeSettings, getMobileFontZoom } from './theme';
 import { MOCK_KPIS }             from './mockData';
-
-const THEME_KEY = 'mobile-theme';
 
 /*
  * ╔══════════════════════════════════════════════════════════════════════════╗
@@ -76,7 +75,7 @@ const TAB_ROOTS = {
 };
 
 function tabForScreen(screen) {
-  if (['home', 'alerts', 'profile'].includes(screen))                              return 'home';
+  if (['home', 'alerts', 'profile', 'theme'].includes(screen))                     return 'home';
   if (['orders', 'meal-planning'].includes(screen))                                return 'orders';
   if (['production'].includes(screen))                                             return 'production';
   if (['qc', 'hygiene', 'personal-hygiene', 'cooking-temp'].includes(screen))      return 'qc';
@@ -110,24 +109,23 @@ export function MobileApp({ onClose }) {
   const [stack, setStack] = useState(['splash']);
   const screen = stack[stack.length - 1];
 
-  // Light/dark mode — persisted, applied to the shared theme before first paint.
-  const [themeMode, setThemeModeState] = useState(() => {
-    let saved = 'light';
-    try { saved = localStorage.getItem(THEME_KEY) || 'light'; } catch { /* ignore */ }
-    applyMobileTheme(saved);
-    return getMobileThemeMode();
+  // Theme Center settings (mode + colour preset + font size) — persisted,
+  // applied to the shared token object before first paint.
+  const [themeSettings, setThemeSettingsState] = useState(() => {
+    applyMobileThemeSettings(loadMobileThemeSettings());
+    return getMobileThemeSettings();
   });
-  const setTheme = (mode) => {
-    applyMobileTheme(mode);
-    try { localStorage.setItem(THEME_KEY, getMobileThemeMode()); } catch { /* ignore */ }
-    setThemeModeState(getMobileThemeMode());
+  const patchTheme = (patch) => {
+    applyMobileThemeSettings({ ...getMobileThemeSettings(), ...patch });
+    setThemeSettingsState(getMobileThemeSettings());
   };
+  const setTheme = (mode) => patchTheme({ mode }); // Dark Mode toggle shim
 
   const navigate = (s) => setStack((p) => [...p, s]);
   const goBack   = ()  => setStack((p) => (p.length > 1 ? p.slice(0, -1) : p));
   const resetTo  = (s) => setStack([s]);
 
-  const nav = { screen, navigate, goBack, resetTo, themeMode, setTheme };
+  const nav = { screen, navigate, goBack, resetTo, themeMode: themeSettings.mode, setTheme, themeSettings, patchTheme };
   const isPreAuth = PRE_AUTH.has(screen);
 
   // Logout resets to login screen
@@ -155,6 +153,7 @@ export function MobileApp({ onClose }) {
       case 'purchase-orders': return <PurchaseOrdersScreen nav={nav} />;
       case 'purchase-requisition': return <PurchaseRequisitionScreen nav={nav} />;
       case 'profile':         return <ProfileScreen nav={nav} onLogout={handleLogout} />;
+      case 'theme':           return <ThemeScreen nav={nav} />;
       case 'galley-overview': return <GalleyOverviewScreen nav={nav} />;
       case 'return-log':      return <ReturnLogScreen nav={nav} />;
       default:                return <HomeScreen nav={nav} />;
@@ -162,7 +161,7 @@ export function MobileApp({ onClose }) {
   }
 
   return (
-    <MobileLayout onClose={onClose}>
+    <MobileLayout onClose={onClose} fontZoom={getMobileFontZoom()}>
       {isPreAuth ? (
         renderScreen()
       ) : (

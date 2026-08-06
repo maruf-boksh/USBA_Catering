@@ -1,12 +1,20 @@
-// Galley item catalog accessor.
+// Galley item catalog accessor — what lines the Handing/Taking sheet carries.
 //
-// The sheet's structure comes from GALLEY_CATALOG (src/lib/galley-catalog.ts).
-// The Beverages/Amenities/Equipment lines are *stock* items that live in the
-// airline-consumables inventory store, so the galley plan reads which of those
-// items exist (and their names/units) from inventory data — nothing hardcoded.
-// Meal-summary and auto-subtotal lines are computed, taken from the catalog.
+// Three sources, merged by key (first one wins, later ones only add):
+//
+//   1. GALLEY_CATALOG — the SEED. Its keys are permanent: saved galley plans and
+//      loading standards are keyed by them, so a seeded line is never renamed or
+//      regenerated. A seed line drops off the sheet if its stock record is gone.
+//   2. The airline-consumables store — live name / unit / section / group for
+//      the seeded stock lines, plus any galley-tagged consumable of its own.
+//   3. The ITEM PROFILE master — any item tagged with a `galleyGroup` becomes a
+//      line, keyed by its item code. This is the path to add galley items (and
+//      whole galley groups) as data: see ItemMaster.galleyGroup.
+//
+// Meal-summary and auto-subtotal lines stay computed, taken from the catalog.
 
 import { GALLEY_CATALOG, type GalleyItemGroup } from "@/lib/galley-catalog";
+import { getItemProfiles } from "@/lib/item-profiles";
 import { consumableItems, type ConsumableItem } from "@/lib/sample-data";
 
 export type GalleyPlan = Record<string, string>;
@@ -20,9 +28,11 @@ export type GalleyItem = {
   group: GalleyItemGroup;
   rollupTo?: string;
   auto?: boolean;
+  /** Ascending position within the section; unset sorts last. */
+  sortOrder?: number;
 };
 
-export type GalleySheetField = { k: string; label: string; unit?: string; auto?: boolean };
+export type GalleySheetField = { k: string; label: string; unit?: string; auto?: boolean; sortOrder?: number };
 export type GalleySheetSection = { title: string; group: GalleyItemGroup; fields: GalleySheetField[] };
 
 const CONSUMABLE_KEY = "harvest-data-v1:airline-consumables-items";
@@ -69,12 +79,19 @@ export function loadGalleyItems(): GalleyItem[] {
   for (const d of GALLEY_CATALOG) {
     if (d.stock && !byId.has(d.key)) continue; // removed from inventory → off the sheet
     const inv = byId.get(d.key);
+    // Name / unit are LIVE (the store is where they are maintained), but the
+    // PLACEMENT — group and section — stays the catalog's. A seeded consumable
+    // only ever received its galleyGroup as a copy of the catalog's at first
+    // write and nothing edits it afterwards, so deferring to the stored copy
+    // would freeze every sheet that had been opened once: re-filing a line in
+    // the catalog (Fresh Fruits leaving Equipment, say) would reach new
+    // installs and nobody else.
     out.push({
       key: d.key,
       label: inv?.name ?? d.label,
       unit: inv?.galleyUnit ?? inv?.uom ?? d.unit,
-      section: inv?.galleySection ?? d.section,
-      group: (inv?.galleyGroup as GalleyItemGroup) ?? d.group,
+      section: d.section,
+      group: d.group,
       rollupTo: d.rollupTo,
       auto: d.auto,
     });
@@ -91,6 +108,29 @@ export function loadGalleyItems(): GalleyItem[] {
       group: c.galleyGroup as GalleyItemGroup,
       rollupTo: c.rollupTo,
       auto: c.auto,
+    });
+  }
+
+  // Item Profile — the master. Any profile tagged with a galleyGroup joins the
+  // sheet, keyed by its item code. Matched out by key AND by name so an item
+  // that also exists as a consumable (the seeded stock lines do) is not listed
+  // twice under two keys, which would double it on the sheet and in the plan.
+  const takenKeys = new Set(out.map((i) => i.key));
+  const takenNames = new Set(out.map((i) => i.label.trim().toLowerCase()));
+  for (const p of getItemProfiles()) {
+    const group = (p.galleyGroup ?? "").trim();
+    if (!group) continue;
+    const name = p.name.trim();
+    if (takenKeys.has(p.code) || takenNames.has(name.toLowerCase())) continue;
+    takenKeys.add(p.code);
+    takenNames.add(name.toLowerCase());
+    out.push({
+      key: p.code,
+      label: name,
+      unit: p.galleyUnit ?? p.uom,
+      section: (p.galleySection ?? "").trim() || group,
+      group,
+      sortOrder: p.gallerySortOrder,
     });
   }
   return out;
@@ -110,7 +150,12 @@ export function computeAutoTotals(plan: GalleyPlan, items: GalleyItem[] = loadGa
   return out;
 }
 
-/** Sheet sections derived from the item list (section order = first appearance). */
+/**
+ * Sheet sections derived from the item list. Section order is first appearance;
+ * within a section, items with a `gallerySortOrder` lead (ascending) and the
+ * rest keep catalog order behind them — so setting the order on one Item Profile
+ * cannot shuffle every other line on the sheet.
+ */
 export function getGalleySections(items: GalleyItem[] = loadGalleyItems()): GalleySheetSection[] {
   const sections: GalleySheetSection[] = [];
   const byTitle = new Map<string, GalleySheetSection>();
@@ -121,7 +166,15 @@ export function getGalleySections(items: GalleyItem[] = loadGalleyItems()): Gall
       byTitle.set(it.section, sec);
       sections.push(sec);
     }
-    sec.fields.push({ k: it.key, label: it.label, unit: it.unit, auto: it.auto });
+    sec.fields.push({ k: it.key, label: it.label, unit: it.unit, auto: it.auto, sortOrder: it.sortOrder });
+  }
+  for (const sec of sections) {
+    sec.fields = sec.fields
+      .map((f, i) => ({ f, i }))
+      .sort((a, b) =>
+        (a.f.sortOrder ?? Number.POSITIVE_INFINITY) - (b.f.sortOrder ?? Number.POSITIVE_INFINITY) ||
+        a.i - b.i)
+      .map(({ f }) => f);
   }
   return sections;
 }

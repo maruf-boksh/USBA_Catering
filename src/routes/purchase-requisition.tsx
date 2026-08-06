@@ -21,7 +21,11 @@ import {
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { activeItems } from "@/lib/sample-data";
+import {
+  getActiveItemProfiles, getItemTypeOptions, getUomOptionsForItem, primaryUomEquivalent,
+} from "@/lib/item-profiles";
+import type { UomOption } from "@/lib/sample-data";
+import { fmtQty } from "@/lib/num";
 import { LocationPicker, LocationFilter, LocationCell } from "@/components/common/LocationPicker";
 import { useWorkflow, type WfRequisition, type WfDemandItem } from "@/lib/workflow-store";
 import { useArrivalFlash, peekArrivalRows } from "@/lib/arrival-flash";
@@ -56,15 +60,67 @@ const REQUESTERS = [
 const selectCls =
   "w-full mt-1 h-9 rounded-md border border-input bg-background px-3 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
-// Item picker — pulled from the central Item Profile
-const ITEM_MASTER = activeItems.map((i) => ({
-  name: i.name,
-  uom: i.uom,
-  description: `${i.code} · ${i.category}${i.subCategory ? ` · ${i.subCategory}` : ""}`,
-  itemType: i.itemType,
-}));
+type PickerItem = {
+  name: string;
+  uom: string;
+  description: string;
+  itemType: string;
+  /** Primary UOM + any Alt UOMs configured on the item's profile. */
+  uomOptions: UomOption[];
+};
 
-type ItemTypeFilter = "All" | "Production" | "Asset";
+// Item picker — pulled live from the Item Profile master (config-item.tsx), so
+// items, item types and alt UOMs added there are usable here without a rebuild.
+function buildItemMaster(): PickerItem[] {
+  return getActiveItemProfiles().map((i) => ({
+    name: i.name,
+    uom: i.uom,
+    // Full classification path, so two similarly-named lines are told apart in
+    // the picker without opening the Item Profile.
+    description: [i.code, i.category, i.subCategory, i.minorCategory]
+      .filter(Boolean).join(" · "),
+    itemType: i.itemType,
+    uomOptions: getUomOptionsForItem(i.name, [i]),
+  }));
+}
+
+/** DDL label for a UOM option — alts carry their conversion, e.g. "Dozen (×12 Piece)". */
+function uomOptionLabel(o: UomOption, primaryUom: string): string {
+  return o.isPrimary ? o.uom : `${o.uom} (×${fmtQty(o.conversion)} ${primaryUom})`;
+}
+
+/**
+ * Stock-unit equivalent of a saved line, when it was raised in an Alt UOM. Uses
+ * the values stored on the line, falling back to a live Item Profile lookup for
+ * lines saved before alt UOMs were recorded (seed / legacy rows).
+ */
+function lineAltEquivalent(l: PRLineItem): { qty: number; uom: string } | null {
+  if (l.primaryQty != null && l.primaryUom) return { qty: l.primaryQty, uom: l.primaryUom };
+  return primaryUomEquivalent(l.itemName, l.qty, l.uom);
+}
+
+/** UoM table cell shared by every PR line table: entered unit + stock equivalent. */
+function UomCell({ line }: { line: PRLineItem }) {
+  const eq = lineAltEquivalent(line);
+  return (
+    <div className="leading-tight">
+      <span>{line.uom}</span>
+      {eq && (
+        <div className="text-[11px] text-muted-foreground whitespace-nowrap">
+          = {fmtQty(eq.qty)} {eq.uom}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** "All" plus every item type configured in the Item Profile's Item Type DDL. */
+const ITEM_TYPE_ALL = "All";
+
+function filterByItemType(master: PickerItem[], type: string): PickerItem[] {
+  if (type === ITEM_TYPE_ALL) return master;
+  return master.filter((i) => i.itemType === type);
+}
 
 // ── Bridge: convert workflow-store WfRequisition (e.g. MRP-generated) into the
 // local PurchaseRequisition shape so they show up in this module's list. The
@@ -552,7 +608,9 @@ function PurchaseRequisitionCreate({
   const [justification, setJustification] = useState(prefill?.justification ?? "");
 
   // Line state
-  const [itemTypeFilter, setItemTypeFilter] = useState<ItemTypeFilter>("All");
+  const itemMaster = useMemo(buildItemMaster, []);
+  const itemTypeOptions = useMemo(() => getItemTypeOptions(), []);
+  const [itemTypeFilter, setItemTypeFilter] = useState(ITEM_TYPE_ALL);
   const [itemSearch, setItemSearch] = useState("");
   const [showItemDrop, setShowItemDrop] = useState(false);
   const [itemName, setItemName] = useState("");
@@ -578,25 +636,31 @@ function PurchaseRequisitionCreate({
   const totalAmount = lines.reduce((s, l) => s + l.qty * l.rate, 0);
 
   const filteredItemMaster = useMemo(
-    () => ITEM_MASTER.filter((i) => {
-      if (itemTypeFilter === "Asset" && i.itemType !== "Asset") return false;
-      if (itemTypeFilter === "Production" && i.itemType === "Asset") return false;
-      return true;
-    }),
-    [itemTypeFilter],
+    () => filterByItemType(itemMaster, itemTypeFilter),
+    [itemMaster, itemTypeFilter],
   );
 
   const visibleItems = itemSearch.trim()
     ? filteredItemMaster.filter((i) => i.name.toLowerCase().includes(itemSearch.trim().toLowerCase()))
     : filteredItemMaster;
 
+  // UOM choices follow the picked item: its Primary UOM plus every Alt UOM on
+  // its Item Profile. Falls back to the generic list until an item is chosen.
+  const selectedItem = itemMaster.find((i) => i.name === itemName);
+  const uomOptions = selectedItem?.uomOptions ?? [];
+  // Live "2 Carton = 720 Piece" readout for the row being entered.
+  const draftEquivalent = itemName && Number(qty) > 0
+    ? primaryUomEquivalent(itemName, Number(qty), uom)
+    : null;
+
   const addLine = () => {
     if (!itemName.trim()) { toast.error("Item name is required."); return; }
-    if (!ITEM_MASTER.find((i) => i.name === itemName.trim())) { toast.error("Select a valid item from the list."); return; }
+    if (!itemMaster.find((i) => i.name === itemName.trim())) { toast.error("Select a valid item from the list."); return; }
     const qtyN = Number(qty);
     if (!qtyN || qtyN <= 0) { toast.error("Quantity must be greater than zero."); return; }
     const rateN = Number(rate);
     if (rateN < 0) { toast.error("Rate cannot be negative."); return; }
+    const eq = primaryUomEquivalent(itemName.trim(), qtyN, uom);
     setLines((prev) => [
       ...prev,
       {
@@ -606,6 +670,7 @@ function PurchaseRequisitionCreate({
         qty: qtyN,
         uom,
         rate: rateN,
+        ...(eq ? { primaryQty: eq.qty, primaryUom: eq.uom } : {}),
       },
     ]);
     setItemName("");
@@ -613,6 +678,7 @@ function PurchaseRequisitionCreate({
     setDescription("");
     setQty("");
     setRate("");
+    setUom(UOMS[0]);   // back to the generic list until the next item is picked
   };
 
   const removeLine = (id: string) => {
@@ -642,7 +708,7 @@ function PurchaseRequisitionCreate({
       totalAmount,
     };
     onSave(newPR);
-    toast.success(`${newPR.id} ${submit ? "submitted for approval" : "saved as draft"}.`);
+    toast.success(`${newPR.id} ${submit ? "saved — pending approval" : "saved as draft"}.`);
   };
 
   return (
@@ -658,7 +724,7 @@ function PurchaseRequisitionCreate({
                 <Save className="h-4 w-4 mr-1.5" /> Save Draft
               </Button>
               <Button onClick={() => handleSave(true)}>
-                <Send className="h-4 w-4 mr-1.5" /> Submit for Approval
+                <Save className="h-4 w-4 mr-1.5" /> Save
               </Button>
             </div>
           </div>
@@ -762,16 +828,16 @@ function PurchaseRequisitionCreate({
               <select
                 value={itemTypeFilter}
                 onChange={(e) => {
-                  setItemTypeFilter(e.target.value as ItemTypeFilter);
+                  setItemTypeFilter(e.target.value);
                   setItemName("");
                   setItemSearch("");
                   setDescription("");
+                  setUom(UOMS[0]);
                 }}
                 className={selectCls}
               >
-                <option value="All">All</option>
-                <option value="Production">Production</option>
-                <option value="Asset">Asset</option>
+                <option value={ITEM_TYPE_ALL}>All</option>
+                {itemTypeOptions.map((t) => <option key={t} value={t}>{t}</option>)}
               </select>
             </div>
 
@@ -847,7 +913,13 @@ function PurchaseRequisitionCreate({
                 onChange={(e) => setUom(e.target.value)}
                 className={selectCls}
               >
-                {UOMS.map((u) => <option key={u} value={u}>{u}</option>)}
+                {uomOptions.length > 0
+                  ? uomOptions.map((o) => (
+                      <option key={o.uom} value={o.uom}>
+                        {uomOptionLabel(o, uomOptions[0].uom)}
+                      </option>
+                    ))
+                  : UOMS.map((u) => <option key={u} value={u}>{u}</option>)}
               </select>
             </div>
 
@@ -870,6 +942,16 @@ function PurchaseRequisitionCreate({
               </Button>
             </div>
           </div>
+
+          {draftEquivalent && (
+            <p className="mt-2 text-xs text-muted-foreground">
+              {fmtQty(Number(qty))} {uom} ={" "}
+              <span className="font-semibold text-foreground">
+                {fmtQty(draftEquivalent.qty)} {draftEquivalent.uom}
+              </span>{" "}
+              in stock unit · Est. Rate is per {uom}.
+            </p>
+          )}
 
           <div className="mt-6 border border-border rounded-md overflow-hidden">
             <Table>
@@ -901,8 +983,8 @@ function PurchaseRequisitionCreate({
                         <TableCell className="text-muted-foreground text-xs">
                           {l.description || "—"}
                         </TableCell>
-                        <TableCell className="text-right tabular-nums">{l.qty}</TableCell>
-                        <TableCell>{l.uom}</TableCell>
+                        <TableCell className="text-right tabular-nums">{fmtQty(l.qty)}</TableCell>
+                        <TableCell><UomCell line={l} /></TableCell>
                         <TableCell className="text-right tabular-nums">{l.rate.toLocaleString()}</TableCell>
                         <TableCell className="text-right tabular-nums">
                           {(l.qty * l.rate).toLocaleString()}
@@ -1058,15 +1140,15 @@ function RequisitionDetailsDialog({
                         <TableCell className="text-muted-foreground text-xs">
                           {l.description || "—"}
                         </TableCell>
-                        <TableCell className="text-right tabular-nums">{l.qty}</TableCell>
+                        <TableCell className="text-right tabular-nums">{fmtQty(l.qty)}</TableCell>
                         <TableCell className="text-right tabular-nums text-muted-foreground">
-                          {l.orderedQty ?? 0}
+                          {fmtQty(l.orderedQty ?? 0)}
                         </TableCell>
                         <TableCell className="text-right tabular-nums text-green-700">
-                          {l.receivedQty ?? 0}
+                          {fmtQty(l.receivedQty ?? 0)}
                         </TableCell>
                         <TableCell className={"text-right tabular-nums " + (Math.max(l.qty - (l.receivedQty ?? 0), 0) > 0 ? "text-amber-700 font-medium" : "text-muted-foreground")}>
-                          {Math.max(l.qty - (l.receivedQty ?? 0), 0)}
+                          {fmtQty(Math.max(l.qty - (l.receivedQty ?? 0), 0))}
                         </TableCell>
                         <TableCell>
                           {(() => {
@@ -1074,7 +1156,7 @@ function RequisitionDetailsDialog({
                             return <span className={"inline-block whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium " + s.cls}>{s.label}</span>;
                           })()}
                         </TableCell>
-                        <TableCell>{l.uom}</TableCell>
+                        <TableCell><UomCell line={l} /></TableCell>
                         <TableCell className="text-right tabular-nums">{l.rate.toLocaleString()}</TableCell>
                         <TableCell className="text-right tabular-nums">
                           {(l.qty * l.rate).toLocaleString()}
@@ -1141,7 +1223,9 @@ function RequisitionEditDialog({
   const [lines, setLines] = useState<PRLineItem[]>([]);
 
   // Draft-line state (the "add new" row at the bottom of the table)
-  const [itemTypeFilter, setItemTypeFilter] = useState<ItemTypeFilter>("All");
+  const itemMaster = useMemo(buildItemMaster, [requisition]);
+  const itemTypeOptions = useMemo(() => getItemTypeOptions(), [requisition]);
+  const [itemTypeFilter, setItemTypeFilter] = useState(ITEM_TYPE_ALL);
   const [itemSearch, setItemSearch] = useState("");
   const [showItemDrop, setShowItemDrop] = useState(false);
   const [itemName, setItemName] = useState("");
@@ -1151,17 +1235,19 @@ function RequisitionEditDialog({
   const [rate, setRate] = useState("");
 
   const filteredItemMaster = useMemo(
-    () => ITEM_MASTER.filter((i) => {
-      if (itemTypeFilter === "Asset" && i.itemType !== "Asset") return false;
-      if (itemTypeFilter === "Production" && i.itemType === "Asset") return false;
-      return true;
-    }),
-    [itemTypeFilter],
+    () => filterByItemType(itemMaster, itemTypeFilter),
+    [itemMaster, itemTypeFilter],
   );
 
   const visibleItems = itemSearch.trim()
     ? filteredItemMaster.filter((i) => i.name.toLowerCase().includes(itemSearch.trim().toLowerCase()))
     : filteredItemMaster;
+
+  const selectedItem = itemMaster.find((i) => i.name === itemName);
+  const uomOptions = selectedItem?.uomOptions ?? [];
+  const draftEquivalent = itemName && Number(qty) > 0
+    ? primaryUomEquivalent(itemName, Number(qty), uom)
+    : null;
 
   // Reseed local state every time the dialog opens with a new requisition.
   useEffect(() => {
@@ -1171,7 +1257,7 @@ function RequisitionEditDialog({
     setLines(requisition.lines.map((l) => ({ ...l })));
     setItemName(""); setItemSearch(""); setDescription(""); setQty(""); setRate("");
     setUom(UOMS[0]); setShowItemDrop(false);
-    setItemTypeFilter("All");
+    setItemTypeFilter(ITEM_TYPE_ALL);
   }, [requisition]);
 
   if (!requisition) return null;
@@ -1180,7 +1266,7 @@ function RequisitionEditDialog({
 
   const addLine = () => {
     if (!itemName.trim()) { toast.error("Pick an item to add."); return; }
-    if (!ITEM_MASTER.find((i) => i.name === itemName.trim())) { toast.error("Select a valid item from the list."); return; }
+    if (!itemMaster.find((i) => i.name === itemName.trim())) { toast.error("Select a valid item from the list."); return; }
     const qtyN = Number(qty);
     if (!qtyN || qtyN <= 0) { toast.error("Quantity must be greater than zero."); return; }
     const rateN = Number(rate);
@@ -1188,6 +1274,7 @@ function RequisitionEditDialog({
     if (lines.some((l) => l.itemName.toLowerCase() === itemName.trim().toLowerCase())) {
       toast.error(`${itemName} is already in this requisition.`); return;
     }
+    const eq = primaryUomEquivalent(itemName.trim(), qtyN, uom);
     setLines((prev) => [
       ...prev,
       {
@@ -1197,13 +1284,24 @@ function RequisitionEditDialog({
         qty: qtyN,
         uom,
         rate: rateN,
+        ...(eq ? { primaryQty: eq.qty, primaryUom: eq.uom } : {}),
       },
     ]);
-    setItemName(""); setItemSearch(""); setDescription(""); setQty(""); setRate("");
+    setItemName(""); setItemSearch(""); setDescription(""); setQty(""); setRate(""); setUom(UOMS[0]);
   };
 
+  // Editing a qty has to re-derive the stock-unit equivalent, or an alt-UOM line
+  // would keep the old converted figure.
   const updateLine = (id: string, patch: Partial<PRLineItem>) =>
-    setLines((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+    setLines((prev) => prev.map((l) => {
+      if (l.id !== id) return l;
+      const next = { ...l, ...patch };
+      if (patch.qty === undefined) return next;
+      const eq = primaryUomEquivalent(next.itemName, next.qty, next.uom);
+      return eq
+        ? { ...next, primaryQty: eq.qty, primaryUom: eq.uom }
+        : { ...next, primaryQty: undefined, primaryUom: undefined };
+    }));
 
   const removeLine = (id: string) =>
     setLines((prev) => prev.filter((l) => l.id !== id));
@@ -1264,16 +1362,16 @@ function RequisitionEditDialog({
                 <select
                   value={itemTypeFilter}
                   onChange={(e) => {
-                    setItemTypeFilter(e.target.value as ItemTypeFilter);
+                    setItemTypeFilter(e.target.value);
                     setItemName("");
                     setItemSearch("");
                     setDescription("");
+                    setUom(UOMS[0]);
                   }}
                   className={selectCls}
                 >
-                  <option value="All">All</option>
-                  <option value="Production">Production</option>
-                  <option value="Asset">Asset</option>
+                  <option value={ITEM_TYPE_ALL}>All</option>
+                  {itemTypeOptions.map((t) => <option key={t} value={t}>{t}</option>)}
                 </select>
               </div>
               <div className="md:col-span-4 relative">
@@ -1322,7 +1420,13 @@ function RequisitionEditDialog({
               <div className="md:col-span-1">
                 <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">UoM</Label>
                 <select value={uom} onChange={(e) => setUom(e.target.value)} className={selectCls}>
-                  {UOMS.map((u) => <option key={u} value={u}>{u}</option>)}
+                  {uomOptions.length > 0
+                    ? uomOptions.map((o) => (
+                        <option key={o.uom} value={o.uom}>
+                          {uomOptionLabel(o, uomOptions[0].uom)}
+                        </option>
+                      ))
+                    : UOMS.map((u) => <option key={u} value={u}>{u}</option>)}
                 </select>
               </div>
               <div className="md:col-span-1">
@@ -1335,6 +1439,15 @@ function RequisitionEditDialog({
                 </Button>
               </div>
             </div>
+            {draftEquivalent && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                {fmtQty(Number(qty))} {uom} ={" "}
+                <span className="font-semibold text-foreground">
+                  {fmtQty(draftEquivalent.qty)} {draftEquivalent.uom}
+                </span>{" "}
+                in stock unit · Rate is per {uom}.
+              </p>
+            )}
           </div>
 
           {/* Existing lines — qty/rate inline editable */}
@@ -1380,7 +1493,7 @@ function RequisitionEditDialog({
                             className="h-8 tabular-nums"
                           />
                         </TableCell>
-                        <TableCell>{l.uom}</TableCell>
+                        <TableCell><UomCell line={l} /></TableCell>
                         <TableCell>
                           <Input
                             type="number" min={0}
