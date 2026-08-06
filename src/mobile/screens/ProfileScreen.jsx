@@ -52,24 +52,41 @@ export function ProfileScreen({ nav, onLogout }) {
           <div style={rowStyle}><span style={labelStyle}>Role</span><span style={valueStyle}>{role}</span></div>
         </div>
 
-        {/* Appearance / dark mode */}
+        {/* Appearance */}
         <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.07em', margin: '20px 2px 8px' }}>Appearance</div>
-        <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 14px', boxShadow: T.shadowSm, display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div style={{ width: 38, height: 38, borderRadius: T.radiusMd, background: T.bgSubtle, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>
-            {isDark ? '🌙' : '☀️'}
+        <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, boxShadow: T.shadowSm, overflow: 'hidden' }}>
+          <div style={{ padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ width: 38, height: 38, borderRadius: T.radiusMd, background: T.bgSubtle, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>
+              {isDark ? '🌙' : '☀️'}
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>Dark Mode</div>
+              <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>{isDark ? 'Dark theme is on' : 'Switch to a darker interface'}</div>
+            </div>
+            {/* Toggle */}
+            <button
+              onClick={() => nav.setTheme(isDark ? 'light' : 'dark')}
+              aria-label="Toggle dark mode"
+              style={{ width: 46, height: 26, borderRadius: T.radiusFull, border: 'none', cursor: 'pointer', flexShrink: 0, padding: 3, background: isDark ? T.primary : T.borderStrong, display: 'flex', justifyContent: isDark ? 'flex-end' : 'flex-start', alignItems: 'center', transition: 'background 150ms ease' }}
+            >
+              <span style={{ width: 20, height: 20, borderRadius: T.radiusFull, background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.25)' }} />
+            </button>
           </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>Dark Mode</div>
-            <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>{isDark ? 'Dark theme is on' : 'Switch to a darker interface'}</div>
-          </div>
-          {/* Toggle */}
-          <button
-            onClick={() => nav.setTheme(isDark ? 'light' : 'dark')}
-            aria-label="Toggle dark mode"
-            style={{ width: 46, height: 26, borderRadius: T.radiusFull, border: 'none', cursor: 'pointer', flexShrink: 0, padding: 3, background: isDark ? T.primary : T.borderStrong, display: 'flex', justifyContent: isDark ? 'flex-end' : 'flex-start', alignItems: 'center', transition: 'background 150ms ease' }}
+          {/* Theme Center — colour presets + font size, mirroring the web */}
+          <div
+            onClick={() => nav.navigate('theme')}
+            style={{ padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 12, borderTop: `1px solid ${T.border}`, cursor: 'pointer' }}
           >
-            <span style={{ width: 20, height: 20, borderRadius: T.radiusFull, background: '#fff', boxShadow: '0 1px 2px rgba(0,0,0,0.25)' }} />
-          </button>
+            <div style={{ width: 38, height: 38, borderRadius: T.radiusMd, background: T.primaryLight, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>
+              🎨
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>Theme & Appearance</div>
+              <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>Colour theme · font size</div>
+            </div>
+            <span style={{ width: 16, height: 16, borderRadius: T.radiusFull, background: T.buttonGradient, flexShrink: 0, border: `2px solid ${T.border}` }} />
+            <span style={{ fontSize: 18, color: T.textTertiary, lineHeight: 1 }}>›</span>
+          </div>
         </div>
 
         {/* Sign out */}

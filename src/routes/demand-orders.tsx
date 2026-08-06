@@ -9,8 +9,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Plus, FileText, Clock, Send, AlertTriangle,
   CheckCircle2, XCircle, ArrowUpRight, PackageCheck, Trash2,
-  ShieldCheck, Eye, X,
+  ShieldCheck, Eye, X, ChevronDown,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { inventory } from "@/lib/sample-data";
 import { getItemStock } from "@/lib/inventory-stock";
 import { roundQty } from "@/lib/num";
@@ -36,6 +37,52 @@ import {
 } from "@/lib/fulfillment-plan";
 
 const KITCHEN_SECTIONS = ["Hot Kitchen", "Cold Kitchen", "Veg Section", "Special Meal", "Bakery", "Packaging"];
+
+/**
+ * The demand's source reference(s).
+ *
+ * A demand raised off a bulk production run carries one production-order id per
+ * order it covers, comma-joined — a 53-order run printed 53 ids as a paragraph
+ * that buried the requester, the date and every item below it. The count is what
+ * a reader actually needs ("this covers 53 runs"); the ids matter only when
+ * someone is chasing a specific one, so they stay one click away rather than
+ * always on screen.
+ *
+ * A single reference ("DR-9002", "BS-203 Menu Plan") renders exactly as before.
+ */
+function DemandReference({ reference }: { reference: string }) {
+  const [open, setOpen] = useState(false);
+  const refs = (reference ?? "").split(",").map((r) => r.trim()).filter(Boolean);
+
+  if (refs.length <= 1) {
+    return <strong className="text-foreground">{reference || "—"}</strong>;
+  }
+  return (
+    <>
+      <strong className="text-foreground font-mono">{refs[0]}</strong>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="ml-1.5 inline-flex items-center gap-0.5 rounded-full border border-border bg-background px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground hover:border-primary/40 hover:text-primary transition-colors align-middle"
+      >
+        {open ? "Hide" : `+${refs.length - 1} more`}
+        <ChevronDown className={cn("h-2.5 w-2.5 transition-transform", open && "rotate-180")} />
+      </button>
+      {open && (
+        <div className="mt-1.5 max-h-32 overflow-y-auto rounded-md border border-border bg-background p-2">
+          <div className="flex flex-wrap gap-1">
+            {refs.map((r) => (
+              <span key={r} className="rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[10px] text-foreground">
+                {r}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
 
 const REQUESTERS = [
   "S. Ahmed",
@@ -289,9 +336,13 @@ export default function DemandOrders() {
                 <>
                   {/* Metadata */}
                   <div className="rounded-md border border-border bg-muted/40 px-3 py-2.5 text-xs space-y-1">
+                    {/* Who and when stay on their own line: they used to trail a
+                        reference list long enough to push them out of sight. */}
                     <div className="text-muted-foreground">
-                      Ref: <strong className="text-foreground">{activeDemand.reference}</strong>
-                      {" · "}By <strong className="text-foreground">{activeDemand.requestedBy}</strong> ({activeDemand.role})
+                      Ref: <DemandReference reference={activeDemand.reference} />
+                    </div>
+                    <div className="text-muted-foreground">
+                      By <strong className="text-foreground">{activeDemand.requestedBy}</strong> ({activeDemand.role})
                       {" · "}{activeDemand.date}
                     </div>
                     {activeDemand.autoFulfill && (

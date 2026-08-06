@@ -27,6 +27,83 @@ function MobileToast({ message, onDismiss }) {
   );
 }
 
+/** The wing silhouette the desktop hero flies — shared so both read as one brand. */
+const PLANE_D =
+  'M22 0 L6 2 L3 2.4 L-5 11 L-8 11 L-5 2.6 L-15 2.2 L-18 6 L-20 6 L-19 2 L-21 1.4 ' +
+  'L-21 -1.4 L-19 -2 L-20 -6 L-18 -6 L-15 -2.2 L-5 -2.6 L-8 -11 L-5 -11 L3 -2.4 L6 -2 Z';
+
+/**
+ * Live flight paths behind the mobile hero — the desktop sign-in panel's
+ * animation, rebuilt for a 360x200 band.
+ *
+ * Same idea, fewer moving parts: two routes instead of three and a shallower
+ * arc, because the desktop's near-vertical climb reads as a straight line once
+ * it is squeezed into a strip a fifth as tall. Planes are glued to their route
+ * with animateMotion + mpath, so the aircraft and the dotted path can never
+ * drift apart the way two independently-tweened animations would.
+ *
+ * Decorative only: aria-hidden, and it never takes a tap.
+ */
+function HeroSky() {
+  // Each plane fades in over the first 7% of its run and out over the last 7%,
+  // so it appears just off the origin rather than materialising on the dot.
+  const flight = (routeId, dur, begin, scale, fill, glow) => (
+    <g style={{ filter: `drop-shadow(0 0 4px ${glow})` }}>
+      <animateMotion
+        dur={dur} begin={begin} repeatCount="indefinite" rotate="auto"
+        keyPoints="0;0;1" keyTimes="0;0.07;1"
+        calcMode="spline" keySplines="0 0 1 1;0.42 0 0.58 1"
+      >
+        <mpath href={`#${routeId}`} />
+      </animateMotion>
+      <animate
+        attributeName="opacity" values="0;1;1;0" keyTimes="0;0.07;0.93;1"
+        dur={dur} begin={begin} repeatCount="indefinite"
+      />
+      <path fill={fill} transform={`scale(${scale})`} d={PLANE_D} />
+    </g>
+  );
+
+  // A waypoint that breathes: r and opacity together, so the ring expands as it
+  // fades instead of popping back at full strength.
+  const waypoint = (cx, cy, r, core, ring, delay) => (
+    <>
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke={ring} strokeWidth="1.2">
+        <animate attributeName="r" values={`${r};${r * 2.6}`} dur="2.6s" begin={delay} repeatCount="indefinite" />
+        <animate attributeName="opacity" values="0.75;0" dur="2.6s" begin={delay} repeatCount="indefinite" />
+      </circle>
+      <circle cx={cx} cy={cy} r={r} fill="none" stroke={ring} strokeWidth="1.4" />
+      <circle cx={cx} cy={cy} r={r * 0.58} fill={core} />
+    </>
+  );
+
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 360 200"
+      preserveAspectRatio="xMidYMid slice"
+      fill="none"
+      style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', opacity: 0.9 }}
+    >
+      {/* Range arcs from the origin station */}
+      {[70, 130, 190, 250].map((r) => (
+        <circle key={r} cx="26" cy="182" r={r} stroke="rgba(255,90,90,0.16)" strokeWidth="1" />
+      ))}
+
+      {/* Routes — ids are referenced by the mpath above */}
+      <path id="ml-route-a" d="M26 182 Q150 96 340 40" stroke="rgba(255,165,165,0.75)" strokeWidth="1.4" strokeDasharray="3 7" strokeLinecap="round" />
+      <path id="ml-route-b" d="M26 182 Q140 150 330 112" stroke="rgba(255,150,150,0.55)" strokeWidth="1.3" strokeDasharray="3 7" strokeLinecap="round" />
+
+      {waypoint(26, 182, 7, '#ffffff', 'rgba(255,255,255,0.42)', '0.8s')}
+      {waypoint(340, 40, 5, '#ff4646', 'rgba(255,80,80,0.55)', '0s')}
+      {waypoint(330, 112, 4.5, '#ff7676', 'rgba(255,110,110,0.45)', '1.3s')}
+
+      {flight('ml-route-a', '7s', '0s', 0.3, '#ffffff', 'rgba(255,130,130,0.6)')}
+      {flight('ml-route-b', '8.4s', '1.6s', 0.26, '#ffd9d9', 'rgba(255,130,130,0.45)')}
+    </svg>
+  );
+}
+
 export function LoginScreen({ onLogin }) {
   const [email, setEmail]       = useState('');
   const [password, setPassword] = useState('');
@@ -84,11 +161,16 @@ export function LoginScreen({ onLogin }) {
           alignItems: 'center',
           gap: 10,
           flexShrink: 0,
+          position: 'relative',
+          overflow: 'hidden',
         }}
       >
+        <HeroSky />
         <div
           style={{
             width: 58,
+            position: 'relative',
+            zIndex: 1,
             height: 58,
             borderRadius: T.radiusLg,
             background: 'rgba(255,255,255,0.14)',
@@ -102,11 +184,38 @@ export function LoginScreen({ onLogin }) {
             <path d="M21 16v-2l-8-5V3.5A1.5 1.5 0 0 0 11.5 2h0A1.5 1.5 0 0 0 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5L21 16z" fill="white"/>
           </svg>
         </div>
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ fontFamily: T.fontBrand, fontSize: 19, fontWeight: 700, color: '#fff', letterSpacing: '0.12em' }}>AEROGALLEY</div>
-          <div style={{ fontFamily: T.fontBrand, fontSize: 9,  fontWeight: 500, color: 'rgba(255,255,255,0.6)', letterSpacing: '0.28em', marginTop: 2 }}>CATERING</div>
+        <div style={{ textAlign: 'center', position: 'relative', zIndex: 1 }}>
+          {/* The wordmark is the one piece of type that has to feel like a badge,
+              not a label — polished fill, a slow sheen across the letters, and a
+              glow that lifts it off the hero. Orbitron stays: it is the brand
+              face the rest of the app is set in. */}
+          <div
+            className="ml-wordmark"
+            style={{
+              fontFamily: T.fontBrand,
+              fontSize: 21,
+              fontWeight: 800,
+              letterSpacing: '0.15em',
+              // Painted by the gradient below; kept as the no-background-clip fallback.
+              color: '#fff',
+              lineHeight: 1.05,
+              textIndent: '0.15em',   // balances the trailing letter-space
+            }}
+          >
+            AEROGALLEY
+          </div>
+          <div
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7, marginTop: 4,
+            }}
+          >
+            <span style={{ width: 18, height: 1, background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.34))' }} />
+            <span style={{ fontFamily: T.fontBrand, fontSize: 9, fontWeight: 600, color: 'rgba(255,255,255,0.66)', letterSpacing: '0.3em', textIndent: '0.3em' }}>
+              CATERING
+            </span>
+            <span style={{ width: 18, height: 1, background: 'linear-gradient(270deg, transparent, rgba(255,255,255,0.34))' }} />
+          </div>
         </div>
-        <div style={{ fontFamily: T.fontBody, fontSize: 12, color: 'rgba(255,255,255,0.5)', marginTop: -2 }}>Operations Platform</div>
       </div>
 
       {/* Form */}
@@ -219,8 +328,33 @@ export function LoginScreen({ onLogin }) {
           )}
         </button>
 
-        <div style={{ textAlign: 'center', fontSize: 11, color: T.textDisabled, fontFamily: T.fontBody, marginTop: 6 }}>
-          AeroGalley Catering · Operations Platform v2.4
+        {/* Ownership line. Hairlines either side lift it off the white so it
+            reads as a signature rather than the fine print it replaced. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 34 }}>
+          <span style={{ flex: 1, height: 1, background: `linear-gradient(90deg, transparent, ${T.border})` }} />
+          <div style={{ textAlign: 'center', fontFamily: T.fontBody, lineHeight: 1.35, whiteSpace: 'nowrap' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: T.textSecondary, letterSpacing: '0.02em' }}>
+              AeroGalley Catering
+            </div>
+            <div style={{ fontSize: 9, fontWeight: 600, color: T.textDisabled, letterSpacing: '0.22em', textTransform: 'uppercase', marginTop: 1 }}>
+              by{' '}
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 800,
+                  letterSpacing: '0.12em',
+                  color: T.primary,
+                  background: `linear-gradient(92deg, ${T.primary}, ${T.primaryDark})`,
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  backgroundClip: 'text',
+                }}
+              >
+                US-Bangla Airlines
+              </span>
+            </div>
+          </div>
+          <span style={{ flex: 1, height: 1, background: `linear-gradient(270deg, transparent, ${T.border})` }} />
         </div>
       </div>
 
@@ -228,6 +362,34 @@ export function LoginScreen({ onLogin }) {
 
       <style>{`
         @keyframes mobileSpinL { to { transform: rotate(360deg); } }
+
+        /* Wordmark: brushed-metal fill with a highlight that sweeps across the
+           letters, then rests — a constant shimmer would read as a broken GIF. */
+        .ml-wordmark {
+          background: linear-gradient(
+            100deg,
+            #ffffff 0%, #ffffff 38%,
+            #fff3f3 45%, #ffdcdc 50%, #fff3f3 55%,
+            #ffffff 62%, #ffffff 100%
+          );
+          background-size: 260% 100%;
+          -webkit-background-clip: text;
+          background-clip: text;
+          -webkit-text-fill-color: transparent;
+          filter: drop-shadow(0 1px 1px rgba(0,0,0,0.35))
+                  drop-shadow(0 0 14px rgba(255,120,120,0.4));
+          animation: mlWordmarkSheen 6.5s ease-in-out infinite;
+        }
+        @keyframes mlWordmarkSheen {
+          0%   { background-position: 150% 0; }
+          38%  { background-position: -50% 0; }
+          100% { background-position: -50% 0; }
+        }
+
+        /* Motion is decoration here; the wordmark still reads without it. */
+        @media (prefers-reduced-motion: reduce) {
+          .ml-wordmark { animation: none; background-position: 50% 0; }
+        }
       `}</style>
     </div>
   );

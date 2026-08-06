@@ -711,3 +711,121 @@ export function loadMobileActiveOrders(maxOrders = 6): {
 
   return { flight: build("flight"), crew: build("crew") };
 }
+
+// ── Mobile Order Management (the full order book, not the dashboard's top-6) ──
+// The mobile Orders screen renders the SAME live order book the web Order
+// Management page manages: every order, grouped by Order # with its legs, plus
+// the per-leg amendment count so the detail view can surface the web's revision
+// history. Read-only by design — orders are raised and amended on the web; the
+// phone is for looking one up at the galley door.
+
+export type MobileOrderBookLeg = {
+  /** Store row id — the key for getOrderAmendments(). */
+  id: string;
+  flight: string;
+  route: string;
+  direction: string;      // "Outbound" | "Return"
+  date: string;
+  etd: string;
+  pax: number;
+  crew: number;
+  specialMeals: number;
+  status: FlightOrderStatus;
+  scope: "Domestic" | "International";
+  /** Hours until departure (negative once flown); null when unparseable. */
+  leadHours: number | null;
+  /** Inside the LMC window — changes from here on are last-minute changes. */
+  inLmcWindow: boolean;
+  amendmentCount: number;
+};
+
+export type MobileOrderBookGroup = {
+  orderNo: string;
+  airline: string;
+  date: string;
+  /**
+   * An order has NO status of its own — it is the intake document; the workflow
+   * entity is the leg, and legs advance independently (the web page's
+   * OrderStatusBadges rule). So the header carries the per-stage counts in
+   * lifecycle order, plus `uniformStatus` when every leg sits at one stage —
+   * the only case where a concrete status pill is honest.
+   */
+  statusCounts: { status: FlightOrderStatus; n: number }[];
+  uniformStatus: FlightOrderStatus | null;
+  legs: MobileOrderBookLeg[];
+  totalPax: number;
+  totalCrew: number;
+  totalSpecial: number;
+};
+
+/** Lifecycle order — mirrors LIFECYCLE_ORDER on the web Order Management page. */
+const LIFECYCLE_STAGES: FlightOrderStatus[] = [
+  "Pending", "Approved", "Production", "Packaged", "Dispatched", "Completed", "Departed",
+];
+
+/**
+ * The live order book grouped for the mobile Orders screen — both tabs, sorted
+ * active-first (the web dashboard's priority table) then by ETD, uncapped.
+ */
+export function loadMobileOrderBook(): {
+  flight: MobileOrderBookGroup[];
+  crew: MobileOrderBookGroup[];
+} {
+  const all = getFlightOrders();
+
+  const build = (mode: "flight" | "crew"): MobileOrderBookGroup[] => {
+    const rows = all.filter((o) =>
+      mode === "crew"
+        ? (o.orderType ?? "flight") === "crew"
+        : (o.orderType ?? "flight") !== "crew",
+    );
+    const sorted = [...rows].sort((a, b) => {
+      const pa = ACTIVE_ORDER_PRIORITY[a.status] ?? 99;
+      const pb = ACTIVE_ORDER_PRIORITY[b.status] ?? 99;
+      if (pa !== pb) return pa - pb;
+      return a.etd.localeCompare(b.etd);
+    });
+    const map = new Map<string, { airline: string; date: string; legs: MobileOrderBookLeg[] }>();
+    for (const o of sorted) {
+      const leadHours = leadHoursToDeparture(o);
+      const leg: MobileOrderBookLeg = {
+        id: o.id,
+        flight: o.flight,
+        route: o.sector,
+        direction: o.direction,
+        date: o.date,
+        etd: o.etd,
+        pax: o.pax,
+        crew: o.crew ?? 0,
+        specialMeals: o.specialMeals ?? 0,
+        status: o.status,
+        scope: isDomesticSector(o.sector) ? "Domestic" : "International",
+        leadHours,
+        // Departed legs are past changing; the flag is for upcoming ones.
+        inLmcWindow: isLmcLead(leadHours) && !hasDeparted(o),
+        amendmentCount: getOrderAmendments(o.id).length,
+      };
+      const g = map.get(o.orderNo);
+      if (g) g.legs.push(leg);
+      else map.set(o.orderNo, { airline: o.airline, date: o.date, legs: [leg] });
+    }
+    return Array.from(map.entries()).map(([orderNo, g]) => {
+      const statusCounts = LIFECYCLE_STAGES
+        .map((status) => ({ status, n: g.legs.filter((l) => l.status === status).length }))
+        .filter((c) => c.n > 0);
+      return {
+        orderNo,
+        airline: g.airline,
+        date: g.date,
+        statusCounts,
+        uniformStatus: statusCounts.length === 1 ? statusCounts[0].status : null,
+        legs: g.legs,
+        totalPax: g.legs.reduce((s, l) => s + l.pax, 0),
+        totalCrew: g.legs.reduce((s, l) => s + l.crew, 0),
+        totalSpecial: g.legs.reduce((s, l) => s + l.specialMeals, 0),
+      };
+    });
+  };
+
+  return { flight: build("flight"), crew: build("crew") };
+}
