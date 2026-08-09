@@ -1,6 +1,10 @@
+import { useRef, useState } from 'react';
 import { T } from '../theme';
 // Real signed-in user from the web auth (same account as the web app).
 import { getAuthUser } from '@/lib/auth';
+// Avatar read/write goes through the SAME durable per-user photo store the web
+// Account Settings page uses, so a photo set on either side shows on both.
+import { saveProfilePhotoFromFile, clearProfilePhoto } from '@/lib/user-photo';
 
 const BTN_BACK = { background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: T.radiusFull, width: 32, height: 32, cursor: 'pointer', color: '#fff', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
 
@@ -19,6 +23,38 @@ export function ProfileScreen({ nav, onLogout }) {
   const userId = user?.userId ?? '—';
   const isDark = nav.themeMode === 'dark';
 
+  // Seeded from the web store; kept in state so the new avatar shows the
+  // instant it is picked, without waiting for a re-mount.
+  const [photoUrl, setPhotoUrl] = useState(user?.photoUrl);
+  const [photoMsg, setPhotoMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef(null);
+
+  const onPickPhoto = async (file) => {
+    if (!file) return;
+    setBusy(true);
+    setPhotoMsg('');
+    try {
+      setPhotoUrl(await saveProfilePhotoFromFile(file));
+      setPhotoMsg('Photo saved — it shows on the web app too.');
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : '';
+      setPhotoMsg(
+        reason === 'not-an-image' ? 'Please choose an image file.'
+          : reason === 'no-user'  ? 'No signed-in user.'
+          : "Couldn't read that image. Try another one.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onRemovePhoto = () => {
+    clearProfilePhoto();
+    setPhotoUrl(undefined);
+    setPhotoMsg('Photo removed.');
+  };
+
   const rowStyle = { display: 'flex', justifyContent: 'space-between', paddingTop: 10, paddingBottom: 10, borderTop: `1px solid ${T.border}` };
   const labelStyle = { fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody };
   const valueStyle = { fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody };
@@ -34,11 +70,49 @@ export function ProfileScreen({ nav, onLogout }) {
       <div style={{ flex: 1, overflowY: 'auto', padding: '16px 14px 24px' }}>
         {/* Identity */}
         <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '18px 14px', boxShadow: T.shadowSm, display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center' }}>
-          <div style={{ width: 66, height: 66, borderRadius: T.radiusFull, background: T.buttonGradient, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 24, fontWeight: 700, fontFamily: T.fontBody }}>
-            {initials(name)}
-          </div>
+          {/* Tap the avatar to replace it. No `capture` attribute — the OS sheet
+              then offers both the camera and the photo library. */}
+          <button
+            onClick={() => fileRef.current?.click()}
+            disabled={busy}
+            aria-label={photoUrl ? 'Change profile photo' : 'Upload profile photo'}
+            style={{ position: 'relative', width: 66, height: 66, borderRadius: T.radiusFull, background: T.buttonGradient, border: 'none', padding: 0, overflow: 'visible', cursor: busy ? 'default' : 'pointer', flexShrink: 0, opacity: busy ? 0.6 : 1 }}
+          >
+            <span style={{ position: 'absolute', inset: 0, borderRadius: T.radiusFull, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 24, fontWeight: 700, fontFamily: T.fontBody }}>
+              {photoUrl
+                ? <img src={photoUrl} alt={name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                : initials(name)}
+            </span>
+            <span style={{ position: 'absolute', right: -2, bottom: -2, width: 24, height: 24, borderRadius: T.radiusFull, background: T.bgSurface, border: `1px solid ${T.border}`, boxShadow: T.shadowSm, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12 }}>
+              📷
+            </span>
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={(e) => { onPickPhoto(e.target.files?.[0] ?? null); e.target.value = ''; }}
+          />
+
           <div style={{ fontSize: 17, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody, marginTop: 10 }}>{name}</div>
           <span style={{ marginTop: 6, fontSize: 11, fontWeight: 700, color: T.statusApproved, background: T.statusApprovedBg, padding: '3px 10px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>{role}</span>
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button onClick={() => fileRef.current?.click()} disabled={busy}
+              style={{ padding: '7px 14px', borderRadius: T.radiusFull, border: `1px solid ${T.border}`, background: T.bgSurface, color: T.textSecondary, fontSize: 12, fontWeight: 700, fontFamily: T.fontBody, cursor: busy ? 'default' : 'pointer' }}>
+              {busy ? 'Saving…' : photoUrl ? 'Change photo' : 'Upload photo'}
+            </button>
+            {photoUrl && !busy && (
+              <button onClick={onRemovePhoto}
+                style={{ padding: '7px 14px', borderRadius: T.radiusFull, border: `1px solid ${T.statusRejected}40`, background: T.bgSurface, color: T.statusRejected, fontSize: 12, fontWeight: 700, fontFamily: T.fontBody, cursor: 'pointer' }}>
+                Remove
+              </button>
+            )}
+          </div>
+          {photoMsg && (
+            <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 8 }}>{photoMsg}</div>
+          )}
         </div>
 
         {/* Account details */}

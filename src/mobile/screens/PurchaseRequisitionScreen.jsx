@@ -172,16 +172,23 @@ const TABS = [
   { key: 'requisition', label: 'Requisition' },
   { key: 'approve',     label: 'Approve' },
   { key: 'receive',     label: 'Receive' },
-  { key: 'inspect',     label: 'Inspect' },
+  { key: 'inspect',     label: 'QC' },
 ];
 
-export function PurchaseRequisitionScreen({ nav }) {
+/**
+ * `initialTab` is which stage of the cycle to open on — the More menu has a
+ * door per stage (Purchase Requisition / Receive Items / Quality Control) and
+ * they all land here. Every tab stays reachable from the tab bar either way.
+ */
+export function PurchaseRequisitionScreen({ nav, initialTab = 'requisition' }) {
   // Snapshot the web data on mount (mobile mounts fresh each time it opens).
   const [requisitions, setRequisitions] = useState(() => getPurchaseRequisitions());
   const [receipts, setReceipts]         = useState(() => getDirectReceiptApprovals());
   const { grns, addGRN, updateGRNLineQC } = useWorkflow();
 
-  const [tab, setTab]           = useState('requisition');
+  const [tab, setTab]           = useState(
+    TABS.some((t) => t.key === initialTab) ? initialTab : 'requisition',
+  );
   const [view, setView]         = useState('list');   // 'list' | 'form' | 'detail' | 'receive' | 'inspect'
   const [activeId, setActiveId] = useState(null);
   const [flashId, setFlashId]   = useState(null);
@@ -371,6 +378,13 @@ export function PurchaseRequisitionScreen({ nav }) {
 
   // ── Inspect ─────────────────────────────────────────────────────────────
   const inspectable = grns.filter((g) => g.lines.some((l) => l.qcStatus === 'Pending'));
+  // Lines already decided, newest receipt first — the history the web QC list
+  // keeps behind its status filter. Read-only: the web locks a line once it
+  // leaves Pending, so there is no re-inspect path here either.
+  const inspected = grns
+    .map((g) => ({ grn: g, done: g.lines.filter((l) => l.qcStatus && l.qcStatus !== 'Pending') }))
+    .filter((x) => x.done.length > 0)
+    .reverse();
   const [insDrafts, setInsDrafts] = useState({});
 
   const openInspect = (g) => {
@@ -791,7 +805,7 @@ export function PurchaseRequisitionScreen({ nav }) {
         <button onClick={() => nav.goBack()} style={BTN_BACK}>←</button>
         <div style={{ flex: 1 }}>
           <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Local Purchase</div>
-          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>Requisition · Approve · Receive · Inspect</div>
+          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>Requisition · Approve · Receive · QC</div>
         </div>
         {tab === 'requisition' && (
           <button onClick={() => { resetForm(); setView('form'); }}
@@ -933,11 +947,16 @@ export function PurchaseRequisitionScreen({ nav }) {
           })
         )}
 
-        {/* ── Inspect ─────────────────────────────────────────────────── */}
+        {/* ── QC / Inspect ────────────────────────────────────────────── */}
+        {tab === 'inspect' && inspectable.length === 0 && inspected.length === 0 && (
+          <Empty icon="🔍" text="No receipt is waiting on inspection. Approve a goods receipt first." />
+        )}
+
+        {tab === 'inspect' && inspectable.length > 0 && (
+          <div style={SECTION}>Awaiting inspection ({inspectable.length})</div>
+        )}
         {tab === 'inspect' && (
-          inspectable.length === 0 ? (
-            <Empty icon="🔍" text="No receipt is waiting on inspection. Approve a goods receipt first." />
-          ) : inspectable.map((g) => {
+          inspectable.map((g) => {
             const pending = g.lines.filter((l) => l.qcStatus === 'Pending');
             return (
               <div key={g.id} onClick={() => openInspect(g)} style={{ ...CARD, cursor: 'pointer' }}>
@@ -958,6 +977,39 @@ export function PurchaseRequisitionScreen({ nav }) {
               </div>
             );
           })
+        )}
+
+        {tab === 'inspect' && inspected.length > 0 && (
+          <>
+            <div style={SECTION}>Inspected ({inspected.length})</div>
+            {inspected.map(({ grn: g, done }) => (
+              <div key={`done-${g.id}`} style={CARD}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
+                  <div style={{ flex: 1, paddingRight: 8 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{g.id}</div>
+                    <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>{g.vendor} · {g.poRef}</div>
+                  </div>
+                </div>
+                {done.map((l, i) => {
+                  const s = qcStyle(l.qcStatus);
+                  const pass = num(l.qcPassQty);
+                  const fail = num(l.qcFailQty);
+                  return (
+                    <div key={`${g.id}-${i}`} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, paddingTop: 7, borderTop: i === 0 ? 'none' : `1px solid ${T.border}` }}>
+                      <div style={{ flex: 1, minWidth: 0, paddingBottom: 7 }}>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody }}>{l.name}</div>
+                        <div style={{ fontSize: 10.5, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
+                          {pass} passed · {fail} failed of {l.qty} {l.uom}
+                          {l.qcRemarks ? ` · ${l.qcRemarks}` : ''}
+                        </div>
+                      </div>
+                      <Chip label={l.qcStatus} color={s.color} bg={s.bg} />
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </>
         )}
       </div>
     </div>

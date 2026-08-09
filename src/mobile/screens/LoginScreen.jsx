@@ -330,7 +330,7 @@ export function LoginScreen({ onLogin }) {
 
         {/* Ownership line. Hairlines either side lift it off the white so it
             reads as a signature rather than the fine print it replaced. */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 34 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 64 }}>
           <span style={{ flex: 1, height: 1, background: `linear-gradient(90deg, transparent, ${T.border})` }} />
           <div style={{ textAlign: 'center', fontFamily: T.fontBody, lineHeight: 1.35, whiteSpace: 'nowrap' }}>
             <div style={{ fontSize: 12, fontWeight: 700, color: T.textSecondary, letterSpacing: '0.02em' }}>

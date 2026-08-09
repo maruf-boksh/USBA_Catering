@@ -422,29 +422,13 @@ export const MOCK_INVENTORY_ALERTS = [
   { id: 'INV-A3', item: 'Chicken (Fresh)',          current: 25, reorderPoint: 50, unit: 'kg' },
 ];
 
-export const MOCK_STOCK = [
-  { id: 'S-001', name: 'Disposable Gloves',   category: 'Packaging',    qty: 8,   unit: 'boxes', value: '৳ 2,400',  status: 'low' },
-  { id: 'S-002', name: 'Aluminium Foil',      category: 'Packaging',    qty: 3,   unit: 'rolls', value: '৳ 1,800',  status: 'low' },
-  { id: 'S-003', name: 'Chicken (Fresh)',      category: 'Raw Material', qty: 25,  unit: 'kg',    value: '৳ 7,500',  status: 'low' },
-  { id: 'S-004', name: 'Rice (Basmati)',       category: 'Raw Material', qty: 180, unit: 'kg',    value: '৳ 18,000', status: 'ok' },
-  { id: 'S-005', name: 'Cooking Oil',          category: 'Raw Material', qty: 40,  unit: 'L',     value: '৳ 6,000',  status: 'ok' },
-  { id: 'S-006', name: 'Meal Trays (Economy)', category: 'Packaging',    qty: 500, unit: 'pcs',   value: '৳ 5,000',  status: 'ok' },
-];
+// MOCK_STOCK removed — the mobile Stock Overview reads the real report through
+// `loadStockOverviewRows()` (lib/stock-overview.ts), the same stores the web
+// page uses. A frozen list here is what made the screen ignore live stock.
 
-// Consumable returns — mirrors the web consumable-returns.tsx. `dest` splits the
-// two mobile sub-tabs: 'inventory' (Inventory & Store) vs 'airport' (Airport Items).
-export const MOCK_RETURNS = [
-  { id: 'CR-2026-051', date: '2026-07-13', flight: 'BS-141', sector: 'DAC→CGP', returnedBy: 'Cabin Crew',    dest: 'inventory', status: 'pending',
-    lines: [ { item: 'Mineral Water 250ml', qty: 40, reusable: 40, uom: 'Bottle' }, { item: 'Blanket', qty: 8, reusable: 8, uom: 'pcs' }, { item: 'Meal Box', qty: 12, reusable: 0, uom: 'pcs' } ] },
-  { id: 'CR-2026-050', date: '2026-07-12', flight: 'BG-401', sector: 'DAC→DXB', returnedBy: 'Store Handler', dest: 'inventory', status: 'received',
-    lines: [ { item: 'Headphone', qty: 30, reusable: 25, uom: 'pcs' }, { item: 'Cutlery Set', qty: 50, reusable: 45, uom: 'set' } ] },
-  { id: 'CR-2026-047', date: '2026-07-10', flight: 'BS-207', sector: 'DAC→CXB', returnedBy: 'Cabin Crew',    dest: 'inventory', status: 'pending',
-    lines: [ { item: 'Water Bottle 500ml', qty: 24, reusable: 24, uom: 'Bottle' }, { item: 'Napkin Pack', qty: 15, reusable: 0, uom: 'pack' } ] },
-  { id: 'CR-2026-049', date: '2026-07-13', flight: 'BS-105', sector: 'DAC→CXB', returnedBy: 'APT Executive', dest: 'airport',   status: 'pending',
-    lines: [ { item: 'Meal Trolley', qty: 4, reusable: 4, uom: 'pcs' }, { item: 'Ice Pack', qty: 20, reusable: 18, uom: 'pcs' } ] },
-  { id: 'CR-2026-048', date: '2026-07-11', flight: 'BG-522', sector: 'DAC→LHR', returnedBy: 'APT Executive', dest: 'airport',   status: 'forwarded',
-    lines: [ { item: 'Oven Rack', qty: 6, reusable: 6, uom: 'pcs' }, { item: 'Bar Trolley', qty: 2, reusable: 2, uom: 'pcs' } ] },
-];
+// MOCK_RETURNS removed with the Stock screen's duplicate "Return Items" tab.
+// Consumable returns live on the Return Log screen, which reads and writes the
+// real web returns store — see MOCK_RETURN_LOG below for its empty-state seed.
 
 export const MOCK_POS = [
   { id: 'PO-2024-0156', vendor: 'Fresh Foods Ltd',    items: 4, total: '৳ 45,200',   status: 'pending',  date: '2024-11-20' },
@@ -454,9 +438,8 @@ export const MOCK_POS = [
 
 // Consumable return log — demo seed used when the web app has no persisted
 // returns yet (the web `consumable-returns` list starts empty). If the user has
-// created returns on the web, the mobile Return Log reads those instead.
-// Distinct from MOCK_RETURNS above (Stock screen): this uses the web return
-// shape (itemName / reusableQty) the Return Log screen renders.
+// created returns on the web, the mobile Return Log reads those instead. Uses
+// the web return shape (itemName / reusableQty) the Return Log screen renders.
 export const MOCK_RETURN_LOG = [
   { id: 'CR-7003', date: '2026-06-28', flight: 'BS-105', sector: 'DAC→CXB', returnedBy: 'T. Ahmed',   lines: [
     { itemName: 'Water 250ml',    qty: 22, reusableQty: 22, uom: 'Pcs' },

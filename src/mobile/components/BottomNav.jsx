@@ -44,6 +44,16 @@ const TABS = [
     ),
   },
   {
+    key: 'approvals',
+    label: 'Approvals',
+    icon: (active) => (
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+        <path d="M9 4h6a1 1 0 011 1v1h2a1 1 0 011 1v13a1 1 0 01-1 1H6a1 1 0 01-1-1V7a1 1 0 011-1h2V5a1 1 0 011-1z" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinejoin="round"/>
+        <path d="M9 13l2.2 2.2L15.5 11" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+      </svg>
+    ),
+  },
+  {
     key: 'more',
     label: 'More',
     icon: (active) => (
@@ -56,7 +66,11 @@ const TABS = [
   },
 ];
 
-export function BottomNav({ activeTab, onTabPress, alertBadge = 0 }) {
+export function BottomNav({ activeTab, onTabPress, alertBadge = 0, approvalBadge = 0 }) {
+  // Each tab owns at most one count; keyed here so the badge block below stays
+  // one branch instead of one per tab.
+  const badgeFor = { home: alertBadge, approvals: approvalBadge };
+
   return (
     <div
       style={{
@@ -71,6 +85,7 @@ export function BottomNav({ activeTab, onTabPress, alertBadge = 0 }) {
     >
       {TABS.map((tab) => {
         const active = activeTab === tab.key;
+        const badge  = badgeFor[tab.key] ?? 0;
         return (
           <button
             key={tab.key}
@@ -105,10 +120,10 @@ export function BottomNav({ activeTab, onTabPress, alertBadge = 0 }) {
               />
             )}
 
-            {/* Alert badge on Home tab */}
+            {/* Count badge — alerts on Home, pending items on Approvals */}
             <div style={{ position: 'relative' }}>
               {tab.icon(active)}
-              {tab.key === 'home' && alertBadge > 0 && (
+              {badge > 0 && (
                 <div
                   style={{
                     position: 'absolute',
@@ -129,18 +144,21 @@ export function BottomNav({ activeTab, onTabPress, alertBadge = 0 }) {
                     border: `1.5px solid ${T.bgSurface}`,
                   }}
                 >
-                  {alertBadge > 9 ? '9+' : alertBadge}
+                  {badge > 9 ? '9+' : badge}
                 </div>
               )}
             </div>
 
+            {/* 9.5px, not 10: six tabs leave ~62px each and "Production" /
+                "Approvals" wrap at the larger size. */}
             <span
               style={{
-                fontSize: 10,
+                fontSize: 9.5,
                 fontFamily: T.fontBody,
                 fontWeight: active ? 700 : 500,
                 color: active ? T.primary : T.textTertiary,
                 lineHeight: 1,
+                whiteSpace: 'nowrap',
               }}
             >
               {tab.label}

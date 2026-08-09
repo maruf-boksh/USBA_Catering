@@ -403,7 +403,11 @@ export function HomeScreen({ nav }) {
   const [expanded, setExpanded] = useState(false);
   const visibleKPIs = expanded ? KPI_ROWS : KPI_ROWS.slice(0, 4);
   const alertBadgeCount = pendingApprovals + inventoryAlerts;
-  const userName = getAuthUser()?.name ?? 'Guest User';
+  const authUser = getAuthUser();
+  const userName = authUser?.name ?? 'Guest User';
+  // Same avatar the web top bar shows — re-read each render, so it updates as
+  // soon as you come back from the Profile screen after changing it.
+  const userPhoto = authUser?.photoUrl;
   const userFirstName = userName.split(/\s+/)[0];
   const stamp = stampParts(useMinuteClock());
 
@@ -474,10 +478,12 @@ export function HomeScreen({ nav }) {
               border: '1px solid rgba(255,255,255,0.35)',
               fontSize: 12.5, fontWeight: 800, fontFamily: T.fontBody, letterSpacing: '0.02em',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', flexShrink: 0, padding: 0,
+              cursor: 'pointer', flexShrink: 0, padding: 0, overflow: 'hidden',
             }}
           >
-            {nameInitials(userName)}
+            {userPhoto
+              ? <img src={userPhoto} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              : nameInitials(userName)}
           </button>
         </div>
       </div>

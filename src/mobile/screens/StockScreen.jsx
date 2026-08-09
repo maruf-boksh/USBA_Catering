@@ -1,198 +1,67 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { T } from '../theme';
-import { MOCK_STOCK, MOCK_RETURNS } from '../mockData';
+import { loadStockOverviewRows, stockOverviewSummary } from '@/lib/stock-overview';
+import { findInventoryRow, lotIsBlocked } from '@/lib/inventory-store';
+import { getItemStockByWarehouse } from '@/lib/inventory-stock';
+import { buildItemLedger } from '@/lib/stock-ledger';
+import { getStockAdjustments } from '@/lib/stock-adjustments';
+import { useWorkflow } from '@/lib/workflow-store';
+import { roundQty } from '@/lib/num';
+
+// Mobile Stock Overview — the web /inventory report on a phone. Rows come from
+// `lib/stock-overview.ts`, the headless projection of that report, so the two
+// screens can never disagree.
+//
+// Tapping a row opens the item detail view (StockDetail below), the phone
+// version of the web report's "Item Details" drill-down: balance breakdown,
+// per-warehouse holdings, batch/lot list and the movement ledger from
+// `lib/stock-ledger.ts`. Same sources as the web page — nothing mocked.
+//
+// Consumable returns are NOT here: the Return Log screen (More → Galley
+// Planning) owns them and works against the real returns store. This screen
+// used to carry a duplicate "Return Items" tab backed by mock data.
 
 const BACK_BTN = { background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: T.radiusFull, width: 32, height: 32, cursor: 'pointer', color: '#fff', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
-const INPUT = { boxSizing: 'border-box', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, background: T.bgSurface, color: T.textPrimary, fontFamily: T.fontBody, outline: 'none' };
 
-const RETURN_STATUS = {
-  pending:   { color: T.statusPending,  bg: T.statusPendingBg,  label: 'Pending'   },
-  received:  { color: T.statusApproved, bg: T.statusApprovedBg, label: 'Received'  },
-  forwarded: { color: T.statusInfo,     bg: T.statusInfoBg,     label: 'Forwarded' },
-};
-
-// ── Return detail ────────────────────────────────────────────────────────────
-function ReturnDetail({ record, onBack, onComplete, onOpenDoc }) {
-  const st = RETURN_STATUS[record.status] || RETURN_STATUS.pending;
-  const isAirport = record.dest === 'airport';
-  const totalQty = record.lines.reduce((s, l) => s + l.qty, 0);
-  const totalReuse = record.lines.reduce((s, l) => s + (l.reusable || 0), 0);
-  return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
-      <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-        <button onClick={onBack} style={BACK_BTN}>←</button>
-        <div>
-          <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Return Details</div>
-          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{record.id}</div>
-        </div>
-      </div>
-      <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 24px' }}>
-        <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', marginBottom: 12, boxShadow: T.shadowSm }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{record.flight} · {record.sector}</div>
-            <span style={{ fontSize: 10, fontWeight: 700, color: st.color, background: st.bg, padding: '3px 10px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>{st.label}</span>
-          </div>
-          {[['Return No.', record.id], ['Date', record.date], ['Returned By', record.returnedBy], ['Destination', isAirport ? 'Airport Store' : 'Inventory & Store'], ['Total Qty', `${totalQty}`], ['Reusable', `${totalReuse}`]].map(([l, v], i) => (
-            <div key={l} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: i === 0 ? 4 : 8, paddingBottom: 8, borderTop: `1px solid ${T.border}` }}>
-              <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{l}</span>
-              {l === 'Return No.' ? (
-                <span onClick={() => onOpenDoc(record.id)}
-                  style={{ fontSize: 12, fontWeight: 700, color: T.statusInfo, fontFamily: T.fontBody, cursor: 'pointer', textDecoration: 'underline', textUnderlineOffset: 2 }}>
-                  {v} ↗
-                </span>
-              ) : (
-                <span style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody }}>{v}</span>
-              )}
-            </div>
-          ))}
-        </div>
-
-        <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Returned Items ({record.lines.length})</div>
-        <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, overflow: 'hidden', marginBottom: 14, boxShadow: T.shadowSm }}>
-          {record.lines.map((l, i) => (
-            <div key={l.item} style={{ padding: '10px 14px', borderTop: i === 0 ? 'none' : `1px solid ${T.border}` }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                <span style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody }}>{l.item}</span>
-                <span style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{l.qty} {l.uom}</span>
-              </div>
-              <div style={{ fontSize: 10, color: (l.reusable || 0) > 0 ? T.statusApproved : T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
-                Reusable: {l.reusable || 0} {l.uom}{(l.reusable || 0) === 0 ? ' · disposed' : ''}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        {record.status === 'pending' ? (
-          <button
-            onClick={() => onComplete(record.id, isAirport ? 'forwarded' : 'received')}
-            style={{ width: '100%', padding: '13px 0', background: isAirport ? T.statusInfo : T.statusApproved, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}
-          >
-            {isAirport ? 'Forward to Airport Store' : 'Receive to Store'}
-          </button>
-        ) : (
-          <div style={{ background: st.bg, border: `1px solid ${st.color}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: st.color, fontFamily: T.fontBody }}>
-              {record.status === 'received' ? 'Reusable items received into store ✓' : 'Forwarded to airport store ✓'}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
+/** Status colours, shared by the list rows and the detail header. */
+function toneFor(status) {
+  if (status === 'Critical') return { fg: T.statusRejected, bg: T.statusRejectedBg };
+  if (status === 'Low')      return { fg: T.statusDelayed,  bg: T.statusDelayedBg };
+  return { fg: T.statusApproved, bg: T.statusApprovedBg };
 }
 
-// ── Return document (web "View" functionality) — full read-only detail ───────
-function ReturnDocPage({ record, onBack }) {
-  const st = RETURN_STATUS[record.status] || RETURN_STATUS.pending;
-  const isAirport = record.dest === 'airport';
-  const totalQty = record.lines.reduce((s, l) => s + l.qty, 0);
-  const totalReuse = record.lines.reduce((s, l) => s + (l.reusable || 0), 0);
-  const disposed = totalQty - totalReuse;
-
-  // Return lifecycle — mirrors the web consumable-return view status timeline.
-  const steps = isAirport
-    ? [['Returned at Airport', true], ['Reusable Verified', true], ['Forwarded to Airport Store', record.status === 'forwarded']]
-    : [['Returned to Store', true], ['Reusable Verified', true], ['Received into Inventory', record.status === 'received']];
-
-  return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
-      <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-        <button onClick={onBack} style={BACK_BTN}>←</button>
-        <div>
-          <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Consumable Return</div>
-          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{record.id}</div>
-        </div>
-      </div>
-      <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 24px' }}>
-        {/* Return summary */}
-        <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', marginBottom: 12, boxShadow: T.shadowSm }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 10 }}>Return Summary</div>
-          {[['Return No.', record.id], ['Status', st.label], ['Flight', record.flight], ['Sector', record.sector], ['Date', record.date], ['Returned By', record.returnedBy], ['Destination', isAirport ? 'Airport Store' : 'Inventory & Store']].map(([l, v], i) => (
-            <div key={l} style={{ display: 'flex', justifyContent: 'space-between', paddingTop: i === 0 ? 0 : 8, paddingBottom: 8, borderTop: i === 0 ? 'none' : `1px solid ${T.border}` }}>
-              <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{l}</span>
-              <span style={{ fontSize: 12, fontWeight: 600, color: l === 'Status' ? st.color : T.textPrimary, fontFamily: T.fontBody }}>{v}</span>
-            </div>
-          ))}
-        </div>
-
-        {/* Line items with condition */}
-        <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Items ({record.lines.length})</div>
-        <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, overflow: 'hidden', marginBottom: 12, boxShadow: T.shadowSm }}>
-          {record.lines.map((l, i) => {
-            const good = (l.reusable || 0) > 0;
-            return (
-              <div key={l.item} style={{ padding: '10px 14px', borderTop: i === 0 ? 'none' : `1px solid ${T.border}` }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                  <span style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody }}>{l.item}</span>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{l.qty} {l.uom}</span>
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 3 }}>
-                  <span style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody }}>Reusable {l.reusable || 0} · Disposed {l.qty - (l.reusable || 0)}</span>
-                  <span style={{ fontSize: 10, fontWeight: 700, color: good ? T.statusApproved : T.statusRejected, fontFamily: T.fontBody }}>{good ? 'Good — reusable' : 'Damaged — disposed'}</span>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Reusable roll-up */}
-        <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
-          {[['Total Returned', totalQty, T.textPrimary], ['Reusable', totalReuse, T.statusApproved], ['Disposed', disposed, T.statusRejected]].map(([l, v, c]) => (
-            <div key={l} style={{ flex: 1, background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '10px 6px', textAlign: 'center', boxShadow: T.shadowSm }}>
-              <div style={{ fontSize: 18, fontWeight: 800, color: c, fontFamily: T.fontBody }}>{v}</div>
-              <div style={{ fontSize: 9, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.04em', marginTop: 2 }}>{l}</div>
-            </div>
-          ))}
-        </div>
-
-        {/* Lifecycle */}
-        <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Lifecycle</div>
-        <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', boxShadow: T.shadowSm }}>
-          {steps.map(([label, done], i) => (
-            <div key={label} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', paddingTop: i === 0 ? 0 : 10 }}>
-              <div style={{ width: 20, height: 20, borderRadius: T.radiusFull, flexShrink: 0, background: done ? T.statusApproved : T.border, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                {done && <span style={{ color: '#fff', fontSize: 11, fontWeight: 700 }}>✓</span>}
-              </div>
-              <div style={{ fontSize: 12, fontWeight: 700, color: done ? T.textPrimary : T.textTertiary, fontFamily: T.fontBody, paddingTop: 2 }}>{label}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
+const qty = (n) => roundQty(n).toLocaleString();
+const money = (n) => `৳${Math.round(n).toLocaleString()}`;
 
 export function StockScreen({ nav }) {
-  const [mainTab, setMainTab]   = useState('stock');   // 'stock' | 'returns'
-  const [returnTab, setReturnTab] = useState('inventory'); // 'inventory' | 'airport'
-  const [returns, setReturns]   = useState(() => MOCK_RETURNS.map(r => ({ ...r })));
-  const [selectedId, setSelectedId] = useState(null);
-  const [docId, setDocId]       = useState(null);
-  const [search, setSearch]     = useState('');
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo]     = useState('');
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState('all'); // 'all' | 'Critical' | 'Low' | 'Held'
+  const [selected, setSelected] = useState(null);
 
-  const low = MOCK_STOCK.filter(s => s.status === 'low').length;
+  // Read once per mount, like the web page: usePersistedState doesn't broadcast
+  // same-tab writes either, so both refresh when you next open them.
+  const rows    = useMemo(() => loadStockOverviewRows(), []);
+  const summary = useMemo(() => stockOverviewSummary(rows), [rows]);
 
-  const completeReturn = (id, status) => {
-    setReturns(prev => prev.map(r => r.id === id ? { ...r, status } : r));
-    setSelectedId(null);
-  };
-
-  const docRecord = returns.find(r => r.id === docId);
-  if (docRecord) return <ReturnDocPage record={docRecord} onBack={() => setDocId(null)} />;
-
-  const selected = returns.find(r => r.id === selectedId);
-  if (selected) return <ReturnDetail record={selected} onBack={() => setSelectedId(null)} onComplete={completeReturn} onOpenDoc={setDocId} />;
+  // Movement ledger sources — the same four the web report stitches together.
+  // The mobile app renders inside the WorkflowProvider (AppLayout), so the
+  // in-memory GRN / transfer / production slices are readable here.
+  const { grns, transferNotes, stockDeltas } = useWorkflow();
+  const ledgerSources = useMemo(
+    () => ({ grns, transferNotes, stockDeltas, adjustments: getStockAdjustments() }),
+    [grns, transferNotes, stockDeltas],
+  );
 
   const q = search.trim().toLowerCase();
-  const visibleReturns = returns.filter(r => {
-    if (r.dest !== returnTab) return false;
-    if (dateFrom && r.date < dateFrom) return false;
-    if (dateTo && r.date > dateTo) return false;
-    if (q && ![r.id, r.flight, r.sector, r.returnedBy, ...r.lines.map(l => l.item)].some(v => (v || '').toLowerCase().includes(q))) return false;
+  const visible = rows.filter(r => {
+    if (filter === 'Held' ? r.held <= 0 : filter !== 'all' && r.status !== filter) return false;
+    if (q && ![r.name, r.id, r.category, r.itemType].some(v => (v || '').toLowerCase().includes(q))) return false;
     return true;
   });
+
+  if (selected) {
+    return <StockDetail item={selected} ledgerSources={ledgerSources} onBack={() => setSelected(null)} />;
+  }
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
@@ -200,105 +69,336 @@ export function StockScreen({ nav }) {
         <button onClick={() => nav.resetTo('home')} style={BACK_BTN}>←</button>
         <div>
           <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Stock Overview</div>
-          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{low} low-stock items</div>
+          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>
+            {summary.critical} critical · {summary.low} low
+          </div>
         </div>
       </div>
 
-      {/* Top-level tabs */}
-      <div style={{ display: 'flex', background: T.bgSurface, borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
-        {[['stock', 'Stock'], ['returns', 'Return Items']].map(([key, label]) => (
-          <button key={key} onClick={() => setMainTab(key)}
-            style={{ flex: 1, padding: '10px 0', fontFamily: T.fontBody, fontSize: 12, fontWeight: 700, cursor: 'pointer',
-              color: mainTab === key ? T.primary : T.textTertiary, background: 'none', border: 'none',
-              borderBottom: mainTab === key ? `2px solid ${T.primary}` : '2px solid transparent' }}>
-            {label}
-          </button>
+      {/* Report KPIs — same figures as the web Stock Overview cards. */}
+      <div style={{ display: 'flex', gap: 8, padding: '12px 14px 0', flexShrink: 0 }}>
+        {[
+          ['Items',    summary.totalItems.toLocaleString(),   T.textPrimary],
+          ['Low',      summary.low.toLocaleString(),          T.statusDelayed],
+          ['Critical', summary.critical.toLocaleString(),     T.statusRejected],
+          ['Near Exp', summary.nearExpiry30.toLocaleString(), T.statusPending],
+        ].map(([label, value, colour]) => (
+          <div key={label} style={{ flex: 1, minWidth: 0, background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '8px 4px', textAlign: 'center', boxShadow: T.shadowSm }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: colour, fontFamily: T.fontBody }}>{value}</div>
+            <div style={{ fontSize: 9, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.04em', marginTop: 2 }}>{label}</div>
+          </div>
         ))}
       </div>
 
-      {mainTab === 'stock' && (
-        <div style={{ flex: 1, overflowY: 'auto', padding: '8px 14px 16px' }}>
-          {MOCK_STOCK.map((item) => (
-            <div key={item.id} style={{ background: T.bgSurface, border: `1px solid ${item.status === 'low' ? T.statusDelayed + '40' : T.border}`, borderRadius: T.radiusLg, padding: '12px 14px', marginTop: 10, boxShadow: T.shadowSm }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
-                <div style={{ flex: 1, paddingRight: 8 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{item.name}</div>
-                  <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>{item.category} · {item.value}</div>
-                </div>
-                <span style={{ fontSize: 10, fontWeight: 700, color: item.status === 'low' ? T.statusDelayed : T.statusApproved, background: item.status === 'low' ? T.statusDelayedBg : T.statusApprovedBg, padding: '2px 8px', borderRadius: T.radiusFull, fontFamily: T.fontBody, flexShrink: 0 }}>
-                  {item.status === 'low' ? 'Low' : 'OK'}
-                </span>
-              </div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: item.status === 'low' ? T.statusDelayed : T.textPrimary, fontFamily: T.fontBody }}>
-                {item.qty} <span style={{ fontSize: 11, fontWeight: 400, color: T.textTertiary }}>{item.unit}</span>
-              </div>
-            </div>
-          ))}
+      {/* Valuation gets its own row — the full figure never fits in a tile. */}
+      <div style={{ margin: '8px 14px 0', background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '9px 12px', boxShadow: T.shadowSm, display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8, flexShrink: 0 }}>
+        <span style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Stock Value</span>
+        <span style={{ fontSize: 14, fontWeight: 800, color: T.statusApproved, fontFamily: T.fontBody }}>
+          ৳ {Math.round(summary.totalValue).toLocaleString()}
+        </span>
+      </div>
+
+      {/* Search + status filter */}
+      <div style={{ padding: '8px 14px 0', flexShrink: 0 }}>
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+          <span style={{ position: 'absolute', left: 12, fontSize: 13, color: T.textTertiary, pointerEvents: 'none' }}>🔍</span>
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search item, code, category…"
+            style={{ boxSizing: 'border-box', border: `1px solid ${T.border}`, background: T.bgSurface, color: T.textPrimary, fontFamily: T.fontBody, outline: 'none', width: '100%', padding: '9px 12px 9px 32px', borderRadius: T.radiusFull, fontSize: 12 }} />
         </div>
-      )}
+        <div style={{ display: 'flex', gap: 6, overflowX: 'auto' }}>
+          {[['all', `All (${rows.length})`], ['Critical', `Critical (${summary.critical})`], ['Low', `Low (${summary.low})`], ['Held', `Held (${summary.heldItems})`]].map(([key, label]) => {
+            const active = filter === key;
+            return (
+              <button key={key} onClick={() => setFilter(key)}
+                style={{ flexShrink: 0, padding: '6px 12px', borderRadius: T.radiusFull, cursor: 'pointer', fontSize: 11, fontWeight: 700, fontFamily: T.fontBody,
+                  border: `1px solid ${active ? T.primary : T.border}`, background: active ? T.primary : T.bgSurface, color: active ? '#fff' : T.textSecondary }}>
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
 
-      {mainTab === 'returns' && (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          {/* Return sub-tabs */}
-          <div style={{ display: 'flex', gap: 8, padding: '10px 14px 6px', flexShrink: 0 }}>
-            {[['inventory', 'Inventory & Store'], ['airport', 'Airport Items']].map(([key, label]) => {
-              const active = returnTab === key;
-              return (
-                <button key={key} onClick={() => setReturnTab(key)}
-                  style={{ flex: 1, padding: '8px 0', borderRadius: T.radiusFull, cursor: 'pointer', fontSize: 12, fontWeight: 700, fontFamily: T.fontBody,
-                    border: `1px solid ${active ? T.primary : T.border}`, background: active ? T.primary : T.bgSurface, color: active ? '#fff' : T.textSecondary }}>
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Search + date range */}
-          <div style={{ padding: '0 14px 6px', flexShrink: 0 }}>
-            <div style={{ position: 'relative', display: 'flex', alignItems: 'center', marginBottom: 8 }}>
-              <span style={{ position: 'absolute', left: 12, fontSize: 13, color: T.textTertiary, pointerEvents: 'none' }}>🔍</span>
-              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search return, flight, item…"
-                style={{ ...INPUT, width: '100%', padding: '9px 12px 9px 32px', borderRadius: T.radiusFull, fontSize: 12 }} />
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} style={{ ...INPUT, flex: 1, minWidth: 0, padding: '7px 8px', fontSize: 11 }} />
-              <span style={{ fontSize: 12, color: T.textTertiary }}>–</span>
-              <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} style={{ ...INPUT, flex: 1, minWidth: 0, padding: '7px 8px', fontSize: 11 }} />
-              {(search || dateFrom || dateTo) && (
-                <span onClick={() => { setSearch(''); setDateFrom(''); setDateTo(''); }} style={{ fontSize: 11, fontWeight: 600, color: T.textTertiary, fontFamily: T.fontBody, cursor: 'pointer' }}>Clear</span>
-              )}
-            </div>
-          </div>
-
-          {/* Approvals-style cards */}
-          <div style={{ flex: 1, overflowY: 'auto', padding: '6px 14px 16px' }}>
-            {visibleReturns.map(r => {
-              const st = RETURN_STATUS[r.status] || RETURN_STATUS.pending;
-              return (
-                <div key={r.id} onClick={() => setSelectedId(r.id)}
-                  style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 14px', marginBottom: 10, boxShadow: T.shadowSm, cursor: 'pointer' }}>
-                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
-                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flex: 1, minWidth: 0 }}>
-                      <div style={{ width: 36, height: 36, borderRadius: T.radiusMd, background: st.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>↩️</div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{r.flight} · {r.sector}</div>
-                        <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>{r.id} · {r.returnedBy} · {r.lines.length} item{r.lines.length > 1 ? 's' : ''}</div>
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                      <span style={{ fontSize: 10, fontWeight: 700, color: st.color, background: st.bg, padding: '2px 8px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>{st.label}</span>
-                      <span style={{ fontSize: 14, color: T.textTertiary }}>›</span>
-                    </div>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '2px 14px 16px' }}>
+        {visible.map((item) => {
+          const tone = toneFor(item.status);
+          return (
+            <div key={item.id} onClick={() => setSelected(item)} role="button"
+              style={{ background: T.bgSurface, border: `1px solid ${item.status === 'OK' ? T.border : tone.fg + '40'}`, borderRadius: T.radiusLg, padding: '12px 14px', marginTop: 10, boxShadow: T.shadowSm, cursor: 'pointer' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6, gap: 8 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{item.name}</div>
+                  <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
+                    {item.id} · {item.category || item.itemType || '—'}
+                    {item.value > 0 ? ` · ${money(item.value)}` : ''}
                   </div>
                 </div>
-              );
-            })}
-            {visibleReturns.length === 0 && (
-              <div style={{ textAlign: 'center', padding: 32, color: T.textTertiary, fontFamily: T.fontBody, fontSize: 13 }}>No returns match.</div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: tone.fg, background: tone.bg, padding: '2px 8px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>
+                    {item.status}
+                  </span>
+                  <span style={{ fontSize: 14, color: T.textDisabled, lineHeight: 1 }}>›</span>
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: item.status === 'OK' ? T.textPrimary : tone.fg, fontFamily: T.fontBody }}>
+                  {qty(item.stock)} <span style={{ fontSize: 11, fontWeight: 400, color: T.textTertiary }}>{item.uom}</span>
+                </div>
+                {item.reorder > 0 && (
+                  <div style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody }}>Reorder {qty(item.reorder)}</div>
+                )}
+              </div>
+              {item.held > 0 && (
+                <div style={{ fontSize: 10, fontWeight: 700, color: T.statusPending, background: T.statusPendingBg, borderRadius: T.radiusFull, padding: '2px 8px', fontFamily: T.fontBody, marginTop: 6, display: 'inline-block' }}>
+                  🔒 {qty(item.held)} held for QC · {qty(item.available)} usable
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {visible.length === 0 && (
+          <div style={{ textAlign: 'center', padding: 32, color: T.textTertiary, fontFamily: T.fontBody, fontSize: 13 }}>No stock items match.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Item detail ─────────────────────────────────────────────────────────────
+
+const CARD = { background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, boxShadow: T.shadowSm, marginTop: 10, overflow: 'hidden' };
+const SECTION_TITLE = { fontSize: 10, fontWeight: 800, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', padding: '10px 14px 0' };
+
+function Fact({ label, value }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, padding: '7px 14px', borderTop: `1px solid ${T.border}` }}>
+      <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, flexShrink: 0 }}>{label}</span>
+      <span style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody, textAlign: 'right', wordBreak: 'break-word' }}>{value}</span>
+    </div>
+  );
+}
+
+const DAY = 86400000;
+const isoToday = () => new Date().toISOString().slice(0, 10);
+
+/** Expiry tone: red once expired, amber inside 30 days, plain otherwise. */
+function expiryTone(expiry) {
+  if (!expiry || expiry === '—') return null;
+  const today = isoToday();
+  if (expiry < today) return { fg: T.statusRejected, bg: T.statusRejectedBg, label: 'Expired' };
+  const cutoff = new Date(Date.now() + 30 * DAY).toISOString().slice(0, 10);
+  if (expiry <= cutoff) return { fg: T.statusPending, bg: T.statusPendingBg, label: 'Near expiry' };
+  return null;
+}
+
+function StockDetail({ item, ledgerSources, onBack }) {
+  const [allMoves, setAllMoves] = useState(false);
+  const tone = toneFor(item.status);
+
+  // Batch lots live on the persisted stock row, not on the report projection.
+  const lots = useMemo(() => {
+    const row = findInventoryRow(item.id) ?? findInventoryRow(item.name);
+    const batches = Array.isArray(row?.batches) ? row.batches : [];
+    // FEFO order — what will be drawn down first sits at the top.
+    return [...batches].sort((a, b) => String(a.expiry).localeCompare(String(b.expiry)));
+  }, [item]);
+
+  const warehouseRows = useMemo(() => getItemStockByWarehouse(item.id), [item]);
+
+  // Weighted-average cost across the lots; the report's `value` is the lot sum,
+  // so this is only shown when there is a cost basis to average.
+  const avgCost = useMemo(() => {
+    const totalQty = lots.reduce((s, b) => s + (Number(b.qty) || 0), 0);
+    if (totalQty <= 0) return 0;
+    return lots.reduce((s, b) => s + (Number(b.qty) || 0) * (Number(b.costPrice) || 0), 0) / totalQty;
+  }, [lots]);
+
+  // Same ledger the web "Item Details" drill-down renders — quantities only, so
+  // the movements are costed at 0 and no value column is shown on the phone.
+  const ledger = useMemo(
+    () => buildItemLedger(item.id, item.name, item.stock, 0, () => 0, ledgerSources),
+    [item, ledgerSources],
+  );
+  const moves = useMemo(() => ledger.rows.slice(1).reverse(), [ledger]); // newest first, minus the opening row
+  const shownMoves = allMoves ? moves : moves.slice(0, 6);
+
+  // Usable stock against the reorder level, for the health bar.
+  const barPct = item.reorder > 0
+    ? Math.max(2, Math.min(100, (item.available / (item.reorder * 1.2)) * 100))
+    : 0;
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
+      <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+        <button onClick={onBack} style={BACK_BTN}>←</button>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.name}</div>
+          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{item.id}</div>
+        </div>
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px 16px' }}>
+        {/* Balance hero */}
+        <div style={{ ...CARD, marginTop: 0, padding: '14px', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.05em' }}>On hand</div>
+            <div style={{ fontSize: 26, fontWeight: 800, color: T.textPrimary, fontFamily: T.fontBody, lineHeight: 1.15, marginTop: 2 }}>
+              {qty(item.stock)} <span style={{ fontSize: 12, fontWeight: 500, color: T.textTertiary }}>{item.uom}</span>
+            </div>
+            <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 3 }}>
+              {item.category || item.itemType || '—'}
+            </div>
+          </div>
+          <div style={{ textAlign: 'right', flexShrink: 0 }}>
+            <span style={{ fontSize: 10, fontWeight: 700, color: tone.fg, background: tone.bg, padding: '3px 9px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>{item.status}</span>
+            {item.value > 0 && (
+              <div style={{ fontSize: 13, fontWeight: 800, color: T.statusApproved, fontFamily: T.fontBody, marginTop: 8 }}>{money(item.value)}</div>
             )}
           </div>
         </div>
-      )}
+
+        {/* Held / usable / reorder split */}
+        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+          {[
+            ['Held for QC', qty(item.held),      item.held > 0 ? T.statusPending : T.textTertiary],
+            ['Usable',      qty(item.available), item.available > 0 ? T.statusApproved : T.statusRejected],
+            ['Reorder',     item.reorder > 0 ? qty(item.reorder) : '—', T.textPrimary],
+          ].map(([label, value, colour]) => (
+            <div key={label} style={{ flex: 1, minWidth: 0, background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '9px 4px', textAlign: 'center', boxShadow: T.shadowSm }}>
+              <div style={{ fontSize: 14, fontWeight: 800, color: colour, fontFamily: T.fontBody }}>{value}</div>
+              <div style={{ fontSize: 9, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.04em', marginTop: 2 }}>{label}</div>
+            </div>
+          ))}
+        </div>
+
+        {item.held > 0 && (
+          <div style={{ marginTop: 10, background: T.statusPendingBg, border: `1px solid ${T.statusPending}33`, borderRadius: T.radiusMd, padding: '9px 12px', fontSize: 11, color: T.statusPending, fontFamily: T.fontBody, fontWeight: 600 }}>
+            🔒 {qty(item.held)} {item.uom} is held for QC and cannot be issued — {qty(item.available)} usable.
+          </div>
+        )}
+
+        {/* Usable vs reorder level */}
+        {item.reorder > 0 && (
+          <div style={{ ...CARD, padding: '12px 14px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, marginBottom: 6 }}>
+              <span style={{ textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 800 }}>Usable vs reorder</span>
+              <span>{qty(item.available)} / {qty(item.reorder)} {item.uom}</span>
+            </div>
+            <div style={{ height: 7, borderRadius: T.radiusFull, background: T.bgSubtle, border: `1px solid ${T.border}`, overflow: 'hidden' }}>
+              <div style={{ width: `${barPct}%`, height: '100%', background: tone.fg, borderRadius: T.radiusFull }} />
+            </div>
+          </div>
+        )}
+
+        {/* Item facts */}
+        <div style={CARD}>
+          <div style={SECTION_TITLE}>Item</div>
+          <div style={{ marginTop: 8 }}>
+            <Fact label="Item code"  value={item.id} />
+            <Fact label="Item type"  value={item.itemType || '—'} />
+            <Fact label="Category"   value={item.category || '—'} />
+            <Fact label="Storage"    value={item.storage || '—'} />
+            <Fact label="UoM"        value={item.uom || '—'} />
+            {avgCost > 0 && <Fact label="Avg cost" value={`${money(avgCost)} / ${item.uom}`} />}
+          </div>
+        </div>
+
+        {/* Per-warehouse holdings */}
+        {warehouseRows.length > 0 && (
+          <div style={CARD}>
+            <div style={SECTION_TITLE}>Warehouses ({warehouseRows.length})</div>
+            <div style={{ marginTop: 8 }}>
+              {warehouseRows.map((w) => (
+                <Fact key={w.warehouseId} label={`${w.warehouseName} · ${w.warehouseId}`} value={`${qty(w.stock)} ${item.uom}`} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Batch lots */}
+        <div style={CARD}>
+          <div style={SECTION_TITLE}>Batches / lots ({lots.length})</div>
+          {lots.length === 0 ? (
+            <div style={{ padding: '10px 14px 14px', fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>
+              Not batch-tracked — no batch numbers, expiry or FEFO ordering for this item.
+            </div>
+          ) : (
+            <div style={{ marginTop: 8 }}>
+              {lots.map((b, i) => {
+                const exp = expiryTone(b.expiry);
+                const blocked = lotIsBlocked(b);
+                return (
+                  <div key={`${b.batchNo}-${i}`} style={{ padding: '9px 14px', borderTop: `1px solid ${T.border}` }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.batchNo || '—'}</span>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody, flexShrink: 0 }}>{qty(b.qty)} <span style={{ fontSize: 10, fontWeight: 400, color: T.textTertiary }}>{item.uom}</span></span>
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 4 }}>
+                      <span style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody }}>
+                        Exp {b.expiry || '—'}{Number(b.costPrice) > 0 ? ` · ${money(b.costPrice)}/${item.uom}` : ''}{b.binLocation ? ` · ${b.binLocation}` : ''}
+                      </span>
+                      {exp && (
+                        <span style={{ fontSize: 9, fontWeight: 700, color: exp.fg, background: exp.bg, padding: '1px 7px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>{exp.label}</span>
+                      )}
+                      {blocked && (
+                        <span style={{ fontSize: 9, fontWeight: 700, color: T.statusPending, background: T.statusPendingBg, padding: '1px 7px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>🔒 Blocked</span>
+                      )}
+                    </div>
+                    {blocked && b.blockedReason && (
+                      <div style={{ fontSize: 10, color: T.statusPending, fontFamily: T.fontBody, marginTop: 3 }}>{b.blockedReason}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Movement ledger */}
+        <div style={CARD}>
+          <div style={{ ...SECTION_TITLE, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <span>Movements ({moves.length})</span>
+            <span style={{ textTransform: 'none', letterSpacing: 0, fontWeight: 600, color: T.textTertiary }}>
+              In {qty(ledger.totalIn)} · Out {qty(ledger.totalOut)}
+            </span>
+          </div>
+          {moves.length === 0 ? (
+            <div style={{ padding: '10px 14px 14px', fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>
+              No recorded movements — the balance is all opening stock.
+            </div>
+          ) : (
+            <div style={{ marginTop: 8 }}>
+              {shownMoves.map((m, i) => {
+                const inbound = m.inQty > 0;
+                return (
+                  <div key={`${m.reference}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '9px 14px', borderTop: `1px solid ${T.border}` }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody }}>{m.type}</div>
+                      <div style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>{m.reference} · {m.date}</div>
+                    </div>
+                    <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 800, fontFamily: T.fontBody, color: inbound ? T.statusApproved : T.statusRejected }}>
+                        {inbound ? '+' : '−'}{qty(inbound ? m.inQty : m.outQty)}
+                      </div>
+                      <div style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>Bal {qty(m.balance)}</div>
+                    </div>
+                  </div>
+                );
+              })}
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '9px 14px', borderTop: `1px solid ${T.border}`, background: T.bgSubtle }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: T.textSecondary, fontFamily: T.fontBody }}>Opening balance</span>
+                <span style={{ fontSize: 11, fontWeight: 700, color: T.textSecondary, fontFamily: T.fontBody }}>{qty(ledger.opening)} {item.uom}</span>
+              </div>
+              {moves.length > 6 && (
+                <button onClick={() => setAllMoves(v => !v)}
+                  style={{ width: '100%', border: 'none', borderTop: `1px solid ${T.border}`, background: 'transparent', color: T.primary, fontFamily: T.fontBody, fontSize: 11, fontWeight: 700, padding: '10px 0', cursor: 'pointer' }}>
+                  {allMoves ? 'Show less' : `Show all ${moves.length} movements`}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

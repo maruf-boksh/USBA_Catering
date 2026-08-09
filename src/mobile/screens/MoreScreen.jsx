@@ -1,7 +1,7 @@
 import { T } from '../theme';
 
+// Approvals is not listed here — it was promoted to its own bottom-nav tab.
 const OPERATIONS = [
-  { key: 'approvals',    icon: '✅', label: 'Approvals',           sub: 'Pending approvals inbox'    },
   { key: 'dispatch',     icon: '🚛', label: 'Dispatch',            sub: 'Manage flight dispatches'   },
   { key: 'dispatch-mon', icon: '📡', label: 'Dispatch Monitoring', sub: 'Cold chain & live status'   },
 ];
@@ -11,8 +11,12 @@ const INVENTORY = [
   { key: 'demands', icon: '📝', label: 'Demand Requests', sub: 'Raise & track material demand' },
 ];
 
+// All three open the same Local Purchase screen, each landing on its own stage
+// of the cycle — the stages were only reachable as tabs before.
 const LOCAL_PURCHASE = [
-  { key: 'purchase-requisition', icon: '📋', label: 'Purchase Requisition', sub: 'Requisition, approve, receive & inspect' },
+  { key: 'purchase-requisition', icon: '📋', label: 'Purchase Requisition', sub: 'Raise & approve requisitions' },
+  { key: 'purchase-receive',     icon: '📥', label: 'Receive Items',        sub: 'Goods receipt against a requisition' },
+  { key: 'purchase-qc',          icon: '🔍', label: 'Quality Control',      sub: 'Inspect receipts · accept or reject' },
 ];
 
 const GALLEY = [

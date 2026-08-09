@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { MobileLayout }          from './MobileLayout';
 import { BottomNav }             from './components/BottomNav';
+import { WelcomeDialog }         from './components/WelcomeDialog';
 import { SplashScreen }          from './screens/SplashScreen';
 import { LoginScreen }           from './screens/LoginScreen';
 import { HomeScreen }            from './screens/HomeScreen';
@@ -48,8 +49,10 @@ import { MOCK_KPIS }             from './mockData';
  * ║    stock                 · Stock Overview                               ║
  * ║    demands               · Demand Requests (list + create)             ║
  * ║    purchase-orders       · Purchase Orders                             ║
- * ║    purchase-requisition  · Purchase Requisition (LIVE web data via      ║
- * ║                            @/lib/purchase-requisitions)                 ║
+ * ║    purchase-requisition  · Local Purchase — Requisition tab (LIVE web   ║
+ * ║                            data via @/lib/purchase-requisitions)        ║
+ * ║    purchase-receive      · Local Purchase — Receive tab                 ║
+ * ║    purchase-qc           · Local Purchase — QC / Inspect tab            ║
  * ╠══════════════════════════════════════════════════════════════════════════╣
  * ║  TIER 3 — Web-only, disabled rows in More, toast on tap (M6 ✓)         ║
  * ║    Configuration (all sub-pages), User Management, Audit Logs,          ║
@@ -71,6 +74,7 @@ const TAB_ROOTS = {
   orders:     'orders',
   production: 'production',
   qc:         'qc',
+  approvals:  'approvals',
   more:       'more',
 };
 
@@ -79,8 +83,10 @@ function tabForScreen(screen) {
   if (['orders', 'meal-planning'].includes(screen))                                return 'orders';
   if (['production'].includes(screen))                                             return 'production';
   if (['qc', 'hygiene', 'personal-hygiene', 'cooking-temp'].includes(screen))      return 'qc';
-  if (['more', 'dispatch', 'dispatch-mon', 'approvals',
+  if (['approvals'].includes(screen))                                              return 'approvals';
+  if (['more', 'dispatch', 'dispatch-mon',
        'stock', 'demands', 'purchase-orders', 'purchase-requisition',
+       'purchase-receive', 'purchase-qc',
        'galley-overview', 'return-log'].includes(screen)) return 'more';
   return 'home';
 }
@@ -100,6 +106,7 @@ function MainShell({ nav, screen, onLogout, children }) {
         activeTab={activeTab}
         onTabPress={(tab) => nav.resetTo(TAB_ROOTS[tab])}
         alertBadge={alertBadge}
+        approvalBadge={MOCK_KPIS.pendingApprovals}
       />
     </div>
   );
@@ -108,6 +115,9 @@ function MainShell({ nav, screen, onLogout, children }) {
 export function MobileApp({ onClose }) {
   const [stack, setStack] = useState(['splash']);
   const screen = stack[stack.length - 1];
+  // Post sign-in greeting. Raised by the login screen, cleared on dismiss and on
+  // logout so the next sign-in gets its own.
+  const [showWelcome, setShowWelcome] = useState(false);
 
   // Theme Center settings (mode + colour preset + font size) — persisted,
   // applied to the shared token object before first paint.
@@ -125,16 +135,18 @@ export function MobileApp({ onClose }) {
   const goBack   = ()  => setStack((p) => (p.length > 1 ? p.slice(0, -1) : p));
   const resetTo  = (s) => setStack([s]);
 
-  const nav = { screen, navigate, goBack, resetTo, themeMode: themeSettings.mode, setTheme, themeSettings, patchTheme };
+  const nav = { screen, navigate, goBack, resetTo, canGoBack: stack.length > 1, themeMode: themeSettings.mode, setTheme, themeSettings, patchTheme };
   const isPreAuth = PRE_AUTH.has(screen);
 
   // Logout resets to login screen
-  const handleLogout = () => resetTo('login');
+  const handleLogout = () => { setShowWelcome(false); resetTo('login'); };
+
+  const handleLogin = () => { resetTo('home'); setShowWelcome(true); };
 
   function renderScreen() {
     switch (screen) {
       case 'splash':          return <SplashScreen onDone={() => resetTo('login')} />;
-      case 'login':           return <LoginScreen onLogin={() => resetTo('home')} />;
+      case 'login':           return <LoginScreen onLogin={handleLogin} />;
       case 'home':            return <HomeScreen nav={nav} />;
       case 'alerts':          return <AlertsScreen nav={nav} />;
       case 'orders':          return <OrdersScreen nav={nav} />;
@@ -151,7 +163,10 @@ export function MobileApp({ onClose }) {
       case 'stock':           return <StockScreen nav={nav} />;
       case 'demands':         return <DemandsScreen nav={nav} />;
       case 'purchase-orders': return <PurchaseOrdersScreen nav={nav} />;
-      case 'purchase-requisition': return <PurchaseRequisitionScreen nav={nav} />;
+      // One screen, three More-menu doors — each opens on its own stage.
+      case 'purchase-requisition': return <PurchaseRequisitionScreen nav={nav} initialTab="requisition" />;
+      case 'purchase-receive':     return <PurchaseRequisitionScreen nav={nav} initialTab="receive" />;
+      case 'purchase-qc':          return <PurchaseRequisitionScreen nav={nav} initialTab="inspect" />;
       case 'profile':         return <ProfileScreen nav={nav} onLogout={handleLogout} />;
       case 'theme':           return <ThemeScreen nav={nav} />;
       case 'galley-overview': return <GalleyOverviewScreen nav={nav} />;
@@ -169,6 +184,7 @@ export function MobileApp({ onClose }) {
           {renderScreen()}
         </MainShell>
       )}
+      {showWelcome && !isPreAuth && <WelcomeDialog onClose={() => setShowWelcome(false)} />}
     </MobileLayout>
   );
 }
