@@ -25,6 +25,8 @@ import { ProfileScreen }         from './screens/ProfileScreen';
 import { GalleyOverviewScreen }  from './screens/GalleyOverviewScreen';
 import { ReturnLogScreen }       from './screens/ReturnLogScreen';
 import { ThemeScreen }           from './screens/ThemeScreen';
+import { NavSettingsScreen }     from './screens/NavSettingsScreen';
+import { loadMobileNavTabs, saveMobileNavTabs, tabForScreen } from './nav-config';
 import { applyMobileThemeSettings, loadMobileThemeSettings, getMobileThemeSettings, getMobileFontZoom } from './theme';
 import { MOCK_KPIS }             from './mockData';
 
@@ -69,33 +71,14 @@ import { MOCK_KPIS }             from './mockData';
  *   - All colours consumed from src/mobile/theme.js — no per-screen literals.
  */
 
-const TAB_ROOTS = {
-  home:       'home',
-  orders:     'orders',
-  production: 'production',
-  qc:         'qc',
-  approvals:  'approvals',
-  more:       'more',
-};
-
-function tabForScreen(screen) {
-  if (['home', 'alerts', 'profile', 'theme'].includes(screen))                     return 'home';
-  if (['orders', 'meal-planning'].includes(screen))                                return 'orders';
-  if (['production'].includes(screen))                                             return 'production';
-  if (['qc', 'hygiene', 'personal-hygiene', 'cooking-temp'].includes(screen))      return 'qc';
-  if (['approvals'].includes(screen))                                              return 'approvals';
-  if (['more', 'dispatch', 'dispatch-mon',
-       'stock', 'demands', 'purchase-orders', 'purchase-requisition',
-       'purchase-receive', 'purchase-qc',
-       'galley-overview', 'return-log'].includes(screen)) return 'more';
-  return 'home';
-}
-
+// Which tabs the bar carries is the user's choice now — see nav-config, and the
+// Bottom Bar screen that edits it. Every tab id is also the screen it opens, so
+// there is no TAB_ROOTS table any more.
 const PRE_AUTH = new Set(['splash', 'login']);
 
 function MainShell({ nav, screen, onLogout, children }) {
   const alertBadge = MOCK_KPIS.pendingApprovals + MOCK_KPIS.inventoryAlerts;
-  const activeTab  = tabForScreen(screen);
+  const activeTab  = tabForScreen(screen, nav.navTabs);
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -103,10 +86,14 @@ function MainShell({ nav, screen, onLogout, children }) {
         {children}
       </div>
       <BottomNav
+        tabs={nav.navTabs}
         activeTab={activeTab}
-        onTabPress={(tab) => nav.resetTo(TAB_ROOTS[tab])}
-        alertBadge={alertBadge}
-        approvalBadge={MOCK_KPIS.pendingApprovals}
+        onTabPress={(tab) => nav.resetTo(tab)}
+        badges={{
+          home:      alertBadge,
+          alerts:    alertBadge,
+          approvals: MOCK_KPIS.pendingApprovals,
+        }}
       />
     </div>
   );
@@ -131,11 +118,17 @@ export function MobileApp({ onClose }) {
   };
   const setTheme = (mode) => patchTheme({ mode }); // Dark Mode toggle shim
 
-  const navigate = (s) => setStack((p) => [...p, s]);
-  const goBack   = ()  => setStack((p) => (p.length > 1 ? p.slice(0, -1) : p));
-  const resetTo  = (s) => setStack([s]);
+  // User-picked bottom-bar modules, persisted on this device.
+  const [navTabs, setNavTabsState] = useState(loadMobileNavTabs);
+  const setNavTabs = (keys) => setNavTabsState(saveMobileNavTabs(keys));
 
-  const nav = { screen, navigate, goBack, resetTo, canGoBack: stack.length > 1, themeMode: themeSettings.mode, setTheme, themeSettings, patchTheme };
+  // Any navigation retires the welcome pill — it belongs to the home screen you
+  // landed on, and should not follow you into the next one.
+  const navigate = (s) => { setShowWelcome(false); setStack((p) => [...p, s]); };
+  const goBack   = ()  => { setShowWelcome(false); setStack((p) => (p.length > 1 ? p.slice(0, -1) : p)); };
+  const resetTo  = (s) => { setShowWelcome(false); setStack([s]); };
+
+  const nav = { screen, navigate, goBack, resetTo, themeMode: themeSettings.mode, setTheme, themeSettings, patchTheme, navTabs, setNavTabs };
   const isPreAuth = PRE_AUTH.has(screen);
 
   // Logout resets to login screen
@@ -169,6 +162,7 @@ export function MobileApp({ onClose }) {
       case 'purchase-qc':          return <PurchaseRequisitionScreen nav={nav} initialTab="inspect" />;
       case 'profile':         return <ProfileScreen nav={nav} onLogout={handleLogout} />;
       case 'theme':           return <ThemeScreen nav={nav} />;
+      case 'nav-settings':    return <NavSettingsScreen nav={nav} />;
       case 'galley-overview': return <GalleyOverviewScreen nav={nav} />;
       case 'return-log':      return <ReturnLogScreen nav={nav} />;
       default:                return <HomeScreen nav={nav} />;

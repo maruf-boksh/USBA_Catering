@@ -1,75 +1,16 @@
 import { T } from '../theme';
+import { navItem, MORE_TAB } from '../nav-config';
 
-const TABS = [
-  {
-    key: 'home',
-    label: 'Home',
-    icon: (active) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <path d="M3 12L12 3l9 9" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        <path d="M9 21V12h6v9" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        <path d="M5 10v11h14V10" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-      </svg>
-    ),
-  },
-  {
-    key: 'orders',
-    label: 'Orders',
-    icon: (active) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <rect x="3" y="3" width="18" height="18" rx="3" stroke={active ? T.primary : T.textTertiary} strokeWidth="2"/>
-        <path d="M7 8h10M7 12h7M7 16h5" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round"/>
-      </svg>
-    ),
-  },
-  {
-    key: 'production',
-    label: 'Production',
-    icon: (active) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <path d="M12 2L2 7l10 5 10-5-10-5z" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        <path d="M2 17l10 5 10-5" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        <path d="M2 12l10 5 10-5" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-      </svg>
-    ),
-  },
-  {
-    key: 'qc',
-    label: 'QC',
-    icon: (active) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <path d="M9 11l3 3L22 4" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-      </svg>
-    ),
-  },
-  {
-    key: 'approvals',
-    label: 'Approvals',
-    icon: (active) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <path d="M9 4h6a1 1 0 011 1v1h2a1 1 0 011 1v13a1 1 0 01-1 1H6a1 1 0 01-1-1V7a1 1 0 011-1h2V5a1 1 0 011-1z" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinejoin="round"/>
-        <path d="M9 13l2.2 2.2L15.5 11" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-      </svg>
-    ),
-  },
-  {
-    key: 'more',
-    label: 'More',
-    icon: (active) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <circle cx="5" cy="12" r="1.5" fill={active ? T.primary : T.textTertiary}/>
-        <circle cx="12" cy="12" r="1.5" fill={active ? T.primary : T.textTertiary}/>
-        <circle cx="19" cy="12" r="1.5" fill={active ? T.primary : T.textTertiary}/>
-      </svg>
-    ),
-  },
-];
-
-export function BottomNav({ activeTab, onTabPress, alertBadge = 0, approvalBadge = 0 }) {
-  // Each tab owns at most one count; keyed here so the badge block below stays
-  // one branch instead of one per tab.
-  const badgeFor = { home: alertBadge, approvals: approvalBadge };
+/**
+ * The bottom bar. Which modules appear is the user's choice (Bottom Bar screen,
+ * persisted in nav-config); More is always pinned last so nothing the user did
+ * not promote becomes unreachable.
+ *
+ * `badges` is keyed by tab id, so a count follows its module onto and off the
+ * bar without this component knowing what any of them mean.
+ */
+export function BottomNav({ tabs, activeTab, onTabPress, badges = {} }) {
+  const items = [...tabs.map(navItem).filter(Boolean), MORE_TAB];
 
   return (
     <div
@@ -83,9 +24,9 @@ export function BottomNav({ activeTab, onTabPress, alertBadge = 0, approvalBadge
         position: 'relative',
       }}
     >
-      {TABS.map((tab) => {
+      {items.map((tab) => {
         const active = activeTab === tab.key;
-        const badge  = badgeFor[tab.key] ?? 0;
+        const badge  = badges[tab.key] ?? 0;
         return (
           <button
             key={tab.key}
@@ -120,7 +61,7 @@ export function BottomNav({ activeTab, onTabPress, alertBadge = 0, approvalBadge
               />
             )}
 
-            {/* Count badge — alerts on Home, pending items on Approvals */}
+            {/* Count badge — whichever module owns one */}
             <div style={{ position: 'relative' }}>
               {tab.icon(active)}
               {badge > 0 && (
@@ -149,11 +90,9 @@ export function BottomNav({ activeTab, onTabPress, alertBadge = 0, approvalBadge
               )}
             </div>
 
-            {/* 9.5px, not 10: six tabs leave ~62px each and "Production" /
-                "Approvals" wrap at the larger size. */}
             <span
               style={{
-                fontSize: 9.5,
+                fontSize: 10,
                 fontFamily: T.fontBody,
                 fontWeight: active ? 700 : 500,
                 color: active ? T.primary : T.textTertiary,

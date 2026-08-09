@@ -1,7 +1,7 @@
 import { T } from '../theme';
 
-// Approvals is not listed here — it was promoted to its own bottom-nav tab.
 const OPERATIONS = [
+  { key: 'approvals',    icon: '✅', label: 'Approvals',           sub: 'Pending approvals inbox'    },
   { key: 'dispatch',     icon: '🚛', label: 'Dispatch',            sub: 'Manage flight dispatches'   },
   { key: 'dispatch-mon', icon: '📡', label: 'Dispatch Monitoring', sub: 'Cold chain & live status'   },
 ];
@@ -25,6 +25,7 @@ const GALLEY = [
 ];
 
 const SETTINGS = [
+  { key: 'nav-settings', icon: '🧭', label: 'Bottom Bar',   sub: 'Choose the modules on the nav bar' },
   { key: 'theme',   icon: '🎨', label: 'Theme & Appearance', sub: 'Colour theme, dark mode & font size' },
   { key: 'profile', icon: '👤', label: 'Profile',            sub: 'Account details & sign out' },
 ];
