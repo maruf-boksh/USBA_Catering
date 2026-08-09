@@ -1,267 +1,403 @@
-import { useMemo, useState } from 'react';
+import { useState, useMemo } from 'react';
 import { T } from '../theme';
-import { KPICard } from '../components/KPICard';
-// Stock Overview on the phone, on the WEB's own inventory — the same
-// "inventory-items" store routes/inventory.tsx persists to, so a receipt
-// approved on the phone or the desk moves the number here immediately.
+import { loadStockOverviewRows, stockOverviewSummary } from '@/lib/stock-overview';
+import { findInventoryRow, lotIsBlocked } from '@/lib/inventory-store';
+import { getItemStockByWarehouse } from '@/lib/inventory-stock';
+import { buildItemLedger } from '@/lib/stock-ledger';
+import { getStockAdjustments } from '@/lib/stock-adjustments';
+import { useWorkflow } from '@/lib/workflow-store';
+import { roundQty } from '@/lib/num';
+
+// Mobile Stock Overview — the web /inventory report on a phone. Rows come from
+// `lib/stock-overview.ts`, the headless projection of that report, so the two
+// screens can never disagree.
 //
-// Availability is stock − blocked (a batch held for QC is on hand but not
-// usable), and the OK / Low / Critical bands are the web's own reorder rules.
-import { inventory } from '@/lib/sample-data';
+// Tapping a row opens the item detail view (StockDetail below), the phone
+// version of the web report's "Item Details" drill-down: balance breakdown,
+// per-warehouse holdings, batch/lot list and the movement ledger from
+// `lib/stock-ledger.ts`. Same sources as the web page — nothing mocked.
+//
+// Consumable returns are NOT here: the Return Log screen (More → Galley
+// Planning) owns them and works against the real returns store. This screen
+// used to carry a duplicate "Return Items" tab backed by mock data.
 
-const BTN_BACK = { background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: T.radiusFull, width: 32, height: 32, cursor: 'pointer', color: '#fff', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
-const INPUT = { width: '100%', boxSizing: 'border-box', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '10px 12px', fontSize: 13, fontFamily: T.fontBody, outline: 'none', background: T.bgSurface, color: T.textPrimary };
-const CARD = { background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 14px', marginBottom: 10, boxShadow: T.shadowSm };
-const SECTION = { fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', margin: '16px 2px 8px' };
+const BACK_BTN = { background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: T.radiusFull, width: 32, height: 32, cursor: 'pointer', color: '#fff', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
 
-const INV_KEY = 'harvest-data-v1:inventory-items';
-
-const STATUS = {
-  OK:       { label: 'OK',       color: T.statusApproved, bg: T.statusApprovedBg },
-  Low:      { label: 'Low',      color: T.statusPending,  bg: T.statusPendingBg },
-  Critical: { label: 'Critical', color: T.statusRejected, bg: T.statusRejectedBg },
-};
-
-const num = (v) => Number(v) || 0;
-const fmt = (n) => num(n).toLocaleString(undefined, { maximumFractionDigits: 2 });
-
-function readItems() {
-  try {
-    const raw = localStorage.getItem(INV_KEY);
-    const saved = raw ? JSON.parse(raw) : null;
-    return Array.isArray(saved) && saved.length > 0 ? saved : inventory;
-  } catch { return inventory; }
+/** Status colours, shared by the list rows and the detail header. */
+function toneFor(status) {
+  if (status === 'Critical') return { fg: T.statusRejected, bg: T.statusRejectedBg };
+  if (status === 'Low')      return { fg: T.statusDelayed,  bg: T.statusDelayedBg };
+  return { fg: T.statusApproved, bg: T.statusApprovedBg };
 }
 
-/** Usable stock — what is on hand minus anything held for QC. */
-const availableOf = (it) => Math.max(0, num(it.stock) - num(it.blockedQty));
-/** The web's own band: Critical under half the reorder point, Low under it. */
-const bandOf = (it) => {
-  if (it.status && STATUS[it.status]) return it.status;
-  const r = num(it.reorder);
-  if (r <= 0) return 'OK';
-  return num(it.stock) < r * 0.5 ? 'Critical' : num(it.stock) < r ? 'Low' : 'OK';
-};
-
-function Chip({ label, color, bg }) {
-  return (
-    <span style={{ fontSize: 10, fontWeight: 700, color, background: bg, padding: '2px 8px', borderRadius: T.radiusFull, fontFamily: T.fontBody, flexShrink: 0 }}>
-      {label}
-    </span>
-  );
-}
-
-function Empty({ icon, text }) {
-  return (
-    <div style={{ textAlign: 'center', padding: '46px 0' }}>
-      <div style={{ fontSize: 36, marginBottom: 10 }}>{icon}</div>
-      <div style={{ fontSize: 13, color: T.textTertiary, fontFamily: T.fontBody, padding: '0 24px' }}>{text}</div>
-    </div>
-  );
-}
-
-function Row({ label, value }) {
-  const v = String(value ?? '').trim();
-  if (v === '') return null;
-  return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8, padding: '7px 0', borderTop: `1px solid ${T.border}` }}>
-      <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{label}</span>
-      <span style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody, textAlign: 'right' }}>{v}</span>
-    </div>
-  );
-}
+const qty = (n) => roundQty(n).toLocaleString();
+const money = (n) => `৳${Math.round(n).toLocaleString()}`;
 
 export function StockScreen({ nav }) {
-  const items = useMemo(() => readItems(), []);
-  const [view, setView]     = useState('list');   // 'list' | 'detail'
-  const [activeId, setActiveId] = useState(null);
-  const [query, setQuery]   = useState('');
-  const [filter, setFilter] = useState('all');
+  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState('all'); // 'all' | 'Critical' | 'Low' | 'Held'
+  const [selected, setSelected] = useState(null);
 
-  const categories = useMemo(
-    () => [...new Set(items.map((i) => i.category).filter(Boolean))].sort(),
-    [items],
+  // Read once per mount, like the web page: usePersistedState doesn't broadcast
+  // same-tab writes either, so both refresh when you next open them.
+  const rows    = useMemo(() => loadStockOverviewRows(), []);
+  const summary = useMemo(() => stockOverviewSummary(rows), [rows]);
+
+  // Movement ledger sources — the same four the web report stitches together.
+  // The mobile app renders inside the WorkflowProvider (AppLayout), so the
+  // in-memory GRN / transfer / production slices are readable here.
+  const { grns, transferNotes, stockDeltas } = useWorkflow();
+  const ledgerSources = useMemo(
+    () => ({ grns, transferNotes, stockDeltas, adjustments: getStockAdjustments() }),
+    [grns, transferNotes, stockDeltas],
   );
 
-  const lowCount = items.filter((i) => bandOf(i) === 'Low').length;
-  const critCount = items.filter((i) => bandOf(i) === 'Critical').length;
-  const blocked = items.reduce((s, i) => s + num(i.blockedQty), 0);
-
-  const visible = items.filter((i) => {
-    const band = bandOf(i);
-    if (filter === 'low' && band === 'OK') return false;
-    if (filter === 'critical' && band !== 'Critical') return false;
-    if (filter === 'blocked' && num(i.blockedQty) <= 0) return false;
-    if (filter !== 'all' && ['low', 'critical', 'blocked'].indexOf(filter) === -1 && i.category !== filter) return false;
-    if (!query.trim()) return true;
-    return `${i.name} ${i.category} ${i.batch ?? ''} ${i.storage ?? ''}`.toLowerCase().includes(query.trim().toLowerCase());
-  });
-  // Anything short floats to the top — the reason to open this screen.
-  const sorted = [...visible].sort((a, b) => {
-    const rank = { Critical: 0, Low: 1, OK: 2 };
-    return (rank[bandOf(a)] - rank[bandOf(b)]) || a.name.localeCompare(b.name);
+  const q = search.trim().toLowerCase();
+  const visible = rows.filter(r => {
+    if (filter === 'Held' ? r.held <= 0 : filter !== 'all' && r.status !== filter) return false;
+    if (q && ![r.name, r.id, r.category, r.itemType].some(v => (v || '').toLowerCase().includes(q))) return false;
+    return true;
   });
 
-  const activeItem = items.find((i) => i.id === activeId) ?? null;
-
-  // ── Item detail ───────────────────────────────────────────────────────────
-  if (view === 'detail' && activeItem) {
-    const it = activeItem;
-    const band = bandOf(it);
-    const s = STATUS[band];
-    const avail = availableOf(it);
-    const lots = it.batches ?? [];
-    return (
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
-        <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-          <button onClick={() => { setActiveId(null); setView('list'); }} style={BTN_BACK}>←</button>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>{it.name}</div>
-            <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{it.id} · {it.category}</div>
-          </div>
-        </div>
-
-        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px 16px' }}>
-          <div style={CARD}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
-              <span style={{ fontSize: 20, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>
-                {fmt(avail)} <span style={{ fontSize: 12, fontWeight: 400, color: T.textTertiary }}>{it.uom} available</span>
-              </span>
-              <Chip label={s.label} color={s.color} bg={s.bg} />
-            </div>
-            <Row label="On Hand" value={`${fmt(it.stock)} ${it.uom}`} />
-            {num(it.blockedQty) > 0 && <Row label="Held For QC" value={`${fmt(it.blockedQty)} ${it.uom}`} />}
-            {it.blockedReason && <Row label="Hold Reason" value={it.blockedReason} />}
-            <Row label="Reorder Level" value={`${fmt(it.reorder)} ${it.uom}`} />
-            <Row label="Storage" value={it.storage} />
-            <Row label="Batch" value={it.batch} />
-            <Row label="Expiry" value={it.expiry} />
-          </div>
-
-          {/* Cover against the reorder point, read at a glance */}
-          <div style={CARD}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
-              <span style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                Against Reorder
-              </span>
-              <span style={{ fontSize: 12, fontWeight: 700, color: s.color, fontFamily: T.fontBody }}>
-                {num(it.reorder) > 0 ? `${Math.round((num(it.stock) / num(it.reorder)) * 100)}%` : '—'}
-              </span>
-            </div>
-            <div style={{ height: 6, borderRadius: T.radiusFull, background: T.bgSubtle, overflow: 'hidden' }}>
-              <div style={{ width: `${Math.min(100, num(it.reorder) > 0 ? (num(it.stock) / num(it.reorder)) * 100 : 100)}%`, height: '100%', background: s.color }} />
-            </div>
-          </div>
-
-          {lots.length > 0 && (
-            <>
-              <div style={SECTION}>Batches / Lots ({lots.length})</div>
-              <div style={CARD}>
-                {lots.map((b, i) => (
-                  <div key={b.batchNo ?? i} style={{ padding: '9px 0', borderTop: i > 0 ? `1px solid ${T.border}` : 'none' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
-                      <span style={{ fontSize: 12.5, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{b.batchNo ?? '—'}</span>
-                      <span style={{ fontSize: 12.5, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{fmt(b.qty)} {it.uom}</span>
-                    </div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 3 }}>
-                      {b.expiry && <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>Exp {b.expiry}</span>}
-                      {b.receivedAt && <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>Recv {b.receivedAt}</span>}
-                      {num(b.blockedQty) > 0 && (
-                        <Chip label={`${fmt(b.blockedQty)} held`} color={T.statusPending} bg={T.statusPendingBg} />
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    );
+  if (selected) {
+    return <StockDetail item={selected} ledgerSources={ledgerSources} onBack={() => setSelected(null)} />;
   }
 
-  // ── List ──────────────────────────────────────────────────────────────────
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
       <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-        <button onClick={() => nav.goBack()} style={BTN_BACK}>←</button>
-        <div style={{ flex: 1 }}>
+        <button onClick={() => nav.resetTo('home')} style={BACK_BTN}>←</button>
+        <div>
           <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Stock Overview</div>
           <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>
-            {items.length} items · {lowCount + critCount} need attention
+            {summary.critical} critical · {summary.low} low
           </div>
         </div>
       </div>
 
-      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px 16px' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <KPICard label="Total Items" value={items.length} sub="In the store"     accent={T.statusInfo} />
-          <KPICard label="Low Stock"   value={lowCount}     sub="Under reorder"    accent={T.statusPending} />
-          <KPICard label="Critical"    value={critCount}    sub="Order now"        accent={T.statusRejected} />
-          <KPICard label="Held For QC" value={fmt(blocked)} sub="Not usable yet"   accent={T.statusBoarding} />
+      {/* Report KPIs — same figures as the web Stock Overview cards. */}
+      <div style={{ display: 'flex', gap: 8, padding: '12px 14px 0', flexShrink: 0 }}>
+        {[
+          ['Items',    summary.totalItems.toLocaleString(),   T.textPrimary],
+          ['Low',      summary.low.toLocaleString(),          T.statusDelayed],
+          ['Critical', summary.critical.toLocaleString(),     T.statusRejected],
+          ['Near Exp', summary.nearExpiry30.toLocaleString(), T.statusPending],
+        ].map(([label, value, colour]) => (
+          <div key={label} style={{ flex: 1, minWidth: 0, background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '8px 4px', textAlign: 'center', boxShadow: T.shadowSm }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: colour, fontFamily: T.fontBody }}>{value}</div>
+            <div style={{ fontSize: 9, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.04em', marginTop: 2 }}>{label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Valuation gets its own row — the full figure never fits in a tile. */}
+      <div style={{ margin: '8px 14px 0', background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '9px 12px', boxShadow: T.shadowSm, display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8, flexShrink: 0 }}>
+        <span style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Stock Value</span>
+        <span style={{ fontSize: 14, fontWeight: 800, color: T.statusApproved, fontFamily: T.fontBody }}>
+          ৳ {Math.round(summary.totalValue).toLocaleString()}
+        </span>
+      </div>
+
+      {/* Search + status filter */}
+      <div style={{ padding: '8px 14px 0', flexShrink: 0 }}>
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+          <span style={{ position: 'absolute', left: 12, fontSize: 13, color: T.textTertiary, pointerEvents: 'none' }}>🔍</span>
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search item, code, category…"
+            style={{ boxSizing: 'border-box', border: `1px solid ${T.border}`, background: T.bgSurface, color: T.textPrimary, fontFamily: T.fontBody, outline: 'none', width: '100%', padding: '9px 12px 9px 32px', borderRadius: T.radiusFull, fontSize: 12 }} />
         </div>
-
-        <input value={query} onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search item, category, batch…" style={{ ...INPUT, marginTop: 12 }} />
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 0 0' }}>
-          <button onClick={() => setFilter('all')}
-            style={{ flexShrink: 0, padding: '8px 14px', borderRadius: T.radiusFull, border: `1px solid ${filter === 'all' ? T.primary : T.border}`, background: filter === 'all' ? T.primary : T.bgSurface, color: filter === 'all' ? '#fff' : T.textTertiary, fontSize: 12, fontWeight: 700, fontFamily: T.fontBody, cursor: 'pointer' }}>
-            All
-          </button>
-          <select value={filter} onChange={(e) => setFilter(e.target.value)}
-            style={{ ...INPUT, flex: 1, minWidth: 0, padding: '9px 10px', fontSize: 12, fontWeight: 700 }}>
-            <option value="all">All items</option>
-            <option value="low">Needs attention (Low + Critical)</option>
-            <option value="critical">Critical only</option>
-            <option value="blocked">Held for QC</option>
-            {categories.map((c) => <option key={c} value={c}>{c}</option>)}
-          </select>
+        <div style={{ display: 'flex', gap: 6, overflowX: 'auto' }}>
+          {[['all', `All (${rows.length})`], ['Critical', `Critical (${summary.critical})`], ['Low', `Low (${summary.low})`], ['Held', `Held (${summary.heldItems})`]].map(([key, label]) => {
+            const active = filter === key;
+            return (
+              <button key={key} onClick={() => setFilter(key)}
+                style={{ flexShrink: 0, padding: '6px 12px', borderRadius: T.radiusFull, cursor: 'pointer', fontSize: 11, fontWeight: 700, fontFamily: T.fontBody,
+                  border: `1px solid ${active ? T.primary : T.border}`, background: active ? T.primary : T.bgSurface, color: active ? '#fff' : T.textSecondary }}>
+                {label}
+              </button>
+            );
+          })}
         </div>
+      </div>
 
-        <div style={{ ...SECTION, marginTop: 12 }}>
-          {sorted.length} of {items.length} items
-        </div>
-
-        {sorted.length === 0 ? (
-          <Empty icon="📦" text="No items match the current filter." />
-        ) : sorted.map((it) => {
-          const band = bandOf(it);
-          const s = STATUS[band];
-          const avail = availableOf(it);
-          const pct = num(it.reorder) > 0 ? Math.min(100, (num(it.stock) / num(it.reorder)) * 100) : 100;
+      <div style={{ flex: 1, overflowY: 'auto', padding: '2px 14px 16px' }}>
+        {visible.map((item) => {
+          const tone = toneFor(item.status);
           return (
-            <div key={it.id} onClick={() => { setActiveId(it.id); setView('detail'); }} style={{ ...CARD, cursor: 'pointer' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 4 }}>
+            <div key={item.id} onClick={() => setSelected(item)} role="button"
+              style={{ background: T.bgSurface, border: `1px solid ${item.status === 'OK' ? T.border : tone.fg + '40'}`, borderRadius: T.radiusLg, padding: '12px 14px', marginTop: 10, boxShadow: T.shadowSm, cursor: 'pointer' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6, gap: 8 }}>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{it.name}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{item.name}</div>
                   <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
-                    {it.category}{it.storage ? ` · ${it.storage}` : ''}
+                    {item.id} · {item.category || item.itemType || '—'}
+                    {item.value > 0 ? ` · ${money(item.value)}` : ''}
                   </div>
                 </div>
-                <Chip label={s.label} color={s.color} bg={s.bg} />
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: tone.fg, background: tone.bg, padding: '2px 8px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>
+                    {item.status}
+                  </span>
+                  <span style={{ fontSize: 14, color: T.textDisabled, lineHeight: 1 }}>›</span>
+                </div>
               </div>
-
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 6, marginBottom: 5 }}>
-                <span style={{ fontSize: 15, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>
-                  {fmt(avail)} <span style={{ fontSize: 11, fontWeight: 400, color: T.textTertiary }}>{it.uom}</span>
-                </span>
-                <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>
-                  reorder {fmt(it.reorder)}
-                </span>
+              <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: item.status === 'OK' ? T.textPrimary : tone.fg, fontFamily: T.fontBody }}>
+                  {qty(item.stock)} <span style={{ fontSize: 11, fontWeight: 400, color: T.textTertiary }}>{item.uom}</span>
+                </div>
+                {item.reorder > 0 && (
+                  <div style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody }}>Reorder {qty(item.reorder)}</div>
+                )}
               </div>
-              <div style={{ height: 5, borderRadius: T.radiusFull, background: T.bgSubtle, overflow: 'hidden' }}>
-                <div style={{ width: `${pct}%`, height: '100%', background: s.color }} />
-              </div>
-
-              {num(it.blockedQty) > 0 && (
-                <div style={{ fontSize: 11, color: T.statusPending, fontFamily: T.fontBody, marginTop: 7 }}>
-                  {fmt(it.blockedQty)} {it.uom} held for QC — not available to issue
+              {item.held > 0 && (
+                <div style={{ fontSize: 10, fontWeight: 700, color: T.statusPending, background: T.statusPendingBg, borderRadius: T.radiusFull, padding: '2px 8px', fontFamily: T.fontBody, marginTop: 6, display: 'inline-block' }}>
+                  🔒 {qty(item.held)} held for QC · {qty(item.available)} usable
                 </div>
               )}
             </div>
           );
         })}
+        {visible.length === 0 && (
+          <div style={{ textAlign: 'center', padding: 32, color: T.textTertiary, fontFamily: T.fontBody, fontSize: 13 }}>No stock items match.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Item detail ─────────────────────────────────────────────────────────────
+
+const CARD = { background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, boxShadow: T.shadowSm, marginTop: 10, overflow: 'hidden' };
+const SECTION_TITLE = { fontSize: 10, fontWeight: 800, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', padding: '10px 14px 0' };
+
+function Fact({ label, value }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, padding: '7px 14px', borderTop: `1px solid ${T.border}` }}>
+      <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, flexShrink: 0 }}>{label}</span>
+      <span style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody, textAlign: 'right', wordBreak: 'break-word' }}>{value}</span>
+    </div>
+  );
+}
+
+const DAY = 86400000;
+const isoToday = () => new Date().toISOString().slice(0, 10);
+
+/** Expiry tone: red once expired, amber inside 30 days, plain otherwise. */
+function expiryTone(expiry) {
+  if (!expiry || expiry === '—') return null;
+  const today = isoToday();
+  if (expiry < today) return { fg: T.statusRejected, bg: T.statusRejectedBg, label: 'Expired' };
+  const cutoff = new Date(Date.now() + 30 * DAY).toISOString().slice(0, 10);
+  if (expiry <= cutoff) return { fg: T.statusPending, bg: T.statusPendingBg, label: 'Near expiry' };
+  return null;
+}
+
+function StockDetail({ item, ledgerSources, onBack }) {
+  const [allMoves, setAllMoves] = useState(false);
+  const tone = toneFor(item.status);
+
+  // Batch lots live on the persisted stock row, not on the report projection.
+  const lots = useMemo(() => {
+    const row = findInventoryRow(item.id) ?? findInventoryRow(item.name);
+    const batches = Array.isArray(row?.batches) ? row.batches : [];
+    // FEFO order — what will be drawn down first sits at the top.
+    return [...batches].sort((a, b) => String(a.expiry).localeCompare(String(b.expiry)));
+  }, [item]);
+
+  const warehouseRows = useMemo(() => getItemStockByWarehouse(item.id), [item]);
+
+  // Weighted-average cost across the lots; the report's `value` is the lot sum,
+  // so this is only shown when there is a cost basis to average.
+  const avgCost = useMemo(() => {
+    const totalQty = lots.reduce((s, b) => s + (Number(b.qty) || 0), 0);
+    if (totalQty <= 0) return 0;
+    return lots.reduce((s, b) => s + (Number(b.qty) || 0) * (Number(b.costPrice) || 0), 0) / totalQty;
+  }, [lots]);
+
+  // Same ledger the web "Item Details" drill-down renders — quantities only, so
+  // the movements are costed at 0 and no value column is shown on the phone.
+  const ledger = useMemo(
+    () => buildItemLedger(item.id, item.name, item.stock, 0, () => 0, ledgerSources),
+    [item, ledgerSources],
+  );
+  const moves = useMemo(() => ledger.rows.slice(1).reverse(), [ledger]); // newest first, minus the opening row
+  const shownMoves = allMoves ? moves : moves.slice(0, 6);
+
+  // Usable stock against the reorder level, for the health bar.
+  const barPct = item.reorder > 0
+    ? Math.max(2, Math.min(100, (item.available / (item.reorder * 1.2)) * 100))
+    : 0;
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
+      <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+        <button onClick={onBack} style={BACK_BTN}>←</button>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.name}</div>
+          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{item.id}</div>
+        </div>
+      </div>
+
+      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px 16px' }}>
+        {/* Balance hero */}
+        <div style={{ ...CARD, marginTop: 0, padding: '14px', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.05em' }}>On hand</div>
+            <div style={{ fontSize: 26, fontWeight: 800, color: T.textPrimary, fontFamily: T.fontBody, lineHeight: 1.15, marginTop: 2 }}>
+              {qty(item.stock)} <span style={{ fontSize: 12, fontWeight: 500, color: T.textTertiary }}>{item.uom}</span>
+            </div>
+            <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 3 }}>
+              {item.category || item.itemType || '—'}
+            </div>
+          </div>
+          <div style={{ textAlign: 'right', flexShrink: 0 }}>
+            <span style={{ fontSize: 10, fontWeight: 700, color: tone.fg, background: tone.bg, padding: '3px 9px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>{item.status}</span>
+            {item.value > 0 && (
+              <div style={{ fontSize: 13, fontWeight: 800, color: T.statusApproved, fontFamily: T.fontBody, marginTop: 8 }}>{money(item.value)}</div>
+            )}
+          </div>
+        </div>
+
+        {/* Held / usable / reorder split */}
+        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+          {[
+            ['Held for QC', qty(item.held),      item.held > 0 ? T.statusPending : T.textTertiary],
+            ['Usable',      qty(item.available), item.available > 0 ? T.statusApproved : T.statusRejected],
+            ['Reorder',     item.reorder > 0 ? qty(item.reorder) : '—', T.textPrimary],
+          ].map(([label, value, colour]) => (
+            <div key={label} style={{ flex: 1, minWidth: 0, background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '9px 4px', textAlign: 'center', boxShadow: T.shadowSm }}>
+              <div style={{ fontSize: 14, fontWeight: 800, color: colour, fontFamily: T.fontBody }}>{value}</div>
+              <div style={{ fontSize: 9, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.04em', marginTop: 2 }}>{label}</div>
+            </div>
+          ))}
+        </div>
+
+        {item.held > 0 && (
+          <div style={{ marginTop: 10, background: T.statusPendingBg, border: `1px solid ${T.statusPending}33`, borderRadius: T.radiusMd, padding: '9px 12px', fontSize: 11, color: T.statusPending, fontFamily: T.fontBody, fontWeight: 600 }}>
+            🔒 {qty(item.held)} {item.uom} is held for QC and cannot be issued — {qty(item.available)} usable.
+          </div>
+        )}
+
+        {/* Usable vs reorder level */}
+        {item.reorder > 0 && (
+          <div style={{ ...CARD, padding: '12px 14px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, marginBottom: 6 }}>
+              <span style={{ textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 800 }}>Usable vs reorder</span>
+              <span>{qty(item.available)} / {qty(item.reorder)} {item.uom}</span>
+            </div>
+            <div style={{ height: 7, borderRadius: T.radiusFull, background: T.bgSubtle, border: `1px solid ${T.border}`, overflow: 'hidden' }}>
+              <div style={{ width: `${barPct}%`, height: '100%', background: tone.fg, borderRadius: T.radiusFull }} />
+            </div>
+          </div>
+        )}
+
+        {/* Item facts */}
+        <div style={CARD}>
+          <div style={SECTION_TITLE}>Item</div>
+          <div style={{ marginTop: 8 }}>
+            <Fact label="Item code"  value={item.id} />
+            <Fact label="Item type"  value={item.itemType || '—'} />
+            <Fact label="Category"   value={item.category || '—'} />
+            <Fact label="Storage"    value={item.storage || '—'} />
+            <Fact label="UoM"        value={item.uom || '—'} />
+            {avgCost > 0 && <Fact label="Avg cost" value={`${money(avgCost)} / ${item.uom}`} />}
+          </div>
+        </div>
+
+        {/* Per-warehouse holdings */}
+        {warehouseRows.length > 0 && (
+          <div style={CARD}>
+            <div style={SECTION_TITLE}>Warehouses ({warehouseRows.length})</div>
+            <div style={{ marginTop: 8 }}>
+              {warehouseRows.map((w) => (
+                <Fact key={w.warehouseId} label={`${w.warehouseName} · ${w.warehouseId}`} value={`${qty(w.stock)} ${item.uom}`} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Batch lots */}
+        <div style={CARD}>
+          <div style={SECTION_TITLE}>Batches / lots ({lots.length})</div>
+          {lots.length === 0 ? (
+            <div style={{ padding: '10px 14px 14px', fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>
+              Not batch-tracked — no batch numbers, expiry or FEFO ordering for this item.
+            </div>
+          ) : (
+            <div style={{ marginTop: 8 }}>
+              {lots.map((b, i) => {
+                const exp = expiryTone(b.expiry);
+                const blocked = lotIsBlocked(b);
+                return (
+                  <div key={`${b.batchNo}-${i}`} style={{ padding: '9px 14px', borderTop: `1px solid ${T.border}` }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.batchNo || '—'}</span>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody, flexShrink: 0 }}>{qty(b.qty)} <span style={{ fontSize: 10, fontWeight: 400, color: T.textTertiary }}>{item.uom}</span></span>
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 4 }}>
+                      <span style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody }}>
+                        Exp {b.expiry || '—'}{Number(b.costPrice) > 0 ? ` · ${money(b.costPrice)}/${item.uom}` : ''}{b.binLocation ? ` · ${b.binLocation}` : ''}
+                      </span>
+                      {exp && (
+                        <span style={{ fontSize: 9, fontWeight: 700, color: exp.fg, background: exp.bg, padding: '1px 7px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>{exp.label}</span>
+                      )}
+                      {blocked && (
+                        <span style={{ fontSize: 9, fontWeight: 700, color: T.statusPending, background: T.statusPendingBg, padding: '1px 7px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>🔒 Blocked</span>
+                      )}
+                    </div>
+                    {blocked && b.blockedReason && (
+                      <div style={{ fontSize: 10, color: T.statusPending, fontFamily: T.fontBody, marginTop: 3 }}>{b.blockedReason}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Movement ledger */}
+        <div style={CARD}>
+          <div style={{ ...SECTION_TITLE, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <span>Movements ({moves.length})</span>
+            <span style={{ textTransform: 'none', letterSpacing: 0, fontWeight: 600, color: T.textTertiary }}>
+              In {qty(ledger.totalIn)} · Out {qty(ledger.totalOut)}
+            </span>
+          </div>
+          {moves.length === 0 ? (
+            <div style={{ padding: '10px 14px 14px', fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>
+              No recorded movements — the balance is all opening stock.
+            </div>
+          ) : (
+            <div style={{ marginTop: 8 }}>
+              {shownMoves.map((m, i) => {
+                const inbound = m.inQty > 0;
+                return (
+                  <div key={`${m.reference}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '9px 14px', borderTop: `1px solid ${T.border}` }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody }}>{m.type}</div>
+                      <div style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>{m.reference} · {m.date}</div>
+                    </div>
+                    <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 800, fontFamily: T.fontBody, color: inbound ? T.statusApproved : T.statusRejected }}>
+                        {inbound ? '+' : '−'}{qty(inbound ? m.inQty : m.outQty)}
+                      </div>
+                      <div style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>Bal {qty(m.balance)}</div>
+                    </div>
+                  </div>
+                );
+              })}
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '9px 14px', borderTop: `1px solid ${T.border}`, background: T.bgSubtle }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: T.textSecondary, fontFamily: T.fontBody }}>Opening balance</span>
+                <span style={{ fontSize: 11, fontWeight: 700, color: T.textSecondary, fontFamily: T.fontBody }}>{qty(ledger.opening)} {item.uom}</span>
+              </div>
+              {moves.length > 6 && (
+                <button onClick={() => setAllMoves(v => !v)}
+                  style={{ width: '100%', border: 'none', borderTop: `1px solid ${T.border}`, background: 'transparent', color: T.primary, fontFamily: T.fontBody, fontSize: 11, fontWeight: 700, padding: '10px 0', cursor: 'pointer' }}>
+                  {allMoves ? 'Show less' : `Show all ${moves.length} movements`}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

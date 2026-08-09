@@ -1,62 +1,17 @@
 import { T } from '../theme';
+import { navItem, MORE_TAB } from '../nav-config';
 
-const TABS = [
-  {
-    key: 'home',
-    label: 'Home',
-    icon: (active) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <path d="M3 12L12 3l9 9" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        <path d="M9 21V12h6v9" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        <path d="M5 10v11h14V10" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-      </svg>
-    ),
-  },
-  {
-    key: 'orders',
-    label: 'Orders',
-    icon: (active) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <rect x="3" y="3" width="18" height="18" rx="3" stroke={active ? T.primary : T.textTertiary} strokeWidth="2"/>
-        <path d="M7 8h10M7 12h7M7 16h5" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round"/>
-      </svg>
-    ),
-  },
-  {
-    key: 'production',
-    label: 'Production',
-    icon: (active) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <path d="M12 2L2 7l10 5 10-5-10-5z" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        <path d="M2 17l10 5 10-5" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        <path d="M2 12l10 5 10-5" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-      </svg>
-    ),
-  },
-  {
-    key: 'qc',
-    label: 'QC',
-    icon: (active) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <path d="M9 11l3 3L22 4" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        <path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11" stroke={active ? T.primary : T.textTertiary} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-      </svg>
-    ),
-  },
-  {
-    key: 'more',
-    label: 'More',
-    icon: (active) => (
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-        <circle cx="5" cy="12" r="1.5" fill={active ? T.primary : T.textTertiary}/>
-        <circle cx="12" cy="12" r="1.5" fill={active ? T.primary : T.textTertiary}/>
-        <circle cx="19" cy="12" r="1.5" fill={active ? T.primary : T.textTertiary}/>
-      </svg>
-    ),
-  },
-];
+/**
+ * The bottom bar. Which modules appear is the user's choice (Bottom Bar screen,
+ * persisted in nav-config); More is always pinned last so nothing the user did
+ * not promote becomes unreachable.
+ *
+ * `badges` is keyed by tab id, so a count follows its module onto and off the
+ * bar without this component knowing what any of them mean.
+ */
+export function BottomNav({ tabs, activeTab, onTabPress, badges = {} }) {
+  const items = [...tabs.map(navItem).filter(Boolean), MORE_TAB];
 
-export function BottomNav({ activeTab, onTabPress, alertBadge = 0 }) {
   return (
     <div
       style={{
@@ -69,8 +24,9 @@ export function BottomNav({ activeTab, onTabPress, alertBadge = 0 }) {
         position: 'relative',
       }}
     >
-      {TABS.map((tab) => {
+      {items.map((tab) => {
         const active = activeTab === tab.key;
+        const badge  = badges[tab.key] ?? 0;
         return (
           <button
             key={tab.key}
@@ -105,10 +61,10 @@ export function BottomNav({ activeTab, onTabPress, alertBadge = 0 }) {
               />
             )}
 
-            {/* Alert badge on Home tab */}
+            {/* Count badge — whichever module owns one */}
             <div style={{ position: 'relative' }}>
               {tab.icon(active)}
-              {tab.key === 'home' && alertBadge > 0 && (
+              {badge > 0 && (
                 <div
                   style={{
                     position: 'absolute',
@@ -129,7 +85,7 @@ export function BottomNav({ activeTab, onTabPress, alertBadge = 0 }) {
                     border: `1.5px solid ${T.bgSurface}`,
                   }}
                 >
-                  {alertBadge > 9 ? '9+' : alertBadge}
+                  {badge > 9 ? '9+' : badge}
                 </div>
               )}
             </div>
@@ -141,6 +97,7 @@ export function BottomNav({ activeTab, onTabPress, alertBadge = 0 }) {
                 fontWeight: active ? 700 : 500,
                 color: active ? T.primary : T.textTertiary,
                 lineHeight: 1,
+                whiteSpace: 'nowrap',
               }}
             >
               {tab.label}

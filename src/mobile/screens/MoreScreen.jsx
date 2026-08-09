@@ -15,8 +15,12 @@ const INVENTORY = [
   { key: 'demands', icon: '📝', label: 'Demand Requests', sub: 'Raise & track material demand' },
 ];
 
+// All three open the same Local Purchase screen, each landing on its own stage
+// of the cycle — the stages were only reachable as tabs before.
 const LOCAL_PURCHASE = [
-  { key: 'purchase-requisition', icon: '📋', label: 'Purchase Requisition', sub: 'Requisition, approve, receive & inspect' },
+  { key: 'purchase-requisition', icon: '📋', label: 'Purchase Requisition', sub: 'Raise & approve requisitions' },
+  { key: 'purchase-receive',     icon: '📥', label: 'Receive Items',        sub: 'Goods receipt against a requisition' },
+  { key: 'purchase-qc',          icon: '🔍', label: 'Quality Control',      sub: 'Inspect receipts · accept or reject' },
 ];
 
 const GALLEY = [
@@ -25,6 +29,7 @@ const GALLEY = [
 ];
 
 const SETTINGS = [
+  { key: 'nav-settings', icon: '🧭', label: 'Bottom Bar',   sub: 'Choose the modules on the nav bar' },
   { key: 'theme',   icon: '🎨', label: 'Theme & Appearance', sub: 'Colour theme, dark mode & font size' },
   { key: 'profile', icon: '👤', label: 'Profile',            sub: 'Account details & sign out' },
 ];
