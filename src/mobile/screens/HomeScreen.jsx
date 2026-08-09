@@ -163,7 +163,7 @@ const inventoryAlerts  = MOCK_INVENTORY_ALERTS.length;
 const KPI_ROWS = [
   { label: 'Total Flights',     value: totalFlights,                     sub: 'Today',                              accent: T.statusInfo,     route: 'orders'      },
   { label: 'Total Meals',       value: totalMeals,                       sub: 'Scheduled',                          accent: T.statusApproved, route: 'meal-planning' },
-  { label: 'Delayed Flights',   value: delayedFlights,                   sub: `${delayedPax} pax affected`,         accent: T.statusDelayed,  route: 'orders'      },
+  { label: 'Delayed Flights',   value: delayedFlights,                   sub: `${delayedPax} pax affected`,         accent: T.statusDelayed,  route: 'delay-management' },
   { label: 'On-Time Rate',      value: `${onTimeRate}%`,                 sub: 'Departures',                         accent: T.statusApproved, route: 'orders'      },
   { label: 'QC Open Issues',    value: qcOpenIssues,                     sub: `${qcResolvedToday} resolved today`,  accent: T.primary,        route: 'qc'          },
   { label: 'Pending Approvals', value: pendingApprovals,                 sub: 'Awaiting review',                    accent: T.statusPending,  route: 'approvals'   },

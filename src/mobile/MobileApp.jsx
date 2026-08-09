@@ -12,14 +12,16 @@ import { QCScreen }              from './screens/QCScreen';
 import { HygieneScreen }         from './screens/HygieneScreen';
 import { PersonalHygieneScreen } from './screens/PersonalHygieneScreen';
 import { CookingTempScreen }     from './screens/CookingTempScreen';
-import { DispatchScreen }        from './screens/DispatchScreen';
-import { DispatchMonScreen }     from './screens/DispatchMonScreen';
 import { ApprovalsScreen }       from './screens/ApprovalsScreen';
 import { MoreScreen }            from './screens/MoreScreen';
 import { StockScreen }           from './screens/StockScreen';
 import { DemandsScreen }         from './screens/DemandsScreen';
 import { PurchaseOrdersScreen }  from './screens/PurchaseOrdersScreen';
 import { PurchaseRequisitionScreen } from './screens/PurchaseRequisitionScreen';
+import { DelayManagementScreen }  from './screens/DelayManagementScreen';
+import { DispatchHubScreen }     from './screens/DispatchHubScreen';
+import { PackagingScreen }       from './screens/PackagingScreen';
+import { WastageScreen }         from './screens/WastageScreen';
 import { ProfileScreen }         from './screens/ProfileScreen';
 import { GalleyOverviewScreen }  from './screens/GalleyOverviewScreen';
 import { ReturnLogScreen }       from './screens/ReturnLogScreen';
@@ -81,7 +83,8 @@ function tabForScreen(screen) {
   if (['qc', 'hygiene', 'personal-hygiene', 'cooking-temp'].includes(screen))      return 'qc';
   if (['more', 'dispatch', 'dispatch-mon', 'approvals',
        'stock', 'demands', 'purchase-orders', 'purchase-requisition',
-       'galley-overview', 'return-log'].includes(screen)) return 'more';
+       'galley-overview', 'return-log', 'delay-management',
+       'packaging', 'wastage'].includes(screen)) return 'more';
   return 'home';
 }
 
@@ -144,14 +147,19 @@ export function MobileApp({ onClose }) {
       case 'hygiene':         return <HygieneScreen nav={nav} />;
       case 'personal-hygiene': return <PersonalHygieneScreen nav={nav} />;
       case 'cooking-temp':    return <CookingTempScreen nav={nav} />;
-      case 'dispatch-mon':    return <DispatchMonScreen nav={nav} />;
-      case 'dispatch':        return <DispatchScreen nav={nav} />;
+      // Dispatch is ONE module with two surfaces — the board and monitoring —
+      // so both entry points land on the hub, on the right tab.
+      case 'dispatch-mon':    return <DispatchHubScreen nav={nav} initialTab="monitoring" />;
+      case 'dispatch':        return <DispatchHubScreen nav={nav} />;
+      case 'packaging':       return <PackagingScreen nav={nav} />;
+      case 'wastage':         return <WastageScreen nav={nav} />;
       case 'approvals':       return <ApprovalsScreen nav={nav} />;
       case 'more':            return <MoreScreen nav={nav} onLogout={handleLogout} />;
       case 'stock':           return <StockScreen nav={nav} />;
       case 'demands':         return <DemandsScreen nav={nav} />;
       case 'purchase-orders': return <PurchaseOrdersScreen nav={nav} />;
       case 'purchase-requisition': return <PurchaseRequisitionScreen nav={nav} />;
+      case 'delay-management': return <DelayManagementScreen nav={nav} />;
       case 'profile':         return <ProfileScreen nav={nav} onLogout={handleLogout} />;
       case 'theme':           return <ThemeScreen nav={nav} />;
       case 'galley-overview': return <GalleyOverviewScreen nav={nav} />;

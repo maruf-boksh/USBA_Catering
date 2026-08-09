@@ -2,8 +2,12 @@ import { T } from '../theme';
 
 const OPERATIONS = [
   { key: 'approvals',    icon: '✅', label: 'Approvals',           sub: 'Pending approvals inbox'    },
-  { key: 'dispatch',     icon: '🚛', label: 'Dispatch',            sub: 'Manage flight dispatches'   },
-  { key: 'dispatch-mon', icon: '📡', label: 'Dispatch Monitoring', sub: 'Cold chain & live status'   },
+  { key: 'delay-management', icon: '⏱️', label: 'Delay Management', sub: 'Log delays & track refreshments' },
+  { key: 'packaging',    icon: '📦', label: 'Packaging',           sub: 'Pack flight labels & mark done' },
+  { key: 'wastage',      icon: '🗑️', label: 'Wastage Management',  sub: 'Disposal reports & approvals' },
+  // Dispatch and Dispatch Monitoring are one module: the hub carries both as
+  // sub-tabs, so the menu offers one card rather than two overlapping ones.
+  { key: 'dispatch',     icon: '🚛', label: 'Dispatch',            sub: 'Dispatch board & monitoring' },
 ];
 
 const INVENTORY = [

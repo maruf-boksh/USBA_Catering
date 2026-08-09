@@ -1,329 +1,385 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { T } from '../theme';
-import { MOCK_PRODUCTION_ORDERS, MOCK_PRODUCTION_DETAILS } from '../mockData';
-import { qcStore } from '../qcStore';
+import { KPICard } from '../components/KPICard';
+// Production on the phone, on the WEB's own workflow store — the same
+// production orders routes/production-entry.tsx works.
+//
+// The floor action here is PRODUCTION INITIATION: approved orders are ticked and
+// released to the Production Entry order list, which is exactly what the web's
+// "Initiate (n)" does — including the kitchen-section segregation (Hot Kitchen /
+// Cold Kitchen / Bakery), resolved from the BOM master.
+import { useWorkflow } from '@/lib/workflow-store';
+import { billOfMaterials } from '@/lib/sample-data';
 
-// Production Order status — mirrors the web production-entry flow, which is fully
-// event-driven (no free-form transitions):
-//   pending      → created, awaiting approval (Approval Management / mobile)
-//   approved     → approved; ready to log Production Entries
-//   in-progress  → "In Preparation" — a partial Production Entry has been logged
-//   ready-qc     → cumulative entries reached order qty → auto-forwarded to QC
-//   completed    → QC sign-off in Cooking Temp & Sensory
-//   rejected     → approval declined
-const STATUS_MAP = {
-  pending:      { color: T.statusPending,  bg: T.statusPendingBg,  label: 'Pending Approval' },
-  approved:     { color: T.statusInfo,     bg: T.statusInfoBg,     label: 'Approved'         },
-  'in-progress':{ color: T.statusInfo,     bg: T.statusInfoBg,     label: 'In Preparation'   },
-  'ready-qc':   { color: T.primary,        bg: T.primaryLight,     label: 'Ready for QC'     },
-  completed:    { color: T.statusApproved, bg: T.statusApprovedBg, label: 'Completed'        },
-  rejected:     { color: T.statusRejected, bg: T.statusRejectedBg, label: 'Rejected'         },
+const BTN_BACK = { background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: T.radiusFull, width: 32, height: 32, cursor: 'pointer', color: '#fff', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 };
+const INPUT = { width: '100%', boxSizing: 'border-box', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '10px 12px', fontSize: 13, fontFamily: T.fontBody, outline: 'none', background: T.bgSurface, color: T.textPrimary };
+const CARD = { background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 14px', marginBottom: 10, boxShadow: T.shadowSm };
+const SECTION = { fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', margin: '16px 2px 8px' };
+
+// Order lifecycle → label + colour, mirroring the web's production badges.
+const PSTATUS = {
+  'Pending':              { color: T.statusPending,  bg: T.statusPendingBg },
+  'Approved':             { color: T.statusInfo,     bg: T.statusInfoBg },
+  'Production Initiation':{ color: T.statusBoarding, bg: T.statusBoardingBg },
+  'In Preparation':       { color: T.statusBoarding, bg: T.statusBoardingBg },
+  'Ready for QC':         { color: T.statusPending,  bg: T.statusPendingBg },
+  'Completed':            { color: T.statusApproved, bg: T.statusApprovedBg },
+  'Re-Cook':              { color: T.statusRejected, bg: T.statusRejectedBg },
+  'Rejected':             { color: T.statusRejected, bg: T.statusRejectedBg },
 };
+const STATUS_KEYS = Object.keys(PSTATUS);
 
-function ProgressBar({ produced, qty }) {
-  const pct = qty > 0 ? Math.round((produced / qty) * 100) : 0;
-  const color = pct === 100 ? T.statusApproved : pct > 0 ? T.statusInfo : T.border;
+const num = (v) => Number(v) || 0;
+
+// ── Kitchen section of an order — the BOM master is the authority ────────────
+const BOM_CATEGORY = (() => {
+  const m = new Map();
+  const put = (k, v) => { const key = (k ?? '').trim().toLowerCase(); if (key && v && !m.has(key)) m.set(key, v); };
+  for (const b of billOfMaterials) { put(b.itemCode, b.category); put(b.itemName, b.category); put(b.name, b.category); }
+  return m;
+})();
+const BAKERY_WORDS = ['bread', 'bun', 'toast', 'cake', 'pastry', 'croissant', 'muffin', 'donut', 'cookie', 'biscuit', 'danish', 'brownie', 'tart', 'jamun', 'mousse', 'tukra'];
+const COLD_WORDS = ['yoghurt', 'yogurt', 'salad', 'fruit', 'banana', 'apple', 'orange', 'custard', 'firni', 'raita', 'juice', 'cold', 'chilled', 'boiled egg'];
+
+function sectionOf(e) {
+  const fromBom = BOM_CATEGORY.get((e.outputItemCode ?? '').trim().toLowerCase())
+    ?? BOM_CATEGORY.get((e.outputItemName ?? '').trim().toLowerCase())
+    ?? BOM_CATEGORY.get((e.bom ?? '').trim().toLowerCase());
+  if (fromBom) return fromBom;
+  const name = `${e.outputItemName ?? ''} ${e.bom ?? ''}`.toLowerCase();
+  if (BAKERY_WORDS.some((w) => name.includes(w))) return 'Bakery';
+  if (COLD_WORDS.some((w) => name.includes(w))) return 'Cold Kitchen';
+  return 'Hot Kitchen';
+}
+const SECTION_ORDER = ['Hot Kitchen', 'Cold Kitchen', 'Bakery'];
+function groupBySection(list) {
+  const g = new Map();
+  for (const e of list) {
+    const c = sectionOf(e);
+    g.set(c, [...(g.get(c) ?? []), e]);
+  }
+  return [...g.entries()]
+    .sort(([a], [b]) => {
+      const ia = SECTION_ORDER.indexOf(a), ib = SECTION_ORDER.indexOf(b);
+      if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+      return a.localeCompare(b);
+    })
+    .map(([section, entries]) => ({ section, entries }));
+}
+
+function Chip({ label, color, bg }) {
   return (
-    <div style={{ marginTop: 8 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-        <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>{produced}/{qty} produced</span>
-        <span style={{ fontSize: 11, fontWeight: 700, color, fontFamily: T.fontBody }}>{pct}%</span>
-      </div>
-      <div style={{ height: 6, background: T.border, borderRadius: T.radiusFull, overflow: 'hidden' }}>
-        <div style={{ height: '100%', width: `${pct}%`, background: color, borderRadius: T.radiusFull, transition: 'width 0.3s' }} />
-      </div>
+    <span style={{ fontSize: 10, fontWeight: 700, color, background: bg, padding: '2px 8px', borderRadius: T.radiusFull, fontFamily: T.fontBody, flexShrink: 0 }}>
+      {label}
+    </span>
+  );
+}
+
+function Empty({ icon, text }) {
+  return (
+    <div style={{ textAlign: 'center', padding: '46px 0' }}>
+      <div style={{ fontSize: 36, marginBottom: 10 }}>{icon}</div>
+      <div style={{ fontSize: 13, color: T.textTertiary, fontFamily: T.fontBody, padding: '0 24px' }}>{text}</div>
     </div>
   );
 }
 
-function SectionLabel({ children }) {
+function Row({ label, value }) {
+  const v = String(value ?? '').trim();
+  if (v === '') return null;
   return (
-    <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
-      {children}
-    </div>
-  );
-}
-
-function MaterialTable({ title, rows }) {
-  if (!rows || rows.length === 0) return null;
-  return (
-    <div style={{ marginBottom: 12 }}>
-      <div style={{ fontSize: 10, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>{title}</div>
-      <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusMd, overflow: 'hidden' }}>
-        {rows.map((m, i) => (
-          <div key={m.code} style={{ padding: '8px 12px', borderTop: i === 0 ? 'none' : `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
-            <span style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody }}>{m.name}</span>
-            <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, whiteSpace: 'nowrap' }}>{m.code} · {m.qty} {m.uom}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function OrderDetail({ order, onBack, onUpdate, nav }) {
-  const s = STATUS_MAP[order.status] || STATUS_MAP.pending;
-  const detail = MOCK_PRODUCTION_DETAILS[order.id];
-  const remaining = Math.max(0, order.qty - order.produced);
-  const [entryQty, setEntryQty] = useState('');
-
-  // "Save Production" === a web Production Entry: logs a produced quantity that
-  // accumulates. The order auto-advances to Ready for QC (and is forwarded to
-  // the QC / Cooking Temp & Sensory queue) the moment the target is reached —
-  // no manual "Forward to QC" step.
-  const saveProduction = () => {
-    const add = Math.max(0, parseInt(entryQty, 10) || 0);
-    if (add <= 0) return;
-    const newProduced = Math.min(order.qty, order.produced + add);
-    const complete = newProduced >= order.qty;
-    onUpdate(order.id, { produced: newProduced, status: complete ? 'ready-qc' : 'in-progress' });
-    if (complete) {
-      qcStore.add({
-        id: `QC-PROD-${order.id}`,
-        item: order.item,
-        flight: order.flight,
-        section: order.section,
-        qty: `${order.qty} units`,
-      });
-    }
-    setEntryQty('');
-  };
-
-  const canEnter = order.status === 'approved' || order.status === 'in-progress';
-
-  return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
-      <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-        <button onClick={onBack} style={{ background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: T.radiusFull, width: 32, height: 32, cursor: 'pointer', color: '#fff', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>←</button>
-        <div>
-          <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>{order.id}</div>
-          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{order.flight} · Due {order.dueBy}</div>
-        </div>
-      </div>
-      <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
-
-        {/* Production Output */}
-        <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: 16, marginBottom: 14, boxShadow: T.shadowSm }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 8 }}>
-            <div style={{ flex: 1 }}>
-              {detail?.outputCode && <div style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody }}>{detail.outputCode}</div>}
-              <div style={{ fontSize: 14, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody, marginTop: 1 }}>{order.item}</div>
-            </div>
-            <span style={{ fontSize: 10, fontWeight: 700, color: s.color, background: s.bg, padding: '3px 10px', borderRadius: T.radiusFull, fontFamily: T.fontBody, flexShrink: 0 }}>{s.label}</span>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', textAlign: 'center', borderTop: `1px solid ${T.border}`, paddingTop: 12 }}>
-            {[['Order Qty', order.qty, T.textPrimary], ['Produced', order.produced, T.textPrimary], ['Remaining', remaining, remaining > 0 ? T.statusPending : T.statusApproved]].map(([l, v, c]) => (
-              <div key={l} style={{ flex: 1 }}>
-                <div style={{ fontSize: 10, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{l}</div>
-                <div style={{ fontSize: 16, fontWeight: 700, color: c, fontFamily: T.fontBody, marginTop: 2 }}>{v}</div>
-              </div>
-            ))}
-          </div>
-          <div style={{ paddingTop: 12 }}>
-            <ProgressBar produced={order.produced} qty={order.qty} />
-          </div>
-        </div>
-
-        {/* Production Information */}
-        {detail && (
-          <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', marginBottom: 14, boxShadow: T.shadowSm }}>
-            <SectionLabel>Production Information</SectionLabel>
-            {[['Date', detail.date], ['Office', detail.office], ['Warehouse', detail.warehouse], ['Section', order.section], ['Flight', order.flight], ['Due By', order.dueBy], ['BOM', detail.bom]].map(([l, v], i) => (
-              <div key={l} style={{ display: 'flex', justifyContent: 'space-between', paddingTop: i === 0 ? 0 : 8, paddingBottom: 8, borderTop: i === 0 ? 'none' : `1px solid ${T.border}` }}>
-                <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{l}</span>
-                <span style={{ fontSize: 12, fontWeight: 600, color: T.textPrimary, fontFamily: T.fontBody, maxWidth: '60%', textAlign: 'right' }}>{v}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Material Requirements */}
-        {detail && (
-          <div style={{ marginBottom: 14 }}>
-            <SectionLabel>Material Requirements</SectionLabel>
-            <MaterialTable title="Raw Materials" rows={detail.raw} />
-            <MaterialTable title="Packaging Materials" rows={detail.pkg} />
-          </div>
-        )}
-
-        {/* ── Flow ────────────────────────────────────────────────────────── */}
-
-        {/* Step 1 · Awaiting approval — approval is handled only in the Approvals
-            section (and on web), never inline on the production order. */}
-        {order.status === 'pending' && (
-          <div style={{ background: T.statusPendingBg, border: `1px solid ${T.statusPending}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: T.statusPending, fontFamily: T.fontBody }}>Awaiting Approval</div>
-            <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 3 }}>Approval is handled in the Approvals section.</div>
-          </div>
-        )}
-
-        {/* Step 2 · Production Entry — "Save Production" logs a web Production Entry */}
-        {canEnter && (
-          <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '14px 16px', boxShadow: T.shadowSm }}>
-            <SectionLabel>Production Entry</SectionLabel>
-            <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginBottom: 8 }}>
-              Enter the quantity produced in this entry ({remaining} remaining of {order.qty}). The order is forwarded to QC automatically once fully produced.
-            </div>
-            <input
-              type="number" min={0} max={remaining} value={entryQty}
-              onChange={e => setEntryQty(e.target.value)}
-              placeholder={`e.g. ${remaining}`}
-              style={{ width: '100%', boxSizing: 'border-box', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '10px 12px', fontSize: 14, fontFamily: T.fontBody, background: T.bgBase, color: T.textPrimary, outline: 'none', marginBottom: 10 }}
-            />
-            <button
-              onClick={saveProduction}
-              disabled={!entryQty || parseInt(entryQty, 10) <= 0}
-              style={{ width: '100%', padding: '12px 0', background: (!entryQty || parseInt(entryQty, 10) <= 0) ? T.textDisabled : T.statusInfo, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: (!entryQty || parseInt(entryQty, 10) <= 0) ? 'not-allowed' : 'pointer' }}
-            >
-              Save Production
-            </button>
-          </div>
-        )}
-
-        {/* Step 3 · Ready for QC — auto-forwarded, no manual step */}
-        {order.status === 'ready-qc' && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: T.statusApproved, fontFamily: T.fontBody }}>Production Complete ✓</div>
-            </div>
-            <div style={{ background: T.primaryLight, border: `1px solid ${T.primary}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: T.primary, fontFamily: T.fontBody }}>Forwarded to QC — Cooking Temp &amp; Sensory ✓</div>
-            </div>
-            <button
-              onClick={() => nav.navigate('qc')}
-              style={{ width: '100%', padding: '13px 0', background: T.buttonGradient, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}
-            >
-              Open QC →
-            </button>
-          </div>
-        )}
-
-        {/* Completed — QC signed off */}
-        {order.status === 'completed' && (
-          <div style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: T.statusApproved, fontFamily: T.fontBody }}>Completed — QC signed off ✓</div>
-          </div>
-        )}
-
-        {/* Rejected */}
-        {order.status === 'rejected' && (
-          <div style={{ background: T.statusRejectedBg, border: `1px solid ${T.statusRejected}30`, borderRadius: T.radiusMd, padding: '12px 16px', textAlign: 'center' }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: T.statusRejected, fontFamily: T.fontBody }}>Order Rejected ✗</div>
-          </div>
-        )}
-      </div>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8, padding: '7px 0', borderTop: `1px solid ${T.border}` }}>
+      <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{label}</span>
+      <span style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody, textAlign: 'right' }}>{v}</span>
     </div>
   );
 }
 
 export function ProductionScreen({ nav }) {
-  const [orders, setOrders]   = useState(() => MOCK_PRODUCTION_ORDERS.map(o => ({ ...o })));
-  const [selectedId, setSelectedId] = useState(null);
-  const [search, setSearch]   = useState('');
-  const [todayOnly, setTodayOnly] = useState(false);
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo]     = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
+  const { productionEntries, updateProductionEntryStatus } = useWorkflow();
+  const [view, setView]   = useState('list');   // 'list' | 'initiate' | 'detail'
+  const [activeId, setActiveId] = useState(null);
+  const [picked, setPicked] = useState([]);
+  const [query, setQuery]   = useState('');
+  const [filter, setFilter] = useState('all');
+  const [notice, setNotice] = useState('');
+  const flash = (m) => { setNotice(m); setTimeout(() => setNotice(''), 3000); };
 
-  const updateOrder = (id, patch) => setOrders(prev => prev.map(o => o.id === id ? { ...o, ...patch } : o));
+  const counts = useMemo(() => ({
+    approved: productionEntries.filter((e) => e.status === 'Approved').length,
+    initiated: productionEntries.filter((e) => e.status === 'Production Initiation').length,
+    preparing: productionEntries.filter((e) => ['In Preparation', 'Ready for QC'].includes(e.status)).length,
+    completed: productionEntries.filter((e) => e.status === 'Completed').length,
+  }), [productionEntries]);
 
-  const selected = orders.find(o => o.id === selectedId);
-  if (selected) return <OrderDetail order={selected} onBack={() => setSelectedId(null)} onUpdate={updateOrder} nav={nav} />;
+  const initiatable = productionEntries.filter((e) => e.status === 'Approved');
 
-  const completed = orders.filter(o => o.status === 'completed').length;
-  const active    = orders.filter(o => ['approved', 'in-progress', 'ready-qc'].includes(o.status)).length;
-  const pending   = orders.filter(o => o.status === 'pending').length;
+  const visible = productionEntries.filter((e) => {
+    if (filter !== 'all' && e.status !== filter) return false;
+    if (!query.trim()) return true;
+    const hay = `${e.id} ${e.outputItemName ?? ''} ${e.bom} ${e.status}`.toLowerCase();
+    return hay.includes(query.trim().toLowerCase());
+  });
+  const sorted = [...visible].sort((a, b) => String(b.date ?? '').localeCompare(String(a.date ?? '')) || String(b.id).localeCompare(String(a.id)));
 
-  const q = search.trim().toLowerCase();
-  const todayStr = new Date().toISOString().slice(0, 10);
-  const bySearch = (o) => !q || [o.item, o.id, o.section, o.flight].some(v => (v || '').toLowerCase().includes(q));
-  const byDate   = (o) => todayOnly ? true : ((!dateFrom || todayStr >= dateFrom) && (!dateTo || todayStr <= dateTo));
-  const byStatus = (o) => statusFilter === 'all' || o.status === statusFilter;
-  const filtered = orders.filter(o => bySearch(o) && byDate(o) && byStatus(o));
+  const activeEntry = productionEntries.find((e) => e.id === activeId) ?? null;
+  const initiateGroups = useMemo(() => groupBySection(initiatable), [initiatable]);
 
-  const inputStyle = { boxSizing: 'border-box', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, background: T.bgSurface, color: T.textPrimary, fontFamily: T.fontBody, outline: 'none' };
+  const togglePick = (id) => setPicked((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+  const groupAll = (entries) => entries.length > 0 && entries.every((e) => picked.includes(e.id));
+  const toggleGroup = (entries) => {
+    const on = !groupAll(entries);
+    setPicked((prev) => {
+      const next = new Set(prev);
+      for (const e of entries) { if (on) next.add(e.id); else next.delete(e.id); }
+      return [...next];
+    });
+  };
 
-  return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
-      <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-        <button onClick={() => nav.resetTo('home')} style={{ background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: T.radiusFull, width: 32, height: 32, cursor: 'pointer', color: '#fff', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>←</button>
-        <div>
-          <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Production</div>
-          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{orders.length} orders today</div>
+  /** Release the ticked orders to the Production Entry floor list. */
+  const confirmInitiate = () => {
+    const targets = initiatable.filter((e) => picked.includes(e.id));
+    if (targets.length === 0) return;
+    for (const e of targets) updateProductionEntryStatus(e.id, 'Production Initiation');
+    setPicked([]);
+    setView('list');
+    flash(`${targets.length} order${targets.length === 1 ? '' : 's'} moved to Production Initiation.`);
+  };
+
+  // ── Production Initiation ─────────────────────────────────────────────────
+  if (view === 'initiate') {
+    return (
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
+        <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          <button onClick={() => { setPicked([]); setView('list'); }} style={BTN_BACK}>←</button>
+          <div>
+            <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Production Initiation</div>
+            <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>
+              {picked.length} of {initiatable.length} selected
+            </div>
+          </div>
         </div>
-      </div>
-      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px 16px' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 14 }}>
-          {[['Done', completed, T.statusApproved, T.statusApprovedBg], ['Active', active, T.statusInfo, T.statusInfoBg], ['Pending', pending, T.statusPending, T.statusPendingBg]].map(([label, val, color, bg]) => (
-            <div key={label} style={{ background: bg, border: `1px solid ${color}20`, borderRadius: T.radiusMd, padding: '10px 8px', textAlign: 'center' }}>
-              <div style={{ fontSize: 22, fontWeight: 800, color, fontFamily: T.fontBody }}>{val}</div>
-              <div style={{ fontSize: 11, color, fontFamily: T.fontBody, marginTop: 2 }}>{label}</div>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px 16px' }}>
+          <div style={{ background: T.statusInfoBg, border: `1px solid ${T.statusInfo}25`, borderRadius: T.radiusMd, padding: '9px 12px', marginBottom: 12, fontSize: 11.5, color: T.textSecondary, fontFamily: T.fontBody }}>
+            Tick the orders to begin. Unticked orders stay Approved and remain available for a later run.
+          </div>
+
+          {initiateGroups.length === 0 ? (
+            <Empty icon="🏭" text="No approved orders waiting to be initiated." />
+          ) : initiateGroups.map((g) => (
+            <div key={g.section}>
+              {/* One block per kitchen section — its heading marks the whole section */}
+              <div onClick={() => toggleGroup(g.entries)}
+                style={{ display: 'flex', alignItems: 'center', gap: 10, background: T.bgSubtle, border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '9px 12px', marginTop: 10, marginBottom: 6, cursor: 'pointer' }}>
+                <input type="checkbox" checked={groupAll(g.entries)} onChange={() => toggleGroup(g.entries)}
+                  onClick={(e) => e.stopPropagation()}
+                  style={{ width: 17, height: 17, accentColor: T.primary, cursor: 'pointer', flexShrink: 0 }} />
+                <span style={{ flex: 1, fontSize: 11.5, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  {g.section}
+                </span>
+                <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>
+                  {g.entries.filter((e) => picked.includes(e.id)).length} of {g.entries.length} marked
+                </span>
+              </div>
+
+              {g.entries.map((e) => {
+                const on = picked.includes(e.id);
+                return (
+                  <div key={e.id} onClick={() => togglePick(e.id)}
+                    style={{ ...CARD, marginBottom: 8, border: `1px solid ${on ? T.primary : T.border}`, background: on ? T.primaryLight : T.bgSurface, cursor: 'pointer' }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                      <input type="checkbox" checked={on} onChange={() => togglePick(e.id)}
+                        onClick={(ev) => ev.stopPropagation()}
+                        style={{ width: 17, height: 17, accentColor: T.primary, cursor: 'pointer', marginTop: 2, flexShrink: 0 }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+                          <span style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>
+                            {e.outputItemName ?? e.bom}
+                          </span>
+                          <span style={{ fontSize: 12.5, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>
+                            {num(e.orderQty).toLocaleString()}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
+                          {e.id} · {e.date}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           ))}
         </div>
 
-        {/* ── Filters: search · today · date range · status ─────────────────── */}
-        <div style={{ position: 'relative', display: 'flex', alignItems: 'center', marginBottom: 8 }}>
-          <span style={{ position: 'absolute', left: 12, fontSize: 14, color: T.textTertiary, pointerEvents: 'none' }}>🔍</span>
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search order, item, section…"
-            style={{ ...inputStyle, width: '100%', padding: '10px 12px 10px 34px', borderRadius: T.radiusFull, fontSize: 13 }} />
+        {initiatable.length > 0 && (
+          <div style={{ display: 'flex', gap: 10, padding: '10px 14px', background: T.bgSurface, borderTop: `1px solid ${T.border}`, flexShrink: 0 }}>
+            <button onClick={() => setPicked(picked.length === initiatable.length ? [] : initiatable.map((e) => e.id))}
+              style={{ flex: 1, padding: '13px 0', background: 'none', border: `2px solid ${T.borderStrong}`, borderRadius: T.radiusMd, fontSize: 13, fontWeight: 700, color: T.textSecondary, fontFamily: T.fontBody, cursor: 'pointer' }}>
+              {picked.length === initiatable.length ? 'Clear' : `Select All (${initiatable.length})`}
+            </button>
+            <button onClick={confirmInitiate} disabled={picked.length === 0}
+              style={{ flex: 2, padding: '13px 0', background: picked.length ? T.buttonGradient : T.borderStrong, border: 'none', borderRadius: T.radiusMd, fontSize: 13, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: picked.length ? 'pointer' : 'not-allowed', opacity: picked.length ? 1 : 0.7 }}>
+              Initiate {picked.length || ''}
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── Order detail ──────────────────────────────────────────────────────────
+  if (view === 'detail' && activeEntry) {
+    const e = activeEntry;
+    const s = PSTATUS[e.status] ?? PSTATUS.Pending;
+    const pct = num(e.orderQty) > 0 ? Math.min(100, Math.round((num(e.producedQty) / num(e.orderQty)) * 100)) : 0;
+    return (
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
+        <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          <button onClick={() => { setActiveId(null); setView('list'); }} style={BTN_BACK}>←</button>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>{e.outputItemName ?? e.bom}</div>
+            <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{e.id} · {sectionOf(e)}</div>
+          </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-          <button onClick={() => setTodayOnly(v => { const nv = !v; if (nv) { setDateFrom(''); setDateTo(''); } return nv; })}
-            style={{ padding: '7px 14px', borderRadius: T.radiusFull, cursor: 'pointer', fontSize: 12, fontWeight: 700, fontFamily: T.fontBody,
-              border: `1px solid ${todayOnly ? T.primary : T.border}`, background: todayOnly ? T.primary : T.bgSurface, color: todayOnly ? '#fff' : T.textSecondary }}>
-            Today
-          </button>
-          <input type="date" value={dateFrom} onChange={e => { setDateFrom(e.target.value); setTodayOnly(false); }} style={{ ...inputStyle, flex: 1, minWidth: 0, padding: '7px 8px', fontSize: 11 }} />
-          <span style={{ fontSize: 12, color: T.textTertiary }}>–</span>
-          <input type="date" value={dateTo} onChange={e => { setDateTo(e.target.value); setTodayOnly(false); }} style={{ ...inputStyle, flex: 1, minWidth: 0, padding: '7px 8px', fontSize: 11 }} />
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-          <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
-            style={{ ...inputStyle, flex: 1, padding: '8px 10px', fontSize: 12 }}>
-            <option value="all">All statuses</option>
-            <option value="pending">Pending Approval</option>
-            <option value="approved">Approved</option>
-            <option value="in-progress">In Preparation</option>
-            <option value="ready-qc">Ready for QC</option>
-            <option value="completed">Completed</option>
-          </select>
-          {(search || todayOnly || dateFrom || dateTo || statusFilter !== 'all') && (
-            <span onClick={() => { setSearch(''); setTodayOnly(false); setDateFrom(''); setDateTo(''); setStatusFilter('all'); }}
-              style={{ fontSize: 11, fontWeight: 600, color: T.textTertiary, fontFamily: T.fontBody, cursor: 'pointer' }}>Clear</span>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px 16px' }}>
+          <div style={CARD}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+              <span style={{ fontSize: 18, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>
+                {num(e.producedQty).toLocaleString()} <span style={{ fontSize: 12, fontWeight: 400, color: T.textTertiary }}>of {num(e.orderQty).toLocaleString()} portions</span>
+              </span>
+              <Chip label={e.status} color={s.color} bg={s.bg} />
+            </div>
+            <div style={{ height: 6, borderRadius: T.radiusFull, background: T.bgSubtle, overflow: 'hidden', margin: '8px 0 2px' }}>
+              <div style={{ width: `${pct}%`, height: '100%', background: pct >= 100 ? T.statusApproved : T.primary }} />
+            </div>
+            <Row label="Kitchen Section" value={sectionOf(e)} />
+            <Row label="Item Code" value={e.outputItemCode} />
+            <Row label="BOM" value={e.bom} />
+            <Row label="Order Date" value={e.date} />
+            <Row label="Completed At" value={e.completedAt} />
+          </div>
+
+          <div style={SECTION}>Quality Control</div>
+          <div style={CARD}>
+            <Row label="QC Checked By" value={e.qcCheckedBy} />
+            <Row label="QC Passed At" value={e.qcPassedAt} />
+            <Row label="QC Failed By" value={e.qcFailedBy} />
+            <Row label="Fail Reason" value={e.qcFailReason} />
+            {!e.qcPassedAt && !e.qcFailReason && (
+              <div style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody, padding: '4px 0' }}>
+                Not QC-checked yet — signed off in Cooking Temperature &amp; Sensory.
+              </div>
+            )}
+          </div>
+
+          {e.status === 'Approved' && (
+            <button onClick={() => { setPicked([e.id]); setView('initiate'); }}
+              style={{ width: '100%', marginTop: 12, padding: '13px 0', background: T.buttonGradient, border: 'none', borderRadius: T.radiusMd, fontSize: 13, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}>
+              Initiate Production
+            </button>
+          )}
+          {e.status === 'Pending' && (
+            <div style={{ background: T.statusPendingBg, border: `1px solid ${T.statusPending}30`, borderRadius: T.radiusMd, padding: '10px 14px', marginTop: 12, fontSize: 12, color: T.statusPending, fontFamily: T.fontBody }}>
+              Waiting for approval — sign it off in the Approvals inbox.
+            </div>
           )}
         </div>
+      </div>
+    );
+  }
 
-        <div style={{ fontSize: 12, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>Production Orders</div>
+  // ── List ──────────────────────────────────────────────────────────────────
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
+      <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Production</div>
+          <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>
+            {productionEntries.length} orders · {counts.approved} to initiate
+          </div>
+        </div>
+        {counts.approved > 0 && (
+          <button onClick={() => { setPicked(initiatable.map((e) => e.id)); setView('initiate'); }}
+            style={{ background: 'rgba(255,255,255,0.18)', border: '1px solid rgba(255,255,255,0.55)', borderRadius: T.radiusMd, height: 30, padding: '0 12px', cursor: 'pointer', color: '#fff', fontSize: 12, fontWeight: 700, fontFamily: T.fontBody, flexShrink: 0 }}>
+            Initiate {counts.approved}
+          </button>
+        )}
+      </div>
 
-        {/* Approvals-style cards */}
-        {filtered.map((order) => {
-          const s = STATUS_MAP[order.status] || STATUS_MAP.pending;
+      <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px 16px' }}>
+        {notice && (
+          <div style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved}30`, borderRadius: T.radiusMd, padding: '9px 12px', marginBottom: 10, fontSize: 11, fontWeight: 700, color: T.statusApproved, fontFamily: T.fontBody }}>
+            {notice}
+          </div>
+        )}
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <KPICard label="To Initiate" value={counts.approved}  sub="Approved orders" accent={T.statusInfo} />
+          <KPICard label="Initiated"   value={counts.initiated} sub="On the floor"    accent={T.statusBoarding} />
+          <KPICard label="In Progress" value={counts.preparing} sub="Cooking / QC"    accent={T.statusPending} />
+          <KPICard label="Completed"   value={counts.completed} sub="Done today"      accent={T.statusApproved} />
+        </div>
+
+        <input value={query} onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search order, item, BOM…" style={{ ...INPUT, marginTop: 12 }} />
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 0 0' }}>
+          <button onClick={() => setFilter('all')}
+            style={{ flexShrink: 0, padding: '8px 14px', borderRadius: T.radiusFull, border: `1px solid ${filter === 'all' ? T.primary : T.border}`, background: filter === 'all' ? T.primary : T.bgSurface, color: filter === 'all' ? '#fff' : T.textTertiary, fontSize: 12, fontWeight: 700, fontFamily: T.fontBody, cursor: 'pointer' }}>
+            All
+          </button>
+          <select value={filter} onChange={(e) => setFilter(e.target.value)}
+            style={{ ...INPUT, flex: 1, minWidth: 0, padding: '9px 10px', fontSize: 12, fontWeight: 700 }}>
+            <option value="all">All statuses</option>
+            {STATUS_KEYS.map((k) => <option key={k} value={k}>{k}</option>)}
+          </select>
+        </div>
+
+        <div style={{ ...SECTION, marginTop: 12 }}>
+          {sorted.length} production order{sorted.length === 1 ? '' : 's'}
+        </div>
+
+        {sorted.length === 0 ? (
+          <Empty icon="🏭" text={productionEntries.length === 0
+            ? 'No production orders yet.'
+            : 'No orders match the current filter.'} />
+        ) : sorted.slice(0, 60).map((e) => {
+          const s = PSTATUS[e.status] ?? PSTATUS.Pending;
+          const pct = num(e.orderQty) > 0 ? Math.min(100, Math.round((num(e.producedQty) / num(e.orderQty)) * 100)) : 0;
           return (
-            <div
-              key={order.id}
-              onClick={() => setSelectedId(order.id)}
-              style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 14px', marginBottom: 10, boxShadow: T.shadowSm, cursor: 'pointer' }}
-            >
-              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
-                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, flex: 1, minWidth: 0 }}>
-                  <div style={{ width: 36, height: 36, borderRadius: T.radiusMd, background: s.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>🏭</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{order.item}</div>
-                    <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>{order.id} · {order.section} · Due {order.dueBy}</div>
+            <div key={e.id} onClick={() => { setActiveId(e.id); setView('detail'); }} style={{ ...CARD, cursor: 'pointer' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 4 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>
+                    {e.outputItemName ?? e.bom}
+                  </div>
+                  <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
+                    {e.id} · {e.date} · {sectionOf(e)}
                   </div>
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                  <span style={{ fontSize: 10, fontWeight: 700, color: s.color, background: s.bg, padding: '2px 8px', borderRadius: T.radiusFull, fontFamily: T.fontBody }}>{s.label}</span>
-                  <span style={{ fontSize: 14, color: T.textTertiary }}>›</span>
-                </div>
+                <Chip label={e.status} color={s.color} bg={s.bg} />
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 6, marginBottom: 5 }}>
+                <span style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>Produced</span>
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>
+                  {num(e.producedQty).toLocaleString()} / {num(e.orderQty).toLocaleString()}
+                </span>
+              </div>
+              <div style={{ height: 5, borderRadius: T.radiusFull, background: T.bgSubtle, overflow: 'hidden' }}>
+                <div style={{ width: `${pct}%`, height: '100%', background: pct >= 100 ? T.statusApproved : T.primary }} />
               </div>
             </div>
           );
         })}
 
-        {filtered.length === 0 && (
-          <div style={{ textAlign: 'center', padding: 32, color: T.textTertiary, fontFamily: T.fontBody, fontSize: 13 }}>No production orders match.</div>
+        {sorted.length > 60 && (
+          <div style={{ textAlign: 'center', padding: '12px 0', fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody }}>
+            Showing the 60 most recent — search to narrow it down.
+          </div>
         )}
       </div>
     </div>

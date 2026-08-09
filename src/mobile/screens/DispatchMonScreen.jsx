@@ -272,7 +272,9 @@ function LogDetail({ entry, onBack }) {
 }
 
 // ── Main Screen ─────────────────────────────────────────────────────────────
-export function DispatchMonScreen({ nav }) {
+/** `embedded` — rendered inside the Dispatch hub, which already supplies the
+ *  module topbar; its own stage tabs and every flow below are unchanged. */
+export function DispatchMonScreen({ nav, embedded = false }) {
   const [tab, setTab] = useState('dispatch');
   const [dispatches, setDispatches] = useState(SEED_DISPATCHES);
 
@@ -859,7 +861,7 @@ export function DispatchMonScreen({ nav }) {
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
-      {topbar(
+      {!embedded && topbar(
         tab === 'dispatch' ? 'Kitchen Dispatch' : tab === 'receive' ? 'Airport Receiving' : 'Dispatch Log',
         tab === 'dispatch' ? 'Baunia Catering → Airport' : tab === 'receive' ? 'Gate No. 08' : 'All dispatch records',
       )}
