@@ -96,11 +96,13 @@ function OmStatusPill({ status, ghost = false }: { status: FlightOrderStatus; gh
   // Ghost = an "inherited" pill for a leg whose status matches its order's single
   // status. Muted, no fill, normal weight — present so the column never reads as
   // empty, but clearly de-emphasized so it isn't a bold repeat of the header.
+  // The /60 wash reads as "inherited" on a white page; on the dark surface it
+  // drops under the legibility floor, so dark mode takes the muted tone at full.
   if (ghost) {
     return (
       <span
         title={`Same as order status — ${status}`}
-        className="inline-flex items-center rounded-full border border-border/60 bg-transparent px-3 py-1 text-[10.5px] font-medium uppercase tracking-[0.04em] text-muted-foreground/60"
+        className="inline-flex items-center rounded-full border border-border/60 bg-transparent px-3 py-1 text-[10.5px] font-medium uppercase tracking-[0.04em] text-muted-foreground/60 dark:text-muted-foreground"
       >
         {status}
       </span>
@@ -2376,7 +2378,7 @@ function OrdersList({
                                       <button
                                         type="button"
                                         onClick={() => setMealDetailLeg(o)}
-                                        className="font-medium text-sky-700 underline decoration-dotted underline-offset-2 hover:text-sky-800 tabular-nums"
+                                        className="font-medium text-sky-700 underline decoration-dotted underline-offset-2 hover:text-sky-800 tabular-nums dark:text-sky-400 dark:hover:text-sky-300"
                                         title="View special meal count & roster"
                                       >
                                         {o.specialMeals}

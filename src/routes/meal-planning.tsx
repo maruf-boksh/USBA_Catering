@@ -57,10 +57,22 @@ interface MealChoice {
 
 /** "×N" marker shown wherever an item line renders, when its per-meal quantity
  *  is above 1 — the quantity is part of the plan, so every read-out carries it. */
+// The -700 tones vanish against a dark card. Each call site keeps passing its
+// light tone; this table pairs it with the dark twin. Spelled out in full rather
+// than derived, because Tailwind only emits classes it can see literally.
+const QTY_TONE: Record<string, string> = {
+  "text-indigo-700": "text-indigo-700 dark:text-indigo-300",
+  "text-purple-700": "text-purple-700 dark:text-purple-300",
+  "text-pink-700":   "text-pink-700 dark:text-pink-300",
+  "text-green-700":  "text-green-700 dark:text-green-300",
+  "text-orange-700": "text-orange-700 dark:text-orange-300",
+  "text-slate-700":  "text-slate-700 dark:text-slate-300",
+};
+
 const qtyMark = (it: MealItem, cls = "text-indigo-700") =>
   (it.qtyPerMeal ?? 1) > 1
     ? (
-      <span className={`ml-1 font-semibold ${cls}`} title={`${it.qtyPerMeal} portion(s) of ${it.name || "this item"} per meal`}>
+      <span className={`ml-1 font-semibold ${QTY_TONE[cls] ?? cls}`} title={`${it.qtyPerMeal} portion(s) of ${it.name || "this item"} per meal`}>
         ×{it.qtyPerMeal}
       </span>
     )
@@ -3131,12 +3143,16 @@ export default function MealPlanning() {
 
         {hasAnyFilterActive && DAYS.map((day) => {
           const mealsByType = getMealsByTypeForDay(day);
+          // One hue per meal type. The -100/-50 fills are light-mode paint: on a
+          // dark page they turn the whole section into a cream slab, so dark mode
+          // takes the same hue as a low-alpha tint over the dark surface and
+          // lifts the text to the -200 end of the ramp.
           const rowPalette = [
-            { border: "border-amber-200",  header: "bg-amber-100",  headerText: "text-amber-800",  body: "bg-amber-50/60",  cardBorder: "border-l-amber-400"  },
-            { border: "border-sky-200",    header: "bg-sky-100",    headerText: "text-sky-800",    body: "bg-sky-50/60",    cardBorder: "border-l-sky-400"    },
-            { border: "border-violet-200", header: "bg-violet-100", headerText: "text-violet-800", body: "bg-violet-50/60", cardBorder: "border-l-violet-400" },
-            { border: "border-orange-200", header: "bg-orange-100", headerText: "text-orange-800", body: "bg-orange-50/60", cardBorder: "border-l-orange-400" },
-            { border: "border-emerald-200",header: "bg-emerald-100",headerText: "text-emerald-800",body: "bg-emerald-50/60",cardBorder: "border-l-emerald-400"},
+            { border: "border-amber-200 dark:border-amber-400/25",   header: "bg-amber-100 dark:bg-amber-400/15",   headerText: "text-amber-800 dark:text-amber-200",   body: "bg-amber-50/60 dark:bg-amber-400/[0.06]",   cardBorder: "border-l-amber-400"  },
+            { border: "border-sky-200 dark:border-sky-400/25",       header: "bg-sky-100 dark:bg-sky-400/15",       headerText: "text-sky-800 dark:text-sky-200",       body: "bg-sky-50/60 dark:bg-sky-400/[0.06]",       cardBorder: "border-l-sky-400"    },
+            { border: "border-violet-200 dark:border-violet-400/25", header: "bg-violet-100 dark:bg-violet-400/15", headerText: "text-violet-800 dark:text-violet-200", body: "bg-violet-50/60 dark:bg-violet-400/[0.06]", cardBorder: "border-l-violet-400" },
+            { border: "border-orange-200 dark:border-orange-400/25", header: "bg-orange-100 dark:bg-orange-400/15", headerText: "text-orange-800 dark:text-orange-200", body: "bg-orange-50/60 dark:bg-orange-400/[0.06]", cardBorder: "border-l-orange-400" },
+            { border: "border-emerald-200 dark:border-emerald-400/25",header: "bg-emerald-100 dark:bg-emerald-400/15",headerText: "text-emerald-800 dark:text-emerald-200",body: "bg-emerald-50/60 dark:bg-emerald-400/[0.06]",cardBorder: "border-l-emerald-400"},
           ];
           const mealTypeTime: Record<string, string> = {
             Breakfast: "07:00 AM – 10:00 AM",
@@ -3166,7 +3182,7 @@ export default function MealPlanning() {
                         ✎ Rename
                       </button>
                       {pendingRename && (
-                        <span className="px-2 py-0.5 text-[10px] rounded-full bg-amber-100 text-amber-800 border border-amber-300 font-medium">
+                        <span className="px-2 py-0.5 text-[10px] rounded-full bg-amber-100 text-amber-800 border border-amber-300 font-medium dark:bg-amber-400/20 dark:text-amber-200 dark:border-amber-400/40">
                           Pending → {pendingRename.newName}
                         </span>
                       )}
@@ -3210,9 +3226,9 @@ export default function MealPlanning() {
                         <div className="space-y-5">
                           {mealsForType.map((meal) => {
                             const choiceCardColors = [
-                              { header: "bg-blue-100 text-blue-800", border: "border-blue-200" },
-                              { header: "bg-teal-100 text-teal-800", border: "border-teal-200" },
-                              { header: "bg-indigo-100 text-indigo-800", border: "border-indigo-200" },
+                              { header: "bg-blue-100 text-blue-800 dark:bg-blue-400/18 dark:text-blue-200", border: "border-blue-200 dark:border-blue-400/30" },
+                              { header: "bg-teal-100 text-teal-800 dark:bg-teal-400/18 dark:text-teal-200", border: "border-teal-200 dark:border-teal-400/30" },
+                              { header: "bg-indigo-100 text-indigo-800 dark:bg-indigo-400/18 dark:text-indigo-200", border: "border-indigo-200 dark:border-indigo-400/30" },
                             ];
                             return (
                               <div key={meal.id}>
@@ -3223,16 +3239,16 @@ export default function MealPlanning() {
                                     <span key={ft} className="px-2 py-0.5 text-xs rounded-full bg-primary/10 text-primary">{ft}</span>
                                   ))}
                                   <span
-                                    className={`px-2 py-0.5 text-xs rounded-full font-medium ${meal.route ? "bg-slate-200 text-slate-800" : "bg-slate-100 text-slate-500"}`}
+                                    className={`px-2 py-0.5 text-xs rounded-full font-medium ${meal.route ? "bg-slate-200 text-slate-800 dark:bg-slate-600/50 dark:text-slate-100" : "bg-slate-100 text-slate-500 dark:bg-slate-700/40 dark:text-slate-300"}`}
                                     title={meal.route ? "Menu specific to this route" : "Shared menu — applies to every route"}
                                   >
                                     {meal.route ? `Route: ${meal.route}` : "All Routes"}
                                   </span>
-                                  <span className={`px-2 py-0.5 text-xs rounded-full ${(meal.effectiveFrom || meal.effectiveTo) ? "bg-amber-100 text-amber-800" : "bg-slate-100 text-slate-600"}`}>
+                                  <span className={`px-2 py-0.5 text-xs rounded-full ${(meal.effectiveFrom || meal.effectiveTo) ? "bg-amber-100 text-amber-800 dark:bg-amber-400/20 dark:text-amber-200" : "bg-slate-100 text-slate-600 dark:bg-slate-700/40 dark:text-slate-300"}`}>
                                     {rangeLabel(meal.effectiveFrom, meal.effectiveTo) || "All Dates"}
                                   </span>
-                                  <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-900">Serving: {to12h(meal.servingTime.start)} – {to12h(meal.servingTime.end)}</span>
-                                  <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-sky-100 text-sky-900">Effective: {formatDateDDMMMYYYY(meal.createdDate)}</span>
+                                  <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-900 dark:bg-emerald-400/20 dark:text-emerald-200">Serving: {to12h(meal.servingTime.start)} – {to12h(meal.servingTime.end)}</span>
+                                  <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-sky-100 text-sky-900 dark:bg-sky-400/20 dark:text-sky-200">Effective: {formatDateDDMMMYYYY(meal.createdDate)}</span>
                                   <Button variant="ghost" size="sm" className="h-6 px-2 text-xs ml-auto" onClick={() => openViewMenu(meal)}>📋 View Menu</Button>
                                 </div>
 
@@ -3280,11 +3296,11 @@ export default function MealPlanning() {
                                   {meal.specialMeals.filter((sm) => sm.enabled).map((sm) => {
                                     const smTotal = sm.items.reduce((s, it) => s + kcalOf(it), 0);
                                     return (
-                                      <Card key={sm.type} className="border border-purple-200 w-56 shrink-0 bg-card relative">
+                                      <Card key={sm.type} className="border border-purple-200 dark:border-purple-400/30 w-56 shrink-0 bg-card relative">
                                         {removeModeType === mealType && (
                                           <button className="absolute top-1.5 right-1.5 z-10 w-5 h-5 rounded-full bg-red-500 hover:bg-red-600 text-white text-xs flex items-center justify-center leading-none" onClick={() => setRemoveConfirmCard({ mealId: meal.id, kind: "specialMeal", smType: sm.type })}>×</button>
                                         )}
-                                        <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-purple-100 text-purple-800">
+                                        <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-purple-100 text-purple-800 dark:bg-purple-400/18 dark:text-purple-200">
                                           {sm.type} {typeof sm.portions === "number" ? `(${sm.portions} portion${sm.portions !== 1 ? "s" : ""})` : `(${sm.portions})`}
                                         </div>
                                         <CardContent className="p-3 space-y-2">
@@ -3294,7 +3310,7 @@ export default function MealPlanning() {
                                                 <span className="font-medium">{item.name}</span>
                                                 {(item.qtyPerMeal ?? 1) > 1 && (
                                                   <span
-                                                    className="ml-1 font-semibold text-purple-700"
+                                                    className="ml-1 font-semibold text-purple-700 dark:text-purple-300"
                                                     title={`${item.qtyPerMeal} portions of ${item.name} per ${sm.type}`}
                                                   >
                                                     ×{item.qtyPerMeal}
@@ -3322,11 +3338,11 @@ export default function MealPlanning() {
 
                                   {/* Dessert card */}
                                   {meal.dessert.name && (
-                                    <Card className="border border-pink-200 w-56 shrink-0 bg-card relative">
+                                    <Card className="border border-pink-200 dark:border-pink-400/30 w-56 shrink-0 bg-card relative">
                                       {removeModeType === mealType && (
                                         <button className="absolute top-1.5 right-1.5 z-10 w-5 h-5 rounded-full bg-red-500 hover:bg-red-600 text-white text-xs flex items-center justify-center leading-none" onClick={() => setRemoveConfirmCard({ mealId: meal.id, kind: "dessert" })}>×</button>
                                       )}
-                                      <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-pink-100 text-pink-800">Dessert</div>
+                                      <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-pink-100 text-pink-800 dark:bg-pink-400/18 dark:text-pink-200">Dessert</div>
                                       <CardContent className="p-3 space-y-2">
                                         <div className="text-xs font-medium">
                                           {meal.dessert.name}
@@ -3350,8 +3366,8 @@ export default function MealPlanning() {
 
                                   {/* Salads card */}
                                   {meal.salads && meal.salads.length > 0 && (
-                                    <Card className="border border-green-200 w-56 shrink-0 bg-card">
-                                      <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-green-100 text-green-800">Salads</div>
+                                    <Card className="border border-green-200 dark:border-green-400/30 w-56 shrink-0 bg-card">
+                                      <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-green-100 text-green-800 dark:bg-green-400/18 dark:text-green-200">Salads</div>
                                       <CardContent className="p-3 space-y-2">
                                         <ol className="text-xs space-y-1 list-decimal list-inside">
                                           {meal.salads.map((item, idx) => (
@@ -3369,8 +3385,8 @@ export default function MealPlanning() {
 
                                   {/* Fresh Fruits card */}
                                   {meal.freshFruits && meal.freshFruits.length > 0 && (
-                                    <Card className="border border-orange-200 w-56 shrink-0 bg-card">
-                                      <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-orange-100 text-orange-800">Fresh Fruits</div>
+                                    <Card className="border border-orange-200 dark:border-orange-400/30 w-56 shrink-0 bg-card">
+                                      <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-orange-100 text-orange-800 dark:bg-orange-400/18 dark:text-orange-200">Fresh Fruits</div>
                                       <CardContent className="p-3 space-y-2">
                                         <ol className="text-xs space-y-1 list-decimal list-inside">
                                           {meal.freshFruits.map((item, idx) => (
@@ -3389,8 +3405,8 @@ export default function MealPlanning() {
                                   {/* Custom add-on cards */}
                                   {meal.customAddons && Object.entries(meal.customAddons).map(([addonName, items]) => (
                                     items.length > 0 && (
-                                      <Card key={addonName} className="border border-slate-200 w-56 shrink-0 bg-card">
-                                        <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-slate-100 text-slate-800">{addonName}</div>
+                                      <Card key={addonName} className="border border-slate-200 dark:border-slate-500/30 w-56 shrink-0 bg-card">
+                                        <div className="px-3 py-2 rounded-t-lg font-semibold text-xs bg-slate-100 text-slate-800 dark:bg-slate-500/20 dark:text-slate-200">{addonName}</div>
                                         <CardContent className="p-3 space-y-2">
                                           <ol className="text-xs space-y-1 list-decimal list-inside">
                                             {items.map((item, idx) => (

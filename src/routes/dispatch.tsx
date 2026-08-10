@@ -3668,8 +3668,13 @@ export default function Dispatch() {
                               )}
                             </td>
                           )}
+                          {/* The slate-50 wash marks the dep-time group's column
+                              span. It is light-mode paint — at 60% over the dark
+                              shell it lands as a grey slab and the muted time on
+                              it disappears, so dark mode takes the same wash as a
+                              low-alpha tint going up from the surface. */}
                           {isFirstInTime && (
-                            <td rowSpan={flightCount} className="p-3 text-sm text-muted-foreground align-middle font-medium border-r border-border/40 bg-slate-50/60 whitespace-nowrap">
+                            <td rowSpan={flightCount} className="p-3 text-sm text-muted-foreground align-middle font-medium border-r border-border/40 bg-slate-50/60 dark:bg-slate-400/[0.08] whitespace-nowrap">
                               {timeGroup.depTime}
                             </td>
                           )}

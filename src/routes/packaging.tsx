@@ -71,9 +71,11 @@ const MEAL_TYPE_BADGE: Record<string, string> = {
 const setCodePill = (code: string) =>
   cn(
     "mr-1 inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-bold",
-    isCrewSetCode(code) ? "bg-indigo-100 text-indigo-700"
-      : isPaxSetCode(code) ? "bg-sky-100 text-sky-700"
-      : "bg-fuchsia-100 text-fuchsia-700",
+    // Each -100 fill is a near-white chip on the dark shell; the dark twin is
+    // the same hue as a tint over the surface, with the text lifted to -200.
+    isCrewSetCode(code) ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-400/20 dark:text-indigo-200"
+      : isPaxSetCode(code) ? "bg-sky-100 text-sky-700 dark:bg-sky-400/20 dark:text-sky-200"
+      : "bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-400/20 dark:text-fuchsia-200",
   );
 /** Short badge text for a set code — the audience for a menu-card meal (whose
  *  full code is synthetic), the SSR code itself for a special meal. */
@@ -286,15 +288,18 @@ function takeFromPicks(part: SetPart, meals: number): { batch: PackagingBatch; q
   return out;
 }
 
+// One hue per status. The -50/-100 fills are light-mode paint — on the dark
+// shell they read as bright chips punched out of the row, so each carries its
+// dark twin: the hue as a low-alpha tint, text lifted to the -200 end.
 const ALLOC_TONE: Record<PackagingAllocationStatus, string> = {
-  "Pending Approval": "border-amber-300 bg-amber-50 text-amber-700",
-  "Rejected": "border-rose-300 bg-rose-50 text-rose-700",
-  "In Packaging": "border-violet-300 bg-violet-50 text-violet-700",
-  "Packaged": "border-emerald-300 bg-emerald-50 text-emerald-700",
-  "Forwarded To Airport": "border-sky-300 bg-sky-50 text-sky-700",
-  "Airport Approved": "border-indigo-300 bg-indigo-50 text-indigo-700",
-  "Received At Airport": "border-teal-300 bg-teal-50 text-teal-700",
-  "Dispatched": "border-slate-300 bg-slate-100 text-slate-700",
+  "Pending Approval": "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-400/40 dark:bg-amber-400/15 dark:text-amber-200",
+  "Rejected": "border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-400/40 dark:bg-rose-400/15 dark:text-rose-200",
+  "In Packaging": "border-violet-300 bg-violet-50 text-violet-700 dark:border-violet-400/40 dark:bg-violet-400/15 dark:text-violet-200",
+  "Packaged": "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-400/40 dark:bg-emerald-400/15 dark:text-emerald-200",
+  "Forwarded To Airport": "border-sky-300 bg-sky-50 text-sky-700 dark:border-sky-400/40 dark:bg-sky-400/15 dark:text-sky-200",
+  "Airport Approved": "border-indigo-300 bg-indigo-50 text-indigo-700 dark:border-indigo-400/40 dark:bg-indigo-400/15 dark:text-indigo-200",
+  "Received At Airport": "border-teal-300 bg-teal-50 text-teal-700 dark:border-teal-400/40 dark:bg-teal-400/15 dark:text-teal-200",
+  "Dispatched": "border-slate-300 bg-slate-100 text-slate-700 dark:border-slate-400/40 dark:bg-slate-400/15 dark:text-slate-200",
 };
 
 function StatusBadge({ status }: { status: PackagingBatchStatus }) {
@@ -1920,8 +1925,14 @@ export default function PackagingPage() {
                 // Flight-level dispatch readiness across the whole menu plan.
                 const rd = isUnassigned ? null : flightReadiness(g);
                 return [
-                  /* ── Flight header — the list is arranged flight by flight ── */
-                  <TableRow key={`${g.key}-head`} className="border-t-2 border-sky-100 bg-sky-50/50 hover:bg-sky-50/70">
+                  /* ── Flight header — the list is arranged flight by flight ──
+                     The sky-50 band is light-mode paint: at 50% over the dark
+                     shell it lands as a mid-grey slab that swallows the muted
+                     sector/date/dep text sitting on it. Dark mode takes the same
+                     hue as a low-alpha tint going *up* from the surface, so the
+                     band still separates flights and the text keeps its
+                     contrast. */
+                  <TableRow key={`${g.key}-head`} className="border-t-2 border-sky-100 bg-sky-50/50 hover:bg-sky-50/70 dark:border-sky-400/30 dark:bg-sky-400/10 dark:hover:bg-sky-400/[0.16]">
                     <TableCell className="w-10 px-2 text-center align-middle">
                       <RowCheckbox
                         tone="group"
@@ -1941,7 +1952,9 @@ export default function PackagingPage() {
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                         <span className={cn(
                           "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-bold whitespace-nowrap",
-                          isUnassigned ? "border-slate-300 bg-slate-100 text-slate-600" : "border-sky-300 bg-sky-100 text-sky-800",
+                          isUnassigned
+                            ? "border-slate-300 bg-slate-100 text-slate-600 dark:border-slate-400/40 dark:bg-slate-400/15 dark:text-slate-200"
+                            : "border-sky-300 bg-sky-100 text-sky-800 dark:border-sky-400/45 dark:bg-sky-400/20 dark:text-sky-200",
                         )}>
                           <Plane className="h-3.5 w-3.5" /> {g.flight}
                         </span>
@@ -1958,20 +1971,20 @@ export default function PackagingPage() {
                         )}
                         {g.depTime && <span className="text-xs text-muted-foreground whitespace-nowrap">Dep {g.depTime}</span>}
                         <span className="text-xs tabular-nums text-muted-foreground whitespace-nowrap">{g.date}</span>
-                        <span className="text-[11px] font-medium text-slate-600 tabular-nums whitespace-nowrap">
+                        <span className="text-[11px] font-medium text-slate-600 dark:text-slate-300 tabular-nums whitespace-nowrap">
                           {g.allocations.length} line{g.allocations.length === 1 ? "" : "s"} · {groupQty.toLocaleString()} portions
                         </span>
                         {rd && rd.meals.length > 0 && (
                           rd.allPackaged ? (
                             <span
-                              className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 whitespace-nowrap"
+                              className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 whitespace-nowrap dark:border-emerald-400/40 dark:bg-emerald-400/15 dark:text-emerald-200"
                               title={`All ${rd.meals.length} menu meal${rd.meals.length === 1 ? "" : "s"} produced & packaged`}
                             >
                               <CheckCircle2 className="h-3 w-3" /> Ready for Dispatch
                             </span>
                           ) : (
                             <span
-                              className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 whitespace-nowrap"
+                              className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 whitespace-nowrap dark:border-amber-400/40 dark:bg-amber-400/15 dark:text-amber-200"
                               title={
                                 `${rd.meals.length - rd.notPackaged.length}/${rd.meals.length} meals packaged. Pending: ` +
                                 rd.notPackaged.map((m) => `${m.name}${m.produced ? " (produced, not packaged)" : " (not produced)"}`).join(", ")
@@ -1986,7 +1999,7 @@ export default function PackagingPage() {
                           <button
                             type="button"
                             onClick={() => navigate("/approval-management")}
-                            className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 whitespace-nowrap hover:bg-amber-100"
+                            className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-700 whitespace-nowrap hover:bg-amber-100 dark:border-amber-400/40 dark:bg-amber-400/15 dark:text-amber-200 dark:hover:bg-amber-400/25"
                             title={`${pendingInGroup.length} of ${g.flight}'s runs need packaging approval before labels can be printed`}
                           >
                             <Clock className="h-3 w-3" />
@@ -2083,7 +2096,7 @@ export default function PackagingPage() {
                     </TableCell>
                     {/* Packaging ID — system-generated per production package */}
                     <TableCell>
-                      <span className="inline-flex items-center rounded-full border border-slate-300 bg-slate-50 px-2 py-0.5 font-mono text-[11px] font-semibold text-slate-600 whitespace-nowrap">
+                      <span className="inline-flex items-center rounded-full border border-slate-300 bg-slate-50 px-2 py-0.5 font-mono text-[11px] font-semibold text-slate-600 whitespace-nowrap dark:border-slate-400/35 dark:bg-slate-400/12 dark:text-slate-200">
                         {a.packagingId}
                       </span>
                     </TableCell>
@@ -2102,7 +2115,7 @@ export default function PackagingPage() {
                         </button>
                         {(a.components?.length ?? 0) > 1 && (
                           <span
-                            className="inline-flex items-center rounded-full border border-fuchsia-300 bg-fuchsia-50 px-1.5 py-0.5 text-[10px] font-semibold text-fuchsia-700 whitespace-nowrap"
+                            className="inline-flex items-center rounded-full border border-fuchsia-300 bg-fuchsia-50 px-1.5 py-0.5 text-[10px] font-semibold text-fuchsia-700 whitespace-nowrap dark:border-fuchsia-400/40 dark:bg-fuchsia-400/15 dark:text-fuchsia-200"
                             title={`Assembled from ${a.components!.length} runs:\n${a.components!.map((c) => `${c.productionId} — ${c.item} × ${c.qty}`).join("\n")}`}
                           >
                             +{a.components!.length - 1}

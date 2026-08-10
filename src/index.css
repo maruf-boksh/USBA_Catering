@@ -281,6 +281,19 @@ html[data-theme="dark"] {
     tbody tr:nth-child(even) { background-color: oklch(0.988 0.005 178 / 0.6); }
     tbody tr:hover { background-color: oklch(0.978 0.014 179 / 0.8); }
 
+    /* Dark mode: the header fill and the zebra/hover tints above are near-white
+       literals, not tokens — left alone they paint a white band across every
+       even row and every hovered row on a dark page (and swallow the muted text
+       sitting on them). Restated here as low-alpha light-on-dark washes, so the
+       banding still reads but goes *up* from the surface instead of blowing it
+       out. Light mode keeps the values above untouched. */
+    .dark thead th,
+    html[data-theme="dark"] thead th { background-color: oklch(0.185 0.022 245); }
+    .dark tbody tr:nth-child(even),
+    html[data-theme="dark"] tbody tr:nth-child(even) { background-color: oklch(0.99 0.005 178 / 0.035); }
+    .dark tbody tr:hover,
+    html[data-theme="dark"] tbody tr:hover { background-color: oklch(0.99 0.014 179 / 0.075); }
+
     input, select, textarea {
         font-family: var(--font-sans);
         font-size: 13px;
