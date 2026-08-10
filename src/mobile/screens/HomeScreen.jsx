@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import { T } from '../theme';
-import { KPICard } from '../components/KPICard';
 import { MOCK_PRODUCTION_ORDERS, MOCK_QC_CHECKS, MOCK_DISPATCHES, MOCK_APPROVALS, MOCK_INVENTORY_ALERTS } from '../mockData';
 import { loadMobileFlights, loadMobileActiveOrders } from '../../lib/flight-orders-store';
 import { getAuthUser } from '@/lib/auth';
+// Same sector test the web dashboard splits its KPI breakdowns on.
+import { isDomesticSector } from '@/lib/sample-data';
 // Same source the web dashboard's "Delayed Flights" KPI reads (index.tsx) — the
 // live Delay Management store — so phone and desk always show the same number.
 import { loadDelayEvents, isActiveDelayEvent } from '@/routes/delay-management';
@@ -160,15 +161,102 @@ const pendingApprovals = MOCK_APPROVALS.filter(a => a.status === 'pending').leng
 const activeDispatches = MOCK_DISPATCHES.filter(d => d.status !== 'pending').length;
 const inventoryAlerts  = MOCK_INVENTORY_ALERTS.length;
 
+// ── At-a-glance breakdowns shown inside each KPI card ─────────────────────────
+// Same splits the web dashboard puts on its cards (routes/index.tsx), computed
+// from the same live data the mobile KPI values already read.
+
+// Legs leaving DAC are Outbound — the rule the web uses for its delay split.
+const isOutboundSector = (sector) => String(sector || '').trim().startsWith('DAC');
+
+// Flights by direction × domestic/international.
+const flightDirSplit = (outbound) => {
+  const rows = FLIGHTS.filter((f) => isOutboundSector(f.route) === outbound);
+  const dom = rows.filter((f) => f.sector === 'Domestic').length;
+  return { total: rows.length, dom, intl: rows.length - dom };
+};
+const fOut = flightDirSplit(true);
+const fRet = flightDirSplit(false);
+
+// Delayed flights by direction × domestic/international.
+const delayDirSplit = (outbound) => {
+  const rows = ACTIVE_DELAYS.filter((e) => isOutboundSector(e.sector) === outbound);
+  const dom = rows.filter((e) => isDomesticSector(e.sector)).length;
+  return { total: rows.length, dom, intl: rows.length - dom };
+};
+const dOut = delayDirSplit(true);
+const dRet = delayDirSplit(false);
+
+const mealsPrepared = MOCK_PRODUCTION_ORDERS.reduce((s, o) => s + o.produced, 0);
+const mealsPending  = Math.max(0, totalMeals - mealsPrepared);
+const onTimeFlights = Math.max(0, totalFlights - delayedFlights);
+
+const dispatchLoading   = MOCK_DISPATCHES.filter(d => d.status === 'loading').length;
+const dispatchDone      = MOCK_DISPATCHES.filter(d => d.status === 'dispatched').length;
+const dispatchPending   = MOCK_DISPATCHES.filter(d => d.status === 'pending').length;
+
+// Critical = a quarter or less of the reorder point still on hand; the rest of
+// the alerts are simply low.
+const invCritical = MOCK_INVENTORY_ALERTS.filter(i => i.current <= i.reorderPoint * 0.25).length;
+const invLow      = inventoryAlerts - invCritical;
+
+// One hue per card, following the web dashboard's assignment (flights violet,
+// meals green, delays amber, QC brand, dispatch indigo) so a metric keeps its
+// colour between the desk and the phone. Every value is a theme token, so the
+// set re-brands with the colour preset and holds up on the dark theme.
 const KPI_ROWS = [
-  { label: 'Total Flights',     value: totalFlights,                     sub: 'Today',                              accent: T.statusInfo,     route: 'orders'      },
-  { label: 'Total Meals',       value: totalMeals,                       sub: 'Scheduled',                          accent: T.statusApproved, route: 'meal-planning' },
-  { label: 'Delayed Flights',   value: delayedFlights,                   sub: `${delayedPax} pax affected`,         accent: T.statusDelayed,  route: 'delay-management' },
-  { label: 'On-Time Rate',      value: `${onTimeRate}%`,                 sub: 'Departures',                         accent: T.statusApproved, route: 'orders'      },
-  { label: 'QC Open Issues',    value: qcOpenIssues,                     sub: `${qcResolvedToday} resolved today`,  accent: T.primary,        route: 'qc'          },
-  { label: 'Pending Approvals', value: pendingApprovals,                 sub: 'Awaiting review',                    accent: T.statusPending,  route: 'approvals'   },
-  { label: 'Active Dispatches', value: activeDispatches,                 sub: 'In progress',                        accent: T.statusBoarding, route: 'dispatch-mon' },
-  { label: 'Inventory Alerts',  value: inventoryAlerts,                  sub: 'Low stock items',                    accent: T.statusDelayed,  route: 'stock'       },
+  { label: 'Total Flights',     value: totalFlights,                     sub: 'Today',                              accent: T.statusBoarding, icon: '✈️', route: 'orders',
+    breakdown: [
+      { label: 'Outbound', value: fOut.total, icon: '🛫', children: [
+        { label: 'Domestic',      value: fOut.dom,  icon: '🏠' },
+        { label: 'International', value: fOut.intl, icon: '🌍' },
+      ] },
+      { label: 'Return', value: fRet.total, icon: '🛬', children: [
+        { label: 'Domestic',      value: fRet.dom,  icon: '🏠' },
+        { label: 'International', value: fRet.intl, icon: '🌍' },
+      ] },
+    ] },
+  { label: 'Total Meals',       value: totalMeals,                       sub: 'Scheduled',                          accent: T.statusApproved, icon: '🍽️', route: 'meal-planning',
+    breakdown: [
+      { label: 'Target (24h)', value: totalMeals,    icon: '🎯' },
+      { label: 'Prepared',     value: mealsPrepared, icon: '🍳' },
+      { label: 'Pending',      value: mealsPending,  icon: '⏳' },
+    ] },
+  { label: 'Delayed Flights',   value: delayedFlights,                   sub: `${delayedPax} pax affected`,         accent: T.statusDelayed,  icon: '⚠️', route: 'delay-management',
+    breakdown: [
+      { label: 'Outbound', value: dOut.total, icon: '🛫', children: [
+        { label: 'Domestic',      value: dOut.dom,  icon: '🏠' },
+        { label: 'International', value: dOut.intl, icon: '🌍' },
+      ] },
+      { label: 'Return', value: dRet.total, icon: '🛬', children: [
+        { label: 'Domestic',      value: dRet.dom,  icon: '🏠' },
+        { label: 'International', value: dRet.intl, icon: '🌍' },
+      ] },
+    ] },
+  { label: 'On-Time Rate',      value: `${onTimeRate}%`,                 sub: 'Departures',                         accent: T.statusInfo,     icon: '⏱️', route: 'orders',
+    breakdown: [
+      { label: 'On Time',  value: onTimeFlights,  icon: '✅' },
+      { label: 'Delayed',  value: delayedFlights, icon: '⏱️' },
+      { label: 'Flights',  value: totalFlights,   icon: '✈️' },
+    ] },
+  { label: 'QC Open Issues',    value: qcOpenIssues,                     sub: `${qcResolvedToday} resolved today`,  accent: T.primary,        icon: '🛡️', route: 'qc',
+    breakdown: [
+      { label: 'Cooking Temp',     value: qcOpenIssues, icon: '🌡️' },
+      { label: 'Re-cook',          value: 0,            icon: '🔁' },
+      { label: 'Daily Hygiene',    value: 0,            icon: '🧹' },
+      { label: 'Personal Hygiene', value: 0,            icon: '🧼' },
+    ] },
+  // Pending Approvals is not a tile here — it leads the page as its own card.
+  { label: 'Active Dispatches', value: activeDispatches,                 sub: 'In progress',                        accent: T.statusProgress, icon: '🚛', route: 'dispatch-mon',
+    breakdown: [
+      { label: 'Loading',    value: dispatchLoading, icon: '📦' },
+      { label: 'Dispatched', value: dispatchDone,    icon: '✅' },
+      { label: 'Pending',    value: dispatchPending, icon: '⏳' },
+    ] },
+  { label: 'Inventory Alerts',  value: inventoryAlerts,                  sub: 'Low stock items',                    accent: T.statusScheduled, icon: '📦', route: 'stock',
+    breakdown: [
+      { label: 'Low',      value: invLow,      icon: '📉' },
+      { label: 'Critical', value: invCritical, icon: '🔴' },
+    ] },
 ];
 
 // Pipeline step data derived from mock data
@@ -251,6 +339,137 @@ function SectionHeader({ children, right }) {
       </span>
       {right}
     </div>
+  );
+}
+
+/**
+ * Dashboard KPI card — the web dashboard's card, narrowed for the phone.
+ *
+ * Same anatomy as the web's KpiCard (aurora variant): a tinted icon chip, the
+ * secondary stat as a pill in the card's own accent, the uppercase label, the
+ * number, then the at-a-glance breakdown under a rule.
+ *
+ * The one adaptation is the breakdown layout — the web splits it into two
+ * columns, which at half a phone's width would leave ~60px per column, so the
+ * rows stack instead and nested detail indents under its parent.
+ */
+function DashKpiCard({ kpi, onPress }) {
+  const accent = kpi.accent || T.primary;
+  // The card's own hue, laid as a thin wash OVER the card surface rather than as
+  // a fixed pastel: on the light theme that reads as the pale tint the web card
+  // uses, and on the dark theme it stays a quiet shade of the same hue instead
+  // of a white block. Same reason the chip, pill and detail panel sit on
+  // T.bgSurface — they lift out of the wash in either theme.
+  const wash    = `linear-gradient(0deg, ${accent}14, ${accent}14), ${T.bgSurface}`;
+  const hairline = `${accent}33`;
+
+  const breakdownRow = (b, i) => (
+    <div key={b.label} style={{ marginTop: i === 0 ? 0 : (b.children ? 6 : 3) }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+        <span style={{ width: 12, textAlign: 'center', fontSize: 9.5, flexShrink: 0, opacity: 0.9 }}>{b.icon ?? '•'}</span>
+        <span style={{
+          fontSize: 10, fontWeight: 600, color: T.textSecondary, fontFamily: T.fontBody,
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        }}>
+          {b.label}
+        </span>
+        <span style={{ flex: 1, minWidth: 4 }} />
+        <span style={{
+          fontSize: 10.5, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody,
+          whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
+        }}>
+          {b.value}
+        </span>
+      </div>
+      {b.children?.map((c) => (
+        <div key={c.label} style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 2, paddingLeft: 14 }}>
+          <span style={{ width: 10, textAlign: 'center', fontSize: 8.5, flexShrink: 0, opacity: 0.75 }}>{c.icon ?? '·'}</span>
+          <span style={{
+            fontSize: 9.5, color: T.textTertiary, fontFamily: T.fontBody,
+            whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+          }}>
+            {c.label}
+          </span>
+          <span style={{ flex: 1, minWidth: 3 }} />
+          <span style={{
+            fontSize: 9.5, fontWeight: 600, color: T.textTertiary, fontFamily: T.fontBody,
+            whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
+          }}>
+            {c.value}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+
+  return (
+    <button
+      onClick={onPress}
+      style={{
+        background: wash,
+        border: `1px solid ${hairline}`,
+        borderRadius: T.radiusLg,
+        padding: '11px 11px 11px',
+        display: 'flex', flexDirection: 'column',
+        textAlign: 'left', width: '100%', height: '100%',
+        cursor: onPress ? 'pointer' : 'default',
+        boxShadow: T.shadowSm,
+        WebkitTapHighlightColor: 'transparent',
+      }}
+    >
+      {/* icon chip */}
+      <div style={{
+        width: 30, height: 30, borderRadius: T.radiusMd,
+        background: T.bgSurface, border: `1px solid ${hairline}`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 15, flexShrink: 0,
+      }}>
+        {kpi.icon ?? '•'}
+      </div>
+
+      {/* label */}
+      <div style={{
+        fontSize: 9.5, fontWeight: 700, letterSpacing: '0.07em', textTransform: 'uppercase',
+        color: T.textTertiary, fontFamily: T.fontBody, marginTop: 9,
+        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', width: '100%',
+      }}>
+        {kpi.label}
+      </div>
+
+      {/* number */}
+      <div style={{
+        fontSize: 24, fontWeight: 800, lineHeight: 1.05, letterSpacing: '-0.02em',
+        color: T.textPrimary, fontFamily: T.fontBody, marginTop: 3,
+        fontVariantNumeric: 'tabular-nums',
+      }}>
+        {kpi.value}
+      </div>
+
+      {/* stat pill — the card's secondary figure, in the card's own hue */}
+      {kpi.sub && (
+        <span style={{
+          alignSelf: 'flex-start', maxWidth: '100%', marginTop: 6,
+          padding: '2px 8px', borderRadius: T.radiusFull,
+          background: T.bgSurface, border: `1px solid ${hairline}`, color: accent,
+          fontSize: 9.5, fontWeight: 700, fontFamily: T.fontBody,
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+        }}>
+          {kpi.sub}
+        </span>
+      )}
+
+      {/* breakdown — an inset panel rather than a rule: the small figures need a
+          plain surface to sit on, and it gives the card a clear second half */}
+      {kpi.breakdown?.length > 0 && (
+        <div style={{
+          width: '100%', marginTop: 9,
+          background: T.bgSurface, border: `1px solid ${T.border}`,
+          borderRadius: T.radiusMd, padding: '7px 8px',
+        }}>
+          {kpi.breakdown.map(breakdownRow)}
+        </div>
+      )}
+    </button>
   );
 }
 
@@ -537,19 +756,47 @@ export function HomeScreen({ nav }) {
       {/* Scrollable content */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '14px 14px 8px' }}>
 
+        {/* ── Pending approvals card — the first thing to act on, so it leads
+               the page instead of sitting below the metrics ── */}
+        <div style={{
+          background: T.bgSurface, border: `1px solid ${T.border}`,
+          borderRadius: T.radiusLg, padding: '12px 14px',
+          marginBottom: 18, boxShadow: T.shadowSm,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>Pending Approvals</span>
+            <ViewAllButton onPress={() => nav.navigate('approvals')} />
+          </div>
+          <div style={{
+            background: T.statusPendingBg, border: `1px solid ${T.statusPending}30`,
+            borderRadius: T.radiusMd, padding: '9px 12px',
+            display: 'flex', alignItems: 'center', gap: 10,
+          }}>
+            <div style={{
+              width: 32, height: 32, borderRadius: T.radiusFull,
+              background: T.statusPendingBg, border: `1.5px solid ${T.statusPending}50`,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 14, flexShrink: 0,
+            }}>
+              ⏳
+            </div>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: T.statusPending, fontFamily: T.fontBody }}>
+                {pendingApprovals} items awaiting your review
+              </div>
+              <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
+                Purchase orders · Payments · Demands
+              </div>
+            </div>
+          </div>
+        </div>
+
         {/* ── KPI grid ── */}
         <div style={{ marginBottom: 4 }}>
           <SectionHeader>Today's KPIs</SectionHeader>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, alignItems: 'stretch' }}>
             {visibleKPIs.map((kpi, i) => (
-              <KPICard
-                key={i}
-                label={kpi.label}
-                value={kpi.value}
-                sub={kpi.sub}
-                accent={kpi.accent}
-                onPress={() => nav.navigate(kpi.route)}
-              />
+              <DashKpiCard key={i} kpi={kpi} onPress={() => nav.navigate(kpi.route)} />
             ))}
           </div>
           <button
@@ -564,6 +811,13 @@ export function HomeScreen({ nav }) {
           >
             {expanded ? '▲ Show less' : `▼ View all metrics (${KPI_ROWS.length - 4} more)`}
           </button>
+        </div>
+
+        {/* ── Quick actions — sits with the KPIs: read the number, jump to the
+               module it came from ── */}
+        <div style={{ marginTop: 18 }}>
+          <SectionHeader>Quick Actions</SectionHeader>
+          <QuickActions nav={nav} />
         </div>
 
         {/* ── Operations pipeline — the catering flow at a glance ── */}
@@ -595,46 +849,6 @@ export function HomeScreen({ nav }) {
             </div>
           </div>
         )}
-
-        {/* ── Quick actions ── */}
-        <div style={{ marginTop: 14 }}>
-          <SectionHeader>Quick Actions</SectionHeader>
-          <QuickActions nav={nav} />
-        </div>
-
-        {/* ── Pending approvals card ── */}
-        <div style={{
-          background: T.bgSurface, border: `1px solid ${T.border}`,
-          borderRadius: T.radiusLg, padding: '12px 14px',
-          marginTop: 14, boxShadow: T.shadowSm,
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-            <span style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>Pending Approvals</span>
-            <ViewAllButton onPress={() => nav.navigate('approvals')} />
-          </div>
-          <div style={{
-            background: T.statusPendingBg, border: `1px solid ${T.statusPending}30`,
-            borderRadius: T.radiusMd, padding: '9px 12px',
-            display: 'flex', alignItems: 'center', gap: 10,
-          }}>
-            <div style={{
-              width: 32, height: 32, borderRadius: T.radiusFull,
-              background: T.statusPendingBg, border: `1.5px solid ${T.statusPending}50`,
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 14, flexShrink: 0,
-            }}>
-              ⏳
-            </div>
-            <div>
-              <div style={{ fontSize: 13, fontWeight: 600, color: T.statusPending, fontFamily: T.fontBody }}>
-                {pendingApprovals} items awaiting your review
-              </div>
-              <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
-                Purchase orders · Payments · Demands
-              </div>
-            </div>
-          </div>
-        </div>
 
         {/* ── Active Orders (Flight / Crew) — same data as the web dashboard ── */}
         <ActiveOrdersCard nav={nav} />
