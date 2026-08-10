@@ -6,6 +6,11 @@ import { Combobox } from '../components/Combobox';
 // Mirrors CHEFS from the web's cooking-temp.tsx
 const CHEFS = ['Chef Ahmed R.', 'Chef Nusrat K.', 'Chef Karim S.', 'Chef Hossain T.', 'Chef Begum F.', 'Chef Mahmud S.'];
 
+// Sensory taste parameter — the same four results the web's Record Test offers
+// (cooking-temp.tsx). Taste is a QC dimension of its own: a batch can be at
+// temperature yet off-taste, so it is recorded on every test.
+const TASTE_OPTIONS = ['Good', 'Average', 'Not Good', 'Other'];
+
 // Two production batches ready for QC sign-off (matches "Ready for QC" production entries in web)
 const INITIAL_PENDING = [
   { id: 'PRD-0235', item: 'Economy Lunch Tray',  qty: 176, date: '2026-06-11', standardTemp: 75 },
@@ -22,6 +27,9 @@ export function CookingTempScreen({ nav }) {
   const [qcTarget, setQcTarget]   = useState(null);
   const [measured, setMeasured]   = useState('');
   const [cookedBy, setCookedBy]   = useState('');
+  const [taste, setTaste]         = useState('');
+  const [tasteOther, setTasteOther] = useState(''); // free-text when Taste = "Other"
+  const [tasteError, setTasteError] = useState(false);
   const [failReason, setFailReason] = useState('');
   const [lastResult, setLastResult] = useState('pass');
   const [logRecordId, setLogRecordId] = useState(null);
@@ -31,13 +39,51 @@ export function CookingTempScreen({ nav }) {
   const stdTemp     = qcTarget?.standardTemp ?? 75;
   const tempPasses  = measuredNum > 0 && measuredNum >= stdTemp;
 
-  const startQc = (item) => { setQcTarget(item); setMeasured(''); setCookedBy(''); setFailReason(''); setScreen(2); };
+  // Taste can only be asked for while it still matters: a reading below the
+  // HACCP standard sends the batch back regardless, so the web disables the
+  // field there and so does this.
+  const tasteApplicable = !(measuredNum > 0 && measuredNum < stdTemp);
+  const tasteNote = taste === 'Other' ? tasteOther.trim() : taste;
+
+  // Mandatory whenever it applies — and an "Other" observation needs its text.
+  const tasteMissing = tasteApplicable && (!taste || (taste === 'Other' && !tasteOther.trim()));
+
+  // A batch can only be passed when BOTH dimensions are acceptable: at/above the
+  // HACCP standard, and not off-taste. Either one failing leaves Fail as the only
+  // route, so the Pass button is switched off rather than left to be pressed.
+  const passBlocked = (measuredNum > 0 && !tempPasses) || taste === 'Not Good';
+  const passBlockedNote = measuredNum > 0 && !tempPasses
+    ? 'Temperature is below the HACCP standard — this batch can only be sent back.'
+    : taste === 'Not Good'
+      ? 'Taste is off — this batch can only be sent back.'
+      : '';
+
+  // Typing a below-standard reading clears any taste already picked: the field
+  // switches off, so a stale selection must not reappear (pre-selected) if the
+  // reading is corrected afterwards.
+  const onMeasuredChange = (val) => {
+    setMeasured(val);
+    const n = parseFloat(val) || 0;
+    if (n > 0 && n < stdTemp) { setTaste(''); setTasteOther(''); setTasteError(false); }
+  };
+  const requireTaste = () => {
+    if (tasteMissing) { setTasteError(true); return false; }
+    setTasteError(false);
+    return true;
+  };
+
+  const startQc = (item) => {
+    setQcTarget(item); setMeasured(''); setCookedBy(''); setFailReason('');
+    setTaste(''); setTasteOther(''); setTasteError(false);
+    setScreen(2);
+  };
 
   const passQc = () => {
+    if (!requireTaste()) return;
     const now = new Date();
     const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
     const recId = `CT-${Date.now()}`;
-    setRecords(prev => [{ id: recId, item: qcTarget.item, target: `≥${stdTemp}°C`, actual: `${measuredNum}°C`, status: 'pass', time: timeStr, chef: cookedBy || 'Kitchen Staff' }, ...prev]);
+    setRecords(prev => [{ id: recId, item: qcTarget.item, target: `≥${stdTemp}°C`, actual: `${measuredNum}°C`, status: 'pass', time: timeStr, chef: cookedBy || 'Kitchen Staff', taste: tasteNote || undefined }, ...prev]);
     setPending(prev => prev.filter(p => p.id !== qcTarget.id));
     setLastResult('pass');
     setNewRecordId(recId);
@@ -45,11 +91,14 @@ export function CookingTempScreen({ nav }) {
   };
 
   const failQc = () => {
-    if (!failReason.trim()) return;
+    // Same fallback the web uses: a rejection driven by the sensory result has no
+    // separate justification, so the taste itself stands as the reason.
+    const reason = failReason.trim() || (tasteNote ? `Sensory/taste not acceptable — ${tasteNote}` : '');
+    if (!reason) return;
     const now = new Date();
     const timeStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
     const recId = `CT-${Date.now()}`;
-    setRecords(prev => [{ id: recId, item: qcTarget.item, target: `≥${stdTemp}°C`, actual: `${measuredNum}°C`, status: 'fail', time: timeStr, chef: cookedBy || 'Kitchen Staff', failReason }, ...prev]);
+    setRecords(prev => [{ id: recId, item: qcTarget.item, target: `≥${stdTemp}°C`, actual: `${measuredNum}°C`, status: 'fail', time: timeStr, chef: cookedBy || 'Kitchen Staff', failReason: reason, taste: tasteNote || undefined }, ...prev]);
     setPending(prev => prev.filter(p => p.id !== qcTarget.id));
     setLastResult('fail');
     setNewRecordId(recId);
@@ -93,11 +142,68 @@ export function CookingTempScreen({ nav }) {
           {/* Measured temp */}
           <div style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>Measured Temp (°C) *</div>
-            <input type="number" value={measured} onChange={e => setMeasured(e.target.value)} placeholder="Enter temperature"
+            <input type="number" value={measured} onChange={e => onMeasuredChange(e.target.value)} placeholder="Enter temperature"
               style={{ width: '100%', boxSizing: 'border-box', border: `2px solid ${measuredNum > 0 ? (tempPasses ? T.statusApproved : T.statusRejected) : T.border}`, borderRadius: T.radiusMd, padding: '10px 12px', fontSize: 18, fontWeight: 700, fontFamily: T.fontBody, outline: 'none', background: T.bgSurface, color: T.textPrimary, textAlign: 'center' }} />
             {measuredNum > 0 && (
               <div style={{ fontSize: 11, fontWeight: 700, color: tempPasses ? T.statusApproved : T.statusRejected, fontFamily: T.fontBody, marginTop: 5, textAlign: 'center' }}>
                 {tempPasses ? `✓ Above standard (+${(measuredNum - stdTemp).toFixed(1)}°C)` : `✗ Below standard (${(stdTemp - measuredNum).toFixed(1)}°C short)`}
+              </div>
+            )}
+          </div>
+
+          {/* Taste — the sensory parameter, judged independently of temperature.
+              Switched off below standard: the batch is sent back either way. */}
+          <div style={{ marginBottom: 14, opacity: tasteApplicable ? 1 : 0.5 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFamily: T.fontBody, textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>Taste *</div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              {TASTE_OPTIONS.map(opt => {
+                const on = taste === opt;
+                const tone = opt === 'Not Good' ? T.statusRejected : opt === 'Other' ? T.statusInfo : T.statusApproved;
+                return (
+                  <button
+                    key={opt}
+                    disabled={!tasteApplicable}
+                    onClick={() => { setTaste(opt); setTasteError(false); }}
+                    style={{
+                      padding: '10px 6px', borderRadius: T.radiusMd,
+                      border: `1.5px solid ${on ? tone : T.border}`,
+                      background: on ? tone + '14' : T.bgSurface,
+                      color: on ? tone : T.textSecondary,
+                      fontSize: 12, fontWeight: 700, fontFamily: T.fontBody,
+                      cursor: tasteApplicable ? 'pointer' : 'not-allowed',
+                      WebkitTapHighlightColor: 'transparent',
+                    }}
+                  >
+                    {opt === 'Not Good' ? 'Not Good' : opt}
+                  </button>
+                );
+              })}
+            </div>
+
+            {taste === 'Other' && tasteApplicable && (
+              <input
+                value={tasteOther}
+                onChange={e => { setTasteOther(e.target.value); setTasteError(false); }}
+                placeholder="Specify the taste / sensory observation…"
+                style={{ width: '100%', boxSizing: 'border-box', marginTop: 8, border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '10px 12px', fontSize: 12, fontFamily: T.fontBody, outline: 'none', background: T.bgSurface, color: T.textPrimary }}
+              />
+            )}
+
+            {taste && taste !== 'Other' && tasteApplicable && (
+              <div style={{ fontSize: 11, fontWeight: 700, marginTop: 6, fontFamily: T.fontBody, color: taste === 'Not Good' ? T.statusRejected : T.statusApproved }}>
+                {taste === 'Not Good' ? '✗ Off-taste — send back if required' : `✓ Taste acceptable (${taste})`}
+              </div>
+            )}
+
+            {!tasteApplicable && (
+              <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 6 }}>
+                Not required — the reading is below standard, so the batch goes back regardless.
+              </div>
+            )}
+
+            {tasteError && (
+              <div style={{ fontSize: 11, fontWeight: 700, color: T.statusRejected, fontFamily: T.fontBody, marginTop: 6 }}>
+                {taste === 'Other' ? 'Describe the taste observation to record this test.' : 'Select a taste result to record this test.'}
               </div>
             )}
           </div>
@@ -110,15 +216,20 @@ export function CookingTempScreen({ nav }) {
 
           {/* Buttons */}
           <div style={{ display: 'flex', gap: 10 }}>
-            <button onClick={() => setScreen(3)}
+            <button onClick={() => { if (requireTaste()) setScreen(3); }}
               style={{ flex: 1, padding: '13px 0', background: 'none', border: `2px solid ${T.statusRejected}`, borderRadius: T.radiusMd, fontSize: 13, fontWeight: 700, color: T.statusRejected, fontFamily: T.fontBody, cursor: 'pointer' }}>
               ✗ Fail
             </button>
-            <button onClick={passQc}
-              style={{ flex: 2, padding: '13px 0', background: T.statusApproved, border: 'none', borderRadius: T.radiusMd, fontSize: 13, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}>
+            <button onClick={passQc} disabled={passBlocked}
+              style={{ flex: 2, padding: '13px 0', background: passBlocked ? T.borderStrong : T.statusApproved, border: 'none', borderRadius: T.radiusMd, fontSize: 13, fontWeight: 700, color: passBlocked ? T.bgSurface : '#fff', fontFamily: T.fontBody, cursor: passBlocked ? 'not-allowed' : 'pointer' }}>
               ✓ Pass & Complete
             </button>
           </div>
+          {passBlocked && (
+            <div style={{ fontSize: 11, color: T.statusRejected, fontFamily: T.fontBody, marginTop: 8, textAlign: 'center' }}>
+              {passBlockedNote}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -154,6 +265,11 @@ export function CookingTempScreen({ nav }) {
             <textarea value={failReason} onChange={e => setFailReason(e.target.value)} rows={4}
               placeholder="Describe why this batch is being sent back..."
               style={{ width: '100%', boxSizing: 'border-box', border: `1px solid ${T.border}`, borderRadius: T.radiusMd, padding: '10px 12px', fontSize: 12, fontFamily: T.fontBody, outline: 'none', resize: 'none', background: T.bgSurface, color: T.textPrimary }} />
+            {tasteNote && (
+              <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 6 }}>
+                Leave blank to record the sensory result — “Sensory/taste not acceptable — {tasteNote}”.
+              </div>
+            )}
           </div>
           <button onClick={failQc}
             style={{ width: '100%', padding: '13px 0', background: T.statusRejected, border: 'none', borderRadius: T.radiusMd, fontSize: 14, fontWeight: 700, color: '#fff', fontFamily: T.fontBody, cursor: 'pointer' }}>
@@ -184,7 +300,7 @@ export function CookingTempScreen({ nav }) {
             </div>
           </div>
           <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 16px', width: '100%', textAlign: 'left' }}>
-            {[['Batch', qcTarget.id], ['Item', qcTarget.item], ['Temp', `${measuredNum}°C / ≥${stdTemp}°C`], ['Cooked By', cookedBy || 'Kitchen Staff']].map(([l, v]) => (
+            {[['Batch', qcTarget.id], ['Item', qcTarget.item], ['Temp', `${measuredNum}°C / ≥${stdTemp}°C`], ...(tasteNote ? [['Taste', tasteNote]] : []), ['Cooked By', cookedBy || 'Kitchen Staff']].map(([l, v]) => (
               <div key={l} style={{ display: 'flex', justifyContent: 'space-between', paddingTop: 6, paddingBottom: 6, borderTop: `1px solid ${T.border}` }}>
                 <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{l}</span>
                 {l === 'Batch' ? (
@@ -222,7 +338,7 @@ export function CookingTempScreen({ nav }) {
           </div>
           <div style={{ flex: 1, overflowY: 'auto', padding: 16 }}>
             <div style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: T.radiusLg, padding: '12px 14px', marginBottom: 12 }}>
-              {[['Item', rec.item], ['Target', rec.target], ['Actual', rec.actual], ['Chef', rec.chef], ['Time', rec.time]].map(([l, v]) => (
+              {[['Item', rec.item], ['Target', rec.target], ['Actual', rec.actual], ...(rec.taste ? [['Taste', rec.taste]] : []), ['Chef', rec.chef], ['Time', rec.time]].map(([l, v]) => (
                 <div key={l} style={{ display: 'flex', justifyContent: 'space-between', paddingTop: 6, paddingBottom: 6, borderTop: `1px solid ${T.border}` }}>
                   <span style={{ fontSize: 12, color: T.textTertiary, fontFamily: T.fontBody }}>{l}</span>
                   <span style={{ fontSize: 12, fontWeight: 600, color: l === 'Actual' ? (rec.status === 'pass' ? T.statusApproved : T.statusRejected) : T.textPrimary, fontFamily: T.fontBody }}>{v}</span>

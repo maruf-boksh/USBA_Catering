@@ -20,7 +20,7 @@ const SECTION = { fontSize: 11, fontWeight: 700, color: T.textTertiary, fontFami
 
 // The other food-safety modules, kept exactly where they were.
 const SAFETY_TILES = [
-  { screen: 'cooking-temp',     icon: '🌡️', label: 'Cooking Temperature',                  sub: 'HACCP temp & sensory tests',   color: T.statusInfo,     bg: T.statusInfoBg },
+  { screen: 'cooking-temp',     icon: '🌡️', label: 'Food Quality Inspection',              sub: 'Temperature, sensory & HACCP checks', color: T.statusInfo, bg: T.statusInfoBg },
   { screen: 'hygiene',          icon: '🧹', label: 'Daily Hygiene Monitoring',             sub: 'Daily safety checklists',      color: T.statusApproved, bg: T.statusApprovedBg },
   { screen: 'personal-hygiene', icon: '🧼', label: 'Health & Personal Hygiene Monitoring', sub: 'Staff hygiene checks by area', color: T.statusPending,  bg: T.statusPendingBg },
 ];
@@ -91,7 +91,9 @@ function Row({ label, value }) {
 
 export function QCScreen({ nav }) {
   const { grns, updateGRNLineQC } = useWorkflow();
-  const [view, setView]   = useState('list');   // 'list' | 'inspect' | 'detail'
+  // 'goods' is the receipt worklist, opened from its own card like the
+  // food-safety checks — the inspect and detail views hang off it.
+  const [view, setView]   = useState('list');   // 'list' | 'goods' | 'inspect' | 'detail'
   const [activeId, setActiveId] = useState(null);
   const [drafts, setDrafts] = useState({});
   const [filter, setFilter] = useState('pending');
@@ -164,9 +166,15 @@ export function QCScreen({ nav }) {
     if (inspected === 0) { flash('Enter a QC quantity for at least one item.'); return; }
     const rtId = failed.length ? initiatePurchaseReturn(g.id, g.poRef, g.vendor, failed) : null;
     setActiveId(null);
-    setView('list');
+    setView('goods');
     flash(`${g.id} inspected — ${inspected} item${inspected === 1 ? '' : 's'} processed${rtId ? ` · Return ${rtId}` : ''}.`);
   };
+
+  const noticeBar = notice ? (
+    <div style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved}30`, borderRadius: T.radiusMd, padding: '9px 12px', marginBottom: 10, fontSize: 11, fontWeight: 700, color: T.statusApproved, fontFamily: T.fontBody }}>
+      {notice}
+    </div>
+  ) : null;
 
   // ── Inspect ───────────────────────────────────────────────────────────────
   if (view === 'inspect' && activeGrn) {
@@ -175,7 +183,7 @@ export function QCScreen({ nav }) {
     return (
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
         <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-          <button onClick={() => { setActiveId(null); setView('list'); }} style={BTN_BACK}>←</button>
+          <button onClick={() => { setActiveId(null); setView('goods'); }} style={BTN_BACK}>←</button>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Inspect Receipt</div>
             <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{g.id} · {g.vendor}</div>
@@ -240,7 +248,7 @@ export function QCScreen({ nav }) {
     return (
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
         <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-          <button onClick={() => { setActiveId(null); setView('list'); }} style={BTN_BACK}>←</button>
+          <button onClick={() => { setActiveId(null); setView('goods'); }} style={BTN_BACK}>←</button>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>{g.id}</div>
             <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>{g.vendor} · {g.poRef}</div>
@@ -281,6 +289,80 @@ export function QCScreen({ nav }) {
     );
   }
 
+  // ── Goods Inspection — the receipt worklist, unchanged, now behind its card ─
+  if (view === 'goods') {
+    return (
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
+        <div style={{ background: T.topbarGradient, padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          <button onClick={() => setView('list')} style={BTN_BACK}>←</button>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontFamily: T.fontBody, fontSize: 15, fontWeight: 700, color: '#fff' }}>Goods Inspection</div>
+            <div style={{ fontFamily: T.fontBody, fontSize: 11, color: 'rgba(255,255,255,0.6)', marginTop: 1 }}>
+              {pendingGrns.length} receipt{pendingGrns.length === 1 ? '' : 's'} awaiting inspection
+            </div>
+          </div>
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px 16px' }}>
+          {noticeBar}
+
+          <input value={query} onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search GRN, vendor, item…" style={INPUT} />
+
+          <div style={{ display: 'flex', gap: 6, padding: '10px 0 2px' }}>
+            {[['pending', 'Awaiting QC'], ['done', 'Inspected'], ['all', 'All']].map(([k, label]) => {
+              const on = filter === k;
+              return (
+                <button key={k} onClick={() => setFilter(k)}
+                  style={{ flex: 1, padding: '8px 0', borderRadius: T.radiusFull, border: `1px solid ${on ? T.primary : T.border}`, background: on ? T.primary : T.bgSurface, color: on ? '#fff' : T.textTertiary, fontSize: 11.5, fontWeight: 700, fontFamily: T.fontBody, cursor: 'pointer' }}>
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={{ ...SECTION, marginTop: 10 }}>
+            {visible.length} receipt{visible.length === 1 ? '' : 's'}
+          </div>
+
+          {visible.length === 0 ? (
+            <Empty icon="🔍" text={filter === 'pending'
+              ? 'Nothing waiting on inspection. Approved goods receipts appear here.'
+              : 'No receipts match this filter.'} />
+          ) : visible.map((g) => {
+            const pending = g.lines.filter((l) => l.qcStatus === 'Pending');
+            const isPending = pending.length > 0;
+            return (
+              <div key={g.id}
+                onClick={() => (isPending ? openInspect(g) : (setActiveId(g.id), setView('detail')))}
+                style={{ ...CARD, cursor: 'pointer' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 4 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{g.id}</div>
+                    <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
+                      {g.vendor} · {g.poRef}
+                    </div>
+                  </div>
+                  <Chip
+                    label={isPending ? `${pending.length} to inspect` : 'Inspected'}
+                    color={isPending ? T.statusPending : T.statusApproved}
+                    bg={isPending ? T.statusPendingBg : T.statusApprovedBg}
+                  />
+                </div>
+                <div style={{ fontSize: 11.5, color: T.textSecondary, fontFamily: T.fontBody, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {g.lines.map((l) => `${l.name} ${num(l.qty).toLocaleString()} ${l.uom}`).join(', ')}
+                </div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: T.primary, fontFamily: T.fontBody, marginTop: 7 }}>
+                  {isPending ? 'Inspect ›' : 'View inspection ›'}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
   // ── List ──────────────────────────────────────────────────────────────────
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: T.bgBase, overflow: 'hidden' }}>
@@ -292,11 +374,7 @@ export function QCScreen({ nav }) {
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px 16px' }}>
-        {notice && (
-          <div style={{ background: T.statusApprovedBg, border: `1px solid ${T.statusApproved}30`, borderRadius: T.radiusMd, padding: '9px 12px', marginBottom: 10, fontSize: 11, fontWeight: 700, color: T.statusApproved, fontFamily: T.fontBody }}>
-            {notice}
-          </div>
-        )}
+        {noticeBar}
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <KPICard label="Awaiting QC" value={kpis.pending}  sub="Received lines"   accent={T.statusPending} />
@@ -320,59 +398,24 @@ export function QCScreen({ nav }) {
           </div>
         ))}
 
+        {/* Goods Inspection — the same worklist, now one card like the checks
+            above it; everything it did lives inside. */}
         <div style={SECTION}>Goods Inspection</div>
-        <input value={query} onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search GRN, vendor, item…" style={INPUT} />
-
-        <div style={{ display: 'flex', gap: 6, padding: '10px 0 2px' }}>
-          {[['pending', 'Awaiting QC'], ['done', 'Inspected'], ['all', 'All']].map(([k, label]) => {
-            const on = filter === k;
-            return (
-              <button key={k} onClick={() => setFilter(k)}
-                style={{ flex: 1, padding: '8px 0', borderRadius: T.radiusFull, border: `1px solid ${on ? T.primary : T.border}`, background: on ? T.primary : T.bgSurface, color: on ? '#fff' : T.textTertiary, fontSize: 11.5, fontWeight: 700, fontFamily: T.fontBody, cursor: 'pointer' }}>
-                {label}
-              </button>
-            );
-          })}
-        </div>
-
-        <div style={{ ...SECTION, marginTop: 10 }}>
-          {visible.length} receipt{visible.length === 1 ? '' : 's'}
-        </div>
-
-        {visible.length === 0 ? (
-          <Empty icon="🔍" text={filter === 'pending'
-            ? 'Nothing waiting on inspection. Approved goods receipts appear here.'
-            : 'No receipts match this filter.'} />
-        ) : visible.map((g) => {
-          const pending = g.lines.filter((l) => l.qcStatus === 'Pending');
-          const isPending = pending.length > 0;
-          return (
-            <div key={g.id}
-              onClick={() => (isPending ? openInspect(g) : (setActiveId(g.id), setView('detail')))}
-              style={{ ...CARD, cursor: 'pointer' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 4 }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>{g.id}</div>
-                  <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
-                    {g.vendor} · {g.poRef}
-                  </div>
-                </div>
-                <Chip
-                  label={isPending ? `${pending.length} to inspect` : 'Inspected'}
-                  color={isPending ? T.statusPending : T.statusApproved}
-                  bg={isPending ? T.statusPendingBg : T.statusApprovedBg}
-                />
-              </div>
-              <div style={{ fontSize: 11.5, color: T.textSecondary, fontFamily: T.fontBody, marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {g.lines.map((l) => `${l.name} ${num(l.qty).toLocaleString()} ${l.uom}`).join(', ')}
-              </div>
-              <div style={{ fontSize: 11, fontWeight: 700, color: T.primary, fontFamily: T.fontBody, marginTop: 7 }}>
-                {isPending ? 'Inspect ›' : 'View inspection ›'}
-              </div>
+        <div onClick={() => setView('goods')} style={{ ...CARD, display: 'flex', alignItems: 'center', gap: 12, cursor: 'pointer' }}>
+          <div style={{ width: 42, height: 42, borderRadius: T.radiusMd, background: T.statusPendingBg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20, flexShrink: 0 }}>
+            📦
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: T.textPrimary, fontFamily: T.fontBody }}>Goods Inspection</div>
+            <div style={{ fontSize: 11, color: T.textTertiary, fontFamily: T.fontBody, marginTop: 2 }}>
+              Inspect receipts · pass to stock or return
             </div>
-          );
-        })}
+          </div>
+          {pendingGrns.length > 0 && (
+            <Chip label={`${pendingGrns.length} to inspect`} color={T.statusPending} bg={T.statusPendingBg} />
+          )}
+          <span style={{ fontSize: 18, color: T.textTertiary, lineHeight: 1 }}>›</span>
+        </div>
       </div>
     </div>
   );
